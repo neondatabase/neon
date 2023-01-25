@@ -916,6 +916,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
             timeline_download_remote_layers_handler_post,
         )
+        .post("/add_forced_now", handle_add_forced_now)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
             timeline_download_remote_layers_handler_get,
@@ -925,4 +926,15 @@ pub fn make_router(
             timeline_delete_handler,
         )
         .any(handler_404))
+}
+
+async fn handle_add_forced_now(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let now = get_query_param(&req, "now")?;
+
+    let now = chrono::DateTime::parse_from_rfc3339(&now).unwrap();
+    let now = now.with_timezone(&chrono::Utc);
+
+    crate::tenant::timeline::Timeline::force_next_now(now.into());
+
+    json_response(StatusCode::OK, ())
 }

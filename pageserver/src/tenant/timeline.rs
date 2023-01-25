@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -74,6 +74,9 @@ enum FlushLoopState {
     Running,
     Exited,
 }
+
+pub static PENDING_NOWS: once_cell::sync::Lazy<Mutex<VecDeque<SystemTime>>> =
+    once_cell::sync::Lazy::new(|| Default::default());
 
 pub struct Timeline {
     conf: &'static PageServerConf,
@@ -2627,6 +2630,10 @@ impl Timeline {
         Ok(())
     }
 
+    pub fn force_next_now(next: SystemTime) {
+        PENDING_NOWS.lock().unwrap().push_back(next)
+    }
+
     /// Update information about which layer files need to be retained on
     /// garbage collection. This is separate from actually performing the GC,
     /// and is updated more frequently, so that compaction can remove obsolete
@@ -2674,10 +2681,28 @@ impl Timeline {
         // work, so avoid calling it altogether if time-based retention is not
         // configured. It would be pointless anyway.
         let pitr_cutoff = if pitr != Duration::ZERO {
-            let now = SystemTime::now();
+            let now = PENDING_NOWS.lock().unwrap().pop_front();
+            let now = if let Some(now) = now {
+                let dt = chrono::DateTime::<chrono::Utc>::from(now);
+                let dt = dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+                tracing::warn!(now = dt, "using forced now");
+                now
+            } else {
+                SystemTime::now()
+            };
+
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
+                {
+                    let dt = chrono::DateTime::<chrono::Utc>::from(now);
+                    let dt = dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+                    info!(
+                        ?pitr,
+                        pitr_cutoff_timestamp = dt,
+                        "searching lsn for timestamp"
+                    );
+                }
                 match self.find_lsn_for_timestamp(pitr_timestamp).await? {
                     LsnForTimestamp::Present(lsn) => lsn,
                     LsnForTimestamp::Future(lsn) => {
