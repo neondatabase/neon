@@ -133,7 +133,7 @@ pub struct Timeline {
     ancestor_lsn: Lsn,
 
     // Metrics
-    metrics: TimelineMetrics,
+    pub metrics: TimelineMetrics,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.

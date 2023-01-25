@@ -1245,28 +1245,11 @@ impl Tenant {
             "Cannot run GC iteration on inactive tenant"
         );
 
-        let timeline_str = target_timeline_id
-            .map(|x| x.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        let gc_result = self
+            .gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
+            .await;
 
-        {
-            let timer = Instant::now();
-            let gc_result = self
-                .gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
-                .await;
-            let duration = timer.elapsed().as_secs_f64();
-            STORAGE_TIME_GLOBAL
-                .with_label_values(&["gc"])
-                .observe(duration);
-            STORAGE_TIME_SUM_PER_TIMELINE
-                .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
-                .inc_by(duration);
-            STORAGE_TIME_COUNT_PER_TIMELINE
-                .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
-                .inc();
-
-            gc_result
-        }
+        gc_result
     }
 
     /// Perform one compaction iteration.
@@ -1965,7 +1948,9 @@ impl Tenant {
                 // made.
                 break;
             }
+            let timer = timeline.metrics.garbage_collect_histo.start_timer();
             let result = timeline.gc().await?;
+            timer.stop_and_record();
             totals += result;
         }
 

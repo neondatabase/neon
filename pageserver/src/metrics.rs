@@ -479,6 +479,7 @@ pub struct TimelineMetrics {
     pub init_logical_size_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
+    pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
     pub resident_physical_size_gauge: UIntGauge,
@@ -507,6 +508,7 @@ impl TimelineMetrics {
         let logical_size_histo = StorageTimeMetrics::new("logical size", &tenant_id, &timeline_id);
         let load_layer_map_histo =
             StorageTimeMetrics::new("load layer map", &tenant_id, &timeline_id);
+        let garbage_collect_histo = StorageTimeMetrics::new("gc", &tenant_id, &timeline_id);
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
@@ -536,6 +538,7 @@ impl TimelineMetrics {
             create_images_time_histo,
             init_logical_size_histo,
             logical_size_histo,
+            garbage_collect_histo,
             load_layer_map_histo,
             last_record_gauge,
             wait_lsn_time_histo,
