@@ -1823,7 +1823,10 @@ impl Tenant {
             OpenOptions::new()
                 .truncate(true) // This needed for overwriting with small config files
                 .write(true)
-                .create_new(first_save),
+                .create_new(first_save)
+                // when initializing a new tenant, first_save will be true, thus this flag will be
+                // ignored (per rust std docs). later, don't care.
+                .create(true),
         )?;
 
         target_config_file
