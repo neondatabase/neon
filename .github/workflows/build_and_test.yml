@@ -1149,12 +1149,16 @@ jobs:
         include:
           - target_region:  us-east-2
             target_cluster: prod-us-east-2-delta
+            deploy_link_proxy: true
           - target_region:  us-west-2
             target_cluster: prod-us-west-2-eta
+            deploy_link_proxy: false
           - target_region: eu-central-1
             target_cluster: prod-eu-central-1-gamma
+            deploy_link_proxy: false
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+            deploy_link_proxy: false
     environment:
       name: prod-${{ matrix.target_region }}
     steps:
@@ -1169,10 +1173,16 @@ jobs:
           helm repo add neondatabase https://neondatabase.github.io/helm-charts
           aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
 
-      - name: Re-deploy proxy
+      - name: Re-deploy scram proxy
         run: |
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+
+      - name: Re-deploy link proxy
+        if: matrix.deploy_link_proxy
+        run: |
+          DOCKER_TAG=${{needs.tag.outputs.build-tag}}
+          helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-prod-new:
     runs-on: prod
