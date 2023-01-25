@@ -237,7 +237,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    env.pageserver.allowed_errors.append(".*NotFound\\(Tenant .* not found")
+    env.pageserver.allowed_errors.append(".*NotFound: Tenant .* not found")
 
     # first check for non existing tenant
     tenant_id = TenantId.generate()
