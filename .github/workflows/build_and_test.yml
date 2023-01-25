@@ -528,7 +528,8 @@ jobs:
   neon-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.1-debug
+    # https://github.com/GoogleContainerTools/kaniko/issues/2005
+    container: gcr.io/kaniko-project/executor:v1.7.0-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -544,7 +545,7 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build neon
-        run: /kaniko/executor --snapshot-mode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
@@ -553,7 +554,7 @@ jobs:
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.1-debug
+    container: gcr.io/kaniko-project/executor:v1.7.0-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -566,14 +567,14 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build compute tools
-        run: /kaniko/executor --snapshot-mode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.1-debug
+    container: gcr.io/kaniko-project/executor:v1.7.0-debug
     needs: [ tag ]
     strategy:
       fail-fast: false
