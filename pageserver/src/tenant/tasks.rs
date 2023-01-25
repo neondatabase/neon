@@ -52,6 +52,8 @@ async fn compaction_loop(tenant_id: TenantId) {
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+        let mut first = true;
+
         loop {
             trace!("waking up");
 
@@ -68,10 +70,14 @@ async fn compaction_loop(tenant_id: TenantId) {
 
             let mut sleep_duration = tenant.get_compaction_period();
             if sleep_duration == Duration::ZERO {
-                info!("automatic compaction is disabled");
+                if first {
+                    info!("automatic compaction is disabled");
+                }
+                first = false;
                 // check again in 10 seconds, in case it's been enabled again.
                 sleep_duration = Duration::from_secs(10);
             } else {
+                first = true;
                 // Run compaction
                 if let Err(e) = tenant.compaction_iteration().await {
                     sleep_duration = wait_duration;
@@ -103,6 +109,7 @@ async fn gc_loop(tenant_id: TenantId) {
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+        let mut first = true;
         loop {
             trace!("waking up");
 
@@ -121,10 +128,14 @@ async fn gc_loop(tenant_id: TenantId) {
             let gc_horizon = tenant.get_gc_horizon();
             let mut sleep_duration = gc_period;
             if sleep_duration == Duration::ZERO {
-                info!("automatic GC is disabled");
+                if first {
+                    info!("automatic GC is disabled");
+                }
+                first = false;
                 // check again in 10 seconds, in case it's been enabled again.
                 sleep_duration = Duration::from_secs(10);
             } else {
+                first = true;
                 // Run gc
                 if gc_horizon > 0 {
                     if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval()).await
