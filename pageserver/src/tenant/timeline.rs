@@ -1370,9 +1370,13 @@ impl Timeline {
         let self_calculation = Arc::clone(self);
         let cancel = CancellationToken::new();
 
+        let blocking_span = tracing::info_span!("blocking");
+
         let calculation = async {
             let cancel = cancel.child_token();
             tokio::task::spawn_blocking(move || {
+                // spans cannot be automatically moved/hoisted to spawn_blocking, do that manually
+                let _entered = blocking_span.entered();
                 // Run in a separate thread since this can do a lot of
                 // synchronous file IO without .await inbetween
                 // if there are no RemoteLayers that would require downloading.
