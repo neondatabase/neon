@@ -3,6 +3,8 @@
 # except for the version of Postgres that is built.
 #
 
+ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+ARG IMAGE=rust
 ARG TAG=pinned
 
 #########################################################################################
@@ -158,7 +160,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 # Compile and run the Neon-specific `compute_ctl` binary
 #
 #########################################################################################
-FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:$TAG AS compute-tools
+FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
