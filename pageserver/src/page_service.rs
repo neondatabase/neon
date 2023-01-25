@@ -30,13 +30,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::*;
 use utils::id::ConnectionId;
-use utils::postgres_backend_async::QueryError;
 use utils::{
     auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
-    postgres_backend_async::{self, PostgresBackend},
+    postgres_backend_async::{self, is_expected_io_error, PostgresBackend, QueryError},
     simple_rcu::RcuReadGuard,
 };
 
@@ -194,21 +193,17 @@ async fn page_service_conn_main(
     let mut conn_handler = PageServerHandler::new(conf, auth);
     let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
 
-    let result = pgbackend
+    match pgbackend
         .run(&mut conn_handler, task_mgr::shutdown_watcher)
-        .await;
-    match result {
+        .await
+    {
         Ok(()) => {
             // we've been requested to shut down
             Ok(())
         }
         Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
-            // `ConnectionReset` error happens when the Postgres client closes the connection.
-            // As this disconnection happens quite often and is expected,
-            // we decided to downgrade the logging level to `INFO`.
-            // See: https://github.com/neondatabase/neon/issues/1683.
-            if io_error.kind() == io::ErrorKind::ConnectionReset {
-                info!("Postgres client disconnected");
+            if is_expected_io_error(&io_error) {
+                info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
                 Err(io_error).context("Postgres connection error")
