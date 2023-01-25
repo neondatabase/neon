@@ -1843,26 +1843,26 @@ impl Tenant {
                 )
             })?;
 
-        // fsync the parent directory to ensure the directory entry is durable
-        if first_save {
-            target_config_path
-                .parent()
-                .context("Config file does not have a parent")
-                .and_then(|target_config_parent| {
-                    File::open(target_config_parent).context("Failed to open config parent")
-                })
-                .and_then(|tenant_dir| {
-                    tenant_dir
-                        .sync_all()
-                        .context("Failed to fsync config parent")
-                })
-                .with_context(|| {
-                    format!(
-                        "Failed to fsync on first save for config {}",
-                        target_config_path.display()
-                    )
-                })?;
-        }
+        // fsync the parent directory to ensure the directory entry is durable.
+        // before this was done conditionally on first_save, but these management actions are rare
+        // enough to just fsync it always.
+        target_config_path
+            .parent()
+            .context("Config file does not have a parent")
+            .and_then(|target_config_parent| {
+                File::open(target_config_parent).context("Failed to open config parent")
+            })
+            .and_then(|tenant_dir| {
+                tenant_dir
+                    .sync_all()
+                    .context("Failed to fsync config parent")
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to fsync on first save for config {}",
+                    target_config_path.display()
+                )
+            })?;
 
         Ok(())
     }
