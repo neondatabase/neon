@@ -1,8 +1,3 @@
-#
-# This file is identical to the Dockerfile.compute-node-v14 file
-# except for the version of Postgres that is built.
-#
-
 ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
 ARG IMAGE=rust
 ARG TAG=pinned
@@ -24,7 +19,8 @@ RUN apt update &&  \
 #
 #########################################################################################
 FROM build-deps AS pg-build
-COPY vendor/postgres-v15 postgres
+ARG PG_VERSION
+COPY vendor/postgres-${PG_VERSION} postgres
 RUN cd postgres && \
     ./configure CFLAGS='-O2 -g3' --enable-debug --with-openssl --with-uuid=ossp && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \

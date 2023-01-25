@@ -583,7 +583,7 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build compute node with extensions
-        run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node-${{ matrix.version }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --build-arg PG_VERSION=${{ matrix.version }} --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
   vm-compute-node-image:
     runs-on: [ self-hosted, dev, x64 ]
