@@ -1,9 +1,11 @@
 import os
 import shutil
+import time
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import List
+
 
 import pytest
 from fixtures.log_helper import log
@@ -294,8 +296,6 @@ def test_pageserver_with_empty_tenants(
     assert (
         loaded_tenant_status["state"] == "Active"
     ), f"Tenant {tenant_with_empty_timelines_dir} without timelines dir should be active"
-
-    import time
 
     time.sleep(1)  # to allow metrics propagation
 
