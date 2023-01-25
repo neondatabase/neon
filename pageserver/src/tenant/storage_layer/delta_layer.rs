@@ -578,12 +578,9 @@ impl DeltaLayer {
         )
     }
 
-    pub fn iter(&self) -> Result<LayerIter<'_>> {
+    pub fn iter(&self) -> anyhow::Result<LayerIter<'_>> {
         let inner = self.load().context("load delta layer")?;
-        Ok(match DeltaValueIter::new(inner) {
-            Ok(iter) => Box::new(iter),
-            Err(err) => Box::new(std::iter::once(Err(err))),
-        })
+        Ok(Box::new(DeltaValueIter::new(inner)?))
     }
 
     pub fn key_iter(&self) -> anyhow::Result<LayerKeyIter<'_>> {
@@ -896,7 +893,7 @@ impl<'a> Iterator for DeltaValueIter<'a> {
 }
 
 impl<'a> DeltaValueIter<'a> {
-    fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> Result<Self> {
+    fn new(inner: RwLockReadGuard<'a, DeltaLayerInner>) -> anyhow::Result<Self> {
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             inner.index_start_blk,
