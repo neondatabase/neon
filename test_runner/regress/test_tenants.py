@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
-
 import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import (
