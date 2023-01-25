@@ -935,8 +935,8 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-prod-new:
-    runs-on: [ self-hosted, gen3, small ]
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    runs-on: prod
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -951,9 +951,6 @@ jobs:
         target_region: [ us-east-2, us-west-2, eu-central-1, ap-southeast-1 ]
     environment:
       name: prod-${{ matrix.target_region }}
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_PROD }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_PROD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1156,8 +1153,8 @@ jobs:
           helm upgrade neon-storage-broker-lb neondatabase/neon-storage-broker --namespace neon-storage-broker-lb --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
   deploy-proxy-prod-new:
-    runs-on: [ self-hosted, gen3, small ]
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    runs-on: prod
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
     if: |
@@ -1183,9 +1180,6 @@ jobs:
             deploy_link_proxy: false
     environment:
       name: prod-${{ matrix.target_region }}
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_PROD }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_PROD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -1210,8 +1204,8 @@ jobs:
           helm upgrade neon-proxy-link neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-link.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-prod-new:
-    runs-on: [ self-hosted, gen3, small ]
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    runs-on: prod
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
     if: |
@@ -1233,9 +1227,6 @@ jobs:
             target_cluster: prod-ap-southeast-1-epsilon
     environment:
       name: prod-${{ matrix.target_region }}
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_PROD }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_PROD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v3
