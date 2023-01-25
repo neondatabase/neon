@@ -52,12 +52,13 @@ use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use anyhow::Result;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 use utils::lsn::Lsn;
 
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
+use pageserver_api::models::LayerMapInfo;
 
 use super::storage_layer::range_eq;
 
@@ -673,5 +674,27 @@ where
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+
+    // TODO kb comments + swagger schema
+    pub fn info(&self) -> LayerMapInfo {
+        let mut in_memory_layers = BTreeSet::new();
+        if let Some(open_layer) = &self.open_layer {
+            in_memory_layers.insert(open_layer.info());
+        }
+        for frozen_layer in &self.frozen_layers {
+            in_memory_layers.insert(frozen_layer.info());
+        }
+
+        let mut historic_layers = BTreeSet::new();
+        for historic_layer in self.iter_historic_layers() {
+            // TODO kb what to use here for `historic_layer: Arc<L>` ?
+            // historic_layers.insert(historic_layer.info());
+        }
+
+        LayerMapInfo {
+            in_memory_layers,
+            historic_layers,
+        }
     }
 }

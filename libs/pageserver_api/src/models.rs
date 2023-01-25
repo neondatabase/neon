@@ -1,4 +1,7 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    collections::BTreeSet,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
@@ -225,6 +228,39 @@ pub struct TimelineInfo {
     pub pg_version: u32,
 
     pub state: TimelineState,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
+pub struct LayerMapInfo {
+    pub in_memory_layers: BTreeSet<InMemoryLayerInfo>,
+    pub historic_layers: BTreeSet<HistoricLayerInfo>,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum InMemoryLayerInfo {
+    Open { lsn_start: Lsn },
+    Frozen { lsn_start: Lsn, lsn_end: Lsn },
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum HistoricLayerInfo {
+    Delta {
+        layer_file_name: String,
+        key_start: String,
+        key_end: String,
+        lsn_start: Lsn,
+        lsn_end: Lsn,
+        remote: bool,
+    },
+    Image {
+        layer_file_name: String,
+        key_start: String,
+        key_end: String,
+        lsn_start: Lsn,
+        remote: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

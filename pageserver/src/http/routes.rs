@@ -556,6 +556,25 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     )
 }
 
+async fn timeline_layer_map_info_handler(
+    request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(ApiError::NotFound)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)?;
+
+    let layer_map_info = timeline.layer_map_info();
+
+    json_response(StatusCode::OK, layer_map_info)
+}
+
 // Helper function to standardize the error messages we produce on bad durations
 //
 // Intended to be used with anyhow's `with_context`, e.g.:
@@ -985,6 +1004,10 @@ pub fn make_router(
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_delete_handler,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/layer",
+            timeline_layer_map_info_handler,
         )
         .any(handler_404))
 }
