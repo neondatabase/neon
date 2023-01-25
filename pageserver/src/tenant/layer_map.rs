@@ -202,6 +202,13 @@ impl<T: ?Sized> PartialEq for LayerRTreeObject<T> {
         // references.  Clippy complains about this. In practice it
         // seems to work, the assertion below would be triggered
         // otherwise but this ought to be fixed.
+
+        {
+            let left = Arc::as_ptr(&self.layer);
+            let right = Arc::as_ptr(&other.layer);
+            tracing::info!(?left, ?right, "comparing ptr_eq");
+        }
+
         #[allow(clippy::vtable_address_comparisons)]
         Arc::ptr_eq(&self.layer, &other.layer)
     }
