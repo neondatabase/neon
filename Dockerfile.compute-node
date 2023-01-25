@@ -147,6 +147,8 @@ RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz &
     cd postgresql-unit-7.7 && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    # remove pgsql from path because we will move the extension to another location while building the final layer
+    find /usr/local/pgsql/share/extension/ -name "unit*.sql" -print0 | xargs -0 sed -i "s|pgsql/||g" && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/unit.control
 
 #########################################################################################
