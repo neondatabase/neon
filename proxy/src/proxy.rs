@@ -347,10 +347,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> EstablishedConnection<'_, S> {
             .await?;
 
         let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("tx"));
-        let client_stream = MeasuredStream::new(stream.into_inner(), m_sent);
+        let client_stream = MeasuredStream::new(stream.into_inner(), |cnt| {
+            // Number of bytes we sent to the client (outbound).
+            m_sent.inc_by(cnt as u64);
+        });
 
         let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("rx"));
-        let db_stream = MeasuredStream::new(db.stream, m_recv);
+        let db_stream = MeasuredStream::new(db.stream, |cnt| {
+            // Number of bytes the client sent to the compute node (inbound).
+            m_recv.inc_by(cnt as u64);
+        });
 
         Ok(EstablishedConnection {
             client_stream,
