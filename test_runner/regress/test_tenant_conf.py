@@ -57,7 +57,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "compaction_period": 20,
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
-                    "gc_period": 100,
+                    "gc_period": 60 * 60,
                     "image_creation_threshold": 3,
                     "pitr_interval": 604800,  # 7 days
                 }.items()
