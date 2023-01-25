@@ -1742,7 +1742,7 @@ impl Timeline {
                     // Check the open and frozen in-memory layers first, in order from newest
                     // to oldest.
                     if let Some(open_layer) = &layers.open_layer {
-                        let start_lsn = open_layer.get_lsn_range().start;
+                        let start_lsn = open_layer.get_current_lsn_range().start;
                         if cont_lsn > start_lsn {
                             //info!("CHECKING for {} at {} on open layer {}", key, cont_lsn, open_layer.filename().display());
                             // Get all the data needed to reconstruct the page version from this layer.
@@ -1769,7 +1769,7 @@ impl Timeline {
                         }
                     }
                     for frozen_layer in layers.frozen_layers.iter().rev() {
-                        let start_lsn = frozen_layer.get_lsn_range().start;
+                        let start_lsn = frozen_layer.get_current_lsn_range().start;
                         if cont_lsn > start_lsn {
                             //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
@@ -1925,7 +1925,7 @@ impl Timeline {
         // Do we have a layer open for writing already?
         let layer;
         if let Some(open_layer) = &layers.open_layer {
-            if open_layer.get_lsn_range().start > lsn {
+            if open_layer.get_current_lsn_range().start > lsn {
                 bail!("unexpected open layer in the future");
             }
 
@@ -2101,7 +2101,7 @@ impl Timeline {
         // instead of writing out a L0 delta layer, we directly write out image layer
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
-        let lsn_range = frozen_layer.get_lsn_range();
+        let lsn_range = frozen_layer.get_current_lsn_range();
         let layer_paths_to_upload =
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
                 // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not

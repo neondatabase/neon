@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::RwLock;
 
-use super::{DeltaLayer, DeltaLayerWriter, LayerContent, LayerRange};
+use super::{DeltaLayer, DeltaLayerWriter, LayerContent};
 
 thread_local! {
     /// A buffer for serializing object during [`InMemoryLayer::put_value`].
@@ -72,35 +72,6 @@ pub struct InMemoryLayerInner {
 impl InMemoryLayerInner {
     fn assert_writeable(&self) {
         assert!(self.end_lsn.is_none());
-    }
-}
-
-impl LayerRange for InMemoryLayer {
-    fn get_key_range(&self) -> Range<Key> {
-        Key::MIN..Key::MAX
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        let inner = self.inner.read().unwrap();
-
-        let end_lsn = if let Some(end_lsn) = inner.end_lsn {
-            end_lsn
-        } else {
-            Lsn(u64::MAX)
-        };
-        self.start_lsn..end_lsn
-    }
-
-    fn is_incremental(&self) -> bool {
-        // in-memory layer is always considered incremental.
-        true
-    }
-
-    fn short_id(&self) -> String {
-        let inner = self.inner.read().unwrap();
-
-        let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
-        format!("inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
 }
 
@@ -334,5 +305,23 @@ impl InMemoryLayer {
 
         let delta_layer = delta_layer_writer.finish(Key::MAX)?;
         Ok(delta_layer)
+    }
+
+    pub fn get_current_lsn_range(&self) -> Range<Lsn> {
+        let inner = self.inner.read().unwrap();
+
+        let end_lsn = if let Some(end_lsn) = inner.end_lsn {
+            end_lsn
+        } else {
+            Lsn(u64::MAX)
+        };
+        self.start_lsn..end_lsn
+    }
+
+    pub fn short_id(&self) -> String {
+        let inner = self.inner.read().unwrap();
+
+        let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
+        format!("inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
 }
