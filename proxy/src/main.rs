@@ -30,7 +30,7 @@ use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use tracing::{info, info_span, Instrument};
 use utils::project_git_version;
-use utils::sentry_init::{init_sentry, release_name};
+use utils::sentry_init::init_sentry;
 
 project_git_version!(GIT_VERSION);
 
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry(release_name!(), &[]);
+    let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     let arg_matches = cli().get_matches();
 

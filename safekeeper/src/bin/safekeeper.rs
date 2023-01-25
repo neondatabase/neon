@@ -38,7 +38,7 @@ use utils::{
     id::NodeId,
     logging::{self, LogFormat},
     project_git_version,
-    sentry_init::{init_sentry, release_name},
+    sentry_init::init_sentry,
     signals, tcp_listener,
 };
 
@@ -173,7 +173,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry(release_name!(), &[("node_id", &conf.my_id.to_string())]);
+    let _sentry_guard = init_sentry(
+        Some(GIT_VERSION.into()),
+        &[("node_id", &conf.my_id.to_string())],
+    );
     start_safekeeper(conf)
 }
 

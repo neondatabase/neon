@@ -26,7 +26,7 @@ use utils::{
     logging,
     postgres_backend::AuthType,
     project_git_version,
-    sentry_init::{init_sentry, release_name},
+    sentry_init::init_sentry,
     signals::{self, Signal},
     tcp_listener,
 };
@@ -85,7 +85,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry(release_name!(), &[("node_id", &conf.id.to_string())]);
+    let _sentry_guard = init_sentry(
+        Some(GIT_VERSION.into()),
+        &[("node_id", &conf.id.to_string())],
+    );
 
     let tenants_path = conf.tenants_path();
     if !tenants_path.exists() {
