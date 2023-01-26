@@ -1,6 +1,4 @@
-import shutil
 from contextlib import closing
-from pathlib import Path
 
 import psycopg2.extras
 from fixtures.log_helper import log
@@ -9,7 +7,9 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
     assert_tenant_status,
+    wait_for_upload,
 )
+from fixtures.types import Lsn
 from fixtures.utils import wait_until
 
 
@@ -182,25 +182,18 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
     config_path = env.repo_dir / "tenants" / str(tenant_id) / "config"
     assert config_path.exists(), "config file is always initially created"
 
-    env.pageserver.stop()
-
-    remote_dir = (
-        env.remote_storage.root / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    )
-    found_any = False
-    for path in Path.iterdir(remote_dir):
-        if not path.is_file():
-            continue
-        found_any = True
-        break
-
-    assert found_any, "should had have files under timeline directory"
-
-    # now prepare for attaching it once more
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_id))
-
-    env.pageserver.start()
     http_client = env.pageserver.http_client()
+
+    detail = http_client.timeline_detail(tenant_id, timeline_id)
+    last_record_lsn = Lsn(detail["last_record_lsn"])
+    assert last_record_lsn.lsn_int != 0, "initdb must have executed"
+
+    wait_for_upload(http_client, tenant_id, timeline_id, last_record_lsn)
+
+    http_client.tenant_detach(tenant_id)
+
+    assert not config_path.exists(), "detach did not remove config file"
+
     http_client.tenant_attach(tenant_id)
     wait_until(
         number_of_iterations=5,
