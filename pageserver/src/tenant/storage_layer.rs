@@ -10,6 +10,7 @@ use crate::repository::{Key, Value};
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
+use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -185,6 +186,8 @@ pub trait PersistentLayer: Layer {
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
     fn file_size(&self) -> Option<u64>;
+
+    fn info(&self) -> HistoricLayerInfo;
 }
 
 pub fn downcast_remote_layer(

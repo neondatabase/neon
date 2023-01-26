@@ -36,6 +36,7 @@ use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
+use pageserver_api::models::HistoricLayerInfo;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -414,6 +415,21 @@ impl PersistentLayer for DeltaLayer {
 
     fn file_size(&self) -> Option<u64> {
         Some(self.file_size)
+    }
+
+    fn info(&self) -> HistoricLayerInfo {
+        let layer_file_name = self.filename().file_name();
+        let key_range = self.get_key_range();
+        let lsn_range = self.get_lsn_range();
+
+        HistoricLayerInfo::Delta {
+            layer_file_name,
+            key_start: key_range.start.to_string(),
+            key_end: key_range.end.to_string(),
+            lsn_start: lsn_range.start,
+            lsn_end: lsn_range.end,
+            remote: false,
+        }
     }
 }
 

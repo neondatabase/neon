@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -820,7 +820,24 @@ impl Timeline {
     }
 
     pub fn layer_map_info(&self) -> LayerMapInfo {
-        self.layers.read().unwrap().info()
+        let mut in_memory_layers = BTreeSet::new();
+        let layer_map = self.layers.read().unwrap();
+        if let Some(open_layer) = &layer_map.open_layer {
+            in_memory_layers.insert(open_layer.info());
+        }
+        for frozen_layer in &layer_map.frozen_layers {
+            in_memory_layers.insert(frozen_layer.info());
+        }
+
+        let mut historic_layers = BTreeSet::new();
+        for historic_layer in layer_map.iter_historic_layers() {
+            historic_layers.insert(historic_layer.info());
+        }
+
+        LayerMapInfo {
+            in_memory_layers,
+            historic_layers,
+        }
     }
 }
 
