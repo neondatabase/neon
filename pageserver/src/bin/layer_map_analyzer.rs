@@ -171,8 +171,8 @@ fn main() -> Result<()> {
             for i in 0..layers.len() {
                 if !layers[i].is_delta {
                     let mut n_deltas_since_last_image = 0usize;
-					let mut n_skipped = 0usize;
-					let img_key_range = &layers[i].key_range;
+                    let mut n_skipped = 0usize;
+                    let img_key_range = &layers[i].key_range;
                     for j in (0..i).rev() {
                         if range_overlaps(img_key_range, &layers[j].key_range) {
                             if layers[j].is_delta {
@@ -188,7 +188,7 @@ fn main() -> Result<()> {
                     if n_deltas_since_last_image >= 3 && n_deltas_since_last_image - n_skipped < 3 {
                         n_excess_layers += 1;
                     }
-					n_holes += n_skipped;
+                    n_holes += n_skipped;
                 }
             }
             println!(
