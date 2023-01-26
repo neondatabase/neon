@@ -1802,7 +1802,7 @@ impl Tenant {
     pub(super) fn persist_tenant_config(
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
-        first_save: bool,
+        creating_tenant: bool,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
         let target_config_parent = target_config_path.parent().with_context(|| {
@@ -1829,7 +1829,7 @@ impl Tenant {
             OpenOptions::new()
                 .truncate(true) // This needed for overwriting with small config files
                 .write(true)
-                .create_new(first_save)
+                .create_new(creating_tenant)
                 // when creating a new tenant, first_save will be true and `.create(true)` will be
                 // ignored (per rust std docs).
                 //
@@ -1854,7 +1854,7 @@ impl Tenant {
             })?;
 
         // fsync the parent directory to ensure the directory entry is durable.
-        // before this was done conditionally on first_save, but these management actions are rare
+        // before this was done conditionally on creating_tenant, but these management actions are rare
         // enough to just fsync it always.
 
         crashsafe::fsync(target_config_parent)?;
