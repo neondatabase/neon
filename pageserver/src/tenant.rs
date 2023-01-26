@@ -1844,7 +1844,7 @@ impl Tenant {
             .and_then(|_| {
                 target_config_file
                     .sync_all()
-                    .context("Faile to fsync config file")
+                    .context("Failed to fsync config file")
             })
             .with_context(|| {
                 format!(
