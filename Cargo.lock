@@ -831,6 +831,7 @@ dependencies = [
  "futures",
  "hyper",
  "notify",
+ "opentelemetry",
  "postgres",
  "regex",
  "serde",

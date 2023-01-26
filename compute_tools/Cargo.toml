@@ -11,6 +11,7 @@ clap.workspace = true
 futures.workspace = true
 hyper = { workspace = true, features = ["full"] }
 notify.workspace = true
+opentelemetry.workspace = true
 postgres.workspace = true
 regex.workspace = true
 serde.workspace = true
