@@ -1722,18 +1722,19 @@ impl Tenant {
 
         tokio::spawn(async move {
             let current_state = *rx.borrow_and_update();
+            let tid = tenant_id.to_string();
             TENANT_STATE_METRIC
-                .with_label_values(&[&tenant_id.to_string(), current_state.as_str()])
+                .with_label_values(&[&tid, current_state.as_str()])
                 .inc();
             loop {
                 match rx.changed().await {
                     Ok(()) => {
                         let new_state = *rx.borrow();
                         TENANT_STATE_METRIC
-                            .with_label_values(&[&tenant_id.to_string(), current_state.as_str()])
+                            .with_label_values(&[&tid, current_state.as_str()])
                             .dec();
                         TENANT_STATE_METRIC
-                            .with_label_values(&[&tenant_id.to_string(), new_state.as_str()])
+                            .with_label_values(&[&tid, new_state.as_str()])
                             .inc();
                     }
                     Err(_sender_dropped_error) => {
