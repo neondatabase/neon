@@ -153,6 +153,7 @@ fn main() -> Result<()> {
             let mut layers = Vec::new();
             let mut n_deltas = 0usize;
             let mut n_excess_layers = 0usize;
+			let mut n_holes = 0usize;
             for layer in fs::read_dir(timeline.path())? {
                 let layer = layer?;
                 if let Some(mut layer_file) =
@@ -169,21 +170,33 @@ fn main() -> Result<()> {
 
             for i in 0..layers.len() {
                 if !layers[i].is_delta {
+					let mut n_deltas_since_last_image = 0usize;
                     for j in 0..i {
-                        if layers[j].is_delta && layers[j].skips(&layers[i].key_range) {
-                            n_excess_layers += 1;
-                            break;
+						if range_overlaps(&layers[i].key_range, &layers[j].key_range) {
+							if layers[j].is_delta {
+								if layers[j].skips(&layers[i].key_range) {
+									n_holes += 1;
+								} else {
+									n_deltas_since_last_image += 1;
+								}
+							} else {
+								break;
+							}
                         }
                     }
+					if n_deltas_since_last_image < 3 {
+                        n_excess_layers += 1;
+					}
                 }
             }
             println!(
-                "Tenant {} timeline {} delta layers {} image layers {} excess layers {}",
+                "Tenant {} timeline {} delta layers {} image layers {} excess layers {} holes {}",
                 tenant.file_name().into_string().unwrap(),
                 timeline.file_name().into_string().unwrap(),
                 n_deltas,
                 layers.len() - n_deltas,
-                n_excess_layers
+                n_excess_layers,
+				n_holes
             );
             total_delta_layers += n_deltas;
             total_image_layers += layers.len() - n_deltas;
