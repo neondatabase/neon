@@ -691,12 +691,13 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     needs: [ tag, test-images, vm-compute-node-image ]
     container: golang:1.19-bullseye
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
+    if: github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Install Crane & ECR helper
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.event_name != 'workflow_dispatch'
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
@@ -707,7 +708,9 @@ jobs:
           echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
 
       - name: Add latest tag to images
-        if: github.event_name != 'workflow_dispatch'
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.event_name != 'workflow_dispatch'
         run: |
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
