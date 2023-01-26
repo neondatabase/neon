@@ -112,6 +112,9 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("failed to define current logical size metric")
 });
 
+// Metrics collected on tenant statss.
+const TENANT_STATE_OPTIONS: &[&str] = &["loading", "attaching", "active", "stopping", "broken"];
+
 pub static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_tenant_states_count",
@@ -505,6 +508,9 @@ impl Drop for TimelineMetrics {
 
 pub fn remove_tenant_metrics(tenant_id: &TenantId) {
     let _ = STORAGE_TIME.remove_label_values(&["gc", &tenant_id.to_string(), "-"]);
+    for state in TENANT_STATE_OPTIONS {
+        let _ = TENANT_STATE_METRIC.remove_label_values(&[&tenant_id.to_string(), state]);
+    }
 }
 
 use futures::Future;
