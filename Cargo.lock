@@ -4169,6 +4169,7 @@ dependencies = [
 name = "tracing-utils"
 version = "0.1.0"
 dependencies = [
+ "hyper",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
