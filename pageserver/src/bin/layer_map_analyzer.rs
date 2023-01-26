@@ -135,8 +135,8 @@ fn main() -> Result<()> {
     } else {
         DEFAULT_MAX_HOLES
     };
-	pageserver::virtual_file::init(10);
-	pageserver::page_cache::init(100);
+    pageserver::virtual_file::init(10);
+    pageserver::page_cache::init(100);
     let mut total_delta_layers = 0usize;
     let mut total_image_layers = 0usize;
     let mut total_excess_layers = 0usize;
@@ -153,7 +153,7 @@ fn main() -> Result<()> {
             let mut layers = Vec::new();
             let mut n_deltas = 0usize;
             let mut n_excess_layers = 0usize;
-			let mut n_holes = 0usize;
+            let mut n_holes = 0usize;
             for layer in fs::read_dir(timeline.path())? {
                 let layer = layer?;
                 if let Some(mut layer_file) =
@@ -170,23 +170,23 @@ fn main() -> Result<()> {
 
             for i in 0..layers.len() {
                 if !layers[i].is_delta {
-					let mut n_deltas_since_last_image = 0usize;
+                    let mut n_deltas_since_last_image = 0usize;
                     for j in 0..i {
-						if range_overlaps(&layers[i].key_range, &layers[j].key_range) {
-							if layers[j].is_delta {
-								if layers[j].skips(&layers[i].key_range) {
-									n_holes += 1;
-								} else {
-									n_deltas_since_last_image += 1;
-								}
-							} else {
-								break;
-							}
+                        if range_overlaps(&layers[i].key_range, &layers[j].key_range) {
+                            if layers[j].is_delta {
+                                if layers[j].skips(&layers[i].key_range) {
+                                    n_holes += 1;
+                                } else {
+                                    n_deltas_since_last_image += 1;
+                                }
+                            } else {
+                                break;
+                            }
                         }
                     }
-					if n_deltas_since_last_image < 3 {
+                    if n_deltas_since_last_image < 3 {
                         n_excess_layers += 1;
-					}
+                    }
                 }
             }
             println!(
@@ -196,7 +196,7 @@ fn main() -> Result<()> {
                 n_deltas,
                 layers.len() - n_deltas,
                 n_excess_layers,
-				n_holes
+                n_holes
             );
             total_delta_layers += n_deltas;
             total_image_layers += layers.len() - n_deltas;
