@@ -61,6 +61,10 @@ nix = "0.26"
 notify = "5.0.0"
 num-traits = "0.2.15"
 once_cell = "1.13"
+opentelemetry = "0.18.0"
+opentelemetry-otlp = { version = "0.11.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-semantic-conventions = "0.10.0"
+tracing-opentelemetry = "0.18.0"
 parking_lot = "0.12"
 pin-project-lite = "0.2"
 prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
@@ -125,6 +129,7 @@ remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
+tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
 
 ## Common library dependency

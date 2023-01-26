@@ -53,7 +53,7 @@ use compute_tools::spec::*;
 use url::Url;
 
 fn main() -> Result<()> {
-    init_logger(DEFAULT_LOG_LEVEL)?;
+    init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let matches = cli().get_matches();
 
@@ -158,6 +158,10 @@ fn main() -> Result<()> {
         thread::sleep(Duration::from_secs(30));
         info!("shutting down");
     }
+
+    // Shutdown trace pipeline gracefully, so that it has a chance to send any
+    // pending traces before we exit.
+    tracing_utils::shutdown_tracing();
 
     exit(exit_code.unwrap_or(1))
 }
