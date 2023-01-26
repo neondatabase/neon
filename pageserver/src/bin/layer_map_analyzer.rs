@@ -171,7 +171,7 @@ fn main() -> Result<()> {
             for i in 0..layers.len() {
                 if !layers[i].is_delta {
                     let mut n_deltas_since_last_image = 0usize;
-                    for j in 0..i {
+                    for j in (0..i).rev() {
                         if range_overlaps(&layers[i].key_range, &layers[j].key_range) {
                             if layers[j].is_delta {
                                 if layers[j].skips(&layers[i].key_range) {
