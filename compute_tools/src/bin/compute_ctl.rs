@@ -84,6 +84,29 @@ fn main() -> Result<()> {
         }
     };
 
+    // Extract OpenTelemetry context for the startup actions from the spec, and
+    // attach it to the current tracing context.
+    //
+    // This is used to propagate the context for the 'start_compute' operation
+    // from the neon control plane. This allows linking together the wider
+    // 'start_compute' operation that creates the compute container, with the
+    // startup actions here within the container.
+    //
+    // Switch to the startup context here, and exit it once the startup has
+    // completed and Postgres is up and running.
+    //
+    // NOTE: This is supposed to only cover the *startup* actions. Once
+    // postgres is configured and up-and-running, we exit this span. Any other
+    // actions that are performed on incoming HTTP requests, for example, are
+    // performed in separate spans.
+    let startup_context_guard = if let Some(ref carrier) = spec.startup_tracing_context {
+        use opentelemetry::propagation::TextMapPropagator;
+        use opentelemetry::sdk::propagation::TraceContextPropagator;
+        Some(TraceContextPropagator::new().extract(carrier).attach())
+    } else {
+        None
+    };
+
     let pageserver_connstr = spec
         .cluster
         .settings
@@ -140,6 +163,9 @@ fn main() -> Result<()> {
     // Wait for the child Postgres process forever. In this state Ctrl+C will
     // propagate to Postgres and it will be shut down as well.
     if let Some(mut pg) = pg {
+        // Startup is finished, exit the startup tracing span
+        drop(startup_context_guard);
+
         let ecode = pg
             .wait()
             .expect("failed to start waiting on Postgres process");

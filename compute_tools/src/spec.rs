@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -22,6 +23,8 @@ pub struct ComputeSpec {
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
+
+    pub startup_tracing_context: Option<HashMap<String, String>>,
 }
 
 /// Cluster state seen from the perspective of the external tools
