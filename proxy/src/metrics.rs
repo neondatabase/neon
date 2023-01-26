@@ -1,12 +1,11 @@
-//!
 //! Periodically collect proxy consumption metrics
 //! and push them to a HTTP endpoint.
-//!
+use crate::http;
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use serde::Serialize;
 use std::{collections::HashMap, time::Duration};
-use tracing::{debug, error, log::info, trace};
+use tracing::{debug, error, info, instrument, trace};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
@@ -40,15 +39,14 @@ pub async fn collect_metrics(
         metric_collection_endpoint
     );
 
-    // define client here to reuse it for all requests
-    let client = reqwest::Client::new();
+    let http_client = http::new_client();
     let mut cached_metrics: HashMap<Ids, (u64, DateTime<Utc>)> = HashMap::new();
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
 
-                match collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, hostname.clone()).await
+                match collect_metrics_iteration(&http_client, &mut cached_metrics, metric_collection_endpoint, hostname.clone()).await
                 {
                     Err(e) => {
                         error!("Failed to send consumption metrics: {} ", e);
@@ -60,7 +58,7 @@ pub async fn collect_metrics(
     }
 }
 
-pub fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
+fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
     let mut current_metrics: Vec<(Ids, (u64, DateTime<Utc>))> = Vec::new();
     let metrics = prometheus::default_registry().gather();
 
@@ -99,8 +97,9 @@ pub fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
     current_metrics
 }
 
-pub async fn collect_metrics_iteration(
-    client: &reqwest::Client,
+#[instrument(skip_all)]
+async fn collect_metrics_iteration(
+    client: &http::ClientWithMiddleware,
     cached_metrics: &mut HashMap<Ids, (u64, DateTime<Utc>)>,
     metric_collection_endpoint: &reqwest::Url,
     hostname: String,

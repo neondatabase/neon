@@ -8,7 +8,6 @@ use super::{
 use crate::{auth::ClientCredentials, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use reqwest::StatusCode as HttpStatusCode;
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Clone)]
@@ -52,7 +51,7 @@ impl Api {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 Err(e) => match e.http_status_code() {
-                    Some(HttpStatusCode::NOT_FOUND) => return Ok(None),
+                    Some(http::StatusCode::NOT_FOUND) => return Ok(None),
                     _otherwise => return Err(e.into()),
                 },
             };
@@ -154,7 +153,7 @@ impl super::Api for Api {
 
 /// Parse http response body, taking status code into account.
 async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
-    response: reqwest::Response,
+    response: http::Response,
 ) -> Result<T, ApiError> {
     let status = response.status();
     if status.is_success() {

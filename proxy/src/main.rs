@@ -12,6 +12,7 @@ mod config;
 mod console;
 mod error;
 mod http;
+mod logging;
 mod metrics;
 mod parse;
 mod proxy;
@@ -41,8 +42,7 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // First, initialize logging and troubleshooting subsystems.
-    init_tracing();
+    let _logging_guard = logging::init().await?;
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     info!("Version: {GIT_VERSION}");
@@ -107,21 +107,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Tracing is used for logging and telemetry.
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter({
-            // This filter will examine the `RUST_LOG` env variable.
-            use tracing_subscriber::filter::{EnvFilter, LevelFilter};
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy()
-        })
-        .with_ansi(atty::is(atty::Stream::Stdout))
-        .with_target(false)
-        .init();
-}
-
 /// ProxyConfig is created at proxy startup, and lives forever.
 fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig> {
     let tls_config = match (
@@ -161,7 +146,7 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
             }));
 
             let url = args.get_one::<String>("auth-endpoint").unwrap().parse()?;
-            let endpoint = http::Endpoint::new(url, reqwest::Client::new());
+            let endpoint = http::Endpoint::new(url, http::new_client());
 
             let api = console::provider::neon::Api::new(endpoint, caches);
             auth::BackendType::Console(Cow::Owned(api), ())
