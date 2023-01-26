@@ -1,0 +1,16 @@
+[package]
+name = "tracing-utils"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+opentelemetry = { workspace = true, features=["rt-tokio"] }
+opentelemetry-otlp = { workspace = true, default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-semantic-conventions.workspace = true
+reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
