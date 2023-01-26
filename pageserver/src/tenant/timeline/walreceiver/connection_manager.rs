@@ -14,12 +14,10 @@ use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, ti
 use super::TaskStateUpdate;
 use crate::broker_client::get_broker_client;
 use crate::context::RequestContext;
-use crate::task_mgr::WALRECEIVER_RUNTIME;
-use crate::task_mgr::{self, TaskKind};
-use crate::tenant::Timeline;
+use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::{Timeline, TimelineState};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
-use pageserver_api::models::TimelineState;
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::SubscribeSafekeeperInfoRequest;

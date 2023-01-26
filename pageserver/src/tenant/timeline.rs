@@ -10,7 +10,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-    DownloadRemoteLayersTaskState, TimelineState,
+    DownloadRemoteLayersTaskState,
 };
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
@@ -77,6 +77,15 @@ enum FlushLoopState {
     NotStarted,
     Running,
     Exited,
+}
+
+/// XXX: this type will become internal to Timeline in a future commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum State {
+    Loading,
+    Active,
+    Stopping,
+    Broken,
 }
 
 pub struct Timeline {
@@ -193,7 +202,7 @@ pub struct Timeline {
 
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
-    state: watch::Sender<TimelineState>,
+    state: watch::Sender<State>,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -652,7 +661,7 @@ impl Timeline {
         let _layer_removal_cs = self.layer_removal_cs.lock().await;
         // Is the timeline being deleted?
         let state = *self.state.borrow();
-        if state == TimelineState::Stopping {
+        if state == State::Stopping {
             anyhow::bail!("timeline is Stopping");
         }
 
@@ -783,22 +792,22 @@ impl Timeline {
     }
 
     pub fn activate(self: &Arc<Self>) {
-        self.set_state(TimelineState::Active);
+        self.set_state(State::Active);
         self.launch_wal_receiver();
     }
 
-    pub fn set_state(&self, new_state: TimelineState) {
+    pub(crate) fn set_state(&self, new_state: State) {
         match (self.current_state(), new_state) {
             (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
                 warn!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
             }
-            (st, TimelineState::Loading) => {
+            (st, State::Loading) => {
                 error!("ignoring transition from {st:?} into Loading state");
             }
-            (TimelineState::Broken, _) => {
+            (State::Broken, _) => {
                 error!("Ignoring state update {new_state:?} for broken tenant");
             }
-            (TimelineState::Stopping, TimelineState::Active) => {
+            (State::Stopping, State::Active) => {
                 error!("Not activating a Stopping timeline");
             }
             (_, new_state) => {
@@ -807,15 +816,15 @@ impl Timeline {
         }
     }
 
-    pub fn current_state(&self) -> TimelineState {
+    pub(crate) fn current_state(&self) -> State {
         *self.state.borrow()
     }
 
     pub fn is_active(&self) -> bool {
-        self.current_state() == TimelineState::Active
+        self.current_state() == State::Active
     }
 
-    pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
+    pub(crate) fn subscribe_for_state_updates(&self) -> watch::Receiver<State> {
         self.state.subscribe()
     }
 }
@@ -873,7 +882,7 @@ impl Timeline {
         pg_version: u32,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
-        let (state, _) = watch::channel(TimelineState::Loading);
+        let (state, _) = watch::channel(State::Loading);
 
         let (layer_flush_start_tx, _) = tokio::sync::watch::channel(0);
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
@@ -1488,10 +1497,10 @@ impl Timeline {
                         let new_state = *timeline_state_updates.borrow();
                         match new_state {
                             // we're running this job for active timelines only
-                            TimelineState::Active => continue,
-                            TimelineState::Broken
-                            | TimelineState::Stopping
-                            | TimelineState::Loading => {
+                            State::Active => continue,
+                            State::Broken
+                            | State::Stopping
+                            | State::Loading => {
                                 break format!("aborted because timeline became inactive (new state: {new_state:?})")
                             }
                         }
@@ -2880,7 +2889,7 @@ impl Timeline {
         let _layer_removal_cs = self.layer_removal_cs.lock().await;
         // Is the timeline being deleted?
         let state = *self.state.borrow();
-        if state == TimelineState::Stopping {
+        if state == State::Stopping {
             anyhow::bail!("timeline is Stopping");
         }
 

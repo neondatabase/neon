@@ -15,7 +15,6 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use futures::FutureExt;
 use futures::Stream;
-use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::sync::watch;
@@ -95,7 +94,7 @@ mod timeline;
 
 pub mod size;
 
-pub use timeline::{PageReconstructError, Timeline};
+pub(crate) use timeline::{PageReconstructError, State as TimelineState, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
