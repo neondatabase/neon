@@ -1805,6 +1805,13 @@ impl Tenant {
         first_save: bool,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
+        let target_config_parent = target_config_path.parent().with_context(|| {
+            format!(
+                "Config path does not have a parent: {}",
+                target_config_path.display()
+            )
+        })?;
+
         info!("persisting tenantconf to {}", target_config_path.display());
 
         let mut conf_content = r#"# This file contains a specific per-tenant's config.
@@ -1846,12 +1853,9 @@ impl Tenant {
         // fsync the parent directory to ensure the directory entry is durable.
         // before this was done conditionally on first_save, but these management actions are rare
         // enough to just fsync it always.
-        target_config_path
-            .parent()
-            .context("Config file does not have a parent")
-            .and_then(|target_config_parent| {
-                File::open(target_config_parent).context("Failed to open config parent")
-            })
+
+        File::open(target_config_parent)
+            .context("Failed to open config parent")
             .and_then(|tenant_dir| {
                 tenant_dir
                     .sync_all()
