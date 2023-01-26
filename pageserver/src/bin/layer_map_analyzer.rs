@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
-use std::{env, fs, path::PathBuf, str, str::FromStr};
+use std::{env, fs, path::Path, path::PathBuf, str, str::FromStr};
 
 use pageserver::page_cache::PAGE_SZ;
 use pageserver::repository::{Key, KEY_SIZE};
@@ -70,13 +70,12 @@ fn parse_filename(name: &str) -> Option<LayerFile> {
     }
     let keys: Vec<&str> = split[0].split('-').collect();
     let mut lsns: Vec<&str> = split[1].split('-').collect();
-    let is_delta;
-    if lsns.len() == 1 {
+    let is_delta = if lsns.len() == 1 {
         lsns.push(lsns[0]);
-        is_delta = false;
+        false
     } else {
-        is_delta = true;
-    }
+        true
+    };
 
     let key_range = Key::from_hex(keys[0]).unwrap()..Key::from_hex(keys[1]).unwrap();
     let lsn_range = Lsn::from_hex(lsns[0]).unwrap()..Lsn::from_hex(lsns[1]).unwrap();
@@ -89,7 +88,7 @@ fn parse_filename(name: &str) -> Option<LayerFile> {
     })
 }
 
-fn get_holes(path: &PathBuf, max_holes: usize) -> Result<Vec<Hole>> {
+fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path)?);
     let summary_blk = file.read_blk(0)?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
