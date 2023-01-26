@@ -19,10 +19,12 @@ concurrency:
 env:
   RUST_BACKTRACE: 1
   COPT: '-Werror'
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
 jobs:
   tag:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     outputs:
       build-tag: ${{steps.build-tag.outputs.tag}}
@@ -50,7 +52,7 @@ jobs:
         id: build-tag
 
   check-codestyle-python:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cloud:pinned
       options: --init
@@ -85,7 +87,7 @@ jobs:
         run: poetry run mypy .
 
   check-codestyle-rust:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -97,16 +99,16 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Restore cargo deps cache
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          key: v1-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#      Disabled for now
+#      - name: Restore cargo deps cache
+#        id: cache_cargo
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
+#          key: v1-${{ runner.os }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
@@ -133,7 +135,7 @@ jobs:
         run: cargo deny check
 
   build-neon:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -141,7 +143,6 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
-
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.sha }}
@@ -194,24 +195,26 @@ jobs:
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
+          echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
 
+      # Disabled for now
       # Don't include the ~/.cargo/registry/src directory. It contains just
       # uncompressed versions of the crates in ~/.cargo/registry/cache
       # directory, and it's faster to let 'cargo' to rebuild it from the
       # compressed crates.
-      - name: Cache cargo deps
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
-          key: |
-            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+#      - name: Cache cargo deps
+#        id: cache_cargo
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            ~/.cargo/registry/
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
+#          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+#          key: |
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -301,7 +304,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -334,7 +337,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -365,7 +368,7 @@ jobs:
       # while coverage is currently collected for the debug ones
 
   merge-allure-report:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -402,7 +405,7 @@ jobs:
           DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
 
   coverage-report:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -418,16 +421,17 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Restore cargo deps cache
-        id: cache_cargo
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry/
-            !~/.cargo/registry/src
-            ~/.cargo/git/
-            target/
-          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#      Disabled for now
+#      - name: Restore cargo deps cache
+#        id: cache_cargo
+#        uses: actions/cache@v3
+#        with:
+#          path: |
+#            ~/.cargo/registry/
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
+#          key: v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Get Neon artifact
         uses: ./.github/actions/download
@@ -477,7 +481,7 @@ jobs:
             }"
 
   trigger-e2e-tests:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
@@ -522,9 +526,10 @@ jobs:
             }"
 
   neon-image:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    # https://github.com/GoogleContainerTools/kaniko/issues/2005
+    container: gcr.io/kaniko-project/executor:v1.7.0-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -540,12 +545,16 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build neon
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+
+      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
+      - name: Cleanup ECR folder
+        run: rm -rf ~/.ecr
 
   compute-tools-image:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    container: gcr.io/kaniko-project/executor:v1.7.0-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -558,11 +567,14 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build compute tools
-        run: /kaniko/executor --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --snapshotMode=redo --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+
+      - name: Cleanup ECR folder
+        run: rm -rf ~/.ecr
 
   compute-node-image:
-    runs-on: [ self-hosted, dev, x64 ]
-    container: gcr.io/kaniko-project/executor:v1.9.0-debug
+    runs-on: [ self-hosted, gen3, large ]
+    container: gcr.io/kaniko-project/executor:v1.7.0-debug
     needs: [ tag ]
     strategy:
       fail-fast: false
@@ -583,10 +595,13 @@ jobs:
         run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
 
       - name: Kaniko build compute node with extensions
-        run: /kaniko/executor --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --build-arg PG_VERSION=${{ matrix.version }} --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --build-arg PG_VERSION=${{ matrix.version }} --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+
+      - name: Cleanup ECR folder
+        run: rm -rf ~/.ecr
 
   vm-compute-node-image:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, large ]
     needs: [ tag, compute-node-image ]
     strategy:
       fail-fast: false
@@ -631,7 +646,7 @@ jobs:
 
   test-images:
     needs: [ tag, neon-image, compute-node-image, compute-tools-image ]
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
 
     steps:
       - name: Checkout
@@ -673,7 +688,7 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     needs: [ tag, test-images, vm-compute-node-image ]
     if: github.event_name != 'workflow_dispatch'
     container: amazon/aws-cli
@@ -681,6 +696,8 @@ jobs:
       fail-fast: false
       matrix:
         name: [ neon, compute-node-v14, vm-compute-node-v14, compute-node-v15, vm-compute-node-v15, compute-tools]
+    env:
+      AWS_DEFAULT_REGION: eu-central-1
 
     steps:
       - name: Promote image to latest
@@ -689,7 +706,7 @@ jobs:
           aws ecr put-image --repository-name ${{ matrix.name }} --image-tag latest --image-manifest "$MANIFEST"
 
   push-docker-hub:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     needs: [ promote-images, tag ]
     container: golang:1.19-bullseye
 
@@ -776,8 +793,11 @@ jobs:
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
+      - name: Cleanup ECR folder
+        run: rm -rf ~/.ecr
+
   calculate-deploy-targets:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     if: |
       github.ref_name == 'release' &&
       github.event_name != 'workflow_dispatch'
@@ -795,7 +815,7 @@ jobs:
           fi
 
   deploy:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -843,7 +863,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-new:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -883,7 +903,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-pr-test-new:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
@@ -958,7 +978,7 @@ jobs:
           rm -f neon_install.tar.gz .neon_current_version
 
   deploy-proxy:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -1003,7 +1023,7 @@ jobs:
 
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
@@ -1045,7 +1065,7 @@ jobs:
           helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install --atomic -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
   deploy-proxy-new:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1098,7 +1118,7 @@ jobs:
           helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
   deploy-storage-broker-dev-new:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, tag, regress-tests ]
@@ -1225,7 +1245,7 @@ jobs:
           helm upgrade neon-storage-broker-lb neondatabase/neon-storage-broker --namespace neon-storage-broker-lb --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
   promote-compatibility-data:
-    runs-on: [ self-hosted, dev, x64 ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
