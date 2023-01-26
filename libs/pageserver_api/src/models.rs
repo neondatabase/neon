@@ -559,7 +559,7 @@ mod tests {
             id: TenantId::generate(),
             state: TenantState::Broken {
                 reason: "reason".into(),
-                backtrace: "backtrace".into(),
+                backtrace: "backtrace info".into(),
             },
             current_physical_size: Some(42),
             has_in_progress_downloads: Some(false),
@@ -580,5 +580,7 @@ mod tests {
             serde_json::to_value(&original_broken).unwrap(),
             expected_broken
         );
+        assert!( format!("{:?}", &original_broken.state).contains("reason"));
+        assert!( format!("{:?}", &original_broken.state).contains("backtrace info"));
     }
 }
