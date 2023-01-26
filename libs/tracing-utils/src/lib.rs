@@ -40,6 +40,8 @@ use opentelemetry_otlp::{OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_TRACES_
 
 pub use tracing_opentelemetry::OpenTelemetryLayer;
 
+pub mod http;
+
 /// Set up OpenTelemetry exporter, using configuration from environment variables.
 ///
 /// `service_name` is set as the OpenTelemetry 'service.name' resource (see
@@ -140,6 +142,11 @@ fn init_tracing_internal(service_name: String) -> opentelemetry::sdk::trace::Tra
             exporter = exporter.with_endpoint(endpoint);
         }
     }
+
+    // Propagate trace information in the standard W3C TraceContext format.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry::sdk::propagation::TraceContextPropagator::new(),
+    );
 
     opentelemetry_otlp::new_pipeline()
         .tracing()

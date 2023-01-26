@@ -8,11 +8,17 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use serde_json;
 use tracing::{error, info};
+use tracing_utils::http::OtelName;
 
 use crate::compute::ComputeNode;
 
 // Service function to handle all available routes.
-async fn routes(req: Request<Body>, compute: Arc<ComputeNode>) -> Response<Body> {
+async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
+    //
+    // NOTE: The URI path is currently included in traces. That's OK because
+    // it doesn't contain any variable parts or sensitive information. But
+    // please keep that in mind if you change the routing here.
+    //
     match (req.method(), req.uri().path()) {
         // Serialized compute state.
         (&Method::GET, "/status") => {
@@ -30,7 +36,7 @@ async fn routes(req: Request<Body>, compute: Arc<ComputeNode>) -> Response<Body>
 
         (&Method::POST, "/check_writability") => {
             info!("serving /check_writability POST request");
-            let res = crate::checker::check_writability(&compute).await;
+            let res = crate::checker::check_writability(compute).await;
             match res {
                 Ok(_) => Response::new(Body::from("true")),
                 Err(e) => Response::new(Body::from(e.to_string())),
@@ -56,7 +62,19 @@ async fn serve(state: Arc<ComputeNode>) {
         async move {
             Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
                 let state = state.clone();
-                async move { Ok::<_, Infallible>(routes(req, state).await) }
+                async move {
+                    Ok::<_, Infallible>(
+                        // NOTE: We include the URI path in the string. It
+                        // doesn't contain any variable parts or sensitive
+                        // information in this API.
+                        tracing_utils::http::tracing_handler(
+                            req,
+                            |req| routes(req, &state),
+                            OtelName::UriPath,
+                        )
+                        .await,
+                    )
+                }
             }))
         }
     });
