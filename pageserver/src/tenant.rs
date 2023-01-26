@@ -1830,8 +1830,11 @@ impl Tenant {
                 .truncate(true) // This needed for overwriting with small config files
                 .write(true)
                 .create_new(first_save)
-                // when initializing a new tenant, first_save will be true, thus this flag will be
-                // ignored (per rust std docs). later, don't care.
+                // when creating a new tenant, first_save will be true and `.create(true)` will be
+                // ignored (per rust std docs).
+                //
+                // later when updating the config of created tenant, or persisting config for the
+                // first time for attached tenant, the `.create(true)` is used.
                 .create(true),
         )?;
 
