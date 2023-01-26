@@ -62,7 +62,7 @@ use super::{DeltaFileName, Layer, LayerFileName, LayerIter, LayerKeyIter, PathOr
 /// the 'index' starts at the block indicated by 'index_start_blk'
 ///
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Summary {
+pub struct Summary {
     /// Magic value to identify this as a neon delta file. Always DELTA_FILE_MAGIC.
     magic: u16,
     format_version: u16,
@@ -73,9 +73,9 @@ struct Summary {
     lsn_range: Range<Lsn>,
 
     /// Block number where the 'index' part of the file begins.
-    index_start_blk: u32,
+    pub index_start_blk: u32,
     /// Block within the 'index', where the B-tree root page is stored
-    index_root_blk: u32,
+    pub index_root_blk: u32,
 }
 
 impl From<&DeltaLayer> for Summary {
@@ -125,7 +125,7 @@ impl BlobRef {
     }
 }
 
-const DELTA_KEY_SIZE: usize = KEY_SIZE + 8;
+pub const DELTA_KEY_SIZE: usize = KEY_SIZE + 8;
 struct DeltaKey([u8; DELTA_KEY_SIZE]);
 
 ///
