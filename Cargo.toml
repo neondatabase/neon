@@ -76,6 +76,8 @@ prost = "0.11"
 rand = "0.8"
 regex = "1.4"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_18"] }
+reqwest-middleware = "0.2.0"
 routerify = "3"
 rpds = "0.12.0"
 rustls = "0.20"
