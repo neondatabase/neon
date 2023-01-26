@@ -1653,7 +1653,7 @@ mod tests {
         assert!(tline.list_rels(0, TESTDB, Lsn(0x30))?.contains(&TESTREL_A));
 
         // Create a branch, check that the relation is visible there
-        repo.branch_timeline(TIMELINE_ID, NEW_TIMELINE_ID, Lsn(0x30))?;
+        repo.branch_timeline(&tline, NEW_TIMELINE_ID, Lsn(0x30))?;
         let newtline = match repo.get_timeline(NEW_TIMELINE_ID)?.local_timeline() {
             Some(timeline) => timeline,
             None => panic!("Should have a local timeline"),
