@@ -220,58 +220,62 @@ where
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
-        let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
-        let latest_delta = version.delta_coverage.query(key.to_i128());
-        let latest_image = version.image_coverage.query(key.to_i128());
+    pub fn search(&self, key: Key, mut end_lsn: Lsn) -> Option<SearchResult<L>> {
+        loop {
+            let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
+            let latest_delta = version.delta_coverage.query(key.to_i128());
+            let latest_image = version.image_coverage.query(key.to_i128());
 
-		loop {
-        return match (latest_delta, latest_image) {
-            (None, None) => None,
-            (None, Some(image)) => {
-                let lsn_floor = image.get_lsn_range().start;
-                Some(SearchResult {
-                    layer: image,
-                    lsn_floor,
-                })
-            }
-            (Some(delta), None) => {
-				if let Ok(contains) = delta.overlaps(&(key..key.next())) {
-					if !contains {
-						continue;
-					}
-				}
-                let lsn_floor = delta.get_lsn_range().start;
-                Some(SearchResult {
-                    layer: delta,
-                    lsn_floor,
-                })
-            }
-            (Some(delta), Some(image)) => {
-                let img_lsn = image.get_lsn_range().start;
-                let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
-                let image_exact_match = img_lsn + 1 == end_lsn;
-                if image_is_newer || image_exact_match {
+            return match (latest_delta, latest_image) {
+                (None, None) => None,
+                (None, Some(image)) => {
+                    let lsn_floor = image.get_lsn_range().start;
                     Some(SearchResult {
                         layer: image,
-                        lsn_floor: img_lsn,
+                        lsn_floor,
                     })
-                } else {
-					if let Ok(contains) = delta.overlaps(&(key..key.next())) {
-						if !contains {
-							continue;
-						}
-					}
-                    let lsn_floor =
-                        std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
+                }
+                (Some(delta), None) => {
+                    let lsn_floor = delta.get_lsn_range().start;
+                    if let Ok(contains) = delta.overlaps(&(key..key.next())) {
+                        if !contains {
+                            end_lsn = lsn_floor;
+                            continue;
+                        }
+                    }
                     Some(SearchResult {
                         layer: delta,
                         lsn_floor,
                     })
                 }
-            }
+                (Some(delta), Some(image)) => {
+                    let img_lsn = image.get_lsn_range().start;
+                    let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
+                    let image_exact_match = img_lsn + 1 == end_lsn;
+                    if image_is_newer || image_exact_match {
+                        Some(SearchResult {
+                            layer: image,
+                            lsn_floor: img_lsn,
+                        })
+                    } else {
+                        if let Ok(contains) = delta.overlaps(&(key..key.next())) {
+                            if !contains {
+                                end_lsn = delta.get_lsn_range().start;
+                                continue;
+                            }
+                        }
+                        let lsn_floor = std::cmp::max(
+                            delta.get_lsn_range().start,
+                            image.get_lsn_range().start + 1,
+                        );
+                        Some(SearchResult {
+                            layer: delta,
+                            lsn_floor,
+                        })
+                    }
+                }
+            };
         }
-		}
     }
 
     /// Start a batch of updates, applied on drop
@@ -486,9 +490,9 @@ where
     ///      implement that we need to plumb a lot more context into this function
     ///      than just the current partition_range.
     pub fn is_reimage_worthy(layer: &L, partition_range: &Range<Key>) -> Result<bool> {
-        if !layer.overlaps(key_range)? {
-			return Ok(false);
-		}
+        if !layer.overlaps(partition_range)? {
+            return Ok(false);
+        }
         // Case 1
         if !Self::is_l0(layer) {
             return Ok(true);
@@ -591,7 +595,8 @@ where
         match self.search(key, lsn) {
             Some(search_result) => {
                 if search_result.layer.is_incremental() {
-                    (Self::is_reimage_worthy(&search_result.layer, partition_range)? as usize)
+                    (Self::is_reimage_worthy(&search_result.layer, partition_range).unwrap()
+                        as usize)
                         + self.get_difficulty(search_result.lsn_floor, key, partition_range)
                 } else {
                     0
