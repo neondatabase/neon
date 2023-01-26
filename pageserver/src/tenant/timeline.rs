@@ -71,6 +71,7 @@ use walreceiver::spawn_connection_manager_task;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
+use super::TimelineMapEntry;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -79,13 +80,11 @@ enum FlushLoopState {
     Exited,
 }
 
-/// XXX: this type will become internal to Timeline in a future commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum State {
+pub(super) enum State {
     Loading,
     Active,
     Stopping,
-    Broken,
 }
 
 pub struct Timeline {
@@ -138,7 +137,7 @@ pub struct Timeline {
 
     // Parent timeline that this timeline was branched from, and the LSN
     // of the branch point.
-    ancestor_timeline: Option<Arc<Timeline>>,
+    ancestor_timeline: Option<TimelineMapEntry>, // TODO: replace Option with 4th state of TimelineMapEntry
     ancestor_lsn: Lsn,
 
     // Metrics
@@ -434,7 +433,7 @@ impl Timeline {
     pub fn get_ancestor_timeline_id(&self) -> Option<TimelineId> {
         self.ancestor_timeline
             .as_ref()
-            .map(|ancestor| ancestor.timeline_id)
+            .map(|ancestor| ancestor.timeline_id())
     }
 
     /// Lock and get timeline's GC cuttof
@@ -563,7 +562,10 @@ impl Timeline {
         lsn: Lsn,
         _ctx: &RequestContext, /* Prepare for use by cancellation */
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.is_active(), "Cannot wait for Lsn on inactive timeline");
+        anyhow::ensure!(
+            self.current_state() == State::Active,
+            "Cannot wait for Lsn on inactive timeline"
+        );
 
         // This should never be called from the WAL receiver, because that could lead
         // to a deadlock.
@@ -791,40 +793,82 @@ impl Timeline {
         Ok(())
     }
 
+    /// Call this method exactly once before starting to use the timeline.
+    /// Panics if called multiple times.
     pub fn activate(self: &Arc<Self>) {
-        self.set_state(State::Active);
+        self.state_cmpxchg(State::Loading, State::Active)
+            .map_err(|current_state| format!("unexpected state {current_state:?}"))
+            .unwrap();
         self.launch_wal_receiver();
     }
 
-    pub(crate) fn set_state(&self, new_state: State) {
-        match (self.current_state(), new_state) {
-            (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
-                warn!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
+    /// Shut down all currently running tasks of this timeline.
+    /// After this function returns, the Timeline won't spawn any new tasks.
+    ///
+    /// Tasks that run concurrently to this function may still observe
+    /// `State::Active` and therefore spawn new tasks that won't
+    /// be shut down by this function.
+    /// Fixing this is future work.
+    pub async fn shutdown(self: &Arc<Self>) {
+        match self.state_cmpxchg(State::Active, State::Stopping) {
+            Ok(()) => (),
+            Err(State::Active) => unreachable!("cmpxchg would have succeeded"),
+            Err(State::Loading) => {
+                info!("timeline was never activated, nothing to shut down");
+                return;
             }
-            (st, State::Loading) => {
-                error!("ignoring transition from {st:?} into Loading state");
-            }
-            (State::Broken, _) => {
-                error!("Ignoring state update {new_state:?} for broken tenant");
-            }
-            (State::Stopping, State::Active) => {
-                error!("Not activating a Stopping timeline");
-            }
-            (_, new_state) => {
-                self.state.send_replace(new_state);
+            Err(State::Stopping) => {
+                warn!("shutdown was called multiple times for this timeline");
+                return;
             }
         }
+
+        // Now that the Timeline is in Stopping state, request all the related tasks to
+        // shut down.
+
+        // Stop the walreceiver first.
+        debug!("waiting for wal receiver to shutdown");
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+        )
+        .await;
+        debug!("wal receiver shutdown confirmed");
+
+        info!("waiting for timeline tasks to shutdown");
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(self.timeline_id)).await;
     }
 
-    pub(crate) fn current_state(&self) -> State {
+    fn state_cmpxchg(&self, expected: State, new: State) -> Result<(), State> {
+        let mut res = None;
+        self.state.send_if_modified(|current| {
+            if *current == expected {
+                *current = new;
+                res = Some(Ok(()));
+                true
+            } else {
+                res = Some(Err(*current));
+                false
+            }
+        });
+        res.expect("closure must set `res`")
+    }
+
+    pub(super) fn current_state(&self) -> State {
         *self.state.borrow()
     }
 
-    pub fn is_active(&self) -> bool {
-        self.current_state() == State::Active
+    pub(super) fn api_state(&self) -> pageserver_api::models::TimelineState {
+        use pageserver_api::models as api;
+        match self.current_state() {
+            State::Loading => api::TimelineState::Loading,
+            State::Active => api::TimelineState::Active,
+            State::Stopping => api::TimelineState::Stopping,
+        }
     }
 
-    pub(crate) fn subscribe_for_state_updates(&self) -> watch::Receiver<State> {
+    fn subscribe_for_state_updates(&self) -> watch::Receiver<State> {
         self.state.subscribe()
     }
 }
@@ -874,7 +918,7 @@ impl Timeline {
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
         metadata: TimelineMetadata,
-        ancestor: Option<Arc<Timeline>>,
+        ancestor: Option<TimelineMapEntry>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
@@ -1498,8 +1542,7 @@ impl Timeline {
                         match new_state {
                             // we're running this job for active timelines only
                             State::Active => continue,
-                            State::Broken
-                            | State::Stopping
+                            State::Stopping
                             | State::Loading => {
                                 break format!("aborted because timeline became inactive (new state: {new_state:?})")
                             }
@@ -1730,12 +1773,35 @@ impl Timeline {
                     timeline.ancestor_lsn,
                     cont_lsn
                 );
-                let ancestor = match timeline.get_ancestor_timeline() {
-                    Ok(timeline) => timeline,
-                    Err(e) => return Err(PageReconstructError::from(e)),
+                let ancestor = match &timeline.ancestor_timeline {
+                    Some(ancestor_timeline) => {
+                        match ancestor_timeline {
+                            crate::tenant::TimelineMapEntry::InitializeFailed(_) => {
+                                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                    "ancestor timeline is broken",
+                                )));
+                            }
+                            // RemovingFromMemory has priority over GetPage.
+                            // This shouldn't happen anyways because shutdown should
+                            // drain all the GetPage requests first anyways.
+                            crate::tenant::TimelineMapEntry::RemovingFromMemory(_) => {
+                                return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                    "ancestor timeline is being removed from memory",
+                                )));
+                            }
+                            crate::tenant::TimelineMapEntry::Live(tl) => tl,
+                        }
+                    }
+                    None => {
+                        return Err(PageReconstructError::from(anyhow::anyhow!(
+                            "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
+                            self.timeline_id,
+                            self.get_ancestor_timeline_id(),
+                        )))
+                    }
                 };
                 timeline_owned = ancestor;
-                timeline = &*timeline_owned;
+                timeline = timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
                 continue 'outer;
             }
@@ -1902,17 +1968,6 @@ impl Timeline {
             cache.lookup_materialized_page(self.tenant_id, self.timeline_id, key, lsn)?;
         let img = Bytes::from(read_guard.to_vec());
         Some((lsn, img))
-    }
-
-    fn get_ancestor_timeline(&self) -> anyhow::Result<Arc<Timeline>> {
-        let ancestor = self.ancestor_timeline.as_ref().with_context(|| {
-            format!(
-                "Ancestor is missing. Timeline id: {} Ancestor id {:?}",
-                self.timeline_id,
-                self.get_ancestor_timeline_id(),
-            )
-        })?;
-        Ok(Arc::clone(ancestor))
     }
 
     ///
@@ -2185,15 +2240,10 @@ impl Timeline {
             None
         };
 
-        let ancestor_timeline_id = self
-            .ancestor_timeline
-            .as_ref()
-            .map(|ancestor| ancestor.timeline_id);
-
         let metadata = TimelineMetadata::new(
             disk_consistent_lsn,
             ondisk_prev_record_lsn,
-            ancestor_timeline_id,
+            self.get_ancestor_timeline_id(),
             self.ancestor_lsn,
             *self.latest_gc_cutoff_lsn.read(),
             self.initdb_lsn,

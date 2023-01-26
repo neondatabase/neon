@@ -224,12 +224,15 @@ pub(super) async fn gather_inputs(
     let mut referenced_branch_froms = HashMap::<(TimelineId, Lsn), bool>::new();
 
     for timeline in timelines {
-        if !timeline.is_active() {
-            anyhow::bail!(
-                "timeline {} is not active, cannot calculate tenant_size now",
-                timeline.timeline_id
-            );
-        }
+        let timeline = match timeline.try_as_active() {
+            Some(tl) => tl,
+            None => {
+                anyhow::bail!(
+                    "timeline {} is not active, cannot calculate tenant_size now",
+                    timeline.timeline_id()
+                )
+            }
+        };
 
         let last_record_lsn = timeline.get_last_record_lsn();
 
@@ -329,7 +332,7 @@ pub(super) async fn gather_inputs(
 
                 needed_cache.insert((timeline.timeline_id, *lsn));
             } else {
-                let timeline = Arc::clone(&timeline);
+                let timeline = Arc::clone(timeline);
                 let parallel_size_calcs = Arc::clone(limit);
                 let ctx = ctx.attached_child();
                 joinset.spawn(calculate_logical_size(
@@ -387,13 +390,22 @@ pub(super) async fn gather_inputs(
 
             needed_cache.insert((timeline_id, lsn));
         } else {
-            let timeline = tenant
-                .get_timeline(timeline_id, false)
+            let tlme = tenant
+                .get_timeline_map_entry(timeline_id)
                 .context("find referenced ancestor timeline")?;
+            let timeline = match tlme {
+                crate::tenant::TimelineMapEntry::InitializeFailed(_) => {
+                    todo!("is this unreachable?")
+                }
+                crate::tenant::TimelineMapEntry::RemovingFromMemory(tl) => {
+                    anyhow::bail!("timeline {} is being removed from memory", tl.timeline_id);
+                }
+                crate::tenant::TimelineMapEntry::Live(tl) => tl,
+            };
             let parallel_size_calcs = Arc::clone(limit);
             joinset.spawn(calculate_logical_size(
                 parallel_size_calcs,
-                timeline.clone(),
+                Arc::clone(&timeline),
                 lsn,
                 ctx.attached_child(),
             ));

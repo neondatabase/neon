@@ -54,7 +54,7 @@ pub enum TimelineState {
     /// The timeline was previously Loading or Active but is shutting down.
     /// It cannot transition back into any other state.
     Stopping,
-    /// The timeline is broken and not operational (previous states: Loading or Active).
+    /// The timeline is broken and not operational.
     Broken,
 }
 
