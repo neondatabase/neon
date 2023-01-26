@@ -1840,18 +1840,9 @@ impl Tenant {
 
         target_config_file
             .write(conf_content.as_bytes())
-            .context("Failed to write toml bytes into file")
-            .and_then(|_| {
-                target_config_file
-                    .sync_all()
-                    .context("Failed to fsync config file")
-            })
-            .with_context(|| {
-                format!(
-                    "Failed to write config file into path '{}'",
-                    target_config_path.display()
-                )
-            })?;
+            .context("write toml bytes into file")
+            .and_then(|_| target_config_file.sync_all().context("fsync config file"))
+            .context("write config file")?;
 
         // fsync the parent directory to ensure the directory entry is durable.
         // before this was done conditionally on creating_tenant, but these management actions are rare
