@@ -1807,7 +1807,7 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
 
-        // imitiate try-block with a closure
+        // imitate a try-block with a closure
         let do_persist = |target_config_path: &Path| -> anyhow::Result<()> {
             let target_config_parent = target_config_path.parent().with_context(|| {
                 format!(
