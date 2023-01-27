@@ -160,7 +160,7 @@ pub mod timed_lru {
             self.get_raw(key, |key, entry| {
                 let info = LookupInfo {
                     created_at: entry.created_at,
-                    key: key.clone(), // low-cost for Arc<T> or &T
+                    key: key.clone(),
                 };
 
                 Cached {
@@ -188,8 +188,11 @@ pub mod timed_lru {
     impl<C: Cache> Cached<C> {
         /// Place any entry into this wrapper; invalidation will be a no-op.
         /// Unfortunately, rust doesn't let us implement [`From`] or [`Into`].
-        pub fn new_uncached(value: C::Value) -> Self {
-            Self { token: None, value }
+        pub fn new_uncached(value: impl Into<C::Value>) -> Self {
+            Self {
+                token: None,
+                value: value.into(),
+            }
         }
 
         /// Drop this entry from a cache if it's still there.

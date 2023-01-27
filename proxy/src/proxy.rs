@@ -240,15 +240,11 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-async fn connect_once(
-    node: &mut CachedNodeInfo, // TODO: &mut shouldn't be required
-    params: &StartupMessageParams,
-) -> Result<PostgresConnection, ConnectionError> {
+/// Try connecting to the compute node.
+async fn connect_to_compute(node: &CachedNodeInfo) -> Result<PostgresConnection, ConnectionError> {
     node.config
-        .connect(params)
-        .await
-        // TODO: extract into a closure/fn (requres non-&mut node)
-        .map_err(|e| {
+        .connect()
+        .inspect_err(|_| {
             let is_cached = node.cached();
 
             let label = match is_cached {
@@ -264,11 +260,11 @@ async fn connect_once(
                 warn!("invalidating stalled compute node info cache entry");
                 node.invalidate();
             }
-
-            e
         })
+        .await
 }
 
+/// Finish client connection initialization: confirm auth success, send params, etc.
 async fn activate_client_connection(
     node: &PostgresConnection,
     reported_auth_ok: bool,
@@ -390,8 +386,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             value: mut node_info,
         } = auth_result;
 
-        let node = connect_once(&mut node_info, params)
+        node_info.config.update(params);
+        let node = connect_to_compute(&node_info)
             .or_else(|e| stream.throw_error(e))
+            .instrument(info_span!("connect_to_compute"))
             .await?;
 
         activate_client_connection(&node, reported_auth_ok, session, &mut stream).await?;

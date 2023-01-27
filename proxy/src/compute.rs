@@ -138,11 +138,7 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
-    /// Connect to a corresponding compute node.
-    pub async fn connect(
-        &mut self,
-        params: &StartupMessageParams,
-    ) -> Result<PostgresConnection, ConnectionError> {
+    pub fn update(&mut self, params: &StartupMessageParams) {
         if let Some(options) = params.options_raw() {
             // We must drop all proxy-specific parameters.
             #[allow(unstable_name_collisions)]
@@ -151,11 +147,11 @@ impl ConnCfg {
                 .intersperse(" ") // TODO: use impl from std once it's stabilized
                 .collect();
 
-            self.0.options(&options);
+            self.options(&options);
         }
 
         if let Some(app_name) = params.get("application_name") {
-            self.0.application_name(app_name);
+            self.application_name(app_name);
         }
 
         // TODO: This is especially ugly...
@@ -163,10 +159,10 @@ impl ConnCfg {
             use tokio_postgres::config::ReplicationMode;
             match replication {
                 "true" | "on" | "yes" | "1" => {
-                    self.0.replication_mode(ReplicationMode::Physical);
+                    self.replication_mode(ReplicationMode::Physical);
                 }
                 "database" => {
-                    self.0.replication_mode(ReplicationMode::Logical);
+                    self.replication_mode(ReplicationMode::Logical);
                 }
                 _other => {}
             }
@@ -178,7 +174,10 @@ impl ConnCfg {
         //
         // This and the reverse params problem can be better addressed
         // in a bespoke connection machinery (a new library for that sake).
+    }
 
+    /// Connect to a corresponding compute node.
+    pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
         // TODO: establish a secure connection to the DB.
         let (socket_addr, mut stream) = self.connect_raw().await?;
         let (client, connection) = self.0.connect_raw(&mut stream, NoTls).await?;
