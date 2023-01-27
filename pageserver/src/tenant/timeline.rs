@@ -1312,6 +1312,7 @@ impl Timeline {
                     &deltafilename,
                     file_size,
                     LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
+                    None,
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1552,8 +1553,10 @@ impl Timeline {
                 .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
                 .len();
             info!("scheduling {layer_path:?} for upload");
-            remote_client
-                .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
+            remote_client.schedule_layer_file_upload(
+                layer_name,
+                &LayerFileMetadata::new(layer_size, layer.get_holes()?),
+            )?;
         }
         remote_client.schedule_index_upload_for_file_changes()?;
 
@@ -2484,6 +2487,8 @@ impl Timeline {
             self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
         ])?;
 
+        let holes = new_delta.get_holes()?;
+
         // Add it to the layer map
         self.layers
             .write()
@@ -2499,7 +2504,7 @@ impl Timeline {
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
-        Ok((new_delta_filename, LayerFileMetadata::new(sz)))
+        Ok((new_delta_filename, LayerFileMetadata::new(sz, holes)))
     }
 
     async fn repartition(
@@ -2667,7 +2672,7 @@ impl Timeline {
                 .metadata()
                 .with_context(|| format!("reading metadata of layer file {}", path.file_name()))?;
 
-            layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len()));
+            layer_paths_to_upload.insert(path, LayerFileMetadata::new(metadata.len(), None));
 
             self.metrics
                 .resident_physical_size_gauge
@@ -2988,7 +2993,7 @@ impl Timeline {
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
                     &l.filename(),
-                    &LayerFileMetadata::new(metadata.len()),
+                    &LayerFileMetadata::new(metadata.len(), l.get_holes()?),
                 )?;
             }
 
@@ -2997,7 +3002,10 @@ impl Timeline {
                 .resident_physical_size_gauge
                 .add(metadata.len());
 
-            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
+            new_layer_paths.insert(
+                new_delta_path,
+                LayerFileMetadata::new(metadata.len(), l.get_holes()?),
+            );
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
             updates.insert_historic(x);
         }

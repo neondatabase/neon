@@ -32,7 +32,7 @@ use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReade
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::range_overlaps;
 use crate::tenant::storage_layer::{
-    PersistentLayer, ValueReconstructResult, ValueReconstructState,
+    Hole, PersistentLayer, ValueReconstructResult, ValueReconstructState,
 };
 use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
@@ -67,6 +67,20 @@ use super::{
 // To much number of layers can cause large memory footprint of layer map,
 const MAX_CACHED_HOLES: usize = 10; // TODO: move it to tenant config? (not available in layer methods)
 const MIN_HOLE_LENGTH: i128 = (128 * 1024 * 1024 / PAGE_SZ) as i128; // TODO: use compaction_target? (see above)
+
+impl Ord for Hole {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let other_len = other.0.end.to_i128() - other.0.start.to_i128();
+        let self_len = self.0.end.to_i128() - self.0.start.to_i128();
+        other_len.cmp(&self_len)
+    }
+}
+
+impl PartialOrd for Hole {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 ///
 /// Header stored in the beginning of the file
@@ -177,27 +191,6 @@ impl DeltaKey {
         Lsn(u64::from_be_bytes(lsn_buf))
     }
 }
-
-/// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
-#[derive(PartialEq, Eq)]
-struct Hole(Range<Key>);
-
-impl Ord for Hole {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let other_len = other.0.end.to_i128() - other.0.start.to_i128();
-        let self_len = self.0.end.to_i128() - self.0.start.to_i128();
-        other_len.cmp(&self_len)
-    }
-}
-
-impl PartialOrd for Hole {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// DeltaLayer is the in-memory data structure associated with an on-disk delta
-/// file.
 ///
 /// We keep a DeltaLayer in memory for each file, in the LayerMap. If a layer
 /// is in "loaded" state, we have a copy of the index in memory, in 'inner'.
@@ -359,6 +352,11 @@ impl Layer for DeltaLayer {
         } else {
             Ok(vec![self.get_key_range()])
         }
+    }
+
+    fn get_holes(&self) -> Result<Option<Vec<Hole>>> {
+        let inner = self.load()?;
+        Ok(inner.holes.clone())
     }
 
     fn overlaps(&self, key_range: &Range<Key>) -> anyhow::Result<bool> {
@@ -697,6 +695,7 @@ impl DeltaLayer {
         filename: &DeltaFileName,
         file_size: u64,
         access_stats: LayerAccessStats,
+        holes: Option<Vec<Hole>>,
     ) -> DeltaLayer {
         DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -711,7 +710,7 @@ impl DeltaLayer {
                 file: None,
                 index_start_blk: 0,
                 index_root_blk: 0,
-                holes: None,
+                holes,
             }),
         }
     }

@@ -19,6 +19,7 @@ use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
+use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -293,6 +294,11 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     fn get_occupied_ranges(&self) -> Result<Vec<Range<Key>>> {
         Ok(vec![self.get_key_range()])
     }
+
+    /// Get list of holes
+    fn get_holes(&self) -> Result<Option<Vec<Hole>>> {
+        Ok(None)
+    }
 }
 
 /// Returned by [`Layer::iter`]
@@ -381,6 +387,10 @@ pub struct LayerDescriptor {
     pub short_id: String,
 }
 
+/// Wrapper for key range to provide reverse ordering by range length (for BinaryHeap)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Hole(Range<Key>);
+
 impl Layer for LayerDescriptor {
     fn get_key_range(&self) -> Range<Key> {
         self.key.clone()
@@ -410,16 +420,6 @@ impl Layer for LayerDescriptor {
 
     fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         todo!()
-    }
-
-    /// Checks if layer contains any entries belonging to the specified key range
-    fn overlaps(&self, key_range: &Range<Key>) -> Result<bool> {
-        Ok(range_overlaps(&self.get_key_range(), key_range))
-    }
-
-    /// Skip holes in this layer key range
-    fn get_occupied_ranges(&self) -> Result<Vec<Range<Key>>> {
-        Ok(vec![self.get_key_range()])
     }
 }
 

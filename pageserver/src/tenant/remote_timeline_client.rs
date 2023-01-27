@@ -423,7 +423,7 @@ impl RemoteTimelineClient {
         // might be missing some information for the file; this allows us
         // to fill in the missing details.
         if layer_metadata.file_size().is_none() {
-            let new_metadata = LayerFileMetadata::new(downloaded_size);
+            let new_metadata = LayerFileMetadata::new(downloaded_size, None);
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut()?;
             if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
@@ -1153,11 +1153,11 @@ mod tests {
 
         client.schedule_layer_file_upload(
             &layer_file_name_1,
-            &LayerFileMetadata::new(content_1.len() as u64),
+            &LayerFileMetadata::new(content_1.len() as u64, None),
         )?;
         client.schedule_layer_file_upload(
             &layer_file_name_2,
-            &LayerFileMetadata::new(content_2.len() as u64),
+            &LayerFileMetadata::new(content_2.len() as u64, None),
         )?;
 
         // Check that they are started immediately, not queued
@@ -1209,7 +1209,7 @@ mod tests {
         std::fs::write(timeline_path.join("baz"), &content_baz)?;
         client.schedule_layer_file_upload(
             &layer_file_name_3,
-            &LayerFileMetadata::new(content_baz.len() as u64),
+            &LayerFileMetadata::new(content_baz.len() as u64, None),
         )?;
         client.schedule_layer_file_deletion(&[layer_file_name_1.clone()])?;
         {

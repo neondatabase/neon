@@ -9,6 +9,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use tracing::warn;
 
 use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::storage_layer::Hole;
 use crate::tenant::storage_layer::LayerFileName;
 
 use utils::lsn::Lsn;
@@ -21,29 +22,39 @@ use utils::lsn::Lsn;
 #[cfg_attr(test, derive(Default))]
 pub struct LayerFileMetadata {
     file_size: Option<u64>,
+    holes: Option<Vec<Hole>>,
 }
 
 impl From<&'_ IndexLayerMetadata> for LayerFileMetadata {
     fn from(other: &IndexLayerMetadata) -> Self {
         LayerFileMetadata {
             file_size: other.file_size,
+            holes: other.holes.clone(),
         }
     }
 }
 
 impl LayerFileMetadata {
-    pub fn new(file_size: u64) -> Self {
+    pub fn new(file_size: u64, holes: Option<Vec<Hole>>) -> Self {
         LayerFileMetadata {
             file_size: Some(file_size),
+            holes,
         }
     }
 
     /// This is used to initialize the metadata for remote layers, for which
     /// the metadata was missing from the index part file.
-    pub const MISSING: Self = LayerFileMetadata { file_size: None };
+    pub const MISSING: Self = LayerFileMetadata {
+        file_size: None,
+        holes: None,
+    };
 
     pub fn file_size(&self) -> Option<u64> {
         self.file_size
+    }
+
+    pub fn holes(&self) -> Option<Vec<Hole>> {
+        self.holes.clone()
     }
 
     /// Metadata has holes due to version upgrades. This method is called to upgrade self with the
@@ -56,6 +67,16 @@ impl LayerFileMetadata {
 
         if self.file_size != other.file_size {
             self.file_size = other.file_size.or(self.file_size);
+            changed = true;
+        }
+
+        if self.holes != other.holes {
+            self.holes = other
+                .holes
+                .as_ref()
+                .or(self.holes.as_ref())
+                .clone()
+                .cloned();
             changed = true;
         }
 
@@ -233,12 +254,14 @@ impl IndexPart {
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct IndexLayerMetadata {
     pub(super) file_size: Option<u64>,
+    pub(super) holes: Option<Vec<Hole>>,
 }
 
 impl From<&'_ LayerFileMetadata> for IndexLayerMetadata {
     fn from(other: &'_ LayerFileMetadata) -> Self {
         IndexLayerMetadata {
             file_size: other.file_size,
+            holes: other.holes.clone(),
         }
     }
 }

@@ -5,7 +5,9 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{
+    range_overlaps, Hole, Layer, ValueReconstructResult, ValueReconstructState,
+};
 use anyhow::{bail, Result};
 use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
@@ -85,6 +87,48 @@ impl Layer for RemoteLayer {
 
     fn is_incremental(&self) -> bool {
         self.is_incremental
+    }
+
+    fn get_occupied_ranges(&self) -> Result<Vec<Range<Key>>> {
+        if let Some(holes) = &self.layer_metadata.holes() {
+            let mut occ = Vec::with_capacity(holes.len() + 1);
+            let key_range = self.get_key_range();
+            let mut prev = key_range.start;
+            for hole in holes {
+                occ.push(prev..hole.0.start);
+                prev = hole.0.end;
+            }
+            occ.push(prev..key_range.end);
+            Ok(occ)
+        } else {
+            Ok(vec![self.get_key_range()])
+        }
+    }
+
+    fn get_holes(&self) -> Result<Option<Vec<Hole>>> {
+        Ok(self.layer_metadata.holes().clone())
+    }
+
+    fn overlaps(&self, key_range: &Range<Key>) -> anyhow::Result<bool> {
+        if !range_overlaps(&self.key_range, key_range) {
+            Ok(false)
+        } else {
+            if let Some(holes) = &self.layer_metadata.holes() {
+                let start = match holes.binary_search_by_key(&key_range.start, |hole| hole.0.start)
+                {
+                    Ok(index) => index,
+                    Err(index) => {
+                        if index == 0 {
+                            return Ok(true);
+                        }
+                        index - 1
+                    }
+                };
+                Ok(holes[start].0.end < key_range.end)
+            } else {
+                Ok(true)
+            }
+        }
     }
 
     /// debugging function to print out the contents of the layer
@@ -251,6 +295,7 @@ impl RemoteLayer {
                 file_size,
                 self.access_stats
                     .clone_for_residence_change(LayerResidenceStatus::Resident),
+                self.get_holes().unwrap(),
             ))
         } else {
             let fname = ImageFileName {
