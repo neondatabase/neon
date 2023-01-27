@@ -1006,7 +1006,7 @@ jobs:
 
   deploy-proxy:
     runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
@@ -1029,18 +1029,13 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Add curl
-        run: apt update && apt install curl -y
-
       - name: Store kubeconfig file
         run: |
           echo "${{ secrets[matrix.kubeconfig_secret] }}" | base64 --decode > ${KUBECONFIG}
           chmod 0600 ${KUBECONFIG}
 
-      - name: Setup helm v3
-        run: |
-          curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+      - name: Add neon helm chart
+        run: helm repo add neondatabase https://neondatabase.github.io/helm-charts
 
       - name: Re-deploy proxy
         run: |
@@ -1053,7 +1048,7 @@ jobs:
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
     runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # Compute image isn't strictly required for proxy deploy, but let's still wait for it to run all deploy jobs consistently.
     needs: [ push-docker-hub, calculate-deploy-targets, tag, regress-tests ]
     if: |
@@ -1076,18 +1071,13 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Add curl
-        run: apt update && apt install curl -y
-
       - name: Store kubeconfig file
         run: |
           echo "${{ secrets[matrix.kubeconfig_secret] }}" | base64 --decode > ${KUBECONFIG}
           chmod 0600 ${KUBECONFIG}
 
-      - name: Setup helm v3
-        run: |
-          curl -s https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+      - name: Add neon helm chart
+        run: helm repo add neondatabase https://neondatabase.github.io/helm-charts
 
       - name: Deploy storage-broker
         run:
