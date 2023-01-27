@@ -579,12 +579,11 @@ def test_load_attach_negatives(
 
     pageserver_http.tenant_ignore(tenant_id)
 
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    expect_error_msg = f".*attach tenant {tenant_id}: some local filesystem state already exists:"
+    env.pageserver.allowed_errors.append(expect_error_msg)
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Cannot attach tenant {tenant_id}, local tenant directory already exists",
+        match=expect_error_msg,
     ):
         pageserver_http.tenant_attach(tenant_id)
 
@@ -628,12 +627,11 @@ def test_ignore_while_attaching(
     pageserver_http.tenant_ignore(tenant_id)
 
     # Cannot attach it due to some local files existing
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    expect_error_msg = f".*attach tenant {tenant_id}: some local filesystem state already exists:"
+    env.pageserver.allowed_errors.append(expect_error_msg)
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Cannot attach tenant {tenant_id}, local tenant directory already exists",
+        match=expect_error_msg,
     ):
         pageserver_http.tenant_attach(tenant_id)
 

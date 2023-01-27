@@ -19,11 +19,12 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{Tenant, TenantState};
+use crate::tenant::{Tenant, TenantState, TENANT_ATTACHING_LEGACY_MARKER_FILENAME};
 use crate::IGNORED_TENANT_FILE_NAME;
 
-use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
+
+use super::{TenantLoadReasonNotAttach, TENANT_ATTACHING_MARKER_SUFFIX};
 
 /// The tenants known to the pageserver.
 /// The enum variants are used to distinguish the different states that the pageserver can be in.
@@ -66,6 +67,11 @@ pub async fn init_tenant_mgr(
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
 
+    // Other code in pageserver assumes new attaching markers.
+    // Do the migration here, abort startup if it fails.
+    Tenant::migrate_attaching_marker_files(&conf.tenants_path())
+        .context("attaching marker migration failed")?;
+
     let mut tenants = HashMap::new();
 
     let mut dir_entries = fs::read_dir(&tenants_dir)
@@ -92,18 +98,12 @@ pub async fn init_tenant_mgr(
                         );
                     }
                 } else {
-                    // This case happens if we crash during attach before creating the attach marker file
-                    let is_empty = tenant_dir_path.is_empty_dir().with_context(|| {
-                        format!("Failed to check whether {tenant_dir_path:?} is an empty dir")
-                    })?;
-                    if is_empty {
-                        info!("removing empty tenant directory {tenant_dir_path:?}");
-                        if let Err(e) = fs::remove_dir(&tenant_dir_path).await {
-                            error!(
-                                "Failed to remove empty tenant directory '{}': {e:#}",
-                                tenant_dir_path.display()
-                            )
-                        }
+                    if tenant_dir_path
+                        .to_string_lossy()
+                        .ends_with(TENANT_ATTACHING_MARKER_SUFFIX)
+                    {
+                        // schedule_local_tenant_processing checks for marker when it encounters a tenant dir
+                        info!("found a tenant attaching marker {tenant_dir_path:?}, skipping");
                         continue;
                     }
 
@@ -117,6 +117,7 @@ pub async fn init_tenant_mgr(
                         conf,
                         &tenant_dir_path,
                         remote_storage.clone(),
+                        TenantLoadReasonNotAttach::PageserverStartup,
                         &ctx,
                     ) {
                         Ok(tenant) => {
@@ -147,10 +148,11 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
-pub fn schedule_local_tenant_processing(
+pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     remote_storage: Option<GenericRemoteStorage>,
+    load_reason: TenantLoadReasonNotAttach,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -162,10 +164,10 @@ pub fn schedule_local_tenant_processing(
         "Cannot load tenant from temporary path {tenant_path:?}"
     );
     anyhow::ensure!(
-        !tenant_path.is_empty_dir().with_context(|| {
-            format!("Failed to check whether {tenant_path:?} is an empty dir")
-        })?,
-        "Cannot load tenant from empty directory {tenant_path:?}"
+        !tenant_path
+            .to_string_lossy()
+            .ends_with(TENANT_ATTACHING_MARKER_SUFFIX),
+        "Caller must filter these out: {tenant_path:?}"
     );
 
     let tenant_id = tenant_path
@@ -183,10 +185,22 @@ pub fn schedule_local_tenant_processing(
         "Cannot load tenant, ignore mark found at {tenant_ignore_mark:?}"
     );
 
+    let legacy_attaching_marker = tenant_path.join(TENANT_ATTACHING_LEGACY_MARKER_FILENAME);
+    anyhow::ensure!(
+        !legacy_attaching_marker.exists(),
+        "legacy attaching marker still present, migration code must have been not called or has a bug: {legacy_attaching_marker:?}"
+    );
+
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
         if let Some(remote_storage) = remote_storage {
-            Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx)
+            match Tenant::spawn_resume_attach(conf, tenant_id, remote_storage, ctx) {
+                Ok(tenant) => tenant,
+                Err(e) => {
+                    warn!("tenant {tenant_id} failed to resume attach operation: {e:#}");
+                    Tenant::create_broken_tenant(conf, tenant_id)
+                }
+            }
         } else {
             warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
             Tenant::create_broken_tenant(conf, tenant_id)
@@ -194,7 +208,7 @@ pub fn schedule_local_tenant_processing(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, remote_storage, ctx)
+        Tenant::spawn_load(conf, tenant_id, remote_storage, load_reason, ctx)
     };
     Ok(tenant)
 }
@@ -274,7 +288,7 @@ pub async fn create_tenant(
         // and do the work in that state.
         let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id)?;
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, TenantLoadReasonNotAttach::Create, ctx)?;
         let crated_tenant_id = created_tenant.tenant_id();
         anyhow::ensure!(
                 tenant_id == crated_tenant_id,
@@ -361,7 +375,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, remote_storage, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, remote_storage, TenantLoadReasonNotAttach::LoadApi, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -421,13 +435,8 @@ pub async fn attach_tenant(
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, |vacant_entry| {
-        let tenant_path = conf.tenant_path(&tenant_id);
-        anyhow::ensure!(
-            !tenant_path.exists(),
-            "Cannot attach tenant {tenant_id}, local tenant directory already exists"
-        );
-
-        let tenant = Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx);
+        let tenant = Tenant::spawn_start_attach(conf, tenant_id, remote_storage, ctx)
+            .map_err(|source| anyhow::anyhow!("attach tenant {tenant_id}: {source:#}"))?;
         vacant_entry.insert(tenant);
         Ok(())
     })

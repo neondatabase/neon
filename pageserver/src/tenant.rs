@@ -15,6 +15,7 @@ use anyhow::{bail, Context};
 use bytes::Bytes;
 use futures::FutureExt;
 use futures::Stream;
+use futures::TryFutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
@@ -24,9 +25,11 @@ use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 
 use std::cmp::min;
+use std::collections::hash_map;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
@@ -109,7 +112,55 @@ pub use crate::tenant::timeline::WalReceiverInfo;
 /// Parts of the `.neon/tenants/<tenant_id>/timelines/<timeline_id>` directory prefix.
 pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 
-pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
+pub const TENANT_ATTACHING_LEGACY_MARKER_FILENAME: &str = "attaching";
+pub const TENANT_ATTACHING_MARKER_SUFFIX: &str = "___attaching";
+
+/// The error message does not include the tenant ID.
+/// The caller is responsible for adding it.
+#[derive(Debug, thiserror::Error)]
+pub enum AttachError {
+    #[error("some local filesystem state already exists: {what}: {path:?}")]
+    LocalStateExists { what: &'static str, path: PathBuf },
+    #[error("{op} marker file {path:?}: {error:#}")]
+    CreateMarkerFile {
+        op: &'static str,
+        path: PathBuf,
+        #[source]
+        error: std::io::Error,
+    },
+    #[error("marker file is missing: {path:?}")]
+    MarkerFileMissing { path: PathBuf },
+}
+
+/// Attach invokes the load routine after it has set up the local filesystem state.
+/// This struct is the in-memory state that is carried over from attach to the load routine.
+/// The load routine uses this state to avoid re-downloading state from S3 that has already
+/// been downloaded before.
+struct AttachDataForLoad {
+    remote_startup_data: RemoteStartupData,
+    /// Load could just re-initiailize this, but then we would reset the prometheus metrics.
+    /// Some python tests depend on those metrics to not reset during attach.
+    remote_client: RemoteTimelineClient,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TenantLoadReasonNotAttach {
+    PageserverStartup,
+    LoadApi,
+    Create,
+}
+
+enum TenantLoadReason {
+    NotAttach(TenantLoadReasonNotAttach),
+    Attach {
+        attach_data_by_timeline_id: HashMap<TimelineId, Box<AttachDataForLoad>>,
+    },
+}
+enum TimelineLoadReason {
+    NotAttach(TenantLoadReasonNotAttach),
+    // Boxed because the struct is not tiny, and we move it around a few times.
+    Attach(Box<AttachDataForLoad>),
+}
 
 ///
 /// Tenant consists of multiple timelines. Keep them in a hash table.
@@ -381,18 +432,13 @@ impl Drop for TimelineUninitMark {
 //
 // So the solution is to take remote metadata only when we're attaching.
 pub fn merge_local_remote_metadata<'a>(
-    local: Option<&'a TimelineMetadata>,
+    local: &'a TimelineMetadata,
     remote: Option<&'a TimelineMetadata>,
 ) -> anyhow::Result<(&'a TimelineMetadata, bool)> {
     match (local, remote) {
-        (None, None) => anyhow::bail!("we should have either local metadata or remote"),
-        (Some(local), None) => Ok((local, true)),
-        // happens if we crash during attach, before writing out the metadata file
-        (None, Some(remote)) => Ok((remote, false)),
+        (local, None) => Ok((local, true)),
         // This is the regular case where we crash/exit before finishing queued uploads.
-        // Also, it happens if we crash during attach after writing the metadata file
-        // but before removing the attaching marker file.
-        (Some(local), Some(remote)) => {
+        (local, Some(remote)) => {
             let consistent_lsn_cmp = local
                 .disk_consistent_lsn()
                 .cmp(&remote.disk_consistent_lsn());
@@ -440,7 +486,6 @@ struct RemoteStartupData {
 
 impl Tenant {
     /// Yet another helper for timeline initialization.
-    /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
     ///
     /// - Initializes the Timeline struct and inserts it into the tenant's hash map
     /// - Scans the local timeline directory for layer files and builds the layer map
@@ -455,15 +500,14 @@ impl Tenant {
         timeline_id: TimelineId,
         remote_client: Option<RemoteTimelineClient>,
         remote_startup_data: Option<RemoteStartupData>,
-        local_metadata: Option<TimelineMetadata>,
+        local_metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        first_save: bool,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
 
         let (up_to_date_metadata, picked_local) = merge_local_remote_metadata(
-            local_metadata.as_ref(),
+            &local_metadata,
             remote_startup_data.as_ref().map(|r| &r.remote_metadata),
         )
         .context("merge_local_remote_metadata")?
@@ -552,11 +596,117 @@ impl Tenant {
                 timeline_id,
                 tenant_id,
                 up_to_date_metadata,
-                first_save,
+                false,
             )
             .context("save_metadata")?;
         }
 
+        Ok(())
+    }
+
+    /// Migrate legacy attaching markers to new location.
+    /// Call this during pageserver startup before loading tenants into memory.
+    /// This code is obsolete on systems where it has run to completion with result `Ok(())`.
+    #[instrument(skip_all)]
+    pub fn migrate_attaching_marker_files(tenants_dir: &Path) -> anyhow::Result<()> {
+        info!("starting on {tenants_dir:?}");
+        let mut dir_entries = std::fs::read_dir(tenants_dir)
+            .with_context(|| format!("list tenants dir {tenants_dir:?}"))?;
+
+        // key: dst, value: src,
+        let mut needed_renames: HashMap<PathBuf, PathBuf> = HashMap::new();
+        loop {
+            let dir_entry = match dir_entries.next() {
+                None => break,
+                Some(res) => res.context("read tenants dir entry")?,
+            };
+            if !dir_entry.path().is_dir() {
+                continue;
+            }
+
+            let legacy_attach_marker_path = dir_entry
+                .path()
+                .join(TENANT_ATTACHING_LEGACY_MARKER_FILENAME)
+                .to_owned();
+            if !legacy_attach_marker_path.exists() {
+                continue;
+            }
+
+            let legacy_marker_parent = legacy_attach_marker_path.parent().unwrap();
+
+            match legacy_marker_parent
+                .file_name()
+                .and_then(OsStr::to_str)
+                .unwrap()
+                .parse::<TenantId>()
+            {
+                Ok(tenant_id) => {
+                    info!("found legacy attaching marker file for tenant {tenant_id}: {legacy_attach_marker_path:?}")
+                }
+                Err(e) => {
+                    warn!("skipping migration of legacy attach marker {legacy_attach_marker_path:?} because parent directory name is not a tenant ID: {e:#}");
+                    continue;
+                }
+            }
+
+            let dst =
+                path_with_suffix_extension(legacy_marker_parent, TENANT_ATTACHING_MARKER_SUFFIX);
+            match needed_renames.entry(dst) {
+                hash_map::Entry::Occupied(o) => anyhow::bail!(
+                    "marker file collision: existing dst {:?} existing src {:?} offender: {:?}",
+                    o.key(),
+                    o.get(),
+                    legacy_attach_marker_path,
+                ),
+                hash_map::Entry::Vacant(v) => {
+                    v.insert(legacy_attach_marker_path);
+                }
+            }
+        }
+
+        // ensure the sources are unique (no need to check dsts, they are unique by definition)
+        let mut sources = HashSet::new();
+        for src in needed_renames.values() {
+            if !sources.insert(src) {
+                anyhow::bail!("source is not unique: {src:?} ")
+            }
+        }
+        drop(sources);
+
+        info!("migration plan: {needed_renames:?}");
+
+        // crash safety & rollback: first create all new markers, then remove the old ones.
+        // This maximizes the window during which a rollback to older software is possible.
+
+        // Create the new marker files.
+        for (dst, src) in &needed_renames {
+            // idempotency: make it so that there is either {src}, {src,dst}, {dst}
+            if dst.exists() {
+                info!(
+                    "new marker already exists, must have crashed before removing old one: {dst:?}"
+                );
+                continue;
+            }
+            info!("create new marker at {dst:?} corresponding to old marker {src:?}");
+            let dst_file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(dst)
+                .with_context(|| format!("open for create marker file at {dst:?}"))?;
+            drop(dst_file);
+            crashsafe::fsync_file_and_parent(dst).with_context(|| format!("fsync {dst:?}"))?;
+        }
+
+        // Remove old marker files
+        for (dst, src) in &needed_renames {
+            info!("remove old marker at {src:?} corresponding to new marker {dst:?}");
+            std::fs::remove_file(src)
+                .with_context(|| format!("remove old marker file at {src:?}"))?;
+            crashsafe::fsync(src.parent().unwrap())
+                .with_context(|| format!("fsync src directory {src:?}"))?;
+        }
+
+        info!("done");
         Ok(())
     }
 
@@ -570,12 +720,66 @@ impl Tenant {
     /// finishes. You can use wait_until_active() to wait for the task to
     /// complete.
     ///
-    pub fn spawn_attach(
+    pub fn spawn_start_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
-    ) -> Arc<Tenant> {
+    ) -> Result<Arc<Tenant>, AttachError> {
+        // Commit attach operation to disk, then return.
+        // The actual work is done in the background.
+        // If we crash before it finishes, we'll resume on restart.
+        let tenant_dir = conf.tenant_path(&tenant_id);
+        let marker_file = conf.tenant_attaching_mark_file_path(&tenant_id);
+        if tenant_dir.exists() {
+            return Err(AttachError::LocalStateExists {
+                what: "tenant directory",
+                path: tenant_dir,
+            });
+        }
+        if marker_file.exists() {
+            return Err(AttachError::LocalStateExists {
+                what: "attaching marker file",
+                path: marker_file,
+            });
+        }
+
+        // create the marker file, i.e., /tenants/${tenant_id}___attaching
+        std::fs::File::create(&marker_file).map_err(|error| AttachError::CreateMarkerFile {
+            op: "create",
+            path: marker_file.clone(),
+            error,
+        })?;
+        crashsafe::fsync_file_and_parent(&marker_file).map_err(|error| {
+            AttachError::CreateMarkerFile {
+                op: "fsync_file_and_parent",
+                path: marker_file.clone(),
+                error,
+            }
+        })?;
+
+        Self::spawn_resume_attach(conf, tenant_id, remote_storage, ctx)
+    }
+
+    /// Spawn a task that resumes a tenant's attach operation.
+    ///
+    /// Pageserver startup calls this instead of [`spawn_load`] if it observes
+    /// that there is an attach marker present.
+    #[instrument(skip_all, fields(tenant_id=%tenant_id))]
+    pub fn spawn_resume_attach(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        remote_storage: GenericRemoteStorage,
+        ctx: &RequestContext,
+    ) -> Result<Arc<Tenant>, AttachError> {
+        // Sanity-check, shouldn't happen in practice.
+        let marker_file_path = conf.tenant_attaching_mark_file_path(&tenant_id);
+        if !marker_file_path.is_file() {
+            return Err(AttachError::MarkerFileMissing {
+                path: marker_file_path,
+            });
+        }
+
         // XXX: Attach should provide the config, especially during tenant migration.
         //      See https://github.com/neondatabase/neon/issues/1555
         let tenant_conf = TenantConfOpt::default();
@@ -587,23 +791,33 @@ impl Tenant {
             tenant_conf,
             wal_redo_manager,
             tenant_id,
-            Some(remote_storage),
+            Some(remote_storage.clone()),
         ));
 
         // Do all the hard work in the background
         let tenant_clone = Arc::clone(&tenant);
 
-        let ctx = ctx.detached_child(TaskKind::Attach, DownloadBehavior::Warn);
+        let ctx = ctx.detached_child(TaskKind::TenantAttach, DownloadBehavior::Warn);
         task_mgr::spawn(
             &tokio::runtime::Handle::current(),
-            TaskKind::Attach,
+            TaskKind::TenantAttach,
             Some(tenant_id),
             None,
             "attach tenant",
             false,
             async move {
-                match tenant_clone.attach(ctx).await {
-                    Ok(_) => {}
+                let res = Tenant::resume_attach(conf, tenant_id, remote_storage.clone(), &ctx)
+                    .and_then(|attach_data_by_timeline_id| {
+                        tenant_clone.load(
+                            TenantLoadReason::Attach {
+                                attach_data_by_timeline_id,
+                            },
+                            &ctx,
+                        )
+                    })
+                    .await;
+                match res {
+                    Ok(()) => {}
                     Err(e) => {
                         tenant_clone.set_broken(&e.to_string());
                         error!("error attaching tenant: {:?}", e);
@@ -612,64 +826,62 @@ impl Tenant {
                 Ok(())
             },
         );
-        tenant
+
+        Ok(tenant)
     }
 
     ///
-    /// Background task that downloads all data for a tenant and brings it to Active state.
+    /// Finish the attach operation started by `spawn_attach`.
+    /// This function is also called after a pageserver restart.
     ///
-    #[instrument(skip(self, ctx), fields(tenant_id=%self.tenant_id))]
-    async fn attach(self: &Arc<Tenant>, ctx: RequestContext) -> anyhow::Result<()> {
-        // Create directory with marker file to indicate attaching state.
-        // The load_local_tenants() function in tenant::mgr relies on the marker file
-        // to determine whether a tenant has finished attaching.
-        let tenant_dir = self.conf.tenant_path(&self.tenant_id);
-        let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
-        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
+    #[instrument(skip_all, fields(tenant_id=%tenant_id))]
+    async fn resume_attach(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        remote_storage: GenericRemoteStorage,
+        _ctx: &RequestContext,
+    ) -> anyhow::Result<HashMap<TimelineId, Box<AttachDataForLoad>>> {
+        let tenant_dir = conf.tenant_path(&tenant_id);
+        let marker_file = conf.tenant_attaching_mark_file_path(&tenant_id);
+        anyhow::ensure!(
+            marker_file.is_file(),
+            "spawn_attach creates the marker file, this should not happen"
+        );
+        // NB don't assert existence of tenant_dir, as we remove & recreate it non-atomically below
+
+        // We're currently not very clever about resuming.
+        // Just blow away all progress that the earlier attach operation made and start over.
         if tenant_dir.exists() {
-            if !marker_file.is_file() {
-                anyhow::bail!(
-                    "calling Tenant::attach with a tenant directory that doesn't have the attaching marker file:\ntenant_dir: {}\nmarker_file: {}",
-                    tenant_dir.display(), marker_file.display());
-            }
-        } else {
-            crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
-            fs::File::create(&marker_file).context("create tenant attaching marker file")?;
-            crashsafe::fsync_file_and_parent(&marker_file)
-                .context("fsync tenant attaching marker file and parent")?;
+            info!("removing prior attach operation's progress");
+            std::fs::remove_dir_all(&tenant_dir).context("remove attaching tenant dir")?;
         }
-        debug_assert!(tenant_dir.is_dir());
-        debug_assert!(marker_file.is_file());
+        crashsafe::create_dir_all(&tenant_dir).context("create attaching tenant dir")?;
+        assert!(
+            marker_file.is_file(),
+            "recreating tenant dir must not destroy the attaching marker"
+        );
 
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
 
-        let remote_storage = self
-            .remote_storage
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("cannot attach without remote storage"))?;
-
-        let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
-            remote_storage,
-            self.conf,
-            self.tenant_id,
-        )
-        .await?;
+        let remote_timeline_ids =
+            remote_timeline_client::list_remote_timelines(&remote_storage, conf, tenant_id).await?;
 
         info!("found {} timelines", remote_timeline_ids.len());
 
-        // Download & parse index parts
-        let mut part_downloads = JoinSet::new();
+        let mut metadata_downloads = JoinSet::new();
         for timeline_id in remote_timeline_ids {
-            let client = RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.conf,
-                self.tenant_id,
-                timeline_id,
-            );
-            part_downloads.spawn(
+            let client =
+                RemoteTimelineClient::new(remote_storage.clone(), conf, tenant_id, timeline_id);
+            metadata_downloads.spawn(
                 async move {
+                    debug!("creating timeline directory");
+
+                    tokio::fs::create_dir_all(conf.timeline_path(&timeline_id, &tenant_id))
+                        .await
+                        .context("create timeline directory")?;
+
                     debug!("starting index part download");
 
                     let index_part = client
@@ -681,11 +893,22 @@ impl Tenant {
 
                     debug!("finished index part download");
 
+                    // Save the metadata file to local disk.
+                    save_metadata(conf, timeline_id, tenant_id, &remote_metadata, true)
+                        .context("save_metadata file")?;
+
+                    debug!("successfully downloaded index part for timeline {timeline_id}");
+
                     Result::<_, anyhow::Error>::Ok((
                         timeline_id,
-                        client,
-                        index_part,
-                        remote_metadata,
+                        // Boxing to silence clippy size difference warning in parent `TimelineLoadReason`
+                        Box::new(AttachDataForLoad {
+                            remote_startup_data: RemoteStartupData {
+                                index_part,
+                                remote_metadata,
+                            },
+                            remote_client: client,
+                        }),
                     ))
                 }
                 .map(move |res| {
@@ -694,56 +917,39 @@ impl Tenant {
                 .instrument(info_span!("download_index_part", timeline=%timeline_id)),
             );
         }
-        // Wait for all the download tasks to complete & collect results.
-        let mut remote_clients = HashMap::new();
-        let mut index_parts = HashMap::new();
-        let mut timeline_ancestors = HashMap::new();
-        while let Some(result) = part_downloads.join_next().await {
+        // Wait for all the downloads have completed & collect results.
+        let mut attach_data_by_timeline_id = HashMap::new();
+        let mut error_count = 0;
+        while let Some(result) = metadata_downloads.join_next().await {
             // NB: we already added timeline_id as context to the error
             let result: Result<_, anyhow::Error> = result.context("joinset task join")?;
-            let (timeline_id, client, index_part, remote_metadata) = result?;
-            debug!("successfully downloaded index part for timeline {timeline_id}");
-            timeline_ancestors.insert(timeline_id, remote_metadata);
-            index_parts.insert(timeline_id, index_part);
-            remote_clients.insert(timeline_id, client);
+            match result {
+                Ok((timeline_id, attach_data)) => {
+                    let replaced = attach_data_by_timeline_id.insert(timeline_id, attach_data);
+                    assert!(replaced.is_none());
+                }
+                Err(e) => {
+                    error!("failed to {e:#}"); // errors already contain verb & timeline_id
+                    error_count += 1;
+                }
+            }
         }
 
-        // For every timeline, download the metadata file, scan the local directory,
-        // and build a layer map that contains an entry for each remote and local
-        // layer file.
-        let sorted_timelines = tree_sort_timelines(timeline_ancestors)?;
-        for (timeline_id, remote_metadata) in sorted_timelines {
-            // TODO again handle early failure
-            self.load_remote_timeline(
-                timeline_id,
-                index_parts.remove(&timeline_id).unwrap(),
-                remote_metadata,
-                remote_clients.remove(&timeline_id).unwrap(),
-                &ctx,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load remote timeline {} for tenant {}",
-                    timeline_id, self.tenant_id
-                )
-            })?;
+        if error_count > 0 {
+            // NB: we leave the attach marker in place here to keep the timeline around, because we already promised
+            // it as attached to control plane earlier.
+            anyhow::bail!("{error_count} timeline metadata files could not be saved or downloaded, check logs for details");
         }
 
+        // Remove the marker file.
         std::fs::remove_file(&marker_file)
             .with_context(|| format!("unlink attach marker file {}", marker_file.display()))?;
         crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
             .context("fsync tenant directory after unlinking attach marker file")?;
 
-        utils::failpoint_sleep_millis_async!("attach-before-activate");
-
-        // Start background operations and open the tenant for business.
-        // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate()?;
-
         info!("Done");
 
-        Ok(())
+        Ok(attach_data_by_timeline_id)
     }
 
     /// get size of all remote timelines
@@ -760,53 +966,6 @@ impl Tenant {
         }
 
         Ok(size)
-    }
-
-    #[instrument(skip_all, fields(timeline_id=%timeline_id))]
-    async fn load_remote_timeline(
-        &self,
-        timeline_id: TimelineId,
-        index_part: IndexPart,
-        remote_metadata: TimelineMetadata,
-        remote_client: RemoteTimelineClient,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        info!("downloading index file for timeline {}", timeline_id);
-        tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
-            .await
-            .context("Failed to create new timeline directory")?;
-
-        let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
-            let timelines = self.timelines.lock().unwrap();
-            Some(Arc::clone(timelines.get(&ancestor_id).ok_or_else(
-                || {
-                    anyhow::anyhow!(
-                        "cannot find ancestor timeline {ancestor_id} for timeline {timeline_id}"
-                    )
-                },
-            )?))
-        } else {
-            None
-        };
-
-        // Even if there is local metadata it cannot be ahead of the remote one
-        // since we're attaching. Even if we resume interrupted attach remote one
-        // cannot be older than the local one
-        let local_metadata = None;
-
-        self.timeline_init_and_sync(
-            timeline_id,
-            Some(remote_client),
-            Some(RemoteStartupData {
-                index_part,
-                remote_metadata,
-            }),
-            local_metadata,
-            ancestor,
-            true,
-            ctx,
-        )
-        .await
     }
 
     /// Create a placeholder Tenant object for a broken tenant
@@ -833,13 +992,20 @@ impl Tenant {
     /// If the loading fails for some reason, the Tenant will go into Broken
     /// state.
     ///
-    #[instrument(skip(conf, remote_storage, ctx), fields(tenant_id=%tenant_id))]
-    pub fn spawn_load(
+
+    pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         remote_storage: Option<GenericRemoteStorage>,
+        load_reason: TenantLoadReasonNotAttach,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
+        let task_kind = match load_reason {
+            TenantLoadReasonNotAttach::PageserverStartup => TaskKind::TenantLoadStartup,
+            TenantLoadReasonNotAttach::LoadApi => TaskKind::TenantLoadApi,
+            TenantLoadReasonNotAttach::Create => TaskKind::TenantLoadCreate,
+        };
+
         let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
             Ok(conf) => conf,
             Err(e) => {
@@ -862,16 +1028,19 @@ impl Tenant {
         // Do all the hard work in a background task
         let tenant_clone = Arc::clone(&tenant);
 
-        let ctx = ctx.detached_child(TaskKind::InitialLoad, DownloadBehavior::Warn);
+        let ctx = ctx.detached_child(task_kind, DownloadBehavior::Warn);
         let _ = task_mgr::spawn(
             &tokio::runtime::Handle::current(),
-            TaskKind::InitialLoad,
+            task_kind,
             Some(tenant_id),
             None,
             "initial tenant load",
             false,
             async move {
-                match tenant_clone.load(&ctx).await {
+                match tenant_clone
+                    .load(TenantLoadReason::NotAttach(load_reason), &ctx)
+                    .await
+                {
                     Ok(()) => {}
                     Err(err) => {
                         tenant_clone.set_broken(&err.to_string());
@@ -892,8 +1061,12 @@ impl Tenant {
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
     ///
-    #[instrument(skip(self, ctx), fields(tenant_id=%self.tenant_id))]
-    async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
+    async fn load(
+        self: &Arc<Tenant>,
+        load_reason: TenantLoadReason,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         info!("loading tenant task");
 
         utils::failpoint_sleep_millis_async!("before-loading-tenant");
@@ -997,16 +1170,49 @@ impl Tenant {
             }
         }
 
+        let timelines_to_load = match load_reason {
+            TenantLoadReason::NotAttach(reason) => timelines_to_load
+                .into_iter()
+                .map(|(timeline_id, metadata)| {
+                    (
+                        timeline_id,
+                        (metadata, TimelineLoadReason::NotAttach(reason)),
+                    )
+                })
+                .collect(),
+            TenantLoadReason::Attach {
+                mut attach_data_by_timeline_id,
+            } => {
+                let mut merged = HashMap::with_capacity(timelines_to_load.len());
+                for (timeline_id, metadata) in timelines_to_load.drain() {
+                    let remote_startup_data = attach_data_by_timeline_id
+                        .remove(&timeline_id)
+                        .with_context(|| format!("local timeline {timeline_id} without remote_startup_data provided by attach"))?;
+                    let replaced = merged.insert(
+                        timeline_id,
+                        (metadata, TimelineLoadReason::Attach(remote_startup_data)),
+                    );
+                    assert!(replaced.is_none());
+                }
+                anyhow::ensure!(
+                    attach_data_by_timeline_id.is_empty(),
+                    "attach_data_by_timeline_id contains data for timelines which don't exist on disk: {:?}",
+                    attach_data_by_timeline_id.keys().collect::<Vec<_>>()
+                );
+                merged
+            }
+        };
+
         // Sort the array of timeline IDs into tree-order, so that parent comes before
         // all its children.
         let sorted_timelines = tree_sort_timelines(timelines_to_load)?;
         // FIXME original collect_timeline_files contained one more check:
         //    1. "Timeline has no ancestor and no layer files"
 
-        for (timeline_id, local_metadata) in sorted_timelines {
-            self.load_local_timeline(timeline_id, local_metadata, ctx)
+        for (timeline_id, (metadata, load_reason)) in sorted_timelines {
+            self.load_timeline(timeline_id, metadata, load_reason, ctx)
                 .await
-                .with_context(|| format!("load local timeline {timeline_id}"))?;
+                .with_context(|| format!("load timeline {timeline_id}"))?;
         }
 
         // Start background operations and open the tenant for business.
@@ -1021,11 +1227,12 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, local_metadata, ctx), fields(timeline_id=%timeline_id))]
-    async fn load_local_timeline(
+    #[instrument(skip_all, fields(timeline_id=%timeline_id))]
+    async fn load_timeline(
         &self,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
+        load_reason: TimelineLoadReason,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
@@ -1036,40 +1243,56 @@ impl Tenant {
             None
         };
 
-        let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
-            RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.conf,
-                self.tenant_id,
-                timeline_id,
-            )
-        });
-
-        let remote_startup_data = match &remote_client {
-            Some(remote_client) => match remote_client.download_index_file().await {
-                Ok(index_part) => {
-                    let remote_metadata = index_part.parse_metadata().context("parse_metadata")?;
-                    Some(RemoteStartupData {
-                        index_part,
-                        remote_metadata,
-                    })
+        let (remote_client, remote_startup_data) = match load_reason {
+            TimelineLoadReason::NotAttach(
+                TenantLoadReasonNotAttach::PageserverStartup
+                | TenantLoadReasonNotAttach::LoadApi
+                | TenantLoadReasonNotAttach::Create,
+            ) => match self.remote_storage.as_ref() {
+                Some(remote_storage) => {
+                    let remote_client = RemoteTimelineClient::new(
+                        remote_storage.clone(),
+                        self.conf,
+                        self.tenant_id,
+                        timeline_id,
+                    );
+                    match remote_client.download_index_file().await {
+                        Ok(index_part) => {
+                            let remote_metadata =
+                                index_part.parse_metadata().context("parse_metadata")?;
+                            (
+                                Some(remote_client),
+                                Some(RemoteStartupData {
+                                    index_part,
+                                    remote_metadata,
+                                }),
+                            )
+                        }
+                        Err(DownloadError::NotFound) => {
+                            info!("no index file was found on the remote");
+                            (Some(remote_client), None)
+                        }
+                        Err(e) => return Err(anyhow::anyhow!(e)),
+                    }
                 }
-                Err(DownloadError::NotFound) => {
-                    info!("no index file was found on the remote");
-                    None
-                }
-                Err(e) => return Err(anyhow::anyhow!(e)),
+                None => (None, None),
             },
-            None => None,
+            TimelineLoadReason::Attach(boxed) => {
+                let AttachDataForLoad {
+                    remote_startup_data,
+                    remote_client,
+                } = *boxed;
+                info!("re-using index_part download earlier by attach");
+                (Some(remote_client), Some(remote_startup_data))
+            }
         };
 
         self.timeline_init_and_sync(
             timeline_id,
             remote_client,
             remote_startup_data,
-            Some(local_metadata),
+            local_metadata,
             ancestor,
-            false,
             ctx,
         )
         .await
@@ -1584,22 +1807,23 @@ impl Tenant {
 /// Given a Vec of timelines and their ancestors (timeline_id, ancestor_id),
 /// perform a topological sort, so that the parent of each timeline comes
 /// before the children.
+#[allow(clippy::type_complexity)]
 fn tree_sort_timelines(
-    timelines: HashMap<TimelineId, TimelineMetadata>,
-) -> anyhow::Result<Vec<(TimelineId, TimelineMetadata)>> {
+    timelines: HashMap<TimelineId, (TimelineMetadata, TimelineLoadReason)>,
+) -> anyhow::Result<Vec<(TimelineId, (TimelineMetadata, TimelineLoadReason))>> {
     let mut result = Vec::with_capacity(timelines.len());
 
     let mut now = Vec::with_capacity(timelines.len());
     // (ancestor, children)
-    let mut later: HashMap<TimelineId, Vec<(TimelineId, TimelineMetadata)>> =
+    let mut later: HashMap<TimelineId, Vec<(TimelineId, (TimelineMetadata, TimelineLoadReason))>> =
         HashMap::with_capacity(timelines.len());
 
-    for (timeline_id, metadata) in timelines {
+    for (timeline_id, (metadata, remote_startup_data)) in timelines {
         if let Some(ancestor_id) = metadata.ancestor_timeline() {
             let children = later.entry(ancestor_id).or_default();
-            children.push((timeline_id, metadata));
+            children.push((timeline_id, (metadata, remote_startup_data)));
         } else {
-            now.push((timeline_id, metadata));
+            now.push((timeline_id, (metadata, remote_startup_data)));
         }
     }
 
@@ -2812,7 +3036,12 @@ pub mod harness {
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
             // FIXME starts background jobs
-            tenant.load(ctx).await?;
+            tenant
+                .load(
+                    TenantLoadReason::NotAttach(TenantLoadReasonNotAttach::PageserverStartup),
+                    ctx,
+                )
+                .await?;
             Ok(tenant)
         }
 
@@ -2857,8 +3086,8 @@ mod tests {
     use crate::keyspace::KeySpaceAccum;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
-    use crate::DEFAULT_PG_VERSION;
     use crate::METADATA_FILE_NAME;
+    use crate::{DEFAULT_PG_VERSION, IGNORED_TENANT_FILE_NAME};
     use bytes::BytesMut;
     use hex_literal::hex;
     use once_cell::sync::Lazy;
@@ -3602,5 +3831,126 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_migrate_attaching_marker_files_empty_dir() {
+        let d = tempfile::tempdir().unwrap();
+        let d = d.path();
+
+        Tenant::migrate_attaching_marker_files(d).unwrap();
+    }
+
+    // Basic works & efficient idempotency
+    #[test]
+    fn test_migrate_attaching_marker_files_basics_and_idempotency() {
+        let mut create_new_oo = std::fs::OpenOptions::new();
+        create_new_oo.create_new(true).write(true);
+        let d = tempfile::tempdir().unwrap();
+        let d = d.path();
+        let t1 = TenantId::generate();
+        let t1_dir = d.join(format!("{t1}"));
+        let t1_old_marker = t1_dir.join(TENANT_ATTACHING_LEGACY_MARKER_FILENAME);
+        let t1_new_marker = path_with_suffix_extension(&t1_dir, TENANT_ATTACHING_MARKER_SUFFIX);
+
+        std::fs::create_dir(&t1_dir).unwrap();
+        create_new_oo.open(&t1_old_marker).unwrap();
+
+        Tenant::migrate_attaching_marker_files(d).unwrap();
+
+        assert!(!t1_old_marker.exists(), "old marker is gone");
+        assert!(t1_new_marker.exists(), "new marker exists");
+        assert!(t1_dir.is_dir(), "tenant dir still exists");
+
+        let new_marker_stat_pre_rerun = t1_new_marker.metadata().unwrap();
+        let tenant_dir_stat_pre_run = t1_dir.metadata().unwrap();
+        Tenant::migrate_attaching_marker_files(d).expect("idempotence");
+        let new_marker_stat_post_rerun = t1_new_marker.metadata().unwrap();
+        let tenant_dir_stat_post_run = t1_dir.metadata().unwrap();
+
+        assert_eq!(
+            new_marker_stat_pre_rerun.accessed().unwrap(),
+            new_marker_stat_post_rerun.accessed().unwrap(),
+            "finished migrations cause no IO"
+        );
+        assert_eq!(
+            tenant_dir_stat_post_run.modified().unwrap(),
+            tenant_dir_stat_pre_run.modified().unwrap(),
+            "finished migrations cause no IO"
+        );
+    }
+
+    // Crash-safety: resuming from situation where src and dst are present
+    #[test]
+    fn test_migrate_attaching_marker_files_crash_safety() {
+        let mut create_new_oo = std::fs::OpenOptions::new();
+        create_new_oo.create_new(true).write(true);
+
+        let d = tempfile::tempdir().unwrap();
+        let d = d.path();
+
+        let t1 = TenantId::generate();
+        let t1_dir = d.join(format!("{t1}"));
+        let t1_old_marker = t1_dir.join(TENANT_ATTACHING_LEGACY_MARKER_FILENAME);
+        let t1_new_marker = path_with_suffix_extension(&t1_dir, TENANT_ATTACHING_MARKER_SUFFIX);
+
+        std::fs::create_dir(&t1_dir).unwrap();
+        create_new_oo.open(&t1_old_marker).unwrap();
+        create_new_oo.open(&t1_new_marker).unwrap();
+
+        Tenant::migrate_attaching_marker_files(d).expect("crash-safe resuming");
+
+        assert!(!t1_old_marker.is_file(), "old marker is gone");
+        assert!(t1_new_marker.is_file(), "new marker exists");
+    }
+
+    // non-TenantId-shaped directories are skipped under the assumption that
+    // they would also not be loaded into the pageserver anyways.
+    #[test]
+    fn test_migrate_attaching_marker_files_non_tenantid_dirs() {
+        let mut create_new_oo = std::fs::OpenOptions::new();
+        create_new_oo.create_new(true).write(true);
+
+        let d = tempfile::tempdir().unwrap();
+        let d = d.path();
+        let t1 = TenantId::generate();
+        let t1_dir = d.join(format!("{t1}-broken")); // just an example from prod
+        let t1_old_marker = t1_dir.join(TENANT_ATTACHING_LEGACY_MARKER_FILENAME);
+        let t1_new_marker = path_with_suffix_extension(&t1_dir, TENANT_ATTACHING_MARKER_SUFFIX);
+
+        std::fs::create_dir(&t1_dir).unwrap();
+        create_new_oo.open(&t1_old_marker).unwrap();
+
+        Tenant::migrate_attaching_marker_files(d).unwrap();
+
+        assert!(t1_old_marker.is_file());
+        assert!(!t1_new_marker.is_file());
+        assert!(t1_dir.is_dir());
+    }
+
+    // Tenants with an ignore file are still migrated, because someone could re-attach it.
+    // (Very improbable case as we only use /ignore manually)
+    #[test]
+    fn test_migrate_attaching_marker_files_ignore_file() {
+        let mut create_new_oo = std::fs::OpenOptions::new();
+        create_new_oo.create_new(true).write(true);
+
+        let d = tempfile::tempdir().unwrap();
+        let d = d.path();
+        let t1 = TenantId::generate();
+        let t1_dir = d.join(format!("{t1}"));
+        let t1_old_marker = t1_dir.join(TENANT_ATTACHING_LEGACY_MARKER_FILENAME);
+        let t1_new_marker = path_with_suffix_extension(&t1_dir, TENANT_ATTACHING_MARKER_SUFFIX);
+        let t1_ignore_file = t1_dir.join(IGNORED_TENANT_FILE_NAME);
+
+        std::fs::create_dir(&t1_dir).unwrap();
+        create_new_oo.open(&t1_old_marker).unwrap();
+        create_new_oo.open(&t1_ignore_file).unwrap();
+
+        Tenant::migrate_attaching_marker_files(d).unwrap();
+
+        assert!(!t1_old_marker.is_file(), "old marker is gone");
+        assert!(t1_new_marker.is_file(), "new marker exists");
+        assert!(t1_ignore_file.is_file(), "ignore file still exists");
     }
 }

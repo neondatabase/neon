@@ -238,11 +238,17 @@ pub enum TaskKind {
     // Task that downloads a file from remote storage
     RemoteDownloadTask,
 
-    // task that handles the initial downloading of all tenants
-    InitialLoad,
+    // task that handles loading of a tenant during pageserver startup
+    TenantLoadStartup,
+
+    // task that handles loading of a tenant in response to a /load HTTP API request
+    TenantLoadApi,
+
+    // task that handles loading of a tenant as part of the tenant creation procedure
+    TenantLoadCreate,
 
     // task that handles attaching a tenant
-    Attach,
+    TenantAttach,
 
     // task that handhes metrics collection
     MetricsCollection,

@@ -29,7 +29,7 @@ use utils::{
 
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
+use crate::tenant::{TENANT_ATTACHING_MARKER_SUFFIX, TIMELINES_SEGMENT_NAME};
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX,
 };
@@ -459,8 +459,7 @@ impl PageServerConf {
     }
 
     pub fn tenant_attaching_mark_file_path(&self, tenant_id: &TenantId) -> PathBuf {
-        self.tenant_path(tenant_id)
-            .join(TENANT_ATTACHING_MARKER_FILENAME)
+        path_with_suffix_extension(self.tenant_path(tenant_id), TENANT_ATTACHING_MARKER_SUFFIX)
     }
 
     pub fn tenant_ignore_mark_file_path(&self, tenant_id: TenantId) -> PathBuf {
