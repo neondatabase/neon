@@ -82,7 +82,7 @@ services:
     deploy:
       placement:
         constraints:
-          - node.role==leader
+          - node.role==manager
 
   prometheus:
     restart: always
