@@ -71,12 +71,7 @@ impl LayerFileMetadata {
         }
 
         if self.holes != other.holes {
-            self.holes = other
-                .holes
-                .as_ref()
-                .or(self.holes.as_ref())
-                .clone()
-                .cloned();
+            self.holes = other.holes.as_ref().or(self.holes.as_ref()).cloned();
             changed = true;
         }
 
