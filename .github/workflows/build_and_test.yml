@@ -1085,8 +1085,8 @@ jobs:
         run:
           helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install --atomic -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
-      - name: Cleanup helm folder
-        run: rm -rf ~/.cache
+      - name: Cleanup k8s folders
+        run: rm -rf ~/.cache && rm -rf ~/.kube
 
   deploy-proxy-new:
     runs-on: [ self-hosted, gen3, small ]
@@ -1149,8 +1149,8 @@ jobs:
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
-      - name: Cleanup helm folder
-        run: rm -rf ~/.cache
+      - name: Cleanup k8s folders
+        run: rm -rf ~/.cache && rm -rf ~/.kube
 
   deploy-storage-broker-dev-new:
     runs-on: [ self-hosted, gen3, small ]
@@ -1196,8 +1196,8 @@ jobs:
         run:
           helm upgrade neon-storage-broker-lb neondatabase/neon-storage-broker --namespace neon-storage-broker-lb --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
 
-      - name: Cleanup helm folder
-        run: rm -rf ~/.cache
+      - name: Cleanup k8s folders
+        run: rm -rf ~/.cache && rm -rf ~/.kube
 
   deploy-proxy-prod-new:
     runs-on: prod
