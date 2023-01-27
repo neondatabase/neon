@@ -1795,69 +1795,70 @@ impl Tenant {
     }
 
     pub(super) fn persist_tenant_config(
+        tenant_id: &TenantId,
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
-        first_save: bool,
+        creating_tenant: bool,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
-        info!("persisting tenantconf to {}", target_config_path.display());
 
-        // TODO this will prepend comments endlessly ?
-        let mut conf_content = r#"# This file contains a specific per-tenant's config.
-#  It is read in case of pageserver restart.
-
-[tenant_config]
-"#
-        .to_string();
-
-        // Convert the config to a toml file.
-        conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
-
-        let mut target_config_file = VirtualFile::open_with_options(
-            target_config_path,
-            OpenOptions::new()
-                .truncate(true) // This needed for overwriting with small config files
-                .write(true)
-                .create_new(first_save),
-        )?;
-
-        target_config_file
-            .write(conf_content.as_bytes())
-            .context("Failed to write toml bytes into file")
-            .and_then(|_| {
-                target_config_file
-                    .sync_all()
-                    .context("Faile to fsync config file")
-            })
-            .with_context(|| {
+        // imitate a try-block with a closure
+        let do_persist = |target_config_path: &Path| -> anyhow::Result<()> {
+            let target_config_parent = target_config_path.parent().with_context(|| {
                 format!(
-                    "Failed to write config file into path '{}'",
+                    "Config path does not have a parent: {}",
                     target_config_path.display()
                 )
             })?;
 
-        // fsync the parent directory to ensure the directory entry is durable
-        if first_save {
-            target_config_path
-                .parent()
-                .context("Config file does not have a parent")
-                .and_then(|target_config_parent| {
-                    File::open(target_config_parent).context("Failed to open config parent")
-                })
-                .and_then(|tenant_dir| {
-                    tenant_dir
-                        .sync_all()
-                        .context("Failed to fsync config parent")
-                })
-                .with_context(|| {
-                    format!(
-                        "Failed to fsync on first save for config {}",
-                        target_config_path.display()
-                    )
-                })?;
-        }
+            info!("persisting tenantconf to {}", target_config_path.display());
 
-        Ok(())
+            let mut conf_content = r#"# This file contains a specific per-tenant's config.
+#  It is read in case of pageserver restart.
+
+[tenant_config]
+"#
+            .to_string();
+
+            // Convert the config to a toml file.
+            conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
+
+            let mut target_config_file = VirtualFile::open_with_options(
+                target_config_path,
+                OpenOptions::new()
+                    .truncate(true) // This needed for overwriting with small config files
+                    .write(true)
+                    .create_new(creating_tenant)
+                    // when creating a new tenant, first_save will be true and `.create(true)` will be
+                    // ignored (per rust std docs).
+                    //
+                    // later when updating the config of created tenant, or persisting config for the
+                    // first time for attached tenant, the `.create(true)` is used.
+                    .create(true),
+            )?;
+
+            target_config_file
+                .write(conf_content.as_bytes())
+                .context("write toml bytes into file")
+                .and_then(|_| target_config_file.sync_all().context("fsync config file"))
+                .context("write config file")?;
+
+            // fsync the parent directory to ensure the directory entry is durable.
+            // before this was done conditionally on creating_tenant, but these management actions are rare
+            // enough to just fsync it always.
+
+            crashsafe::fsync(target_config_parent)?;
+            Ok(())
+        };
+
+        // this function is called from creating the tenant and updating the tenant config, which
+        // would otherwise share this context, so keep it here in one place.
+        do_persist(target_config_path).with_context(|| {
+            format!(
+                "write tenant {tenant_id} config to {}",
+                target_config_path.display()
+            )
+        })
     }
 
     //
@@ -2512,26 +2513,19 @@ fn try_create_target_tenant_dir(
         target_tenant_directory,
         temporary_tenant_dir,
     )
-    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary timelines dir"))?;
+    .with_context(|| format!("resolve tenant {tenant_id} temporary timelines dir"))?;
     let temporary_tenant_config_path = rebase_directory(
         &conf.tenant_config_path(tenant_id),
         target_tenant_directory,
         temporary_tenant_dir,
     )
-    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary config path"))?;
+    .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true).with_context(
-        || {
-            format!(
-                "Failed to write tenant {} config to {}",
-                tenant_id,
-                temporary_tenant_config_path.display()
-            )
-        },
-    )?;
+    Tenant::persist_tenant_config(&tenant_id, &temporary_tenant_config_path, tenant_conf, true)?;
+
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
-            "could not create tenant {} temporary timelines directory {}",
+            "create tenant {} temporary timelines directory {}",
             tenant_id,
             temporary_tenant_timelines_dir.display()
         )
@@ -2542,7 +2536,7 @@ fn try_create_target_tenant_dir(
 
     fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
-            "failed to move tenant {} temporary directory {} into the permanent one {}",
+            "move tenant {} temporary directory {} into the permanent one {}",
             tenant_id,
             temporary_tenant_dir.display(),
             target_tenant_directory.display()
@@ -2550,14 +2544,14 @@ fn try_create_target_tenant_dir(
     })?;
     let target_dir_parent = target_tenant_directory.parent().with_context(|| {
         format!(
-            "Failed to get tenant {} dir parent for {}",
+            "get tenant {} dir parent for {}",
             tenant_id,
             target_tenant_directory.display()
         )
     })?;
     crashsafe::fsync(target_dir_parent).with_context(|| {
         format!(
-            "Failed to fsync renamed directory's parent {} for tenant {}",
+            "fsync renamed directory's parent {} for tenant {}",
             target_dir_parent.display(),
             tenant_id,
         )

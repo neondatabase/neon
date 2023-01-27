@@ -2,7 +2,15 @@ from contextlib import closing
 
 import psycopg2.extras
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import (
+    LocalFsStorage,
+    NeonEnvBuilder,
+    RemoteStorageKind,
+    assert_tenant_status,
+    wait_for_upload,
+)
+from fixtures.types import Lsn
+from fixtures.utils import wait_until
 
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
@@ -158,3 +166,46 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "pitr_interval": 60,
                 }.items()
             )
+
+
+def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
+        test_name="test_creating_tenant_conf_after_attach",
+    )
+
+    env = neon_env_builder.init_start()
+    assert isinstance(env.remote_storage, LocalFsStorage)
+
+    # tenant is created with defaults, as in without config file
+    (tenant_id, timeline_id) = env.neon_cli.create_tenant()
+    config_path = env.repo_dir / "tenants" / str(tenant_id) / "config"
+    assert config_path.exists(), "config file is always initially created"
+
+    http_client = env.pageserver.http_client()
+
+    detail = http_client.timeline_detail(tenant_id, timeline_id)
+    last_record_lsn = Lsn(detail["last_record_lsn"])
+    assert last_record_lsn.lsn_int != 0, "initdb must have executed"
+
+    wait_for_upload(http_client, tenant_id, timeline_id, last_record_lsn)
+
+    http_client.tenant_detach(tenant_id)
+
+    assert not config_path.exists(), "detach did not remove config file"
+
+    http_client.tenant_attach(tenant_id)
+    wait_until(
+        number_of_iterations=5,
+        interval=1,
+        func=lambda: assert_tenant_status(http_client, tenant_id, "Active"),
+    )
+
+    env.neon_cli.config_tenant(tenant_id, {"gc_horizon": "1000000"})
+    contents_first = config_path.read_text()
+    env.neon_cli.config_tenant(tenant_id, {"gc_horizon": "0"})
+    contents_later = config_path.read_text()
+
+    # dont test applying the setting here, we have that another test case to show it
+    # we just care about being able to create the file
+    assert len(contents_first) > len(contents_later)
