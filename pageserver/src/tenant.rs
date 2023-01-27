@@ -2513,19 +2513,19 @@ fn try_create_target_tenant_dir(
         target_tenant_directory,
         temporary_tenant_dir,
     )
-    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary timelines dir"))?;
+    .with_context(|| format!("resolve tenant {tenant_id} temporary timelines dir"))?;
     let temporary_tenant_config_path = rebase_directory(
         &conf.tenant_config_path(tenant_id),
         target_tenant_directory,
         temporary_tenant_dir,
     )
-    .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary config path"))?;
+    .with_context(|| format!("resolve tenant {tenant_id} temporary config path"))?;
 
     Tenant::persist_tenant_config(&tenant_id, &temporary_tenant_config_path, tenant_conf, true)?;
 
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
-            "could not create tenant {} temporary timelines directory {}",
+            "create tenant {} temporary timelines directory {}",
             tenant_id,
             temporary_tenant_timelines_dir.display()
         )
@@ -2536,7 +2536,7 @@ fn try_create_target_tenant_dir(
 
     fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
-            "failed to move tenant {} temporary directory {} into the permanent one {}",
+            "move tenant {} temporary directory {} into the permanent one {}",
             tenant_id,
             temporary_tenant_dir.display(),
             target_tenant_directory.display()
@@ -2544,14 +2544,14 @@ fn try_create_target_tenant_dir(
     })?;
     let target_dir_parent = target_tenant_directory.parent().with_context(|| {
         format!(
-            "Failed to get tenant {} dir parent for {}",
+            "get tenant {} dir parent for {}",
             tenant_id,
             target_tenant_directory.display()
         )
     })?;
     crashsafe::fsync(target_dir_parent).with_context(|| {
         format!(
-            "Failed to fsync renamed directory's parent {} for tenant {}",
+            "fsync renamed directory's parent {} for tenant {}",
             target_dir_parent.display(),
             tenant_id,
         )
