@@ -387,13 +387,13 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     name.pg_quote(),
                     db.owner.pg_quote()
                 );
-                let _ = info_span!("executing", query).entered();
+                let _guard = info_span!("executing", query).entered();
                 client.execute(query.as_str(), &[])?;
             }
             DatabaseAction::Create => {
                 let mut query: String = format!("CREATE DATABASE {} ", name.pg_quote());
                 query.push_str(&db.to_pg_options());
-                let _ = info_span!("executing", query).entered();
+                let _guard = info_span!("executing", query).entered();
                 client.execute(query.as_str(), &[])?;
             }
         };
