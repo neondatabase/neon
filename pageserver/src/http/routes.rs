@@ -84,12 +84,10 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
     match err {
         PageReconstructError::Other(err) => ApiError::InternalServerError(err),
-        PageReconstructError::NeedsDownload(_, _) => {
+        PageReconstructError::NeedsDownload(_) => {
             // This shouldn't happen, because we use a RequestContext that requests to
             // download any missing layer files on-demand.
-            ApiError::InternalServerError(anyhow::anyhow!(
-                "would need to download remote layer file"
-            ))
+            ApiError::InternalServerError(anyhow::anyhow!("need to download remote layer file"))
         }
         PageReconstructError::Cancelled => {
             ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
