@@ -39,12 +39,9 @@
 #
 #       docker stack deploy --compose-file docker-compose-multi-region.yml neon
 #
-#   - (Optional) By default, the services are spread across the nodes in an undeterministic manner.
-#     To control which node a service runs on, we need to place a constraint on it. Examples of such
-#     constraints are provided. Activate them by uncommenting the "deploy.placement.constraints"
-#     keys in the services. The neon-specific services are constrained based on node labels, so they
-#     will not be run until at least a node is assigned with the necessary label. For example,
-#     run the following command to label a node named "vm1" to run the pageserver:
+#   - Some services are constrained based on node labels, so each of them will not run until it can find
+#     a node having the labels that satisfy the constraints. For example, run the following command to label
+#     a node named "vm1" to run the pageserver:
 #
 #       docker node update --label-add has_pageserver=true vm1
 #

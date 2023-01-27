@@ -77,6 +77,7 @@ elif [ "$mode" = "swarm" ]; then
                         $minio_image                         \
                         server /data --address :9000 --console-address :9001
 
+  echo "Starting the local image registry"
   docker service create --name registry --publish published=5000,target=5000 registry:2
 
 else
