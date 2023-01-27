@@ -133,6 +133,8 @@ pub struct PostgresConnection {
     pub stream: TcpStream,
     /// PostgreSQL connection parameters.
     pub params: std::collections::HashMap<String, String>,
+    /// Query cancellation token.
+    pub cancel_closure: CancelClosure,
 }
 
 impl ConnCfg {
@@ -140,7 +142,7 @@ impl ConnCfg {
     pub async fn connect(
         &mut self,
         params: &StartupMessageParams,
-    ) -> Result<(PostgresConnection, CancelClosure), ConnectionError> {
+    ) -> Result<PostgresConnection, ConnectionError> {
         if let Some(options) = params.options_raw() {
             // We must drop all proxy-specific parameters.
             #[allow(unstable_name_collisions)]
@@ -190,8 +192,13 @@ impl ConnCfg {
         // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
         // Yet another reason to rework the connection establishing code.
         let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
-        let db = PostgresConnection { stream, params };
 
-        Ok((db, cancel_closure))
+        let connection = PostgresConnection {
+            stream,
+            params,
+            cancel_closure,
+        };
+
+        Ok(connection)
     }
 }

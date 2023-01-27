@@ -2,8 +2,9 @@
 mod tests;
 
 use crate::{
-    auth,
+    auth::{self, backend::CachedNodeInfo},
     cancellation::{self, CancelMap},
+    compute::PostgresConnection,
     config::{ProxyConfig, TlsConfig},
     stream::{MeasuredStream, PqStream, Stream},
 };
@@ -235,6 +236,38 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+// TODO: decide where it belongs
+async fn connect_once(
+    node: &mut CachedNodeInfo, // TODO: &mut shouldn't be required
+    params: &StartupMessageParams,
+    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+) -> anyhow::Result<PostgresConnection> {
+    node.config
+        .connect(params)
+        .or_else(|e| stream.throw_error(e))
+        .await
+        // TODO: extract into a closure/fn (requres non-&mut node)
+        .map_err(|e| {
+            let is_cached = node.cached();
+
+            let label = match is_cached {
+                true => "compute_cached",
+                false => "compute_uncached",
+            };
+            NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+
+            // If we couldn't connect, a cached connection info might be to blame
+            // (e.g. the compute node's address might've changed at the wrong time).
+            // Invalidate the cache entry (if any) to prevent subsequent errors.
+            if is_cached {
+                warn!("invalidating stalled compute node info cache entry");
+                node.invalidate();
+            }
+
+            e
+        })
+}
+
 /// Thin connection context.
 struct Client<'a, S> {
     /// The underlying libpq protocol stream.
@@ -293,32 +326,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         .await?;
 
         let mut node = auth_result.value;
-        let (db, cancel_closure) = node
-            .config
-            .connect(params)
-            .or_else(|e| stream.throw_error(e))
-            .await
-            .map_err(|e| {
-                let is_cached = node.cached();
-
-                let label = match is_cached {
-                    true => "compute_cached",
-                    false => "compute_uncached",
-                };
-                NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
-
-                // If we couldn't connect, a cached connection info might be to blame
-                // (e.g. the compute node's address might've changed at the wrong time).
-                // Invalidate the cache entry (if any) to prevent subsequent errors.
-                if is_cached {
-                    warn!("invalidating stalled compute node info cache entry");
-                    node.invalidate();
-                }
-
-                e
-            })?;
-
-        let cancel_key_data = session.enable_query_cancellation(cancel_closure);
+        let db = connect_once(&mut node, params, &mut stream).await?;
+        let cancel_key_data = session.enable_query_cancellation(db.cancel_closure);
 
         // Report authentication success if we haven't done this already.
         // Note that we do this only (for the most part) after we've connected

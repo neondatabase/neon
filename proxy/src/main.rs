@@ -29,10 +29,7 @@ use futures::FutureExt;
 use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
 use tracing::{info, info_span, Instrument};
-use utils::{
-    project_git_version,
-    sentry_init::init_sentry,
-};
+use utils::{project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
 
