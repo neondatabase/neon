@@ -879,6 +879,10 @@ jobs:
           ANSIBLE_CONFIG=./ansible.cfg ansible-playbook deploy.yaml -i ${{ matrix.env_name }}.hosts.yaml -e CONSOLE_API_TOKEN=${{ secrets[matrix.console_api_key_secret] }} -e SENTRY_URL_PAGESERVER=${{ secrets.SENTRY_URL_PAGESERVER }} -e SENTRY_URL_SAFEKEEPER=${{ secrets.SENTRY_URL_SAFEKEEPER }}
           rm -f neon_install.tar.gz .neon_current_version
 
+      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ansible/collections': Permission denied
+      - name: Cleanup ansible folder
+        run: rm -rf ~/.ansible
+
   deploy-new:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
@@ -919,6 +923,9 @@ jobs:
           ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{ secrets.NEON_STAGING_API_KEY }} -e SENTRY_URL_PAGESERVER=${{ secrets.SENTRY_URL_PAGESERVER }} -e SENTRY_URL_SAFEKEEPER=${{ secrets.SENTRY_URL_SAFEKEEPER }}
           rm -f neon_install.tar.gz .neon_current_version
 
+      - name: Cleanup ansible folder
+        run: rm -rf ~/.ansible
+
   deploy-pr-test-new:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
@@ -951,6 +958,9 @@ jobs:
           ansible-galaxy collection install sivel.toiletwater
           ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{ secrets.NEON_STAGING_API_KEY }} -e SENTRY_URL_PAGESERVER=${{ secrets.SENTRY_URL_PAGESERVER }} -e SENTRY_URL_SAFEKEEPER=${{ secrets.SENTRY_URL_SAFEKEEPER }}
           rm -f neon_install.tar.gz .neon_current_version
+
+      - name: Cleanup ansible folder
+        run: rm -rf ~/.ansible
 
   deploy-prod-new:
     runs-on: prod
@@ -1037,6 +1047,9 @@ jobs:
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade ${{ matrix.proxy_job }}-scram neondatabase/neon-proxy --namespace neon-proxy --install --atomic -f .github/helm-values/${{ matrix.proxy_config }}-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
+      - name: Cleanup helm folder
+        run: rm -rf ~/.cache
+
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
     runs-on: [ self-hosted, gen3, small ]
@@ -1079,6 +1092,9 @@ jobs:
       - name: Deploy storage-broker
         run:
           helm upgrade neon-storage-broker neondatabase/neon-storage-broker --namespace ${{ matrix.storage_broker_ns }} --create-namespace --install --atomic -f .github/helm-values/${{ matrix.storage_broker_config }}.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
+
+      - name: Cleanup helm folder
+        run: rm -rf ~/.cache
 
   deploy-proxy-new:
     runs-on: [ self-hosted, gen3, small ]
@@ -1133,6 +1149,9 @@ jobs:
           DOCKER_TAG=${{needs.tag.outputs.build-tag}}
           helm upgrade neon-proxy-scram-legacy neondatabase/neon-proxy --namespace neon-proxy --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-proxy-scram-legacy.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
 
+      - name: Cleanup helm folder
+        run: rm -rf ~/.cache
+
   deploy-storage-broker-dev-new:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
@@ -1168,6 +1187,9 @@ jobs:
       - name: Deploy storage-broker
         run:
           helm upgrade neon-storage-broker-lb neondatabase/neon-storage-broker --namespace neon-storage-broker-lb --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${{ needs.tag.outputs.build-tag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
+
+      - name: Cleanup helm folder
+        run: rm -rf ~/.cache
 
   deploy-proxy-prod-new:
     runs-on: prod
