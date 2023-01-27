@@ -1124,6 +1124,8 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::369495373322:role/github-runner
           aws-region: eu-central-1
+          role-skip-session-tagging: true
+          role-duration-seconds: 1800
 
       - name: Configure environment
         run: |
@@ -1182,6 +1184,8 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::369495373322:role/github-runner
           aws-region: eu-central-1
+          role-skip-session-tagging: true
+          role-duration-seconds: 1800
 
       - name: Configure environment
         run: |
