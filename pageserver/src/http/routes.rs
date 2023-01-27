@@ -1029,6 +1029,16 @@ async fn active_timeline_of_active_tenant(
         .map_err(ApiError::NotFound)
 }
 
+async fn always_panic_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
+    // catch_unwind ensures that tokio nor hyper are distracted by our panic, but panic hooks
+    // (at least sentry) will report the issue. if tested across fleet, this should be a good test
+    // case for panic deduplication as well per version.
+    let _ = std::panic::catch_unwind(|| {
+        panic!("unconditional panic for testing panic hook integration")
+    });
+    json_response(StatusCode::NO_CONTENT, ())
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -1147,5 +1157,6 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
             evict_timeline_layer_handler,
         )
+        .get("/v1/panic", always_panic_handler)
         .any(handler_404))
 }
