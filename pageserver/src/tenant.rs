@@ -1800,57 +1800,70 @@ impl Tenant {
     }
 
     pub(super) fn persist_tenant_config(
+        tenant_id: &TenantId,
         target_config_path: &Path,
         tenant_conf: TenantConfOpt,
         creating_tenant: bool,
     ) -> anyhow::Result<()> {
         let _enter = info_span!("saving tenantconf").entered();
-        let target_config_parent = target_config_path.parent().with_context(|| {
-            format!(
-                "Config path does not have a parent: {}",
-                target_config_path.display()
-            )
-        })?;
 
-        info!("persisting tenantconf to {}", target_config_path.display());
+        // imitiate try-block with a closure
+        let do_persist = |target_config_path: &Path| -> anyhow::Result<()> {
+            let target_config_parent = target_config_path.parent().with_context(|| {
+                format!(
+                    "Config path does not have a parent: {}",
+                    target_config_path.display()
+                )
+            })?;
 
-        let mut conf_content = r#"# This file contains a specific per-tenant's config.
+            info!("persisting tenantconf to {}", target_config_path.display());
+
+            let mut conf_content = r#"# This file contains a specific per-tenant's config.
 #  It is read in case of pageserver restart.
 
 [tenant_config]
 "#
-        .to_string();
+            .to_string();
 
-        // Convert the config to a toml file.
-        conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
+            // Convert the config to a toml file.
+            conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
 
-        let mut target_config_file = VirtualFile::open_with_options(
-            target_config_path,
-            OpenOptions::new()
-                .truncate(true) // This needed for overwriting with small config files
-                .write(true)
-                .create_new(creating_tenant)
-                // when creating a new tenant, first_save will be true and `.create(true)` will be
-                // ignored (per rust std docs).
-                //
-                // later when updating the config of created tenant, or persisting config for the
-                // first time for attached tenant, the `.create(true)` is used.
-                .create(true),
-        )?;
+            let mut target_config_file = VirtualFile::open_with_options(
+                target_config_path,
+                OpenOptions::new()
+                    .truncate(true) // This needed for overwriting with small config files
+                    .write(true)
+                    .create_new(creating_tenant)
+                    // when creating a new tenant, first_save will be true and `.create(true)` will be
+                    // ignored (per rust std docs).
+                    //
+                    // later when updating the config of created tenant, or persisting config for the
+                    // first time for attached tenant, the `.create(true)` is used.
+                    .create(true),
+            )?;
 
-        target_config_file
-            .write(conf_content.as_bytes())
-            .context("write toml bytes into file")
-            .and_then(|_| target_config_file.sync_all().context("fsync config file"))
-            .context("write config file")?;
+            target_config_file
+                .write(conf_content.as_bytes())
+                .context("write toml bytes into file")
+                .and_then(|_| target_config_file.sync_all().context("fsync config file"))
+                .context("write config file")?;
 
-        // fsync the parent directory to ensure the directory entry is durable.
-        // before this was done conditionally on creating_tenant, but these management actions are rare
-        // enough to just fsync it always.
+            // fsync the parent directory to ensure the directory entry is durable.
+            // before this was done conditionally on creating_tenant, but these management actions are rare
+            // enough to just fsync it always.
 
-        crashsafe::fsync(target_config_parent)?;
+            crashsafe::fsync(target_config_parent)?;
+            Ok(())
+        };
 
-        Ok(())
+        // this function is called from creating the tenant and updating the tenant config, which
+        // would otherwise share this context, so keep it here in one place.
+        do_persist(target_config_path).with_context(|| {
+            format!(
+                "write tenant {tenant_id} config to {}",
+                target_config_path.display()
+            )
+        })
     }
 
     //
@@ -2508,15 +2521,8 @@ fn try_create_target_tenant_dir(
     )
     .with_context(|| format!("Failed to resolve tenant {tenant_id} temporary config path"))?;
 
-    Tenant::persist_tenant_config(&temporary_tenant_config_path, tenant_conf, true).with_context(
-        || {
-            format!(
-                "Failed to write tenant {} config to {}",
-                tenant_id,
-                temporary_tenant_config_path.display()
-            )
-        },
-    )?;
+    Tenant::persist_tenant_config(&tenant_id, &temporary_tenant_config_path, tenant_conf, true)?;
+
     crashsafe::create_dir(&temporary_tenant_timelines_dir).with_context(|| {
         format!(
             "could not create tenant {} temporary timelines directory {}",

@@ -242,17 +242,11 @@ pub async fn update_tenant_config(
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
-    get_tenant(tenant_id, true)
-        .await?
-        .update_tenant_config(tenant_conf);
+    let tenant = get_tenant(tenant_id, true).await?;
+
+    tenant.update_tenant_config(tenant_conf);
     let tenant_config_path = conf.tenant_config_path(tenant_id);
-    Tenant::persist_tenant_config(&tenant_config_path, tenant_conf, false).with_context(|| {
-        format!(
-            "Failed to write tenant {} config to {}",
-            tenant_id,
-            tenant_config_path.display()
-        )
-    })?;
+    Tenant::persist_tenant_config(&tenant.tenant_id(), &tenant_config_path, tenant_conf, false)?;
     Ok(())
 }
 
