@@ -207,7 +207,7 @@ services:
   #         - node.labels.region==1
 
   xactserver-r1: &xactserver
-    image: ctring/xactserver:test
+    image: ctring/xactserver:${TAG:-latest}
     environment:
       - NODE_ID=1
       - CONNECT_PG=postgresql://cloud_admin@compute-r1:55433/postgres
