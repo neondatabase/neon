@@ -7,7 +7,7 @@ use crate::{
         backend::{AuthSuccess, CachedNodeInfo},
     },
     cancellation::{self, CancelMap},
-    compute::PostgresConnection,
+    compute::{ConnectionError, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::messages::MetricsAuxInfo,
     stream::{MeasuredStream, PqStream, Stream},
@@ -240,15 +240,12 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-// TODO: decide where it belongs
 async fn connect_once(
     node: &mut CachedNodeInfo, // TODO: &mut shouldn't be required
     params: &StartupMessageParams,
-    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>, // TODO: remove this!
-) -> anyhow::Result<PostgresConnection> {
+) -> Result<PostgresConnection, ConnectionError> {
     node.config
         .connect(params)
-        .or_else(|e| stream.throw_error(e))
         .await
         // TODO: extract into a closure/fn (requres non-&mut node)
         .map_err(|e| {
@@ -393,9 +390,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             value: mut node_info,
         } = auth_result;
 
-        let node = connect_once(&mut node_info, params, &mut stream).await?;
-        activate_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
+        let node = connect_once(&mut node_info, params)
+            .or_else(|e| stream.throw_error(e))
+            .await?;
 
+        activate_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
         proxy_pass(stream.into_inner(), node.stream, &node_info.aux).await
     }
 }
