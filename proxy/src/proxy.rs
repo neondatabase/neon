@@ -2,10 +2,14 @@
 mod tests;
 
 use crate::{
-    auth::{self, backend::CachedNodeInfo},
+    auth::{
+        self,
+        backend::{AuthSuccess, CachedNodeInfo},
+    },
     cancellation::{self, CancelMap},
     compute::PostgresConnection,
     config::{ProxyConfig, TlsConfig},
+    console::messages::MetricsAuxInfo,
     stream::{MeasuredStream, PqStream, Stream},
 };
 use anyhow::{bail, Context};
@@ -240,7 +244,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 async fn connect_once(
     node: &mut CachedNodeInfo, // TODO: &mut shouldn't be required
     params: &StartupMessageParams,
-    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>, // TODO: remove this!
 ) -> anyhow::Result<PostgresConnection> {
     node.config
         .connect(params)
@@ -266,6 +270,65 @@ async fn connect_once(
 
             e
         })
+}
+
+async fn activate_client_connection(
+    node: &PostgresConnection,
+    reported_auth_ok: bool,
+    session: cancellation::Session<'_>,
+    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+) -> anyhow::Result<()> {
+    let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
+
+    // Report authentication success if we haven't done this already.
+    // Note that we do this only (for the most part) after we've connected
+    // to a compute (see above) which performs its own authentication.
+    if !reported_auth_ok {
+        stream.write_message_noflush(&Be::AuthenticationOk)?;
+    }
+
+    // Forward all postgres connection params to the client.
+    // Right now the implementation is very hacky and inefficent (ideally,
+    // we don't need an intermediate hashmap), but at least it should be correct.
+    for (name, value) in &node.params {
+        // TODO: Theoretically, this could result in a big pile of params...
+        stream.write_message_noflush(&Be::ParameterStatus {
+            name: name.as_bytes(),
+            value: value.as_bytes(),
+        })?;
+    }
+
+    stream
+        .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
+        .write_message(&Be::ReadyForQuery)
+        .await?;
+
+    Ok(())
+}
+
+/// Forward bytes in both directions (client <-> compute).
+async fn proxy_pass(
+    client: impl AsyncRead + AsyncWrite + Unpin,
+    compute: impl AsyncRead + AsyncWrite + Unpin,
+    aux: &MetricsAuxInfo,
+) -> anyhow::Result<()> {
+    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
+    let mut client = MeasuredStream::new(client, |cnt| {
+        // Number of bytes we sent to the client (outbound).
+        m_sent.inc_by(cnt as u64);
+    });
+
+    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
+    let mut compute = MeasuredStream::new(compute, |cnt| {
+        // Number of bytes the client sent to the compute node (inbound).
+        m_recv.inc_by(cnt as u64);
+    });
+
+    // Starting from here we only proxy the client's traffic.
+    info!("performing the proxy pass...");
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut compute).await?;
+
+    Ok(())
 }
 
 /// Thin connection context.
@@ -325,49 +388,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         .instrument(info_span!("auth"))
         .await?;
 
-        let mut node = auth_result.value;
-        let db = connect_once(&mut node, params, &mut stream).await?;
-        let cancel_key_data = session.enable_query_cancellation(db.cancel_closure);
+        let AuthSuccess {
+            reported_auth_ok,
+            value: mut node_info,
+        } = auth_result;
 
-        // Report authentication success if we haven't done this already.
-        // Note that we do this only (for the most part) after we've connected
-        // to a compute (see above) which performs its own authentication.
-        if !auth_result.reported_auth_ok {
-            stream.write_message_noflush(&Be::AuthenticationOk)?;
-        }
+        let node = connect_once(&mut node_info, params, &mut stream).await?;
+        activate_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
 
-        // Forward all postgres connection params to the client.
-        // Right now the implementation is very hacky and inefficent (ideally,
-        // we don't need an intermediate hashmap), but at least it should be correct.
-        for (name, value) in &db.params {
-            // TODO: Theoretically, this could result in a big pile of params...
-            stream.write_message_noflush(&Be::ParameterStatus {
-                name: name.as_bytes(),
-                value: value.as_bytes(),
-            })?;
-        }
-
-        stream
-            .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-            .write_message(&Be::ReadyForQuery)
-            .await?;
-
-        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("tx"));
-        let mut client = MeasuredStream::new(stream.into_inner(), |cnt| {
-            // Number of bytes we sent to the client (outbound).
-            m_sent.inc_by(cnt as u64);
-        });
-
-        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("rx"));
-        let mut db = MeasuredStream::new(db.stream, |cnt| {
-            // Number of bytes the client sent to the compute node (inbound).
-            m_recv.inc_by(cnt as u64);
-        });
-
-        // Starting from here we only proxy the client's traffic.
-        info!("performing the proxy pass...");
-        let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
-
-        Ok(())
+        proxy_pass(stream.into_inner(), node.stream, &node_info.aux).await
     }
 }
