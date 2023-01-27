@@ -272,7 +272,7 @@ impl Api<'_> {
         let key = self.creds.project().expect("impossible");
 
         // Every time we do a wakeup http request, the compute node will stay up
-        // for some time (~5 mins; depends on the console's scale-to-zero policy);
+        // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
         if let Some(cached) = self.caches.node_info.get(key) {
