@@ -193,6 +193,8 @@ impl<D, I> Clone for HistoricLayer<D, I> {
 }
 
 /// A layer, that might need downloading before most of its [meta]data is accesible.
+// TODO: `RemoteLayer` has a separation of delta/image inside, but local layers are separated with L
+// find a better way to unify this, or a better place for this separation.
 pub enum LocalOrRemote<L> {
     Local(Arc<L>),
     Remote(Arc<RemoteLayer>),
@@ -290,6 +292,11 @@ impl<D, I> HistoricLayer<D, I> {
     }
 }
 
+pub enum ValueReconstructError {
+    LayerMissing(Arc<RemoteLayer>),
+    Reconstruct(anyhow::Error),
+}
+
 impl<D, I> HistoricLayer<D, I>
 where
     D: LayerFile,
@@ -370,20 +377,17 @@ where
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
-    ) -> anyhow::Result<ValueReconstructResult> {
+    ) -> Result<ValueReconstructResult, ValueReconstructError> {
         use LocalOrRemote::*;
         match self {
-            Self::Delta(Local(delta)) => {
-                delta.get_value_reconstruct_data(key, lsn_range, reconstruct_data)
-            }
-            Self::Image(Local(image)) => {
-                image.get_value_reconstruct_data(key, lsn_range, reconstruct_data)
-            }
+            Self::Delta(Local(delta)) => delta
+                .get_value_reconstruct_data(key, lsn_range, reconstruct_data)
+                .map_err(ValueReconstructError::Reconstruct),
+            Self::Image(Local(image)) => image
+                .get_value_reconstruct_data(key, lsn_range, reconstruct_data)
+                .map_err(ValueReconstructError::Reconstruct),
             Self::Delta(Remote(remote)) | Self::Image(Remote(remote)) => {
-                anyhow::bail!(
-                    "layer {} needs to be downloaded",
-                    remote.layer_name().file_name()
-                );
+                Err(ValueReconstructError::LayerMissing(Arc::clone(remote)))
             }
         }
     }

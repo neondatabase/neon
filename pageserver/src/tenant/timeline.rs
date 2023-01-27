@@ -30,7 +30,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
     DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer, LayerFileName,
-    RemoteLayer,
+    RemoteLayer, ValueReconstructError,
 };
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file,
@@ -1804,24 +1804,30 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                            result = match layer.get_value_reconstruct_data(
+                            match layer.get_value_reconstruct_data(
                                 key,
                                 lsn_floor..cont_lsn,
                                 reconstruct_state,
                             ) {
-                                Ok(result) => result,
-                                Err(e) => return Err(PageReconstructError::from(e)),
-                            };
-                            cont_lsn = lsn_floor;
-                            traversal_path.push((
-                                result,
-                                cont_lsn,
-                                Box::new({
-                                    let layer = layer.clone();
-                                    move || layer.traversal_id()
-                                }),
-                            ));
-                            continue 'outer;
+                                Ok(result) => {
+                                    cont_lsn = lsn_floor;
+                                    traversal_path.push((
+                                        result,
+                                        cont_lsn,
+                                        Box::new({
+                                            let layer = layer.clone();
+                                            move || layer.traversal_id()
+                                        }),
+                                    ));
+                                    continue 'outer;
+                                }
+                                Err(ValueReconstructError::LayerMissing(remote_layer)) => {
+                                    remote_layer
+                                }
+                                Err(ValueReconstructError::Reconstruct(e)) => {
+                                    return Err(PageReconstructError::from(e));
+                                }
+                            }
                         }
                     } else if timeline.ancestor_timeline.is_some() {
                         // Nothing on this timeline. Traverse to parent
