@@ -607,7 +607,7 @@ jobs:
         run: echo "{\"auths\":{\"https://index.docker.io/v1/\":{\"auth\":\"${{secrets.DOCKERHUB_CRED_BASE64}}\"}}}" > /kaniko/.docker/config.json
 
       - name: Kaniko build compute node with extensions
-        run: /kaniko/executor --reproducible --skip-unused-stages  --snapshotMode=redo --cache=true --cache-repo ctring/neon-cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-node --destination ctring/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo ctring/neon-cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --build-arg PG_VERSION=${{ matrix.version }} --dockerfile Dockerfile.compute-node --destination ctring/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
