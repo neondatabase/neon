@@ -5,6 +5,7 @@ use metrics::{
     IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
+use pageserver_api::models::state;
 use utils::id::{TenantId, TimelineId};
 
 /// Prometheus histogram buckets (in seconds) that capture the majority of
@@ -110,6 +111,24 @@ static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
         &["tenant_id", "timeline_id"]
     )
     .expect("failed to define current logical size metric")
+});
+
+// Metrics collected on tenant states.
+const TENANT_STATE_OPTIONS: &[&str] = &[
+    state::LOADING,
+    state::ATTACHING,
+    state::ACTIVE,
+    state::STOPPING,
+    state::BROKEN,
+];
+
+pub static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_tenant_states_count",
+        "Count of tenants per state",
+        &["tenant_id", "state"]
+    )
+    .expect("Failed to register pageserver_tenant_states_count metric")
 });
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
@@ -496,6 +515,10 @@ impl Drop for TimelineMetrics {
 
 pub fn remove_tenant_metrics(tenant_id: &TenantId) {
     let _ = STORAGE_TIME.remove_label_values(&["gc", &tenant_id.to_string(), "-"]);
+    let tid = tenant_id.to_string();
+    for state in TENANT_STATE_OPTIONS {
+        let _ = TENANT_STATE_METRIC.remove_label_values(&[&tid, state]);
+    }
 }
 
 use futures::Future;

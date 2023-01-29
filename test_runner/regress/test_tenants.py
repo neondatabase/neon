@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -259,7 +260,7 @@ def test_pageserver_with_empty_tenants(
         files_in_timelines_dir == 0
     ), f"Tenant {tenant_with_empty_timelines_dir} should have an empty timelines/ directory"
 
-    # Trigger timeline reinitialization after pageserver restart
+    # Trigger timeline re-initialization after pageserver restart
     env.postgres.stop_all()
     env.pageserver.stop()
 
@@ -278,7 +279,51 @@ def test_pageserver_with_empty_tenants(
         broken_tenant["state"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
+    broken_tenant_status = client.tenant_status(tenant_without_timelines_dir)
+    assert (
+        broken_tenant_status["state"] == "Broken"
+    ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
+
+    assert env.pageserver.log_contains(".*Setting tenant as Broken state, reason:.*")
+
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
     assert (
         loaded_tenant["state"] == "Active"
     ), "Tenant {tenant_with_empty_timelines_dir} with empty timelines dir should be active and ready for timeline creation"
+
+    loaded_tenant_status = client.tenant_status(tenant_with_empty_timelines_dir)
+    assert (
+        loaded_tenant_status["state"] == "Active"
+    ), f"Tenant {tenant_with_empty_timelines_dir} without timelines dir should be active"
+
+    time.sleep(1)  # to allow metrics propagation
+
+    ps_metrics = parse_metrics(client.get_metrics(), "pageserver")
+    broken_tenants_metric_filter = {
+        "tenant_id": str(tenant_without_timelines_dir),
+        "state": "broken",
+    }
+    active_tenants_metric_filter = {
+        "tenant_id": str(tenant_with_empty_timelines_dir),
+        "state": "active",
+    }
+
+    tenant_active_count = int(
+        ps_metrics.query_one(
+            "pageserver_tenant_states_count", filter=active_tenants_metric_filter
+        ).value
+    )
+
+    assert (
+        tenant_active_count == 1
+    ), f"Tenant {tenant_with_empty_timelines_dir} should have metric as active"
+
+    tenant_broken_count = int(
+        ps_metrics.query_one(
+            "pageserver_tenant_states_count", filter=broken_tenants_metric_filter
+        ).value
+    )
+
+    assert (
+        tenant_broken_count == 1
+    ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"
