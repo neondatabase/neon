@@ -363,25 +363,22 @@ impl Layer for DeltaLayer {
         if !range_overlaps(&self.key_range, key_range) {
             Ok(false)
         } else {
-            Ok(true)
-            /*
-                        let inner = self.load()?;
-                        if let Some(holes) = &inner.holes {
-                            let start = match holes.binary_search_by_key(&key_range.start, |hole| hole.0.start)
-                            {
-                                Ok(index) => index,
-                                Err(index) => {
-                                    if index == 0 {
-                                        return Ok(true);
-                                    }
-                                    index - 1
-                                }
-                            };
-                            Ok(holes[start].0.end < key_range.end)
-                        } else {
-                            Ok(true)
+            let inner = self.load()?;
+            if let Some(holes) = &inner.holes {
+                let start = match holes.binary_search_by_key(&key_range.start, |hole| hole.0.start)
+                {
+                    Ok(index) => index,
+                    Err(index) => {
+                        if index == 0 {
+                            return Ok(true);
                         }
-            */
+                        index - 1
+                    }
+                };
+                Ok(holes[start].0.end < key_range.end)
+            } else {
+                Ok(true)
+            }
         }
     }
 
