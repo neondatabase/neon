@@ -179,7 +179,7 @@ impl<'a> Api<'a> {
     /// Authenticate the existing user or throw an error.
     pub async fn handle_user(
         &'a self,
-        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         handle_user(client, self, Self::get_auth_info, Self::wake_compute).await
     }

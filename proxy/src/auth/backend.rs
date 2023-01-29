@@ -172,7 +172,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
         &'a mut self,
         caches: &'static ApiCaches,
         extra: &'a ConsoleReqExtra<'a>,
-        client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+        client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> auth::Result<Option<AuthSuccess<CachedNodeInfo>>> {
         use BackendType::*;
 
@@ -254,7 +254,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
         mut self,
         caches: &'static ApiCaches,
         extra: &'a ConsoleReqExtra<'a>,
-        client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+        client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         use BackendType::*;
 

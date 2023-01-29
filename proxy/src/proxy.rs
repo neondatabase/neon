@@ -100,7 +100,7 @@ pub async fn handle_ws_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
-    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
+    stream: impl AsyncRead + AsyncWrite + Unpin,
     hostname: Option<String>,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
@@ -141,7 +141,7 @@ async fn handle_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
-    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
+    stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -357,7 +357,7 @@ impl<'a, S> Client<'a, S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
     async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
         let Self {
