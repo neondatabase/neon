@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import pytest
+import time
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -211,6 +212,8 @@ def test_ondemand_download_timetravel(
     filled_size = get_resident_physical_size()
     log.info(filled_size)
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
+
+    time.sleep(3)
 
     env.pageserver.stop()
 
