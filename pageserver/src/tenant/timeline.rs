@@ -544,11 +544,9 @@ impl Timeline {
         let mut no_size_cnt = 0;
         for l in layer_map.iter_historic_layers() {
             let (l_size, l_no_size) = l.file_size().map(|s| (s, 0)).unwrap_or((0, 1));
-            info!("Layer {} size {}", l.short_id(), l_size);
             size += l_size;
             no_size_cnt += l_no_size;
         }
-        info!("Total size {} no_size_cnt {}", size, no_size_cnt);
         if no_size_cnt == 0 {
             LayerSizeSum::Accurate(size)
         } else {
