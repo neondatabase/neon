@@ -51,6 +51,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
 use crate::is_uninit_mark;
+use crate::metrics::TENANT_STATE_METRIC;
 use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
 use crate::repository::GcResult;
 use crate::task_mgr;
@@ -1736,7 +1737,33 @@ impl Tenant {
         tenant_id: TenantId,
         remote_storage: Option<GenericRemoteStorage>,
     ) -> Tenant {
-        let (state, _) = watch::channel(state);
+        let (state, mut rx) = watch::channel(state);
+
+        tokio::spawn(async move {
+            let current_state = *rx.borrow_and_update();
+            let tid = tenant_id.to_string();
+            TENANT_STATE_METRIC
+                .with_label_values(&[&tid, current_state.as_str()])
+                .inc();
+            loop {
+                match rx.changed().await {
+                    Ok(()) => {
+                        let new_state = *rx.borrow();
+                        TENANT_STATE_METRIC
+                            .with_label_values(&[&tid, current_state.as_str()])
+                            .dec();
+                        TENANT_STATE_METRIC
+                            .with_label_values(&[&tid, new_state.as_str()])
+                            .inc();
+                    }
+                    Err(_sender_dropped_error) => {
+                        info!("Tenant dropped the state updates sender, quitting waiting for tenant state change");
+                        return;
+                    }
+                }
+            }
+        });
+
         Tenant {
             tenant_id,
             conf,
