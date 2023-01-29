@@ -60,11 +60,11 @@ def test_tenant_reattach(
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    with pg.cursor() as cur:
-        cur.execute("CREATE TABLE t(key int primary key, value text)")
-        cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
-        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t(key int primary key, value text)")
+            cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
     # Wait for the all data to be processed by the pageserver and uploaded in remote storage
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
@@ -91,8 +91,6 @@ def test_tenant_reattach(
     pageserver_http.tenant_detach(tenant_id)
     pageserver_http.tenant_attach(tenant_id)
 
-    import time
-
     time.sleep(1)  # for metrics propagation
 
     ps_metrics = parse_metrics(pageserver_http.get_metrics(), "pageserver")
@@ -102,12 +100,13 @@ def test_tenant_reattach(
 
     assert pageserver_last_record_lsn_before_detach == pageserver_last_record_lsn
 
-    with pg.cursor() as cur:
-        assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
+    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
 
-    # Check that we had to retry the downloads
-    assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
-    assert env.pageserver.log_contains(".*download.*failed, will retry.*")
+        # Check that we had to retry the downloads
+        assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
+        assert env.pageserver.log_contains(".*download.*failed, will retry.*")
 
 
 num_connections = 10
