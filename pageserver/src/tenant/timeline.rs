@@ -945,6 +945,10 @@ impl Timeline {
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
+                .metrics
+                .last_record_gauge
+                .set(disk_consistent_lsn.0 as i64);
+            result
         })
     }
 
