@@ -29,6 +29,14 @@ pub enum TenantState {
     Broken,
 }
 
+pub mod state {
+    pub const LOADING: &str = "loading";
+    pub const ATTACHING: &str = "attaching";
+    pub const ACTIVE: &str = "active";
+    pub const STOPPING: &str = "stopping";
+    pub const BROKEN: &str = "broken";
+}
+
 impl TenantState {
     pub fn has_in_progress_downloads(&self) -> bool {
         match self {
@@ -42,11 +50,11 @@ impl TenantState {
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            TenantState::Loading => "loading",
-            TenantState::Attaching => "attaching",
-            TenantState::Active => "active",
-            TenantState::Stopping => "stopping",
-            TenantState::Broken => "broken",
+            TenantState::Loading => state::LOADING,
+            TenantState::Attaching => state::ATTACHING,
+            TenantState::Active => state::ACTIVE,
+            TenantState::Stopping => state::STOPPING,
+            TenantState::Broken => state::BROKEN,
         }
     }
 }
