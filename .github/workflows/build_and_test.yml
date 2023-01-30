@@ -849,11 +849,11 @@ jobs:
       - name: Cleanup ansible folder
         run: rm -rf ~/.ansible
 
-  deploy-dev:
+  deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     needs: [ push-docker-hub, tag, regress-tests ]
-    if: github.ref_name == 'main' && github.event_name != 'workflow_dispatch'
+    if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -861,11 +861,18 @@ jobs:
           submodules: false
           fetch-depth: 0
 
-      - name: Trigger deploy-dev workflow
+      - name: Trigger deploy workflow
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run deploy-dev.yml --ref ${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}}
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            gh workflow run deploy-dev.yml --ref ${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}}
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            gh workflow run deploy-prod.yml --ref ${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}}
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            exit 1
+          fi
 
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]
