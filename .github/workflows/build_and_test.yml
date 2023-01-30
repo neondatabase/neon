@@ -855,8 +855,8 @@ jobs:
     if: github.ref_name == 'main' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Trigger deploy-dev workflow
-      run: |
-         gh workflow run deploy-dev.yml --ref sergey/redeploy -f dockerTag=2722 -f branch=sergey/redeploy
+        run: |
+          gh workflow run deploy-dev.yml --ref sergey/redeploy -f dockerTag=2722 -f branch=sergey/redeploy
 
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]
