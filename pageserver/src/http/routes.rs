@@ -87,9 +87,7 @@ fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
         PageReconstructError::NeedsDownload(_, _) => {
             // This shouldn't happen, because we use a RequestContext that requests to
             // download any missing layer files on-demand.
-            ApiError::InternalServerError(anyhow::anyhow!(
-                "would need to download remote layer file"
-            ))
+            ApiError::InternalServerError(anyhow::anyhow!("need to download remote layer file"))
         }
         PageReconstructError::Cancelled => {
             ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))

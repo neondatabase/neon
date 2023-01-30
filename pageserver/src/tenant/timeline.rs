@@ -15,6 +15,7 @@ use pageserver_api::models::{
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
 use std::collections::HashMap;
@@ -382,7 +383,7 @@ pub enum PageReconstructError {
     Other(#[from] anyhow::Error), // source and Display delegate to anyhow::Error
 
     /// The operation would require downloading a layer that is missing locally.
-    NeedsDownload(Weak<Timeline>, Weak<RemoteLayer>),
+    NeedsDownload(TenantTimelineId, LayerFileName),
 
     /// The operation was cancelled
     Cancelled,
@@ -396,7 +397,14 @@ impl std::fmt::Debug for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
-            Self::NeedsDownload(_tli, _layer) => write!(f, "needs download"),
+            Self::NeedsDownload(tenant_timeline_id, layer_file_name) => {
+                write!(
+                    f,
+                    "layer {}/{} needs download",
+                    tenant_timeline_id,
+                    layer_file_name.file_name()
+                )
+            }
             Self::Cancelled => write!(f, "cancelled"),
             Self::WalRedo(err) => err.fmt(f),
         }
@@ -407,7 +415,14 @@ impl std::fmt::Display for PageReconstructError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::Other(err) => err.fmt(f),
-            Self::NeedsDownload(_tli, _layer) => write!(f, "needs download"),
+            Self::NeedsDownload(tenant_timeline_id, layer_file_name) => {
+                write!(
+                    f,
+                    "layer {}/{} needs download",
+                    tenant_timeline_id,
+                    layer_file_name.file_name()
+                )
+            }
             Self::Cancelled => write!(f, "cancelled"),
             Self::WalRedo(err) => err.fmt(f),
         }
@@ -1879,8 +1894,8 @@ impl Timeline {
                     }
                     (DownloadBehavior::Error, false) => {
                         return Err(PageReconstructError::NeedsDownload(
-                            timeline.myself.clone(),
-                            Arc::downgrade(&remote_layer),
+                            TenantTimelineId::new(self.tenant_id, self.timeline_id),
+                            remote_layer.file_name.clone(),
                         ))
                     }
                 }
