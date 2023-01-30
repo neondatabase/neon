@@ -133,7 +133,6 @@ pub struct Timeline {
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
-    // Metrics
     metrics: TimelineMetrics,
 
     /// Ensures layers aren't frozen by checkpointer between
@@ -2894,6 +2893,8 @@ impl Timeline {
     /// obsolete.
     ///
     pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+        let timer = self.metrics.garbage_collect_histo.start_timer();
+
         fail_point!("before-timeline-gc");
 
         let _layer_removal_cs = self.layer_removal_cs.lock().await;
@@ -2914,11 +2915,17 @@ impl Timeline {
 
         let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
 
-        self.gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
+        let res = self
+            .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
             .instrument(
                 info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
             )
-            .await
+            .await?;
+
+        // only record successes
+        timer.stop_and_record();
+
+        Ok(res)
     }
 
     async fn gc_timeline(

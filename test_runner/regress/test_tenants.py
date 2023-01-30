@@ -9,6 +9,7 @@ from typing import List
 import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import (
+    PAGESERVER_GLOBAL_METRICS,
     PAGESERVER_PER_TENANT_METRICS,
     PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     parse_metrics,
@@ -160,6 +161,14 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         log.info(
             f"process_start_time_seconds (UTC): {datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)}"
         )
+
+    # Test (a subset of) pageserver global metrics
+    for metric in PAGESERVER_GLOBAL_METRICS:
+        ps_samples = ps_metrics.query_all(metric, {})
+        assert len(ps_samples) > 0
+        for sample in ps_samples:
+            labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
+            log.info(f"{sample.name}{{{labels}}} {sample.value}")
 
 
 @pytest.mark.parametrize(
