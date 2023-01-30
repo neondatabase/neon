@@ -438,7 +438,7 @@ impl StorageTimeMetricsTimer {
 pub struct StorageTimeMetrics {
     timeline_sum: Counter,
     timeline_count: IntCounter,
-    global_histogram: Arc<Histogram>,
+    global_histogram: Histogram,
 }
 
 impl StorageTimeMetrics {
@@ -449,11 +449,9 @@ impl StorageTimeMetrics {
         let timeline_count = STORAGE_TIME_COUNT_PER_TIMELINE
             .get_metric_with_label_values(&[operation, tenant_id, timeline_id])
             .unwrap();
-        let global_histogram = Arc::new(
-            STORAGE_TIME_GLOBAL
-                .get_metric_with_label_values(&[operation])
-                .unwrap(),
-        );
+        let global_histogram = STORAGE_TIME_GLOBAL
+            .get_metric_with_label_values(&[operation])
+            .unwrap();
 
         StorageTimeMetrics {
             timeline_sum,
