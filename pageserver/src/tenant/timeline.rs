@@ -839,6 +839,73 @@ impl Timeline {
             historic_layers,
         }
     }
+
+    pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<bool> {
+        if self.remote_client.is_none() {
+            return Ok(false);
+        }
+        let Some(remote_layer) = self.find_layer(layer_file_name)
+            .and_then(PersistentLayer::downcast_remote_layer)
+        else {
+            return Ok(false);
+        };
+
+        self.download_remote_layer(remote_layer)
+            .await
+            .map(|()| true)
+    }
+
+    pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<bool> {
+        let Some(remote_client) = &self.remote_client
+        else {
+            return Ok(false);
+        };
+        let Some(local_layer) = self.find_layer(layer_file_name)
+        else {
+            return Ok(false);
+        };
+        if local_layer.is_remote_layer() {
+            return Ok(false);
+        }
+
+        // ensure the current layer is uploaded for sure
+        remote_client
+            .wait_completion()
+            .await
+            .context("wait for layer upload ops to complete")?;
+
+        let layer_metadata = LayerFileMetadata::new(
+            local_layer
+                .file_size()
+                .expect("Local layer should have a file size"),
+        );
+        let new_remote_layer = Arc::new(match local_layer.filename() {
+            LayerFileName::Image(image_name) => RemoteLayer::new_img(
+                self.tenant_id,
+                self.timeline_id,
+                &image_name,
+                &layer_metadata,
+            ),
+            LayerFileName::Delta(delta_name) => RemoteLayer::new_delta(
+                self.tenant_id,
+                self.timeline_id,
+                &delta_name,
+                &layer_metadata,
+            ),
+            #[cfg(test)]
+            LayerFileName::Test(_) => unreachable!(),
+        });
+
+        let mut layers = self.layers.write().unwrap();
+        let mut updates = layers.batch_update();
+        local_layer.delete()?;
+        updates.remove_historic(local_layer);
+        updates.insert_historic(new_remote_layer);
+        updates.flush();
+        drop(layers);
+
+        Ok(true)
+    }
 }
 
 // Private functions
@@ -1627,6 +1694,17 @@ impl Timeline {
                 .set(new_current_size.size()),
             Err(e) => error!("Failed to compute current logical size for metrics update: {e:?}"),
         }
+    }
+
+    fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
+        for historic_layer in self.layers.read().unwrap().iter_historic_layers() {
+            let historic_layer_name = historic_layer.filename().file_name();
+            if layer_file_name == historic_layer_name {
+                return Some(historic_layer);
+            }
+        }
+
+        None
     }
 }
 
