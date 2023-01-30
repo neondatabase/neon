@@ -8,17 +8,17 @@ on:
         required: true
         type: string
       deployStorage:
-        description: 'Should storage be deployed'
+        description: 'Deploy storage'
         required: true
         type: boolean
         default: true
       deployProxy:
-        description: 'Should proxy be deployed'
+        description: 'Deploy proxy'
         required: true
         type: boolean
         default: true
       deployStorageBroker:
-        description: 'Should storage-broker be deployed'
+        description: 'Deploy storage-broker'
         required: true
         type: boolean
         default: true
