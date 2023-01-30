@@ -337,7 +337,7 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -405,7 +405,7 @@ jobs:
           DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
 
   coverage-report:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -481,7 +481,7 @@ jobs:
             }"
 
   trigger-e2e-tests:
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
