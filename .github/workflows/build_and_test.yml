@@ -855,6 +855,12 @@ jobs:
 #    needs: [ push-docker-hub, tag, regress-tests ]
 #    if: github.ref_name == 'main' && github.event_name != 'workflow_dispatch'
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
       - name: Trigger deploy-dev workflow
         env:
           GH_TOKEN: ${{ github.token }}
