@@ -1945,9 +1945,7 @@ impl Tenant {
                 // made.
                 break;
             }
-            let timer = timeline.metrics.garbage_collect_histo.start_timer();
             let result = timeline.gc().await?;
-            timer.stop_and_record();
             totals += result;
         }
 
