@@ -3080,23 +3080,23 @@ impl Timeline {
             if let Some(pitr_cutoff_timestamp) = now.checked_sub(pitr) {
                 let pitr_timestamp = to_pg_timestamp(pitr_cutoff_timestamp);
 
-                match self.find_lsn_for_timestamp(pitr_timestamp, ctx).await {
-                    Ok(LsnForTimestamp::Present(lsn)) => lsn,
-                    Ok(LsnForTimestamp::Future(lsn)) => {
+                match self.find_lsn_for_timestamp(pitr_timestamp, ctx).await? {
+                    LsnForTimestamp::Present(lsn) => lsn,
+                    LsnForTimestamp::Future(lsn) => {
                         // The timestamp is in the future. That sounds impossible,
                         // but what it really means is that there hasn't been
                         // any commits since the cutoff timestamp.
                         debug!("future({})", lsn);
                         cutoff_horizon
                     }
-                    Ok(LsnForTimestamp::Past(lsn)) => {
+                    LsnForTimestamp::Past(lsn) => {
                         debug!("past({})", lsn);
                         // conservative, safe default is to remove nothing, when we
                         // have no commit timestamp data available
                         *self.get_latest_gc_cutoff_lsn()
                     }
-                    _ => {
-                        //debug!("nodata({})", lsn);
+                    LsnForTimestamp::NoData(lsn) => {
+                        debug!("nodata({})", lsn);
                         // conservative, safe default is to remove nothing, when we
                         // have no commit timestamp data available
                         *self.get_latest_gc_cutoff_lsn()
