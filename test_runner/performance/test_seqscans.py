@@ -35,11 +35,17 @@ from pytest_lazyfixture import lazy_fixture  # type: ignore
     ],
 )
 def test_seqscans(env: PgCompare, scale: int, rows: int, iters: int, workers: int):
-    rows = scale * rows
+    rows = scale * rows * 10
 
     with closing(env.pg.connect(options="-cstatement_timeout=0")) as conn:
         with conn.cursor() as cur:
+            cur.execute("set enable_seqscan_prefetch=on")
+            cur.execute("set max_parallel_workers_per_gather=0")
+
             cur.execute("drop table if exists t;")
+
+
+
             cur.execute("create table t (i integer);")
             cur.execute(f"insert into t values (generate_series(1,{rows}));")
 
@@ -62,4 +68,11 @@ def test_seqscans(env: PgCompare, scale: int, rows: int, iters: int, workers: in
 
             with env.record_duration("run"):
                 for i in range(iters):
-                    cur.execute("select count(*) from t;")
+                    cur.execute("explain (analyze, prefetch) select count(*) from t;")
+                    result = cur.fetchall()
+                    prefetch_stats = result[1][0]
+
+                    import re
+                    regex = re.compile(r'([\S]+)=(\S+)')
+                    parsed = dict(regex.findall(prefetch_stats))
+                    print("FFFF", parsed)
