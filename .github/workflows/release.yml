@@ -1,0 +1,33 @@
+name: Create Release Branch
+
+on:
+  schedule:
+    - cron: '0 10 * * 2'
+
+jobs:
+  create_release_branch:
+    runs-on: [ubuntu-latest]
+
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v3
+      with:
+        ref: main
+
+    - name: Get current date
+      id: date
+      run: echo "::set-output name=date::$(date +'%Y-%m-%d')"
+
+    - name: Create release branch
+      run: git checkout -b release/${{ steps.date.outputs.date }}
+
+    - name: Push new branch
+      run: git push origin release/${{ steps.date.outputs.date }}
+
+    - name: Create pull request into release
+      uses: thomaseizinger/create-pull-request@1
+      with:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        head: release/${{ steps.date.outputs.date }}
+        base: release
+        title: Release ${{ steps.date.outputs.date }}
