@@ -4,9 +4,10 @@ mod tests;
 use crate::{
     auth::{self, backend::AuthSuccess},
     cancellation::{self, CancelMap},
-    compute::{ConnectionError, PostgresConnection},
+    compute::{self, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, messages::MetricsAuxInfo},
+    error::io_error,
     stream::{MeasuredStream, PqStream, Stream},
 };
 use anyhow::{bail, Context};
@@ -17,6 +18,9 @@ use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, info_span, warn, Instrument};
+
+/// Number of times we should retry the `/proxy_wake_compute` http request.
+const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -93,6 +97,7 @@ pub async fn task_main(
     }
 }
 
+// TODO(tech debt): unite this with its twin below.
 pub async fn handle_ws_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
@@ -237,41 +242,74 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-/// Try connecting to the compute node.
-async fn connect_to_compute(
-    node: &console::CachedNodeInfo,
-) -> Result<PostgresConnection, ConnectionError> {
-    let invalidate_cache = || {
-        let is_cached = node.cached();
+/// Try to connect to the compute node once.
+async fn connect_to_compute_once(
+    node_info: &console::CachedNodeInfo,
+) -> Result<PostgresConnection, compute::ConnectionError> {
+    // If we couldn't connect, a cached connection info might be to blame
+    // (e.g. the compute node's address might've changed at the wrong time).
+    // Invalidate the cache entry (if any) to prevent subsequent errors.
+    let invalidate_cache = |_: &compute::ConnectionError| {
+        let is_cached = node_info.cached();
+        if is_cached {
+            warn!("invalidating stalled compute node info cache entry");
+            node_info.invalidate();
+        }
 
         let label = match is_cached {
             true => "compute_cached",
             false => "compute_uncached",
         };
         NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
-
-        // If we couldn't connect, a cached connection info might be to blame
-        // (e.g. the compute node's address might've changed at the wrong time).
-        // Invalidate the cache entry (if any) to prevent subsequent errors.
-        if is_cached {
-            warn!("invalidating stalled compute node info cache entry");
-            node.invalidate();
-        }
     };
 
-    node.config
+    node_info
+        .config
         .connect()
-        .inspect_err(|_| invalidate_cache())
+        .inspect_err(invalidate_cache)
         .await
+}
+
+/// Try to connect to the compute node, retrying if necessary.
+async fn connect_to_compute(
+    node_info: &mut console::CachedNodeInfo,
+    params: &StartupMessageParams,
+    extra: &console::ConsoleReqExtra<'_>,
+    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
+) -> Result<PostgresConnection, compute::ConnectionError> {
+    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
+    loop {
+        // Apply startup params to the (possibly, cached) compute node info.
+        node_info.config.update(params);
+        let res = connect_to_compute_once(node_info)
+            .instrument(info_span!("connect_to_compute_once"))
+            .await;
+
+        match res {
+            Err(e) if num_retries > 0 => {
+                match creds.wake_compute(extra).await.map_err(io_error)? {
+                    // Update `node_info` and try one more time.
+                    Some(new) => *node_info = new,
+                    // Link auth doesn't work that way, so we just exit.
+                    None => return Err(e),
+                }
+            }
+            other => return other,
+        }
+
+        num_retries -= 1;
+    }
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 async fn prepare_client_connection(
-    node: &PostgresConnection,
+    node: &compute::PostgresConnection,
     reported_auth_ok: bool,
     session: cancellation::Session<'_>,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> anyhow::Result<()> {
+    // Register compute's query cancellation token and produce a new, unique one.
+    // The new token (cancel_key_data) will be sent to the client.
     let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
 
     // Report authentication success if we haven't done this already.
@@ -359,7 +397,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
         let Self {
             mut stream,
-            creds,
+            mut creds,
             params,
             session_id,
         } = self;
@@ -382,8 +420,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             value: mut node_info,
         } = auth_result;
 
-        node_info.config.update(params);
-        let node = connect_to_compute(&node_info)
+        let node = connect_to_compute(&mut node_info, params, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .instrument(info_span!("connect_to_compute"))
             .await?;

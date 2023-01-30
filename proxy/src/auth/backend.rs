@@ -1,6 +1,7 @@
 mod classic;
 
 mod link;
+use futures::TryFutureExt;
 pub use link::LinkAuthError;
 
 use crate::{
@@ -149,28 +150,28 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
 
         // TODO: find a proper way to merge those very similar blocks.
         let (mut node, payload) = match self {
-            Console(endpoint, creds) if creds.project.is_none() => {
+            Console(api, creds) if creds.project.is_none() => {
                 let payload = fetch_magic_payload(client).await?;
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());
-                let node = endpoint.wake_compute(extra, &creds).await?;
+                let node = api.wake_compute(extra, &creds).await?;
 
                 (node, payload)
             }
             // This is a hack to allow cleartext password in secure connections (wss).
-            Console(endpoint, creds) if creds.use_cleartext_password_flow => {
+            Console(api, creds) if creds.use_cleartext_password_flow => {
                 let payload = fetch_plaintext_password(client).await?;
-                let node = endpoint.wake_compute(extra, creds).await?;
+                let node = api.wake_compute(extra, creds).await?;
 
                 (node, payload)
             }
-            Postgres(endpoint, creds) if creds.project.is_none() => {
+            Postgres(api, creds) if creds.project.is_none() => {
                 let payload = fetch_magic_payload(client).await?;
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());
-                let node = endpoint.wake_compute(extra, &creds).await?;
+                let node = api.wake_compute(extra, &creds).await?;
 
                 (node, payload)
             }
@@ -186,7 +187,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
 
     /// Authenticate the client via the requested backend, possibly using credentials.
     pub async fn authenticate<'a>(
-        mut self,
+        &mut self,
         extra: &'a ConsoleReqExtra<'a>,
         client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
@@ -200,7 +201,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
         }
 
         let res = match self {
-            Console(endpoint, creds) => {
+            Console(api, creds) => {
                 info!(
                     user = creds.user,
                     project = creds.project(),
@@ -208,19 +209,19 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
                 );
 
                 assert!(creds.project.is_some());
-                classic::handle_user(endpoint.as_ref(), extra, &creds, client).await?
+                classic::handle_user(api.as_ref(), extra, creds, client).await?
             }
-            Postgres(endpoint, creds) => {
+            Postgres(api, creds) => {
                 info!("performing mock authentication using a local postgres instance");
 
                 assert!(creds.project.is_some());
-                classic::handle_user(endpoint.as_ref(), extra, &creds, client).await?
+                classic::handle_user(api.as_ref(), extra, creds, client).await?
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
                 info!("performing link authentication");
 
-                link::handle_user(&url, client)
+                link::handle_user(url, client)
                     .await?
                     .map(CachedNodeInfo::new_uncached)
             }
@@ -228,5 +229,20 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
 
         info!("user successfully authenticated");
         Ok(res)
+    }
+
+    /// When applicable, wake the compute node, gaining its connection info in the process.
+    /// The link auth flow doesn't support this, so we return [`None`] in that case.
+    pub async fn wake_compute<'a>(
+        &self,
+        extra: &'a ConsoleReqExtra<'a>,
+    ) -> Result<Option<CachedNodeInfo>, console::errors::WakeComputeError> {
+        use BackendType::*;
+
+        match self {
+            Console(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
+            Postgres(api, creds) => api.wake_compute(extra, creds).map_ok(Some).await,
+            Link(_) => Ok(None),
+        }
     }
 }
