@@ -413,6 +413,7 @@ pub static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Similar to [`prometheus::HistogramTimer`] but doesn't apply the recording on drop.
 pub struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
     start: Instant,
@@ -434,10 +435,15 @@ impl StorageTimeMetricsTimer {
     }
 }
 
+/// Timing facilities for an globally histogrammed metric, which is supported by per tenant and
+/// timeline total sum and count.
 #[derive(Clone, Debug)]
 pub struct StorageTimeMetrics {
+    /// Sum of f64 seconds, per operation, tenant_id and timeline_id
     timeline_sum: Counter,
+    /// Number of oeprations, per operation, tenant_id and timeline_id
     timeline_count: IntCounter,
+    /// Global histogram having only the "operation" label.
     global_histogram: Histogram,
 }
 
