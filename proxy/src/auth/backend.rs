@@ -1,49 +1,39 @@
-mod postgres;
+mod classic;
 
 mod link;
 pub use link::LinkAuthError;
 
-mod console;
-pub use console::{GetAuthInfoError, WakeComputeError};
-
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
-    cache::{timed_lru, TimedLru},
-    compute,
-    console::messages::MetricsAuxInfo,
-    http, mgmt, stream, url,
-    waiters::{self, Waiter, Waiters},
+    console::{
+        self,
+        provider::{CachedNodeInfo, ConsoleReqExtra},
+        Api,
+    },
+    stream, url,
 };
-use once_cell::sync::Lazy;
-use std::{borrow::Cow, sync::Arc};
+use std::borrow::Cow;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
-static CPLANE_WAITERS: Lazy<Waiters<mgmt::ComputeReady>> = Lazy::new(Default::default);
-
-/// Give caller an opportunity to wait for the cloud's reply.
-pub async fn with_waiter<R, T, E>(
-    psql_session_id: impl Into<String>,
-    action: impl FnOnce(Waiter<'static, mgmt::ComputeReady>) -> R,
-) -> Result<T, E>
-where
-    R: std::future::Future<Output = Result<T, E>>,
-    E: From<waiters::RegisterError>,
-{
-    let waiter = CPLANE_WAITERS.register(psql_session_id.into())?;
-    action(waiter).await
+/// A product of successful authentication.
+pub struct AuthSuccess<T> {
+    /// Did we send [`pq_proto::BeMessage::AuthenticationOk`] to client?
+    pub reported_auth_ok: bool,
+    /// Something to be considered a positive result.
+    pub value: T,
 }
 
-pub fn notify(psql_session_id: &str, msg: mgmt::ComputeReady) -> Result<(), waiters::NotifyError> {
-    CPLANE_WAITERS.notify(psql_session_id, msg)
-}
-
-/// Extra query params we'd like to pass to the console.
-pub struct ConsoleReqExtra<'a> {
-    /// A unique identifier for a connection.
-    pub session_id: uuid::Uuid,
-    /// Name of client application, if set.
-    pub application_name: Option<&'a str>,
+impl<T> AuthSuccess<T> {
+    /// Very similar to [`std::option::Option::map`].
+    /// Maps [`AuthSuccess<T>`] to [`AuthSuccess<R>`] by applying
+    /// a function to a contained value.
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> AuthSuccess<R> {
+        AuthSuccess {
+            reported_auth_ok: self.reported_auth_ok,
+            value: f(self.value),
+        }
+    }
 }
 
 /// This type serves two purposes:
@@ -54,12 +44,11 @@ pub struct ConsoleReqExtra<'a> {
 /// * However, when we substitute `T` with [`ClientCredentials`],
 ///   this helps us provide the credentials only to those auth
 ///   backends which require them for the authentication process.
-#[derive(Debug)]
 pub enum BackendType<'a, T> {
     /// Current Cloud API (V2).
-    Console(Cow<'a, http::Endpoint>, T),
+    Console(Cow<'a, console::provider::neon::Api>, T),
     /// Local mock of Cloud API (V2).
-    Postgres(Cow<'a, url::ApiUrl>, T),
+    Postgres(Cow<'a, console::provider::mock::Api>, T),
     /// Authentication via a web browser.
     Link(Cow<'a, url::ApiUrl>),
 }
@@ -68,14 +57,8 @@ impl std::fmt::Display for BackendType<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use BackendType::*;
         match self {
-            Console(endpoint, _) => fmt
-                .debug_tuple("Console")
-                .field(&endpoint.url().as_str())
-                .finish(),
-            Postgres(endpoint, _) => fmt
-                .debug_tuple("Postgres")
-                .field(&endpoint.as_str())
-                .finish(),
+            Console(endpoint, _) => fmt.debug_tuple("Console").field(&endpoint.url()).finish(),
+            Postgres(endpoint, _) => fmt.debug_tuple("Postgres").field(&endpoint.url()).finish(),
             Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
         }
     }
@@ -121,48 +104,6 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
     }
 }
 
-/// A product of successful authentication.
-pub struct AuthSuccess<T> {
-    /// Did we send [`pq_proto::BeMessage::AuthenticationOk`] to client?
-    pub reported_auth_ok: bool,
-    /// Something to be considered a positive result.
-    pub value: T,
-}
-
-impl<T> AuthSuccess<T> {
-    /// Very similar to [`std::option::Option::map`].
-    /// Maps [`AuthSuccess<T>`] to [`AuthSuccess<R>`] by applying
-    /// a function to a contained value.
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> AuthSuccess<R> {
-        AuthSuccess {
-            reported_auth_ok: self.reported_auth_ok,
-            value: f(self.value),
-        }
-    }
-}
-
-/// Info for establishing a connection to a compute node.
-/// This is what we get after auth succeeded, but not before!
-#[derive(Clone)]
-pub struct NodeInfo {
-    /// Compute node connection params.
-    /// It's sad that we have to clone this, but this will improve
-    /// once we migrate to a bespoke connection logic.
-    pub config: compute::ConnCfg,
-
-    /// Labels for proxy's metrics.
-    pub aux: Arc<MetricsAuxInfo>,
-}
-
-pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
-pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
-
-/// Various caches for [`console`].
-pub struct ApiCaches {
-    /// Cache for the `wake_compute` API method.
-    pub node_info: NodeInfoCache,
-}
-
 // TODO: get rid of explicit lifetimes in this block (there's a bug in rustc).
 // Read more: https://github.com/rust-lang/rust/issues/99190
 // Alleged fix: https://github.com/rust-lang/rust/pull/89056
@@ -170,7 +111,6 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
     /// Do something special if user didn't provide the `project` parameter.
     async fn try_password_hack<'a>(
         &'a mut self,
-        caches: &'static ApiCaches,
         extra: &'a ConsoleReqExtra<'a>,
         client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> auth::Result<Option<AuthSuccess<CachedNodeInfo>>> {
@@ -214,19 +154,14 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());
-                let node = console::Api::new(endpoint, extra, &creds, caches)
-                    .wake_compute()
-                    .await?;
+                let node = endpoint.wake_compute(extra, &creds).await?;
 
                 (node, payload)
             }
             // This is a hack to allow cleartext password in secure connections (wss).
             Console(endpoint, creds) if creds.use_cleartext_password_flow => {
                 let payload = fetch_plaintext_password(client).await?;
-                let creds = creds.as_ref();
-                let node = console::Api::new(endpoint, extra, &creds, caches)
-                    .wake_compute()
-                    .await?;
+                let node = endpoint.wake_compute(extra, creds).await?;
 
                 (node, payload)
             }
@@ -235,7 +170,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
 
                 let mut creds = creds.as_ref();
                 creds.project = Some(payload.project.as_str().into());
-                let node = postgres::Api::new(endpoint, &creds).wake_compute().await?;
+                let node = endpoint.wake_compute(extra, &creds).await?;
 
                 (node, payload)
             }
@@ -252,7 +187,6 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
     /// Authenticate the client via the requested backend, possibly using credentials.
     pub async fn authenticate<'a>(
         mut self,
-        caches: &'static ApiCaches,
         extra: &'a ConsoleReqExtra<'a>,
         client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
@@ -260,7 +194,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
 
         // Handle cases when `project` is missing in `creds`.
         // TODO: type safety: return `creds` with irrefutable `project`.
-        if let Some(res) = self.try_password_hack(caches, extra, client).await? {
+        if let Some(res) = self.try_password_hack(extra, client).await? {
             info!("user successfully authenticated (using the password hack)");
             return Ok(res);
         }
@@ -274,17 +208,13 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
                 );
 
                 assert!(creds.project.is_some());
-                console::Api::new(&endpoint, extra, &creds, caches)
-                    .handle_user(client)
-                    .await?
+                classic::handle_user(endpoint.as_ref(), extra, &creds, client).await?
             }
             Postgres(endpoint, creds) => {
                 info!("performing mock authentication using a local postgres instance");
 
                 assert!(creds.project.is_some());
-                postgres::Api::new(&endpoint, &creds)
-                    .handle_user(client)
-                    .await?
+                classic::handle_user(endpoint.as_ref(), extra, &creds, client).await?
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {

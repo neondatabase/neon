@@ -6,7 +6,6 @@ pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
-    pub api_caches: auth::caches::ApiCaches,
 }
 
 pub struct MetricCollectionConfig {
@@ -38,6 +37,7 @@ pub fn configure_tls(key_path: &str, cert_path: &str) -> anyhow::Result<TlsConfi
 
     let cert_chain_bytes = std::fs::read(cert_path)
         .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
+
     let cert_chain = {
         rustls_pemfile::certs(&mut &cert_chain_bytes[..])
             .context(format!(

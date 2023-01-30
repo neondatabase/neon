@@ -2,14 +2,11 @@
 mod tests;
 
 use crate::{
-    auth::{
-        self,
-        backend::{AuthSuccess, CachedNodeInfo},
-    },
+    auth::{self, backend::AuthSuccess},
     cancellation::{self, CancelMap},
     compute::{ConnectionError, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
-    console::messages::MetricsAuxInfo,
+    console::{self, messages::MetricsAuxInfo},
     stream::{MeasuredStream, PqStream, Stream},
 };
 use anyhow::{bail, Context};
@@ -131,7 +128,7 @@ pub async fn handle_ws_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id, &config.api_caches);
+    let client = Client::new(stream, creds, &params, session_id);
     cancel_map
         .with_session(|session| client.connect_to_db(session))
         .await
@@ -169,7 +166,7 @@ async fn handle_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id, &config.api_caches);
+    let client = Client::new(stream, creds, &params, session_id);
     cancel_map
         .with_session(|session| client.connect_to_db(session))
         .await
@@ -241,7 +238,9 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Try connecting to the compute node.
-async fn connect_to_compute(node: &CachedNodeInfo) -> Result<PostgresConnection, ConnectionError> {
+async fn connect_to_compute(
+    node: &console::CachedNodeInfo,
+) -> Result<PostgresConnection, ConnectionError> {
     node.config
         .connect()
         .inspect_err(|_| {
@@ -334,8 +333,6 @@ struct Client<'a, S> {
     params: &'a StartupMessageParams,
     /// Unique connection ID.
     session_id: uuid::Uuid,
-    /// Varous caches for the cloud API responses.
-    caches: &'static auth::caches::ApiCaches,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -345,13 +342,11 @@ impl<'a, S> Client<'a, S> {
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
-        caches: &'static auth::caches::ApiCaches,
     ) -> Self {
         Self {
             stream,
             creds,
             params,
-            caches,
             session_id,
         }
     }
@@ -365,17 +360,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             creds,
             params,
             session_id,
-            caches,
         } = self;
 
-        let extra = auth::ConsoleReqExtra {
+        let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
             application_name: params.get("application_name"),
         };
 
         let auth_result = async {
             // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds.authenticate(caches, &extra, &mut stream).await;
+            let res = creds.authenticate(&extra, &mut stream).await;
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
         .instrument(info_span!("auth"))

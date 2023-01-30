@@ -13,7 +13,6 @@ mod console;
 mod error;
 mod http;
 mod metrics;
-mod mgmt;
 mod parse;
 mod proxy;
 mod sasl;
@@ -74,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let mut tasks = vec![
         tokio::spawn(http::server::task_main(http_listener)),
         tokio::spawn(proxy::task_main(config, proxy_listener)),
-        tokio::task::spawn_blocking(move || mgmt::thread_main(mgmt_listener)),
+        tokio::task::spawn_blocking(move || console::mgmt::thread_main(mgmt_listener)),
     ];
 
     if let Some(wss_address) = args.get_one::<String>("wss") {
@@ -140,13 +139,26 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
 
     let auth_backend = match args.get_one::<String>("auth-backend").unwrap().as_str() {
         "console" => {
+            let config::CacheOptions { size, ttl } = args
+                .get_one::<String>("wake-compute-cache")
+                .unwrap()
+                .parse()?;
+
+            info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
+            let caches = Box::leak(Box::new(console::caches::ApiCaches {
+                node_info: console::caches::NodeInfoCache::new(size, ttl),
+            }));
+
             let url = args.get_one::<String>("auth-endpoint").unwrap().parse()?;
             let endpoint = http::Endpoint::new(url, reqwest::Client::new());
-            auth::BackendType::Console(Cow::Owned(endpoint), ())
+
+            let api = console::provider::neon::Api::new(endpoint, caches);
+            auth::BackendType::Console(Cow::Owned(api), ())
         }
         "postgres" => {
             let url = args.get_one::<String>("auth-endpoint").unwrap().parse()?;
-            auth::BackendType::Postgres(Cow::Owned(url), ())
+            let api = console::provider::mock::Api::new(url);
+            auth::BackendType::Postgres(Cow::Owned(api), ())
         }
         "link" => {
             let url = args.get_one::<String>("uri").unwrap().parse()?;
@@ -155,25 +167,10 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         other => bail!("unsupported auth backend: {other}"),
     };
 
-    let wake_compute_cache = {
-        let config::CacheOptions { size, ttl } = args
-            .get_one::<String>("wake-compute-cache")
-            .unwrap()
-            .parse()?;
-
-        info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
-        auth::caches::NodeInfoCache::new(size, ttl)
-    };
-
-    let api_caches = auth::caches::ApiCaches {
-        node_info: wake_compute_cache,
-    };
-
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
         auth_backend,
         metric_collection,
-        api_caches,
     }));
 
     Ok(config)

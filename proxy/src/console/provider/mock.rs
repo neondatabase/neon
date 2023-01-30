@@ -1,5 +1,6 @@
+//! Mock console backend which relies on a user-provided postgres instance.
+
 use super::{
-    super::messages::ConsoleError,
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
@@ -27,21 +28,22 @@ impl From<tokio_postgres::Error> for ApiError {
     }
 }
 
-pub struct Api<'a> {
-    endpoint: &'a ApiUrl,
+#[derive(Clone)]
+pub struct Api {
+    endpoint: ApiUrl,
 }
 
-impl<'a> Api<'a> {
-    /// Construct an API object containing the auth parameters.
-    pub fn new(endpoint: &'a ApiUrl) -> Self {
+impl Api {
+    pub fn new(endpoint: ApiUrl) -> Self {
         Self { endpoint }
     }
-}
 
-impl Api<'_> {
+    pub fn url(&self) -> &str {
+        self.endpoint.as_str()
+    }
+
     async fn do_get_auth_info(
         &self,
-        extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
     ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
         async {
@@ -82,7 +84,6 @@ impl Api<'_> {
 
     async fn do_wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
     ) -> Result<NodeInfo, WakeComputeError> {
         let mut config = compute::ConnCfg::new();
@@ -102,49 +103,24 @@ impl Api<'_> {
 }
 
 #[async_trait]
-impl super::Api for Api<'_> {
+impl super::Api for Api {
     async fn get_auth_info(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        _extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
     ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
-        self.do_get_auth_info(extra, creds).await
+        self.do_get_auth_info(creds).await
     }
 
     async fn wake_compute(
         &self,
-        extra: &ConsoleReqExtra<'_>,
+        _extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        self.do_wake_compute(extra, creds)
+        self.do_wake_compute(creds)
             .map_ok(CachedNodeInfo::new_uncached)
             .await
     }
-}
-
-/// Parse http response body, taking status code into account.
-async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
-    response: reqwest::Response,
-) -> Result<T, ApiError> {
-    let status = response.status();
-    if status.is_success() {
-        // We shouldn't log raw body because it may contain secrets.
-        info!("request succeeded, processing the body");
-        return Ok(response.json().await?);
-    }
-
-    // Don't throw an error here because it's not as important
-    // as the fact that the request itself has failed.
-    let body = response.json().await.unwrap_or_else(|e| {
-        warn!("failed to parse error body: {e}");
-        ConsoleError {
-            error: "reason unclear (malformed error message)".into(),
-        }
-    });
-
-    let text = body.error;
-    error!("console responded with an error ({status}): {text}");
-    Err(ApiError::Console { status, text })
 }
 
 fn parse_md5(input: &str) -> Option<[u8; 16]> {

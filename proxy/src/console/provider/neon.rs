@@ -1,3 +1,5 @@
+//! Production console backend.
+
 use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
@@ -9,19 +11,22 @@ use futures::TryFutureExt;
 use reqwest::StatusCode as HttpStatusCode;
 use tracing::{error, info, info_span, warn, Instrument};
 
-pub struct Api<'a> {
-    endpoint: &'a http::Endpoint,
+#[derive(Clone)]
+pub struct Api {
+    endpoint: http::Endpoint,
     caches: &'static ApiCaches,
 }
 
-impl<'a> Api<'a> {
+impl Api {
     /// Construct an API object containing the auth parameters.
-    pub fn new(endpoint: &'a http::Endpoint, caches: &'static ApiCaches) -> Self {
+    pub fn new(endpoint: http::Endpoint, caches: &'static ApiCaches) -> Self {
         Self { endpoint, caches }
     }
-}
 
-impl Api<'_> {
+    pub fn url(&self) -> &str {
+        self.endpoint.url().as_str()
+    }
+
     async fn do_get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
@@ -113,7 +118,7 @@ impl Api<'_> {
 }
 
 #[async_trait]
-impl super::Api for Api<'_> {
+impl super::Api for Api {
     async fn get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,

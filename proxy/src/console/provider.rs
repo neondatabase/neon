@@ -1,5 +1,5 @@
-mod mock;
-mod neon;
+pub mod mock;
+pub mod neon;
 
 use super::messages::MetricsAuxInfo;
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
 use async_trait::async_trait;
 use std::sync::Arc;
 
-mod errors {
+pub mod errors {
     use crate::error::{io_error, UserFacingError};
     use reqwest::StatusCode as HttpStatusCode;
     use thiserror::Error;
@@ -105,7 +105,6 @@ mod errors {
             }
         }
     }
-
     #[derive(Debug, Error)]
     pub enum WakeComputeError {
         #[error("Console responded with a malformed compute address: {0}")]
