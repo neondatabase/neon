@@ -167,9 +167,8 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         ps_samples = ps_metrics.query_all(metric, {})
         assert len(ps_samples) > 0
         for sample in ps_samples:
-            labels_str = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
-            line = "{0}{{{1}}} {2}".format(sample.name, labels_str, sample.value)
-            log.info(line)
+            labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
+            log.info(f"{sample.name}{{{labels}}} {sample.value}")
 
 
 @pytest.mark.parametrize(
