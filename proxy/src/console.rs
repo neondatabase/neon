@@ -3,3 +3,6 @@
 
 /// Payloads used in the console's APIs.
 pub mod messages;
+
+/// Wrappers for console APIs and their mocks.
+pub mod backend;

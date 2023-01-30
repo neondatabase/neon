@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 atty.workspace = true
 base64.workspace = true
 bstr.workspace = true
@@ -58,7 +59,6 @@ x509-parser.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
