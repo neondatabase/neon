@@ -241,25 +241,27 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 async fn connect_to_compute(
     node: &console::CachedNodeInfo,
 ) -> Result<PostgresConnection, ConnectionError> {
+    let invalidate_cache = || {
+        let is_cached = node.cached();
+
+        let label = match is_cached {
+            true => "compute_cached",
+            false => "compute_uncached",
+        };
+        NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+
+        // If we couldn't connect, a cached connection info might be to blame
+        // (e.g. the compute node's address might've changed at the wrong time).
+        // Invalidate the cache entry (if any) to prevent subsequent errors.
+        if is_cached {
+            warn!("invalidating stalled compute node info cache entry");
+            node.invalidate();
+        }
+    };
+
     node.config
         .connect()
-        .inspect_err(|_| {
-            let is_cached = node.cached();
-
-            let label = match is_cached {
-                true => "compute_cached",
-                false => "compute_uncached",
-            };
-            NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
-
-            // If we couldn't connect, a cached connection info might be to blame
-            // (e.g. the compute node's address might've changed at the wrong time).
-            // Invalidate the cache entry (if any) to prevent subsequent errors.
-            if is_cached {
-                warn!("invalidating stalled compute node info cache entry");
-                node.invalidate();
-            }
-        })
+        .inspect_err(|_| invalidate_cache())
         .await
 }
 
