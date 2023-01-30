@@ -211,8 +211,9 @@ services:
     environment:
       - NODE_ID=1
       - CONNECT_PG=postgresql://cloud_admin@compute-r1:55433/postgres
-      - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000
-      #- RUST_LOG=debug
+      - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000,http://xactserver-r3:23000
+      # - RUST_LOG=debug
+      # - RUST_BACKTRACE=1
     extra_hosts:
       - xactserver-r1:0.0.0.0
     entrypoint:
@@ -350,8 +351,9 @@ services:
     environment:
       - NODE_ID=2
       - CONNECT_PG=postgresql://cloud_admin@compute-r2:55433/postgres
-      - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000
-      #- RUST_LOG=debug
+      - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000,http://xactserver-r3:23000
+      # - RUST_LOG=debug
+      # - RUST_BACKTRACE=1
     extra_hosts:
       - xactserver-r2:0.0.0.0
     deploy:
@@ -384,3 +386,115 @@ services:
         constraints:
           - node.labels.has_compute==true
           - node.labels.region==2
+
+  #############################################
+  #                 REGION 3                  #
+  #############################################
+  pageserver-r3:
+    <<: *pageserver
+    environment:
+      - BROKER_ENDPOINT='http://storage_broker:50051'
+      - LISTEN_PG_ADDR=6400
+      - LISTEN_HTTP_ADDR=9898
+      #- RUST_BACKTRACE=1
+      #- RUST_LOG=debug
+    ports:
+       #- 6400:6400  # pg protocol handler
+       - 9900:9898 # http endpoints
+    deploy:
+      placement:
+        constraints:
+          - node.labels.has_pageserver==true
+          - node.labels.region==3
+
+  safekeeper-r3-1:
+    <<: *safekeeper
+    environment:
+      - SAFEKEEPER_ADVERTISE_URL=safekeeper-r3-1:5454
+      - SAFEKEEPER_ID=1
+      - BROKER_ENDPOINT=http://storage_broker:50051
+      #- RUST_BACKTRACE=1
+      #- RUST_LOG=debug
+    extra_hosts:
+      - safekeeper-r3-1:0.0.0.0
+    ports: []
+    deploy:
+      placement:
+        constraints:
+          - node.labels.has_safekeeper1==true
+          - node.labels.region==3
+
+  # safekeeper-r3-2:
+  #   <<: *safekeeper
+  #   environment:
+  #     - SAFEKEEPER_ADVERTISE_URL=safekeeper-r3-2:5454
+  #     - SAFEKEEPER_ID=2
+  #     - BROKER_ENDPOINT=http://storage_broker:50051
+  #     #- RUST_BACKTRACE=1
+  #     #- RUST_LOG=debug
+  #   extra_hosts:
+  #     - safekeeper-r3-2:0.0.0.0
+  #   ports: []
+  #   deploy:
+  #     placement:
+  #       constraints:
+  #         - node.labels.has_safekeeper2==true
+  #         - node.labels.region==3
+
+  # safekeeper-r3-3:
+  #   <<: *safekeeper
+  #   environment:
+  #     - SAFEKEEPER_ADVERTISE_URL=safekeeper-r3-3:5454
+  #     - SAFEKEEPER_ID=3
+  #     - BROKER_ENDPOINT=http://storage_broker:50051
+  #     #- RUST_BACKTRACE=1
+  #     #- RUST_LOG=debug
+  #   extra_hosts:
+  #     - safekeeper-r3-3:0.0.0.0
+  #   ports: []
+  #   deploy:
+  #     placement:
+  #       constraints:
+  #         - node.labels.has_safekeeper3==true
+  #         - node.labels.region==3
+
+  xactserver-r3:
+    <<: *xactserver
+    environment:
+      - NODE_ID=3
+      - CONNECT_PG=postgresql://cloud_admin@compute-r3:55433/postgres
+      - NODES=http://xactserver-r1:23000,http://xactserver-r2:23000,http://xactserver-r3:23000
+      # - RUST_LOG=debug
+      # - RUST_BACKTRACE=1
+    extra_hosts:
+      - xactserver-r3:0.0.0.0
+    deploy:
+      placement:
+        constraints:
+          - node.labels.has_xactserver==true
+          - node.labels.region==3
+
+  compute-r3:
+    <<: *compute
+    environment:
+      - PG_VERSION=${PG_VERSION:-14}
+      - PAGESERVER_HOST=pageserver-r3
+      - SAFEKEEPERS_ADDR=safekeeper-r3-1:5454
+      # - SAFEKEEPERS_ADDR=safekeeper-r3-1:5454,safekeeper-r3-2:5454,safekeeper-r3-3:5454
+      - REGION=3
+      - XACTSERVER=xactserver-r3:10000
+      #- RUST_BACKTRACE=1
+    ports:
+      - 55435:55433 # pg protocol handler
+      - 3082:3080 # http endpoints
+    depends_on:
+      - safekeeper-r3-1
+      # - safekeeper-r3-2
+      # - safekeeper-r3-3
+      - pageserver-r3
+      - xactserver-r3
+    deploy:
+      placement:
+        constraints:
+          - node.labels.has_compute==true
+          - node.labels.region==3

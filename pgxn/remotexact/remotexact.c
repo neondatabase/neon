@@ -498,7 +498,7 @@ rx_execute_remote_xact(void)
 	PQfreemem(resp_buf.data);
 
 	if (!committed)
-		ereport(ERROR, errmsg("[remotexact] validation failed"));
+		ereport(ERROR, errmsg("[remotexact] validation failed or an error has occured during commit"));
 }
 
 /*

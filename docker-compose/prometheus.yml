@@ -1,5 +1,5 @@
 global:
-  scrape_interval:     15s # By default, scrape targets every 15 seconds.
+  scrape_interval:     5s # By default, scrape targets every 5 seconds.
 
 # A scrape configuration containing exactly one endpoint to scrape:
 # Here it's Prometheus itself.
@@ -7,8 +7,8 @@ scrape_configs:
   # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
   - job_name: 'xactserver'
 
-    # Override the global default and scrape targets from this job every 5 seconds.
-    scrape_interval: 5s
+    # Override the global default and scrape targets from this job every second.
+    scrape_interval: 1s
 
     static_configs:
-      - targets: ['xactserver-r1:8080', 'xactserver-r2:8080']
+      - targets: ['xactserver-r1:8080', 'xactserver-r2:8080', 'xactserver-r3:8080']
