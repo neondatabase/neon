@@ -1,10 +1,10 @@
 # It's possible to run any regular test with the local fs remote storage via
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
+import time
 from pathlib import Path
 
 import pytest
-import time
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,

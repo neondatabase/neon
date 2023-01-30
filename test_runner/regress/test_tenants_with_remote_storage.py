@@ -280,6 +280,7 @@ def test_tenant_upgrades_index_json_from_v0(
 
         timeline_file.seek(0)
         json.dump(v0_index_part, timeline_file)
+        timeline_file.truncate(timeline_file.tell())
 
     env.pageserver.start()
     pageserver_http = env.pageserver.http_client()
