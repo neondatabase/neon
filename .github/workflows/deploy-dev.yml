@@ -1,4 +1,4 @@
-name: Deploy dev
+name: Neon Deploy dev
 
 on:
   workflow_dispatch:

@@ -851,6 +851,7 @@ jobs:
 
   deploy-dev:
     runs-on: [ self-hosted, gen3, small ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
 #    needs: [ push-docker-hub, tag, regress-tests ]
 #    if: github.ref_name == 'main' && github.event_name != 'workflow_dispatch'
     steps:
