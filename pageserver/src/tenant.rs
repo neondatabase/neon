@@ -51,8 +51,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::metrics::TENANT_STATE_METRIC;
-use crate::metrics::{remove_tenant_metrics, STORAGE_TIME};
+use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
@@ -1243,17 +1242,11 @@ impl Tenant {
             "Cannot run GC iteration on inactive tenant"
         );
 
-        let timeline_str = target_timeline_id
-            .map(|x| x.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        let gc_result = self
+            .gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
+            .await;
 
-        {
-            let _timer = STORAGE_TIME
-                .with_label_values(&["gc", &self.tenant_id.to_string(), &timeline_str])
-                .start_timer();
-            self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
-                .await
-        }
+        gc_result
     }
 
     /// Perform one compaction iteration.

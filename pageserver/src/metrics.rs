@@ -1,8 +1,9 @@
 use metrics::core::{AtomicU64, GenericCounter};
 use metrics::{
-    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
-    register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec, Histogram, HistogramVec,
-    IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge, UIntGaugeVec,
+    register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
+    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
+    Counter, CounterVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::models::state;
@@ -36,11 +37,29 @@ const STORAGE_TIME_OPERATIONS: &[&str] = &[
     "gc",
 ];
 
-pub static STORAGE_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "pageserver_storage_operations_seconds",
-        "Time spent on storage operations",
+pub static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "pageserver_storage_operations_seconds_sum",
+        "Total time spent on storage operations with operation, tenant and timeline dimensions",
         &["operation", "tenant_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_storage_operations_seconds_count",
+        "Count of storage operations with operation, tenant and timeline dimensions",
+        &["operation", "tenant_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
+pub static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_storage_operations_seconds_global",
+        "Time spent on storage operations",
+        &["operation"],
         get_buckets_for_critical_operations(),
     )
     .expect("failed to define a metric")
@@ -394,18 +413,81 @@ pub static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Similar to [`prometheus::HistogramTimer`] but does not record on drop.
+pub struct StorageTimeMetricsTimer {
+    metrics: StorageTimeMetrics,
+    start: Instant,
+}
+
+impl StorageTimeMetricsTimer {
+    fn new(metrics: StorageTimeMetrics) -> Self {
+        Self {
+            metrics,
+            start: Instant::now(),
+        }
+    }
+
+    /// Record the time from creation to now.
+    pub fn stop_and_record(self) {
+        let duration = self.start.elapsed().as_secs_f64();
+        self.metrics.timeline_sum.inc_by(duration);
+        self.metrics.timeline_count.inc();
+        self.metrics.global_histogram.observe(duration);
+    }
+}
+
+/// Timing facilities for an globally histogrammed metric, which is supported by per tenant and
+/// timeline total sum and count.
+#[derive(Clone, Debug)]
+pub struct StorageTimeMetrics {
+    /// Sum of f64 seconds, per operation, tenant_id and timeline_id
+    timeline_sum: Counter,
+    /// Number of oeprations, per operation, tenant_id and timeline_id
+    timeline_count: IntCounter,
+    /// Global histogram having only the "operation" label.
+    global_histogram: Histogram,
+}
+
+impl StorageTimeMetrics {
+    pub fn new(operation: &str, tenant_id: &str, timeline_id: &str) -> Self {
+        let timeline_sum = STORAGE_TIME_SUM_PER_TIMELINE
+            .get_metric_with_label_values(&[operation, tenant_id, timeline_id])
+            .unwrap();
+        let timeline_count = STORAGE_TIME_COUNT_PER_TIMELINE
+            .get_metric_with_label_values(&[operation, tenant_id, timeline_id])
+            .unwrap();
+        let global_histogram = STORAGE_TIME_GLOBAL
+            .get_metric_with_label_values(&[operation])
+            .unwrap();
+
+        StorageTimeMetrics {
+            timeline_sum,
+            timeline_count,
+            global_histogram,
+        }
+    }
+
+    /// Starts timing a new operation.
+    ///
+    /// Note: unlike [`prometheus::HistogramTimer`] the returned timer does not record on drop.
+    pub fn start_timer(&self) -> StorageTimeMetricsTimer {
+        StorageTimeMetricsTimer::new(self.clone())
+    }
+}
+
 #[derive(Debug)]
 pub struct TimelineMetrics {
     tenant_id: String,
     timeline_id: String,
     pub reconstruct_time_histo: Histogram,
     pub materialized_page_cache_hit_counter: GenericCounter<AtomicU64>,
-    pub flush_time_histo: Histogram,
-    pub compact_time_histo: Histogram,
-    pub create_images_time_histo: Histogram,
-    pub init_logical_size_histo: Histogram,
-    pub logical_size_histo: Histogram,
-    pub load_layer_map_histo: Histogram,
+    pub flush_time_histo: StorageTimeMetrics,
+    pub compact_time_histo: StorageTimeMetrics,
+    pub create_images_time_histo: StorageTimeMetrics,
+    pub init_logical_size_histo: StorageTimeMetrics,
+    pub logical_size_histo: StorageTimeMetrics,
+    pub load_layer_map_histo: StorageTimeMetrics,
+    pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
     pub resident_physical_size_gauge: UIntGauge,
@@ -425,24 +507,16 @@ impl TimelineMetrics {
         let materialized_page_cache_hit_counter = MATERIALIZED_PAGE_CACHE_HIT
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let flush_time_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["layer flush", &tenant_id, &timeline_id])
-            .unwrap();
-        let compact_time_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["compact", &tenant_id, &timeline_id])
-            .unwrap();
-        let create_images_time_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["create images", &tenant_id, &timeline_id])
-            .unwrap();
-        let init_logical_size_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["init logical size", &tenant_id, &timeline_id])
-            .unwrap();
-        let logical_size_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["logical size", &tenant_id, &timeline_id])
-            .unwrap();
-        let load_layer_map_histo = STORAGE_TIME
-            .get_metric_with_label_values(&["load layer map", &tenant_id, &timeline_id])
-            .unwrap();
+        let flush_time_histo = StorageTimeMetrics::new("layer flush", &tenant_id, &timeline_id);
+        let compact_time_histo = StorageTimeMetrics::new("compact", &tenant_id, &timeline_id);
+        let create_images_time_histo =
+            StorageTimeMetrics::new("create images", &tenant_id, &timeline_id);
+        let init_logical_size_histo =
+            StorageTimeMetrics::new("init logical size", &tenant_id, &timeline_id);
+        let logical_size_histo = StorageTimeMetrics::new("logical size", &tenant_id, &timeline_id);
+        let load_layer_map_histo =
+            StorageTimeMetrics::new("load layer map", &tenant_id, &timeline_id);
+        let garbage_collect_histo = StorageTimeMetrics::new("gc", &tenant_id, &timeline_id);
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
@@ -472,6 +546,7 @@ impl TimelineMetrics {
             create_images_time_histo,
             init_logical_size_histo,
             logical_size_histo,
+            garbage_collect_histo,
             load_layer_map_histo,
             last_record_gauge,
             wait_lsn_time_histo,
@@ -497,7 +572,10 @@ impl Drop for TimelineMetrics {
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
 
         for op in STORAGE_TIME_OPERATIONS {
-            let _ = STORAGE_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
+            let _ =
+                STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
+            let _ =
+                STORAGE_TIME_COUNT_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
         }
         for op in STORAGE_IO_TIME_OPERATIONS {
             let _ = STORAGE_IO_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
@@ -514,7 +592,6 @@ impl Drop for TimelineMetrics {
 }
 
 pub fn remove_tenant_metrics(tenant_id: &TenantId) {
-    let _ = STORAGE_TIME.remove_label_values(&["gc", &tenant_id.to_string(), "-"]);
     let tid = tenant_id.to_string();
     for state in TENANT_STATE_OPTIONS {
         let _ = TENANT_STATE_METRIC.remove_label_values(&[&tid, state]);
