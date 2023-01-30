@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Config is expected to live forever.
+/// ProxyConfig is created at proxy startup, and lives forever.
 fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig> {
     let tls_config = match (
         args.get_one::<String>("tls-key"),

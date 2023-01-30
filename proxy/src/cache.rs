@@ -72,6 +72,7 @@ pub mod timed_lru {
             }
         }
 
+        /// Drop an entry from the cache if it's outdated.
         fn invalidate_raw(&self, info: &LookupInfo<K>) {
             let mut cache = self.cache.lock();
             let raw_entry = match cache.raw_entry_mut().from_key(&info.key) {
@@ -85,6 +86,7 @@ pub mod timed_lru {
             }
         }
 
+        /// Try retrieving an entry by its key, then execute `extract` if it exists.
         fn get_raw<Q, R>(&self, key: &Q, extract: impl FnOnce(&K, &Entry<V>) -> R) -> Option<R>
         where
             K: Borrow<Q>,
@@ -116,7 +118,9 @@ pub mod timed_lru {
             Some(value)
         }
 
-        pub fn insert_raw(&self, key: K, value: V) -> (Instant, Option<V>) {
+        /// Insert an entry to the cache. If an entry with the same key already
+        /// existed, return the previous value and its creation timestamp.
+        fn insert_raw(&self, key: K, value: V) -> (Instant, Option<V>) {
             let created_at = Instant::now();
             let expires_at = created_at.checked_add(self.ttl).expect("time overflow");
 
