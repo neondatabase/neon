@@ -16,7 +16,7 @@ jobs:
 
     - name: Get current date
       id: date
-      run: echo "::set-output name=date::$(date +'%Y-%m-%d')"
+      run: echo "date=(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
 
     - name: Create release branch
       run: git checkout -b release/${{ steps.date.outputs.date }}
@@ -25,7 +25,7 @@ jobs:
       run: git push origin release/${{ steps.date.outputs.date }}
 
     - name: Create pull request into release
-      uses: thomaseizinger/create-pull-request@1
+      uses: thomaseizinger/create-pull-request@e3972219c86a56550fb70708d96800d8e24ba862 # 1.3.0
       with:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         head: release/${{ steps.date.outputs.date }}
