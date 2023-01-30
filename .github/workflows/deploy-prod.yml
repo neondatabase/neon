@@ -264,5 +264,3 @@ jobs:
 
       - name: Cleanup helm folder
         run: rm -rf ~/.cache
-
-
