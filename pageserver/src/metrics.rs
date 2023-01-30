@@ -592,8 +592,6 @@ pub fn remove_tenant_metrics(tenant_id: &TenantId) {
     for state in TENANT_STATE_OPTIONS {
         let _ = TENANT_STATE_METRIC.remove_label_values(&[&tid, state]);
     }
-    let _ = STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&["gc", &tid, "-"]);
-    let _ = STORAGE_TIME_COUNT_PER_TIMELINE.remove_label_values(&["gc", &tid, "-"]);
 }
 
 use futures::Future;
