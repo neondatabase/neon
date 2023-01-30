@@ -3300,9 +3300,7 @@ impl Timeline {
             // If GC horizon is at 2500, we can remove layers A and B, but
             // we cannot remove C, even though it's older than 2500, because
             // the delta layer 2000-3000 depends on it.
-            //for occupied_range in &l.get_occupied_ranges()?
-            let occupied_range = &l.get_key_range();
-            {
+            for occupied_range in &l.get_occupied_ranges()? {
                 if !layers
                     .image_layer_exists(occupied_range, &(l.get_lsn_range().end..new_gc_cutoff))?
                 {

@@ -220,13 +220,13 @@ where
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
-    pub fn search(&self, key: Key, mut end_lsn: Lsn) -> Option<SearchResult<L>> {
-        loop {
-            let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
-            let latest_delta = version.delta_coverage.query(key.to_i128());
-            let latest_image = version.image_coverage.query(key.to_i128());
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
+        let mut version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
+        let mut latest_delta = version.delta_coverage.query(key.to_i128());
+        let latest_image = version.image_coverage.query(key.to_i128());
 
-            return match (latest_delta, latest_image) {
+        loop {
+            return match (latest_delta, latest_image.clone()) {
                 (None, None) => None,
                 (None, Some(image)) => {
                     let lsn_floor = image.get_lsn_range().start;
@@ -239,7 +239,8 @@ where
                     let lsn_floor = delta.get_lsn_range().start;
                     if let Ok(contains) = delta.overlaps(&(key..key.next())) {
                         if !contains {
-                            end_lsn = lsn_floor;
+                            version = self.historic.get().unwrap().get_version(lsn_floor.0 - 1)?;
+                            latest_delta = version.delta_coverage.query(key.to_i128());
                             continue;
                         }
                     }
@@ -260,7 +261,12 @@ where
                     } else {
                         if let Ok(contains) = delta.overlaps(&(key..key.next())) {
                             if !contains {
-                                end_lsn = delta.get_lsn_range().start;
+                                version = self
+                                    .historic
+                                    .get()
+                                    .unwrap()
+                                    .get_version(delta.get_lsn_range().start.0 - 1)?;
+                                latest_delta = version.delta_coverage.query(key.to_i128());
                                 continue;
                             }
                         }

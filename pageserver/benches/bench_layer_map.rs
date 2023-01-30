@@ -206,7 +206,7 @@ fn bench_sequential(c: &mut Criterion) {
     let now = Instant::now();
     let mut layer_map = LayerMap::default();
     let mut updates = layer_map.batch_update();
-    for i in 0..100_000 {
+    for i in 1..100_000 {
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
         let layer = LayerDescriptor {
