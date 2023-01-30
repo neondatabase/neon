@@ -413,7 +413,7 @@ pub static WAL_REDO_RECORD_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-/// Similar to [`prometheus::HistogramTimer`] but doesn't apply the recording on drop.
+/// Similar to [`prometheus::HistogramTimer`] but does not record on drop.
 pub struct StorageTimeMetricsTimer {
     metrics: StorageTimeMetrics,
     start: Instant,
@@ -427,6 +427,7 @@ impl StorageTimeMetricsTimer {
         }
     }
 
+    /// Record the time from creation to now.
     pub fn stop_and_record(self) {
         let duration = self.start.elapsed().as_secs_f64();
         self.metrics.timeline_sum.inc_by(duration);
@@ -466,6 +467,9 @@ impl StorageTimeMetrics {
         }
     }
 
+    /// Starts timing a new operation.
+    ///
+    /// Note: unlike [`prometheus::HistogramTimer`] the returned timer does not record on drop.
     pub fn start_timer(&self) -> StorageTimeMetricsTimer {
         StorageTimeMetricsTimer::new(self.clone())
     }
