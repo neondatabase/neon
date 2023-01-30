@@ -7,18 +7,23 @@ on:
         description: 'Docker tag to deploy'
         required: true
         type: string
+      branch:
+        description: 'Branch or commit used for deploy scripts and configs'
+        required: true
+        type: string
+        default: 'main'
       deployStorage:
-        description: 'Should storage be deployed'
+        description: 'Deploy storage'
         required: true
         type: boolean
         default: true
       deployProxy:
-        description: 'Should proxy be deployed'
+        description: 'Deploy proxy'
         required: true
         type: boolean
         default: true
       deployStorageBroker:
-        description: 'Should storage-broker be deployed'
+        description: 'Deploy storage-broker'
         required: true
         type: boolean
         default: true
@@ -46,6 +51,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ inputs.branch }}
 
       - name: Redeploy
         run: |
@@ -92,6 +98,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ inputs.branch }}
 
       - name: Configure environment
         run: |
@@ -141,6 +148,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ inputs.branch }}
 
       - name: Configure environment
         run: |
@@ -168,6 +176,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ inputs.branch }}
 
       - name: Redeploy
         run: |
@@ -214,6 +223,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ inputs.branch }}
 
       - name: Store kubeconfig file
         run: |
@@ -249,6 +259,7 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
+          ref: ${{ inputs.branch }}
 
       - name: Store kubeconfig file
         run: |
