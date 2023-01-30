@@ -51,10 +51,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::metrics::{
-    remove_tenant_metrics, STORAGE_TIME_COUNT_PER_TIMELINE, STORAGE_TIME_GLOBAL,
-    STORAGE_TIME_SUM_PER_TIMELINE, TENANT_STATE_METRIC,
-};
+use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
