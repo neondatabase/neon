@@ -138,6 +138,7 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
+    /// Apply startup message params to the connection config.
     pub fn update(&mut self, params: &StartupMessageParams) {
         if let Some(options) = params.options_raw() {
             // We must drop all proxy-specific parameters.

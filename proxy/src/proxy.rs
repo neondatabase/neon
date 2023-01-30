@@ -265,7 +265,7 @@ async fn connect_to_compute(node: &CachedNodeInfo) -> Result<PostgresConnection,
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
-async fn activate_client_connection(
+async fn prepare_client_connection(
     node: &PostgresConnection,
     reported_auth_ok: bool,
     session: cancellation::Session<'_>,
@@ -392,7 +392,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             .instrument(info_span!("connect_to_compute"))
             .await?;
 
-        activate_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
+        prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
         proxy_pass(stream.into_inner(), node.stream, &node_info.aux).await
     }
 }
