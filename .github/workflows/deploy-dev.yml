@@ -1,8 +1,6 @@
 name: Deploy dev
 
 on:
-  push:
-
   workflow_dispatch:
     inputs:
       dockerTag:
