@@ -858,14 +858,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
         with:
-          submodules: true
+          submodules: false
           fetch-depth: 0
 
       - name: Trigger deploy-dev workflow
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run deploy-dev.yml --ref ${{ github.sha }} -f dockerTag=2722
+          gh workflow run deploy-dev.yml --ref ${{ github.ref_name }} -f dockerTag=2722
 
 #  promote-compatibility-data:
 #    runs-on: [ self-hosted, gen3, small ]
