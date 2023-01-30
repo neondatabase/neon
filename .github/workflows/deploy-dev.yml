@@ -7,11 +7,6 @@ on:
         description: 'Docker tag to deploy'
         required: true
         type: string
-      branch:
-        description: 'Branch or commit used for configs'
-        required: true
-        type: string
-        default: 'main'
 
 concurrency:
   group: deploy-dev
@@ -37,7 +32,6 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-          ref: ${{ inputs.branch }}
 
       - name: Redeploy
         run: |
@@ -78,7 +72,6 @@ jobs:
 #       with:
 #         submodules: true
 #         fetch-depth: 0
-#         ref: ${{ inputs.branch }}
 #
 #     - name: Configure AWS Credentials
 #       uses: aws-actions/configure-aws-credentials@v1-node16
@@ -134,7 +127,6 @@ jobs:
 #       with:
 #         submodules: true
 #         fetch-depth: 0
-#         ref: ${{ inputs.branch }}
 #
 #     - name: Configure AWS Credentials
 #       uses: aws-actions/configure-aws-credentials@v1-node16

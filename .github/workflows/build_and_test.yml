@@ -865,7 +865,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run deploy-dev.yml --ref ${{ github.ref }} -f dockerTag=2722 -f branch=${{ github.ref }}
+          gh workflow run deploy-dev.yml --ref ${{ github.sha }} -f dockerTag=2722
 
 #  promote-compatibility-data:
 #    runs-on: [ self-hosted, gen3, small ]
