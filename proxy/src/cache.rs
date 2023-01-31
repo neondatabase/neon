@@ -28,13 +28,18 @@ pub trait Cache {
     type LookupInfo<Key>;
 
     /// Invalidate an entry using a lookup info.
-    fn invalidate(&self, _: &Self::LookupInfo<Self::Key>) {}
+    /// We don't have an empty default impl because it's error-prone.
+    fn invalidate(&self, _: &Self::LookupInfo<Self::Key>);
 }
 
 impl<C: Cache> Cache for &C {
     type Key = C::Key;
     type Value = C::Value;
     type LookupInfo<Key> = C::LookupInfo<Key>;
+
+    fn invalidate(&self, info: &Self::LookupInfo<Self::Key>) {
+        C::invalidate(self, info)
+    }
 }
 
 pub use timed_lru::TimedLru;
@@ -247,7 +252,7 @@ pub mod timed_lru {
             }
         }
 
-        /// Tell if this entry is cached.
+        /// Tell if this entry is actually cached.
         pub fn cached(&self) -> bool {
             self.token.is_some()
         }
