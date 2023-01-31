@@ -15,3 +15,4 @@ utils.workspace = true
 postgres_ffi.workspace = true
 
 workspace_hack.workspace = true
+enum-map = "2.4.2"

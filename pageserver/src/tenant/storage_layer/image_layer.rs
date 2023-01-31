@@ -33,7 +33,7 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
-use pageserver_api::models::{HistoricLayerInfo, Key, KEY_SIZE};
+use pageserver_api::models::{HistoricLayerInfo, Key, LayerAccessKind, KEY_SIZE};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -52,7 +52,7 @@ use utils::{
 };
 
 use super::filename::{ImageFileName, LayerFileName, PathOrConf};
-use super::{Layer, LayerIter};
+use super::{Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter};
 
 ///
 /// Header stored in the beginning of the file
@@ -111,6 +111,8 @@ pub struct ImageLayer {
     // This entry contains an image of all pages as of this LSN
     pub lsn: Lsn,
 
+    access_stats: LayerAccessStats,
+
     inner: RwLock<ImageLayerInner>,
 }
 
@@ -154,7 +156,7 @@ impl Layer for ImageLayer {
             return Ok(());
         }
 
-        let inner = self.load(ctx)?;
+        let inner = self.load(LayerAccessKind::Dump, ctx)?;
         let file = inner.file.as_ref().unwrap();
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -181,7 +183,7 @@ impl Layer for ImageLayer {
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load(ctx)?;
+        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
 
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -236,18 +238,25 @@ impl PersistentLayer for ImageLayer {
         Some(self.file_size)
     }
 
-    fn info(&self) -> HistoricLayerInfo {
+    fn info(&self, reset: Option<LayerAccessStatsReset>) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let key_range = self.get_key_range();
         let lsn_range = self.get_lsn_range();
 
-        HistoricLayerInfo::Image {
+        let ret = HistoricLayerInfo::Image {
             layer_file_name,
             key_start: key_range.start,
             key_end: key_range.end,
             lsn_start: lsn_range.start,
             remote: false,
+            access_stats: Some(self.access_stats.to_api_model()),
+        };
+
+        if let Some(reset) = reset {
+            self.access_stats.reset(reset);
         }
+
+        ret
     }
 }
 
@@ -286,7 +295,13 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self, _ctx: &RequestContext) -> Result<RwLockReadGuard<ImageLayerInner>> {
+    fn load(
+        &self,
+        access_kind: LayerAccessKind,
+        ctx: &RequestContext,
+    ) -> Result<RwLockReadGuard<ImageLayerInner>> {
+        self.access_stats
+            .record_access(access_kind, ctx.task_kind());
         loop {
             // Quick exit if already loaded
             let inner = self.inner.read().unwrap();
@@ -374,6 +389,7 @@ impl ImageLayer {
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
             file_size,
+            access_stats: LayerAccessStats::default(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,
@@ -401,6 +417,7 @@ impl ImageLayer {
             key_range: summary.key_range,
             lsn: summary.lsn,
             file_size: metadata.len(),
+            access_stats: LayerAccessStats::default(),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
                 loaded: false,
@@ -560,6 +577,7 @@ impl ImageLayerWriterInner {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             file_size: metadata.len(),
+            access_stats: LayerAccessStats::default(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,

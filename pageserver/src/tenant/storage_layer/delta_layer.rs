@@ -37,7 +37,7 @@ use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use pageserver_api::models::{HistoricLayerInfo, Key, KEY_SIZE};
+use pageserver_api::models::{HistoricLayerInfo, Key, LayerAccessKind, KEY_SIZE};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -55,7 +55,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{DeltaFileName, Layer, LayerFileName, LayerIter, LayerKeyIter, PathOrConf};
+use super::{
+    DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerFileName, LayerIter,
+    LayerKeyIter, PathOrConf,
+};
 
 ///
 /// Header stored in the beginning of the file
@@ -185,6 +188,8 @@ pub struct DeltaLayer {
 
     pub file_size: u64,
 
+    access_stats: LayerAccessStats,
+
     inner: RwLock<DeltaLayerInner>,
 }
 
@@ -231,7 +236,7 @@ impl Layer for DeltaLayer {
             return Ok(());
         }
 
-        let inner = self.load(ctx)?;
+        let inner = self.load(LayerAccessKind::Dump, ctx)?;
 
         println!(
             "index_start_blk: {}, root {}",
@@ -304,7 +309,7 @@ impl Layer for DeltaLayer {
 
         {
             // Open the file and lock the metadata in memory
-            let inner = self.load(ctx)?;
+            let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
 
             // Scan the page versions backwards, starting from `lsn`.
             let file = inner.file.as_ref().unwrap();
@@ -395,7 +400,9 @@ impl PersistentLayer for DeltaLayer {
     }
 
     fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>> {
-        let inner = self.load(ctx).context("load delta layer")?;
+        let inner = self
+            .load(LayerAccessKind::KeyIter, ctx)
+            .context("load delta layer")?;
         Ok(match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
             Err(err) => Box::new(std::iter::once(Err(err))),
@@ -403,7 +410,7 @@ impl PersistentLayer for DeltaLayer {
     }
 
     fn key_iter(&self, ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
-        let inner = self.load(ctx)?;
+        let inner = self.load(LayerAccessKind::KeyIter, ctx)?;
         Ok(Box::new(
             DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
         ))
@@ -419,19 +426,26 @@ impl PersistentLayer for DeltaLayer {
         Some(self.file_size)
     }
 
-    fn info(&self) -> HistoricLayerInfo {
+    fn info(&self, reset: Option<LayerAccessStatsReset>) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let key_range = self.get_key_range();
         let lsn_range = self.get_lsn_range();
 
-        HistoricLayerInfo::Delta {
+        let ret = HistoricLayerInfo::Delta {
             layer_file_name,
             key_start: key_range.start,
             key_end: key_range.end,
             lsn_start: lsn_range.start,
             lsn_end: lsn_range.end,
             remote: false,
+            access_stats: Some(self.access_stats.to_api_model()),
+        };
+
+        if let Some(reset) = reset {
+            self.access_stats.reset(reset);
         }
+
+        ret
     }
 }
 
@@ -477,7 +491,13 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self, _ctx: &RequestContext) -> Result<RwLockReadGuard<DeltaLayerInner>> {
+    fn load(
+        &self,
+        access_kind: LayerAccessKind,
+        ctx: &RequestContext,
+    ) -> Result<RwLockReadGuard<DeltaLayerInner>> {
+        self.access_stats
+            .record_access(access_kind, ctx.task_kind());
         loop {
             // Quick exit if already loaded
             let inner = self.inner.read().unwrap();
@@ -566,6 +586,7 @@ impl DeltaLayer {
             key_range: filename.key_range.clone(),
             lsn_range: filename.lsn_range.clone(),
             file_size,
+            access_stats: LayerAccessStats::default(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -595,6 +616,7 @@ impl DeltaLayer {
             key_range: summary.key_range,
             lsn_range: summary.lsn_range,
             file_size: metadata.len(),
+            access_stats: LayerAccessStats::default(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -765,6 +787,7 @@ impl DeltaLayerWriterInner {
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
             file_size: metadata.len(),
+            access_stats: LayerAccessStats::default(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,

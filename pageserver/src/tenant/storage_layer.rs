@@ -6,14 +6,21 @@ mod image_layer;
 mod inmemory_layer;
 mod remote_layer;
 
+use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use crate::{context::RequestContext, repository::Value};
 use anyhow::Result;
 use bytes::Bytes;
+use enum_map::EnumMap;
+use enumset::EnumSet;
+use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{HistoricLayerInfo, Key};
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{self, AtomicBool};
+use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -79,6 +86,103 @@ pub enum ValueReconstructResult {
     /// the returned LSN. This is usually considered an error, but might be OK
     /// in some circumstances.
     Missing,
+}
+
+#[derive(Default)]
+pub struct LayerAccessStats(RwLock<LayerAccessStatsInner>);
+
+#[derive(Clone)]
+struct LayerAccessStatFullDetails {
+    when: SystemTime,
+    task_kind: TaskKind,
+    access_kind: LayerAccessKind,
+}
+
+#[derive(Default)]
+struct LayerAccessStatsInner {
+    first_access: Option<LayerAccessStatFullDetails>,
+    count_by_access_kind: EnumMap<LayerAccessKind, u64>,
+    task_kind_flag: EnumSet<TaskKind>,
+    last_accesses: VecDeque<LayerAccessStatFullDetails>,
+}
+
+#[derive(Clone, Copy, strum_macros::EnumString)]
+pub enum LayerAccessStatsReset {
+    JustTaskKindFlags,
+    AllStats,
+}
+
+impl LayerAccessStatFullDetails {
+    fn to_api_model(&self) -> pageserver_api::models::LayerAccessStatFullDetails {
+        let Self {
+            when,
+            task_kind,
+            access_kind,
+        } = self;
+        pageserver_api::models::LayerAccessStatFullDetails {
+            when_millis_since_epoch: when
+                .duration_since(UNIX_EPOCH)
+                .expect("better to die in this unlikely case than report false stats")
+                .as_millis(),
+            task_kind: task_kind.into(), // into static str, powered by strum_macros
+            access_kind: *access_kind,
+        }
+    }
+}
+
+pub static LAYER_ACCESS_STATS_KILLSWITCH: AtomicBool = AtomicBool::new(false);
+
+impl LayerAccessStats {
+    fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
+        if LAYER_ACCESS_STATS_KILLSWITCH.load(atomic::Ordering::SeqCst) {
+            return;
+        }
+        let mut inner = self.0.write().unwrap();
+        let this_access = LayerAccessStatFullDetails {
+            when: SystemTime::now(),
+            task_kind,
+            access_kind,
+        };
+        inner
+            .first_access
+            .get_or_insert_with(|| this_access.clone());
+        inner.count_by_access_kind[access_kind] += 1;
+        inner.task_kind_flag |= task_kind;
+        inner.last_accesses.push_front(this_access);
+        inner.last_accesses.truncate(10); // TODO make runtime-configurable
+    }
+    fn reset(&self, what: LayerAccessStatsReset) {
+        let mut inner = self.0.write().unwrap();
+        match what {
+            LayerAccessStatsReset::JustTaskKindFlags => {
+                inner.task_kind_flag.clear();
+            }
+            LayerAccessStatsReset::AllStats => {
+                *inner = LayerAccessStatsInner::default();
+            }
+        }
+    }
+    fn to_api_model(&self) -> pageserver_api::models::LayerAccessStats {
+        let inner = self.0.read().unwrap();
+        let LayerAccessStatsInner {
+            first_access,
+            count_by_access_kind,
+            task_kind_flag,
+            last_accesses,
+        } = &*inner;
+        pageserver_api::models::LayerAccessStats {
+            access_count_by_access_kind: count_by_access_kind
+                .iter()
+                .map(|(kind, count)| (kind, *count))
+                .collect(),
+            task_kind_access_flag: task_kind_flag
+                .iter()
+                .map(|task_kind| task_kind.into()) // into static str, powered by strum_macros
+                .collect(),
+            first: first_access.as_ref().map(|a| a.to_api_model()),
+            most_recent: last_accesses.iter().map(|a| a.to_api_model()).collect(),
+        }
+    }
 }
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
@@ -188,7 +292,7 @@ pub trait PersistentLayer: Layer {
     /// current_physical_size is computed as the som of this value.
     fn file_size(&self) -> Option<u64>;
 
-    fn info(&self) -> HistoricLayerInfo;
+    fn info(&self, reset: Option<LayerAccessStatsReset>) -> HistoricLayerInfo;
 }
 
 pub fn downcast_remote_layer(

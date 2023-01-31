@@ -160,6 +160,7 @@ pub struct PageServerConf {
     pub test_remote_failures: u64,
 
     pub ondemand_download_behavior_treat_error_as_warn: bool,
+    pub layer_access_stats_disable: bool,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -226,6 +227,7 @@ struct PageServerConfigBuilder {
     test_remote_failures: BuilderValue<u64>,
 
     ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
+    layer_access_stats_disable: BuilderValue<bool>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -273,6 +275,7 @@ impl Default for PageServerConfigBuilder {
             test_remote_failures: Set(0),
 
             ondemand_download_behavior_treat_error_as_warn: Set(false),
+            layer_access_stats_disable: Set(false),
         }
     }
 }
@@ -377,6 +380,10 @@ impl PageServerConfigBuilder {
             BuilderValue::Set(ondemand_download_behavior_treat_error_as_warn);
     }
 
+    pub fn layer_access_stats_disable(&mut self, val: bool) {
+        self.layer_access_stats_disable = BuilderValue::Set(val);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         Ok(PageServerConf {
             listen_pg_addr: self
@@ -441,6 +448,9 @@ impl PageServerConfigBuilder {
                 .ok_or(anyhow!(
                     "missing ondemand_download_behavior_treat_error_as_warn"
                 ))?,
+            layer_access_stats_disable: self
+                .layer_access_stats_disable
+                .ok_or(anyhow!("missing layer_acccess_stats_disable"))?,
         })
     }
 }
@@ -620,6 +630,7 @@ impl PageServerConf {
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
+                "layer_access_stats_disable" => builder.layer_access_stats_disable(parse_toml_bool(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -745,6 +756,7 @@ impl PageServerConf {
             synthetic_size_calculation_interval: Duration::from_secs(60),
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
+            layer_access_stats_disable: false,
         }
     }
 }
@@ -934,6 +946,7 @@ log_format = 'json'
                 )?,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
+                layer_access_stats_disable: false,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -982,6 +995,7 @@ log_format = 'json'
                 synthetic_size_calculation_interval: Duration::from_secs(333),
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
+                layer_access_stats_disable: false,
             },
             "Should be able to parse all basic config values correctly"
         );

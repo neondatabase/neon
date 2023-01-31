@@ -1,12 +1,13 @@
 //! Main entry point for the Page Server executable.
 
 use std::env::{var, VarError};
-use std::sync::Arc;
+use std::sync::{atomic, Arc};
 use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
+use pageserver::tenant::storage_layer;
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
@@ -84,6 +85,9 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+
+    storage_layer::LAYER_ACCESS_STATS_KILLSWITCH
+        .store(conf.layer_access_stats_disable, atomic::Ordering::SeqCst);
 
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(

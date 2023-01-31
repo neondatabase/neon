@@ -1224,6 +1224,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "enum-map"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50c25992259941eb7e57b936157961b217a4fc8597829ddef0596d6c3cd86e1a"
+dependencies = [
+ "enum-map-derive",
+]
+
+[[package]]
+name = "enum-map-derive"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a4da76b3b6116d758c7ba93f7ec6a35d2e2cf24feda76c6e38a375f4d5c59f2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "enumset"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19be8061a06ab6f3a6cf21106c873578bf01bd42ad15e0311a9c76161cb1c753"
+dependencies = [
+ "enumset_derive",
+]
+
+[[package]]
+name = "enumset_derive"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e7b551eba279bf0fa88b83a46330168c1560a52a94f5126f892f0b364ab3e0"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "env_logger"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2320,6 +2361,8 @@ dependencies = [
  "crc32c",
  "criterion",
  "crossbeam-utils",
+ "enum-map",
+ "enumset",
  "fail",
  "futures",
  "git-version",
@@ -2352,6 +2395,8 @@ dependencies = [
  "serde_with",
  "signal-hook",
  "storage_broker",
+ "strum",
+ "strum_macros",
  "svg_fmt",
  "tempfile",
  "tenant_size_model",
@@ -2376,6 +2421,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "const_format",
+ "enum-map",
  "postgres_ffi",
  "serde",
  "serde_with",

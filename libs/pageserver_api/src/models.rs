@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -237,7 +238,30 @@ pub struct LayerMapInfo {
     pub historic_layers: Vec<HistoricLayerInfo>,
 }
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, enum_map::Enum)]
+#[repr(usize)]
+pub enum LayerAccessKind {
+    GetValueReconstructData,
+    Iter,
+    KeyIter,
+    Dump,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerAccessStatFullDetails {
+    pub when_millis_since_epoch: u128,
+    pub task_kind: &'static str,
+    pub access_kind: LayerAccessKind,
+}
+
 #[derive(Debug, Clone, Serialize)]
+pub struct LayerAccessStats {
+    pub access_count_by_access_kind: HashMap<LayerAccessKind, u64>,
+    pub task_kind_access_flag: Vec<&'static str>,
+    pub first: Option<LayerAccessStatFullDetails>,
+    pub most_recent: Vec<LayerAccessStatFullDetails>,
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde_as]
 #[serde(tag = "kind")]
 pub enum InMemoryLayerInfo {
@@ -268,6 +292,7 @@ pub enum HistoricLayerInfo {
         #[serde_as(as = "DisplayFromStr")]
         lsn_end: Lsn,
         remote: bool,
+        access_stats: Option<LayerAccessStats>,
     },
     Image {
         layer_file_name: String,
@@ -278,6 +303,7 @@ pub enum HistoricLayerInfo {
         #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
         remote: bool,
+        access_stats: Option<LayerAccessStats>,
     },
 }
 

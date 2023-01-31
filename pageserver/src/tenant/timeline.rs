@@ -71,7 +71,7 @@ use walreceiver::spawn_connection_manager_task;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
+use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -820,7 +820,7 @@ impl Timeline {
         self.state.subscribe()
     }
 
-    pub fn layer_map_info(&self) -> LayerMapInfo {
+    pub fn layer_map_info(&self, reset: Option<LayerAccessStatsReset>) -> LayerMapInfo {
         let mut in_memory_layers = Vec::new();
         let layer_map = self.layers.read().unwrap();
         if let Some(open_layer) = &layer_map.open_layer {
@@ -832,7 +832,7 @@ impl Timeline {
 
         let mut historic_layers = Vec::new();
         for historic_layer in layer_map.iter_historic_layers() {
-            historic_layers.push(historic_layer.info());
+            historic_layers.push(historic_layer.info(reset));
         }
 
         LayerMapInfo {

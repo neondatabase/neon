@@ -18,7 +18,7 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
-use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
+use super::{DeltaLayer, LayerAccessStatsReset, LayerIter, LayerKeyIter, PersistentLayer};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
@@ -137,7 +137,7 @@ impl PersistentLayer for RemoteLayer {
         self.layer_metadata.file_size()
     }
 
-    fn info(&self) -> HistoricLayerInfo {
+    fn info(&self, _reset: Option<LayerAccessStatsReset>) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let key_range = self.get_key_range();
         let lsn_range = self.get_lsn_range();
@@ -150,6 +150,7 @@ impl PersistentLayer for RemoteLayer {
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
+                access_stats: None, // remote layer doesn't get accessed
             }
         } else {
             HistoricLayerInfo::Image {
@@ -158,6 +159,7 @@ impl PersistentLayer for RemoteLayer {
                 key_end: key_range.end,
                 lsn_start: lsn_range.start,
                 remote: true,
+                access_stats: None, // remote layer doesn't get accessed
             }
         }
     }

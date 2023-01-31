@@ -67,6 +67,10 @@ utils.workspace = true
 workspace_hack.workspace = true
 reqwest.workspace = true
 rpds.workspace = true
+enumset = "1.0.12"
+enum-map = "2.4.2"
+strum.workspace = true
+strum_macros.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

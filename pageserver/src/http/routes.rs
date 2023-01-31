@@ -18,6 +18,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::mgr::TenantMapInsertError;
+use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
@@ -535,6 +536,8 @@ async fn layer_map_info_handler(request: Request<Body>) -> Result<Response<Body>
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
+    let reset: Option<LayerAccessStatsReset> = parse_query_param(&request, "reset")?;
+
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
         .map_err(ApiError::NotFound)?;
@@ -542,7 +545,7 @@ async fn layer_map_info_handler(request: Request<Body>) -> Result<Response<Body>
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)?;
 
-    let layer_map_info = timeline.layer_map_info();
+    let layer_map_info = timeline.layer_map_info(reset);
 
     json_response(StatusCode::OK, layer_map_info)
 }
