@@ -145,6 +145,7 @@ impl super::Api for Api {
 
         let node = self.do_wake_compute(extra, creds).await?;
         let (_, cached) = self.caches.node_info.insert(key.into(), node);
+        info!("created a cache entry for compute node info");
 
         Ok(cached)
     }

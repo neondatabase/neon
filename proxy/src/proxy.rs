@@ -283,12 +283,13 @@ async fn connect_to_compute(
         // Apply startup params to the (possibly, cached) compute node info.
         node_info.config.set_startup_params(params);
         let res = connect_to_compute_once(node_info)
-            .instrument(info_span!("connect_to_compute_once"))
+            .instrument(info_span!("connect_once"))
             .await;
 
         match res {
             Err(e) if num_retries > 0 => {
-                match creds.wake_compute(extra).await.map_err(io_error)? {
+                info!("compute node's state has changed; requesting a wake-up");
+                match creds.wake_compute(extra).map_err(io_error).await? {
                     // Update `node_info` and try one more time.
                     Some(mut new) => {
                         new.config.reuse_password(&node_info.config);
@@ -302,6 +303,7 @@ async fn connect_to_compute(
         }
 
         num_retries -= 1;
+        info!("retrying after wake-up ({num_retries} attempts left)");
     }
 }
 
