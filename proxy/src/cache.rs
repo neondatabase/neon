@@ -17,11 +17,16 @@ use tracing::debug;
 // On the other hand, `hashlink` has good download stats and appears to be maintained.
 use hashlink::{linked_hash_map::RawEntryMut, LruCache};
 
+/// A generic trait which exposes types of cache's key and value,
+/// as well as the notion of cache entry invalidation.
+/// This is useful for [`timed_lru::Cached`].
 pub trait Cache {
     /// Entry's key.
     type Key;
+
     /// Entry's value.
     type Value;
+
     /// Used for entry invalidation.
     type LookupInfo<Key>;
 
@@ -44,7 +49,26 @@ pub use timed_lru::TimedLru;
 pub mod timed_lru {
     use super::*;
 
-    /// A timed LRU cache implementation.
+    /// An implementation of timed LRU cache with fixed capacity.
+    /// Key properties:
+    ///
+    /// * Whenever a new entry is inserted, the least recently accessed one is evicted.
+    ///   The cache also keeps track of entry's insertion time (`created_at`) and TTL (`expires_at`).
+    ///
+    /// * When the entry is about to be retrieved, we check its expiration timestamp.
+    ///   If the entry has expired, we remove it from the cache; Otherwise we bump the
+    ///   expiration timestamp (e.g. +5mins) and change its place in LRU list to prolong
+    ///   its existence.
+    ///
+    /// * There's an API for immediate invalidation (removal) of a cache entry;
+    ///   It's useful in case we know for sure that the entry is no longer correct.
+    ///
+    /// * Expired entries are kept in the cache, until they are evicted by the LRU policy,
+    ///   or by a successful lookup (i.e. the entry hasn't expired yet).
+    ///   There is no background job to reap the expired records.
+    ///
+    /// * It's possible for an entry that has not yet expired entry to be evicted
+    ///   before expired items. That's a bit wasteful, but probably fine in practice.
     pub struct TimedLru<K, V> {
         /// Cache's name for tracing.
         name: &'static str,
