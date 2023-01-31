@@ -44,7 +44,7 @@ pub struct RemoteLayer {
 
     pub layer_metadata: LayerFileMetadata,
 
-    is_delta: bool,
+    pub is_delta: bool,
 
     is_incremental: bool,
 

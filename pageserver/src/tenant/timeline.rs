@@ -3504,6 +3504,24 @@ impl Timeline {
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
                     let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
+
+                    // Update the metadata for given layer file. The remote index file
+                    // might be missing some information for the file; this allows us
+                    // to fill in the missing details.
+                    if remote_layer.layer_metadata.file_size().is_none()
+                        || (remote_layer.is_delta && remote_layer.layer_metadata.holes().is_none())
+                    {
+                        let new_metadata =
+                            LayerFileMetadata::new(*size, new_layer.get_holes().unwrap());
+                        remote_client
+                            .upgrade_layer_metadata(
+                                &remote_layer.file_name,
+                                &remote_layer.layer_metadata,
+                                &new_metadata,
+                            )
+                            .await;
+                    }
+
                     let mut layers = self_clone.layers.write().unwrap();
                     let mut updates = layers.batch_update();
                     {

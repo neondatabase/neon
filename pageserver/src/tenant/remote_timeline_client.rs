@@ -419,39 +419,46 @@ impl RemoteTimelineClient {
             .await?
         };
 
-        // Update the metadata for given layer file. The remote index file
-        // might be missing some information for the file; this allows us
-        // to fill in the missing details.
-        if layer_metadata.file_size().is_none() {
-            let new_metadata = LayerFileMetadata::new(downloaded_size, None);
-            let mut guard = self.upload_queue.lock().unwrap();
-            let upload_queue = guard.initialized_mut()?;
-            if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
-                if upgraded.merge(&new_metadata) {
-                    upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                }
-                // If we don't do an index file upload inbetween here and restart,
-                // the value will go back down after pageserver restart, since we will
-                // have lost this data point.
-                // But, we upload index part fairly frequently, and restart pageserver rarely.
-                // So, by accounting eagerly, we present a most-of-the-time-more-accurate value sooner.
-                self.metrics
-                    .remote_physical_size_gauge()
-                    .add(downloaded_size);
-            } else {
-                // The file should exist, since we just downloaded it.
-                warn!(
-                    "downloaded file {:?} not found in local copy of the index file",
-                    layer_file_name
-                );
-            }
-        }
         Ok(downloaded_size)
     }
 
     //
     // Upload operations.
     //
+
+    ///
+    /// Upgrade layer metadata
+    ///
+    pub async fn upgrade_layer_metadata(
+        &self,
+        layer_file_name: &LayerFileName,
+        old_metadata: &LayerFileMetadata,
+        new_metadata: &LayerFileMetadata,
+    ) {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut().unwrap();
+        if let Some(upgraded) = upload_queue.latest_files.get_mut(&layer_file_name) {
+            if upgraded.merge(&new_metadata) {
+                upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
+            }
+            // If we don't do an index file upload inbetween here and restart,
+            // the value will go back down after pageserver restart, since we will
+            // have lost this data point.
+            // But, we upload index part fairly frequently, and restart pageserver rarely.
+            // So, by accounting eagerly, we present a most-of-the-time-more-accurate value sooner.
+            if old_metadata.file_size().is_none() {
+                self.metrics
+                    .remote_physical_size_gauge()
+                    .add(new_metadata.file_size().unwrap_or(0));
+            }
+        } else {
+            // The file should exist, since we just downloaded it.
+            warn!(
+                "downloaded file {:?} not found in local copy of the index file",
+                &layer_file_name
+            );
+        }
+    }
 
     ///
     /// Launch an index-file upload operation in the background, with
