@@ -3,6 +3,7 @@ use std::{
     fmt,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
+    str::FromStr,
 };
 
 use byteorder::{BigEndian, ByteOrder, ReadBytesExt, BE};
@@ -237,28 +238,45 @@ pub struct LayerMapInfo {
     pub historic_layers: BTreeSet<HistoricLayerInfo>,
 }
 
+#[serde_as]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum InMemoryLayerInfo {
-    Open { lsn_start: Lsn },
-    Frozen { lsn_start: Lsn, lsn_end: Lsn },
+    Open {
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+    },
+    Frozen {
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_end: Lsn,
+    },
 }
 
+#[serde_as]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum HistoricLayerInfo {
     Delta {
         layer_file_name: String,
+        #[serde_as(as = "DisplayFromStr")]
         key_start: Key,
+        #[serde_as(as = "DisplayFromStr")]
         key_end: Key,
+        #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
+        #[serde_as(as = "DisplayFromStr")]
         lsn_end: Lsn,
         remote: bool,
     },
     Image {
         layer_file_name: String,
+        #[serde_as(as = "DisplayFromStr")]
         key_start: Key,
+        #[serde_as(as = "DisplayFromStr")]
         key_end: Key,
+        #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
         remote: bool,
     },
@@ -625,10 +643,6 @@ pub fn key_range_size(key_range: &Range<Key>) -> u32 {
     }
 }
 
-pub fn singleton_range(key: Key) -> Range<Key> {
-    key..key.next()
-}
-
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -636,6 +650,14 @@ impl fmt::Display for Key {
             "{:02X}{:08X}{:08X}{:08X}{:02X}{:08X}",
             self.field1, self.field2, self.field3, self.field4, self.field5, self.field6
         )
+    }
+}
+
+impl FromStr for Key {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(s)
     }
 }
 

@@ -1,4 +1,4 @@
-use pageserver_api::models::{key_range_size, singleton_range, Key};
+use pageserver_api::models::{key_range_size, Key};
 use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 
@@ -102,7 +102,7 @@ impl KeySpaceAccum {
     }
 
     pub fn add_key(&mut self, key: Key) {
-        self.add_range(singleton_range(key))
+        self.add_range(key..key.next())
     }
 
     pub fn add_range(&mut self, range: Range<Key>) {
