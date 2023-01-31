@@ -11,6 +11,7 @@ async-trait.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 bytes.workspace = true
+heapless.workspace = true
 hyper = { workspace = true, features = ["full"] }
 routerify.workspace = true
 serde.workspace = true

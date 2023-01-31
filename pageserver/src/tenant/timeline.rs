@@ -10,7 +10,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-    DownloadRemoteLayersTaskState, LayerMapInfo, TimelineState,
+    DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceStatus, TimelineState,
 };
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
@@ -30,8 +30,8 @@ use crate::broker_client::is_broker_client_initialized;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
-    DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer, LayerFileName,
-    RemoteLayer,
+    DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer,
+    LayerAccessStats, LayerFileName, RemoteLayer,
 };
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file,
@@ -72,7 +72,7 @@ use walreceiver::spawn_connection_manager_task;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
+use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -835,7 +835,7 @@ impl Timeline {
         self.state.subscribe()
     }
 
-    pub fn layer_map_info(&self) -> LayerMapInfo {
+    pub fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
         let layer_map = self.layers.read().unwrap();
         let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
         if let Some(open_layer) = &layer_map.open_layer {
@@ -847,7 +847,7 @@ impl Timeline {
 
         let mut historic_layers = Vec::new();
         for historic_layer in layer_map.iter_historic_layers() {
-            historic_layers.push(historic_layer.info());
+            historic_layers.push(historic_layer.info(reset));
         }
 
         LayerMapInfo {
@@ -891,12 +891,18 @@ impl Timeline {
                 self.timeline_id,
                 &image_name,
                 &layer_metadata,
+                local_layer
+                    .access_stats()
+                    .clone_for_residence_change(LayerResidenceStatus::Evicted),
             ),
             LayerFileName::Delta(delta_name) => RemoteLayer::new_delta(
                 self.tenant_id,
                 self.timeline_id,
                 &delta_name,
                 &layer_metadata,
+                local_layer
+                    .access_stats()
+                    .clone_for_residence_change(LayerResidenceStatus::Evicted),
             ),
         });
 
@@ -1172,6 +1178,7 @@ impl Timeline {
                     self.tenant_id,
                     &imgfilename,
                     file_size,
+                    LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1203,6 +1210,7 @@ impl Timeline {
                     self.tenant_id,
                     &deltafilename,
                     file_size,
+                    LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1340,6 +1348,7 @@ impl Timeline {
                         self.timeline_id,
                         imgfilename,
                         &remote_layer_metadata,
+                        LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted),
                     );
                     let remote_layer = Arc::new(remote_layer);
 
@@ -1364,6 +1373,7 @@ impl Timeline {
                         self.timeline_id,
                         deltafilename,
                         &remote_layer_metadata,
+                        LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted),
                     );
                     let remote_layer = Arc::new(remote_layer);
                     updates.insert_historic(remote_layer);
