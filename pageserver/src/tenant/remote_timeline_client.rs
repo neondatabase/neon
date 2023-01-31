@@ -437,8 +437,8 @@ impl RemoteTimelineClient {
     ) {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut().unwrap();
-        if let Some(upgraded) = upload_queue.latest_files.get_mut(&layer_file_name) {
-            if upgraded.merge(&new_metadata) {
+        if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
+            if upgraded.merge(new_metadata) {
                 upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
             }
             // If we don't do an index file upload inbetween here and restart,
@@ -455,7 +455,7 @@ impl RemoteTimelineClient {
             // The file should exist, since we just downloaded it.
             warn!(
                 "downloaded file {:?} not found in local copy of the index file",
-                &layer_file_name
+                layer_file_name
             );
         }
     }
