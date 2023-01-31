@@ -4,9 +4,7 @@ use std::{
     ops::{Deref, DerefMut},
     time::{Duration, Instant},
 };
-
-// TODO: change to `trace`.
-use tracing::info;
+use tracing::debug;
 
 // This seems to make more sense than `lru` or `cached`:
 //
@@ -85,7 +83,7 @@ pub mod timed_lru {
         }
 
         /// Drop an entry from the cache if it's outdated.
-        #[tracing::instrument(name = "cache_invalidate", fields(cache = self.name), skip_all)]
+        #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
         fn invalidate_raw(&self, info: &LookupInfo<K>) {
             let now = Instant::now();
 
@@ -106,7 +104,7 @@ pub mod timed_lru {
             }
 
             drop(cache); // drop lock before logging
-            info!(
+            debug!(
                 created_at = format_args!("{created_at:?}"),
                 expires_at = format_args!("{expires_at:?}"),
                 entry_removed = should_remove,
@@ -115,7 +113,7 @@ pub mod timed_lru {
         }
 
         /// Try retrieving an entry by its key, then execute `extract` if it exists.
-        #[tracing::instrument(name = "cache_get", fields(cache = self.name), skip_all)]
+        #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
         fn get_raw<Q, R>(&self, key: &Q, extract: impl FnOnce(&K, &Entry<V>) -> R) -> Option<R>
         where
             K: Borrow<Q>,
@@ -146,7 +144,7 @@ pub mod timed_lru {
             raw_entry.to_back();
 
             drop(cache); // drop lock before logging
-            info!(
+            debug!(
                 created_at = format_args!("{created_at:?}"),
                 old_expires_at = format_args!("{expires_at:?}"),
                 new_expires_at = format_args!("{deadline:?}"),
@@ -158,7 +156,7 @@ pub mod timed_lru {
 
         /// Insert an entry to the cache. If an entry with the same key already
         /// existed, return the previous value and its creation timestamp.
-        #[tracing::instrument(name = "cache_insert", fields(cache = self.name), skip_all)]
+        #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
         fn insert_raw(&self, key: K, value: V) -> (Instant, Option<V>) {
             let created_at = Instant::now();
             let expires_at = created_at.checked_add(self.ttl).expect("time overflow");
@@ -176,7 +174,7 @@ pub mod timed_lru {
                 .insert(key, entry)
                 .map(|entry| entry.value);
 
-            info!(
+            debug!(
                 created_at = format_args!("{created_at:?}"),
                 expires_at = format_args!("{expires_at:?}"),
                 replaced = old.is_some(),
