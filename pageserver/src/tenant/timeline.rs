@@ -840,32 +840,23 @@ impl Timeline {
         }
     }
 
-    pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<bool> {
+    pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+        let Some(layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         if self.remote_client.is_none() {
-            return Ok(false);
+            return Ok(Some(false));
         }
-        let Some(remote_layer) = self.find_layer(layer_file_name)
-            .and_then(PersistentLayer::downcast_remote_layer)
-        else {
-            return Ok(false);
-        };
 
-        self.download_remote_layer(remote_layer)
-            .await
-            .map(|()| true)
+        let Some(remote_layer) = layer.downcast_remote_layer() else {return  Ok(Some(false)) };
+
+        self.download_remote_layer(remote_layer).await?;
+        Ok(Some(true))
     }
 
-    pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<bool> {
-        let Some(remote_client) = &self.remote_client
-        else {
-            return Ok(false);
-        };
-        let Some(local_layer) = self.find_layer(layer_file_name)
-        else {
-            return Ok(false);
-        };
+    pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+        let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
+        let Some(remote_client) = &self.remote_client else { return Ok(Some(false)) };
         if local_layer.is_remote_layer() {
-            return Ok(false);
+            return Ok(Some(false));
         }
 
         // ensure the current layer is uploaded for sure
@@ -904,7 +895,7 @@ impl Timeline {
         updates.flush();
         drop(layers);
 
-        Ok(true)
+        Ok(Some(true))
     }
 }
 

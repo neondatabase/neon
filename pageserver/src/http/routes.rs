@@ -592,12 +592,14 @@ async fn layer_download_handler(request: Request<Body>) -> Result<Response<Body>
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    let status = if downloaded {
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_MODIFIED
-    };
-    json_response(status, ())
+    match downloaded {
+        Some(true) => json_response(StatusCode::OK, ()),
+        Some(false) => json_response(StatusCode::NOT_MODIFIED, ()),
+        None => json_response(
+            StatusCode::BAD_REQUEST,
+            format!("Layer {tenant_id}/{timeline_id}/{layer_file_name} not found"),
+        ),
+    }
 }
 
 async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -618,12 +620,14 @@ async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    let status = if evicted {
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_MODIFIED
-    };
-    json_response(status, ())
+    match evicted {
+        Some(true) => json_response(StatusCode::OK, ()),
+        Some(false) => json_response(StatusCode::NOT_MODIFIED, ()),
+        None => json_response(
+            StatusCode::BAD_REQUEST,
+            format!("Layer {tenant_id}/{timeline_id}/{layer_file_name} not found"),
+        ),
+    }
 }
 
 // Helper function to standardize the error messages we produce on bad durations
