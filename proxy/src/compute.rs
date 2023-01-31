@@ -46,10 +46,60 @@ pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 #[repr(transparent)]
 pub struct ConnCfg(Box<tokio_postgres::Config>);
 
+/// Creation and initialization routines.
 impl ConnCfg {
-    /// Construct a new connection config.
     pub fn new() -> Self {
         Self(Default::default())
+    }
+
+    /// Reuse password or auth keys from the other config.
+    pub fn reuse_password(&mut self, other: &Self) {
+        if let Some(password) = other.get_password() {
+            self.password(password);
+        }
+
+        if let Some(keys) = other.get_auth_keys() {
+            self.auth_keys(keys);
+        }
+    }
+
+    /// Apply startup message params to the connection config.
+    pub fn set_startup_params(&mut self, params: &StartupMessageParams) {
+        if let Some(options) = params.options_raw() {
+            // We must drop all proxy-specific parameters.
+            #[allow(unstable_name_collisions)]
+            let options: String = options
+                .filter(|opt| !opt.starts_with("project="))
+                .intersperse(" ") // TODO: use impl from std once it's stabilized
+                .collect();
+
+            self.options(&options);
+        }
+
+        if let Some(app_name) = params.get("application_name") {
+            self.application_name(app_name);
+        }
+
+        // TODO: This is especially ugly...
+        if let Some(replication) = params.get("replication") {
+            use tokio_postgres::config::ReplicationMode;
+            match replication {
+                "true" | "on" | "yes" | "1" => {
+                    self.replication_mode(ReplicationMode::Physical);
+                }
+                "database" => {
+                    self.replication_mode(ReplicationMode::Logical);
+                }
+                _other => {}
+            }
+        }
+
+        // TODO: extend the list of the forwarded startup parameters.
+        // Currently, tokio-postgres doesn't allow us to pass
+        // arbitrary parameters, but the ones above are a good start.
+        //
+        // This and the reverse params problem can be better addressed
+        // in a bespoke connection machinery (a new library for that sake).
     }
 }
 
@@ -138,45 +188,6 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
-    /// Apply startup message params to the connection config.
-    pub fn update(&mut self, params: &StartupMessageParams) {
-        if let Some(options) = params.options_raw() {
-            // We must drop all proxy-specific parameters.
-            #[allow(unstable_name_collisions)]
-            let options: String = options
-                .filter(|opt| !opt.starts_with("project="))
-                .intersperse(" ") // TODO: use impl from std once it's stabilized
-                .collect();
-
-            self.options(&options);
-        }
-
-        if let Some(app_name) = params.get("application_name") {
-            self.application_name(app_name);
-        }
-
-        // TODO: This is especially ugly...
-        if let Some(replication) = params.get("replication") {
-            use tokio_postgres::config::ReplicationMode;
-            match replication {
-                "true" | "on" | "yes" | "1" => {
-                    self.replication_mode(ReplicationMode::Physical);
-                }
-                "database" => {
-                    self.replication_mode(ReplicationMode::Logical);
-                }
-                _other => {}
-            }
-        }
-
-        // TODO: extend the list of the forwarded startup parameters.
-        // Currently, tokio-postgres doesn't allow us to pass
-        // arbitrary parameters, but the ones above are a good start.
-        //
-        // This and the reverse params problem can be better addressed
-        // in a bespoke connection machinery (a new library for that sake).
-    }
-
     /// Connect to a corresponding compute node.
     pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
         // TODO: establish a secure connection to the DB.

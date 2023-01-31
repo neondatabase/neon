@@ -271,6 +271,7 @@ async fn connect_to_compute_once(
 }
 
 /// Try to connect to the compute node, retrying if necessary.
+/// This function might update `node_info`, so we take it by `&mut`.
 async fn connect_to_compute(
     node_info: &mut console::CachedNodeInfo,
     params: &StartupMessageParams,
@@ -280,7 +281,7 @@ async fn connect_to_compute(
     let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
     loop {
         // Apply startup params to the (possibly, cached) compute node info.
-        node_info.config.update(params);
+        node_info.config.set_startup_params(params);
         let res = connect_to_compute_once(node_info)
             .instrument(info_span!("connect_to_compute_once"))
             .await;
@@ -289,7 +290,10 @@ async fn connect_to_compute(
             Err(e) if num_retries > 0 => {
                 match creds.wake_compute(extra).await.map_err(io_error)? {
                     // Update `node_info` and try one more time.
-                    Some(new) => *node_info = new,
+                    Some(mut new) => {
+                        new.config.reuse_password(&node_info.config);
+                        *node_info = new;
+                    }
                     // Link auth doesn't work that way, so we just exit.
                     None => return Err(e),
                 }
