@@ -1,6 +1,6 @@
 //! Common traits and structs for layers
 
-mod delta_layer;
+pub mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
