@@ -47,13 +47,13 @@ use std::{
 
 use anyhow::Context;
 use once_cell::sync::OnceCell;
+use pageserver_api::models::Key;
 use tracing::error;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
 
-use crate::repository::Key;
 use crate::tenant::writeback_ephemeral_file;
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();

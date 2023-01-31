@@ -21,7 +21,6 @@
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
 use crate::page_cache::PAGE_SZ;
-use crate::repository::{Key, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
@@ -33,7 +32,7 @@ use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
-use pageserver_api::models::HistoricLayerInfo;
+use pageserver_api::models::{HistoricLayerInfo, Key, KEY_SIZE};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -242,8 +241,8 @@ impl PersistentLayer for ImageLayer {
 
         HistoricLayerInfo::Image {
             layer_file_name,
-            key_start: key_range.start.to_string(),
-            key_end: key_range.end.to_string(),
+            key_start: key_range.start,
+            key_end: key_range.end,
             lsn_start: lsn_range.start,
             remote: false,
         }

@@ -48,10 +48,10 @@ mod layer_coverage;
 
 use crate::keyspace::KeyPartitioning;
 use crate::metrics::NUM_ONDISK_LAYERS;
-use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use anyhow::Result;
+use pageserver_api::models::Key;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;

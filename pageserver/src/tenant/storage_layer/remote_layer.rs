@@ -2,11 +2,10 @@
 //! in remote storage.
 //!
 use crate::config::PageServerConf;
-use crate::repository::Key;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
-use pageserver_api::models::HistoricLayerInfo;
+use pageserver_api::models::{HistoricLayerInfo, Key};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -144,8 +143,8 @@ impl PersistentLayer for RemoteLayer {
         if self.is_delta {
             HistoricLayerInfo::Delta {
                 layer_file_name,
-                key_start: key_range.start.to_string(),
-                key_end: key_range.end.to_string(),
+                key_start: key_range.start,
+                key_end: key_range.end,
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
@@ -153,8 +152,8 @@ impl PersistentLayer for RemoteLayer {
         } else {
             HistoricLayerInfo::Image {
                 layer_file_name,
-                key_start: key_range.start.to_string(),
-                key_end: key_range.end.to_string(),
+                key_start: key_range.start,
+                key_end: key_range.end,
                 lsn_start: lsn_range.start,
                 remote: true,
             }

@@ -5,14 +5,14 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
-use crate::repository::{Key, Value};
+use crate::repository::Value;
 use crate::tenant::blob_io::{BlobCursor, BlobWriter};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
 use anyhow::{ensure, Result};
-use pageserver_api::models::InMemoryLayerInfo;
+use pageserver_api::models::{InMemoryLayerInfo, Key};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;

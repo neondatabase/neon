@@ -1,4 +1,4 @@
-use crate::repository::{key_range_size, singleton_range, Key};
+use pageserver_api::models::{key_range_size, singleton_range, Key};
 use postgres_ffi::BLCKSZ;
 use std::ops::Range;
 

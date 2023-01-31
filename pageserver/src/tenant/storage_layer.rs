@@ -6,11 +6,11 @@ mod image_layer;
 mod inmemory_layer;
 mod remote_layer;
 
-use crate::repository::{Key, Value};
+use crate::repository::Value;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
-use pageserver_api::models::HistoricLayerInfo;
+use pageserver_api::models::{HistoricLayerInfo, Key};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;

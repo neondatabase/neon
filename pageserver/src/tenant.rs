@@ -2686,6 +2686,7 @@ pub mod harness {
     use bytes::{Bytes, BytesMut};
     use once_cell::sync::Lazy;
     use once_cell::sync::OnceCell;
+    use pageserver_api::models::Key;
     use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
     use std::{fs, path::PathBuf};
     use utils::logging;
@@ -2693,7 +2694,6 @@ pub mod harness {
 
     use crate::{
         config::PageServerConf,
-        repository::Key,
         tenant::Tenant,
         walrecord::NeonWalRecord,
         walredo::{WalRedoError, WalRedoManager},
@@ -2882,13 +2882,14 @@ pub mod harness {
 mod tests {
     use super::*;
     use crate::keyspace::KeySpaceAccum;
-    use crate::repository::{Key, Value};
+    use crate::repository::Value;
     use crate::tenant::harness::*;
     use crate::DEFAULT_PG_VERSION;
     use crate::METADATA_FILE_NAME;
     use bytes::BytesMut;
     use hex_literal::hex;
     use once_cell::sync::Lazy;
+    use pageserver_api::models::Key;
     use rand::{thread_rng, Rng};
 
     static TEST_KEY: Lazy<Key> =

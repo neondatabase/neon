@@ -1,9 +1,10 @@
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
-use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::Layer;
 use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, LayerDescriptor};
-use rand::prelude::{SeedableRng, SliceRandom, StdRng};
+use pageserver_api::models::Key;
+use rand::prelude::{SeedableRng, StdRng};
+use rand::seq::SliceRandom;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufRead, BufReader};

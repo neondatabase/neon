@@ -21,6 +21,7 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
+use pageserver_api::models::Key;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -46,7 +47,6 @@ use crate::metrics::{
     WAL_REDO_WAIT_TIME,
 };
 use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
-use crate::repository::Key;
 use crate::task_mgr::BACKGROUND_RUNTIME;
 use crate::walrecord::NeonWalRecord;
 use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
@@ -1153,9 +1153,9 @@ fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{PostgresRedoManager, WalRedoManager};
-    use crate::repository::Key;
     use crate::{config::PageServerConf, walrecord::NeonWalRecord};
     use bytes::Bytes;
+    use pageserver_api::models::Key;
     use std::str::FromStr;
     use utils::{id::TenantId, lsn::Lsn};
 

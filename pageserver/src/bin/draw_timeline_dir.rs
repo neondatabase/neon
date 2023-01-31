@@ -22,7 +22,7 @@
 //! TODO Consider shipping this as a grafana panel plugin:
 //!      https://grafana.com/tutorials/build-a-panel-plugin/
 use anyhow::Result;
-use pageserver::repository::Key;
+use pageserver_api::models::Key;
 use std::cmp::Ordering;
 use std::io::{self, BufRead};
 use std::path::PathBuf;

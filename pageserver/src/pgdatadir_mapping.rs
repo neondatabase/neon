@@ -13,7 +13,10 @@ use crate::repository::*;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
-use pageserver_api::reltag::{RelTag, SlruKind};
+use pageserver_api::{
+    models::Key,
+    reltag::{RelTag, SlruKind},
+};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, TimestampTz, TransactionId};

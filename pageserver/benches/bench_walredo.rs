@@ -12,10 +12,10 @@ use std::sync::{Arc, Barrier};
 use bytes::{Buf, Bytes};
 use pageserver::{
     config::PageServerConf,
-    repository::Key,
     walrecord::NeonWalRecord,
     walredo::{PostgresRedoManager, WalRedoError},
 };
+use pageserver_api::models::Key;
 use utils::{id::TenantId, lsn::Lsn};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};

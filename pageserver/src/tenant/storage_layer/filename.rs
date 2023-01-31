@@ -2,13 +2,13 @@
 //! Helper functions for dealing with filenames of the image and delta layer files.
 //!
 use crate::config::PageServerConf;
-use crate::repository::Key;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use pageserver_api::models::Key;
 use utils::lsn::Lsn;
 
 // Note: Timeline::load_layer_map() relies on this sort order

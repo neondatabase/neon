@@ -25,7 +25,7 @@
 //!
 use crate::config::PageServerConf;
 use crate::page_cache::{PageReadGuard, PAGE_SZ};
-use crate::repository::{Key, Value, KEY_SIZE};
+use crate::repository::Value;
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
@@ -36,7 +36,7 @@ use crate::virtual_file::VirtualFile;
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use pageserver_api::models::HistoricLayerInfo;
+use pageserver_api::models::{HistoricLayerInfo, Key, KEY_SIZE};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -424,8 +424,8 @@ impl PersistentLayer for DeltaLayer {
 
         HistoricLayerInfo::Delta {
             layer_file_name,
-            key_start: key_range.start.to_string(),
-            key_end: key_range.end.to_string(),
+            key_start: key_range.start,
+            key_end: key_range.end,
             lsn_start: lsn_range.start,
             lsn_end: lsn_range.end,
             remote: false,

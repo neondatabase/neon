@@ -10,7 +10,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-    DownloadRemoteLayersTaskState, LayerMapInfo, TimelineState,
+    DownloadRemoteLayersTaskState, Key, LayerMapInfo, TimelineState,
 };
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
@@ -60,7 +60,7 @@ use utils::{
 
 use crate::page_cache;
 use crate::repository::GcResult;
-use crate::repository::{Key, Value};
+use crate::repository::Value;
 use crate::task_mgr::TaskKind;
 use crate::walredo::WalRedoManager;
 use crate::METADATA_FILE_NAME;
