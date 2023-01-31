@@ -1,3 +1,7 @@
+//! Tool for extracting content-dependent metadata about layers. Useful for scanning real project layer files and evaluating the effectiveness of different heuristics on them.
+//!
+//! Currently it only analyzes holes, which are regions within the layer range that the layer contains no updates for. In the future it might do more analysis (maybe key quantiles?) but it should never return sensitive data.
+
 use anyhow::Result;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -88,6 +92,7 @@ fn parse_filename(name: &str) -> Option<LayerFile> {
     })
 }
 
+// Finds the max_holes largest holes, ignoring any that are smaller than MIN_HOLE_LENGTH"
 fn get_holes(path: &Path, max_holes: usize) -> Result<Vec<Hole>> {
     let file = FileBlockReader::new(VirtualFile::open(path)?);
     let summary_blk = file.read_blk(0)?;
@@ -134,8 +139,11 @@ fn main() -> Result<()> {
     } else {
         DEFAULT_MAX_HOLES
     };
+
+    // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
     pageserver::virtual_file::init(10);
     pageserver::page_cache::init(100);
+
     let mut total_delta_layers = 0usize;
     let mut total_image_layers = 0usize;
     let mut total_excess_layers = 0usize;
@@ -149,10 +157,10 @@ fn main() -> Result<()> {
             if !timeline.file_type()?.is_dir() {
                 continue;
             }
+            // Collect sorted vec of layers and count deltas
             let mut layers = Vec::new();
             let mut n_deltas = 0usize;
-            let mut n_excess_layers = 0usize;
-            let mut n_holes = 0usize;
+
             for layer in fs::read_dir(timeline.path())? {
                 let layer = layer?;
                 if let Some(mut layer_file) =
@@ -167,6 +175,11 @@ fn main() -> Result<()> {
             }
             layers.sort_by_key(|layer| layer.lsn_range.end);
 
+            // Count the number of holes and number of excess layers.
+            // Excess layer is image layer generated when holes in delta layers are not considered.
+            let mut n_excess_layers = 0usize;
+            let mut n_holes = 0usize;
+
             for i in 0..layers.len() {
                 if !layers[i].is_delta {
                     let mut n_deltas_since_last_image = 0usize;
@@ -180,11 +193,16 @@ fn main() -> Result<()> {
                                     n_skipped += 1;
                                 }
                             } else {
+                                // Iimage layer is always dense, despite to the fact that it doesn't contain all possible
+                                // key values in the specified range: there are may be no keys in the storage belonging
+                                // to the image layer range but not present in the image layer.
                                 break;
                             }
                         }
                     }
                     if n_deltas_since_last_image >= 3 && n_deltas_since_last_image - n_skipped < 3 {
+                        // It is just approximation: it doesn't take in account all image coverage.
+                        // Moerover the new layer map doesn't count total deltas, but the max stack of overlapping deltas.
                         n_excess_layers += 1;
                     }
                     n_holes += n_skipped;
