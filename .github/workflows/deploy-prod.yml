@@ -11,7 +11,7 @@ on:
         description: 'Branch or commit used for deploy scripts and configs'
         required: true
         type: string
-        default: 'main'
+        default: 'release'
       deployStorage:
         description: 'Deploy storage'
         required: true
