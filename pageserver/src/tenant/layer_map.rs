@@ -49,7 +49,7 @@ mod layer_coverage;
 use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
 use crate::metrics::NUM_ONDISK_LAYERS;
-use crate::repository::Key;
+use crate::repository::{singleton_range, Key};
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use anyhow::Result;
@@ -237,7 +237,7 @@ where
                 }
                 (Some(delta), None) => {
                     let lsn_floor = delta.get_lsn_range().start;
-                    if let Ok(contains) = delta.overlaps(&(key..key.next())) {
+                    if let Ok(contains) = delta.overlaps(&singleton_range(key)) {
                         if !contains {
                             version = self.historic.get().unwrap().get_version(lsn_floor.0 - 1)?;
                             latest_delta = version.delta_coverage.query(key.to_i128());
@@ -259,7 +259,7 @@ where
                             lsn_floor: img_lsn,
                         })
                     } else {
-                        if let Ok(contains) = delta.overlaps(&(key..key.next())) {
+                        if let Ok(contains) = delta.overlaps(&singleton_range(key)) {
                             if !contains {
                                 version = self
                                     .historic

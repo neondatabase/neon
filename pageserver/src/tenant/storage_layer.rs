@@ -19,7 +19,10 @@ use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
 };
-use serde::{Deserialize, Serialize};
+use pageserver_api::models::HistoricLayerInfo;
+use serde::ser::SerializeMap;
+use serde::{de::MapAccess, de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -295,7 +298,11 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
         Ok(vec![self.get_key_range()])
     }
 
-    /// Get list of holes
+    /// Get list of holes in key range: returns up to MAX_CACHED_HOLES largest holes, ignoring any that are smaller
+    /// than MIN_HOLE_LENGTH.
+    /// Only delta layers can contain holes. Image is consdered as always dense, despite to the fact that it doesn't
+    /// contain all possible key values in the specified range: there are may be no keys in the storage belonging
+    /// to the image layer range but not present in the image layer.
     fn get_holes(&self) -> Result<Option<Vec<Hole>>> {
         Ok(None)
     }
@@ -388,8 +395,65 @@ pub struct LayerDescriptor {
 }
 
 /// Wrapper for key range to provide reverse ordering by range length (for BinaryHeap)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hole(Range<Key>);
+
+impl Serialize for Hole {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut hole = serializer.serialize_map(Some(2))?;
+        hole.serialize_entry("start", &self.0.start.to_string())?;
+        hole.serialize_entry("end", &self.0.end.to_string())?;
+        hole.end()
+    }
+}
+
+struct HoleVisitor;
+
+impl<'de> Visitor<'de> for HoleVisitor {
+    type Value = Hole;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "a map with keys 'start' and 'end'")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        let mut start = None;
+        let mut end = None;
+
+        while let Some(k) = map.next_key::<&str>()? {
+            if k == "start" {
+                start = Some(map.next_value()?);
+            } else if k == "end" {
+                end = Some(map.next_value()?);
+            } else {
+                return Err(serde::de::Error::custom(&format!("Invalid key: {}", k)));
+            }
+        }
+
+        if start.is_none() || end.is_none() {
+            return Err(serde::de::Error::custom("Missing start or end"));
+        }
+
+        Ok(Hole(
+            Key::from_hex(start.unwrap()).unwrap()..Key::from_hex(end.unwrap()).unwrap(),
+        ))
+    }
+}
+
+impl<'de> Deserialize<'de> for Hole {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(HoleVisitor)
+    }
+}
 
 impl Layer for LayerDescriptor {
     fn get_key_range(&self) -> Range<Key> {
