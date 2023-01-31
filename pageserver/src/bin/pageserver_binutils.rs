@@ -12,7 +12,9 @@ use anyhow::Context;
 use clap::{value_parser, Arg, Command};
 
 use pageserver::{
+    context::{DownloadBehavior, RequestContext},
     page_cache,
+    task_mgr::TaskKind,
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
     virtual_file,
 };
@@ -75,7 +77,8 @@ fn print_layerfile(path: &Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
     virtual_file::init(10);
     page_cache::init(100);
-    dump_layerfile_from_path(path, true)
+    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    dump_layerfile_from_path(path, true, &ctx)
 }
 
 fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), anyhow::Error> {

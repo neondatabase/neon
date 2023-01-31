@@ -5,6 +5,7 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::repository::Value;
 use crate::tenant::blob_io::{BlobCursor, BlobWriter};
 use crate::tenant::block_io::BlockReader;
@@ -120,7 +121,7 @@ impl Layer for InMemoryLayer {
         format!("inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool) -> Result<()> {
+    fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();
 
         let end_str = inner
@@ -176,6 +177,7 @@ impl Layer for InMemoryLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;

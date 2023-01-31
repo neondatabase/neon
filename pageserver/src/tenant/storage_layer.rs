@@ -6,8 +6,8 @@ mod image_layer;
 mod inmemory_layer;
 mod remote_layer;
 
-use crate::repository::Value;
 use crate::walrecord::NeonWalRecord;
+use crate::{context::RequestContext, repository::Value};
 use anyhow::Result;
 use bytes::Bytes;
 use pageserver_api::models::{HistoricLayerInfo, Key};
@@ -118,13 +118,14 @@ pub trait Layer: Send + Sync {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> Result<ValueReconstructResult>;
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
     fn short_id(&self) -> String;
 
     /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool) -> Result<()>;
+    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
 /// Returned by [`Layer::iter`]
@@ -162,11 +163,11 @@ pub trait PersistentLayer: Layer {
     fn local_path(&self) -> Option<PathBuf>;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> Result<LayerIter<'_>>;
+    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>>;
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
+    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
         panic!("Not implemented")
     }
 
@@ -234,6 +235,7 @@ impl Layer for LayerDescriptor {
         _key: Key,
         _lsn_range: Range<Lsn>,
         _reconstruct_data: &mut ValueReconstructState,
+        _ctx: &RequestContext,
     ) -> Result<ValueReconstructResult> {
         todo!("This method shouldn't be part of the Layer trait")
     }
@@ -242,7 +244,7 @@ impl Layer for LayerDescriptor {
         self.short_id.clone()
     }
 
-    fn dump(&self, _verbose: bool) -> Result<()> {
+    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         todo!()
     }
 }

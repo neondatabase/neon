@@ -255,6 +255,8 @@ pub enum TaskKind {
     // A request that comes in via the pageserver HTTP API.
     MgmtRequest,
 
+    DebugTool,
+
     #[cfg(test)]
     UnitTest,
 }
