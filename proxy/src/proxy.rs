@@ -115,7 +115,7 @@ pub async fn handle_ws_client(
     let hostname = hostname.as_deref();
 
     // TLS is None here, because the connection is already encrypted.
-    let do_handshake = handshake(stream, None, cancel_map).instrument(info_span!("handshake"));
+    let do_handshake = handshake(stream, None, cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -152,7 +152,7 @@ async fn handle_client(
     }
 
     let tls = config.tls_config.as_ref();
-    let do_handshake = handshake(stream, tls, cancel_map).instrument(info_span!("handshake"));
+    let do_handshake = handshake(stream, tls, cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -181,6 +181,7 @@ async fn handle_client(
 /// For better testing experience, `stream` can be any object satisfying the traits.
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
+#[tracing::instrument(skip_all)]
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<&TlsConfig>,
@@ -243,6 +244,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Try to connect to the compute node once.
+#[tracing::instrument(name = "connect_once", skip_all)]
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
@@ -272,6 +274,7 @@ async fn connect_to_compute_once(
 
 /// Try to connect to the compute node, retrying if necessary.
 /// This function might update `node_info`, so we take it by `&mut`.
+#[tracing::instrument(skip_all)]
 async fn connect_to_compute(
     node_info: &mut console::CachedNodeInfo,
     params: &StartupMessageParams,
@@ -282,11 +285,7 @@ async fn connect_to_compute(
     loop {
         // Apply startup params to the (possibly, cached) compute node info.
         node_info.config.set_startup_params(params);
-        let res = connect_to_compute_once(node_info)
-            .instrument(info_span!("connect_once"))
-            .await;
-
-        match res {
+        match connect_to_compute_once(node_info).await {
             Err(e) if num_retries > 0 => {
                 info!("compute node's state has changed; requesting a wake-up");
                 match creds.wake_compute(extra).map_err(io_error).await? {
@@ -428,7 +427,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         let node = connect_to_compute(&mut node_info, params, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
-            .instrument(info_span!("connect_to_compute"))
             .await?;
 
         prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;

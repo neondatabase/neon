@@ -64,7 +64,7 @@ impl Api {
             Ok(Some(secret))
         }
         .map_err(crate::error::log_error)
-        .instrument(info_span!("get_auth_info", id = request_id))
+        .instrument(info_span!("http", id = request_id))
         .await
     }
 
@@ -112,13 +112,14 @@ impl Api {
             Ok(node)
         }
         .map_err(crate::error::log_error)
-        .instrument(info_span!("wake_compute", id = request_id))
+        .instrument(info_span!("http", id = request_id))
         .await
     }
 }
 
 #[async_trait]
 impl super::Api for Api {
+    #[tracing::instrument(skip_all)]
     async fn get_auth_info(
         &self,
         extra: &ConsoleReqExtra<'_>,
@@ -127,6 +128,7 @@ impl super::Api for Api {
         self.do_get_auth_info(extra, creds).await
     }
 
+    #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
         extra: &ConsoleReqExtra<'_>,
@@ -139,13 +141,13 @@ impl super::Api for Api {
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
         if let Some(cached) = self.caches.node_info.get(key) {
-            info!("found cached compute node info, skipping wake_compute");
+            info!(key = key, "found cached compute node info");
             return Ok(cached);
         }
 
         let node = self.do_wake_compute(extra, creds).await?;
         let (_, cached) = self.caches.node_info.insert(key.into(), node);
-        info!("created a cache entry for compute node info");
+        info!(key = key, "created a cache entry for compute node info");
 
         Ok(cached)
     }

@@ -78,7 +78,7 @@ impl Api {
             Ok(secret.or_else(|| parse_md5(entry).map(AuthInfo::Md5)))
         }
         .map_err(crate::error::log_error)
-        .instrument(info_span!("get_auth_info", mock = self.endpoint.as_str()))
+        .instrument(info_span!("postgres", url = self.endpoint.as_str()))
         .await
     }
 
@@ -104,6 +104,7 @@ impl Api {
 
 #[async_trait]
 impl super::Api for Api {
+    #[tracing::instrument(skip_all)]
     async fn get_auth_info(
         &self,
         _extra: &ConsoleReqExtra<'_>,
@@ -112,6 +113,7 @@ impl super::Api for Api {
         self.do_get_auth_info(creds).await
     }
 
+    #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
         _extra: &ConsoleReqExtra<'_>,
