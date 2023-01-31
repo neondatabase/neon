@@ -24,6 +24,7 @@
 //! "values" part.
 //!
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::page_cache::{PageReadGuard, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
@@ -214,7 +215,7 @@ impl Layer for DeltaLayer {
         self.filename().file_name()
     }
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool) -> Result<()> {
+    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
             self.tenant_id,
@@ -229,7 +230,7 @@ impl Layer for DeltaLayer {
             return Ok(());
         }
 
-        let inner = self.load()?;
+        let inner = self.load(ctx)?;
 
         println!(
             "index_start_blk: {}, root {}",
@@ -293,6 +294,7 @@ impl Layer for DeltaLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.lsn_range.start);
         let mut need_image = true;
@@ -301,7 +303,7 @@ impl Layer for DeltaLayer {
 
         {
             // Open the file and lock the metadata in memory
-            let inner = self.load()?;
+            let inner = self.load(ctx)?;
 
             // Scan the page versions backwards, starting from `lsn`.
             let file = inner.file.as_ref().unwrap();
@@ -391,16 +393,16 @@ impl PersistentLayer for DeltaLayer {
         Some(self.path())
     }
 
-    fn iter(&self) -> Result<LayerIter<'_>> {
-        let inner = self.load().context("load delta layer")?;
+    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>> {
+        let inner = self.load(ctx).context("load delta layer")?;
         Ok(match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
             Err(err) => Box::new(std::iter::once(Err(err))),
         })
     }
 
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
-        let inner = self.load()?;
+    fn key_iter(&self, ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
+        let inner = self.load(ctx)?;
         Ok(Box::new(
             DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
         ))
@@ -459,7 +461,7 @@ impl DeltaLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self) -> Result<RwLockReadGuard<DeltaLayerInner>> {
+    fn load(&self, _ctx: &RequestContext) -> Result<RwLockReadGuard<DeltaLayerInner>> {
         loop {
             // Quick exit if already loaded
             let inner = self.inner.read().unwrap();
