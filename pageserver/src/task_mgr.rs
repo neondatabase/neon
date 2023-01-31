@@ -169,7 +169,14 @@ task_local! {
 /// Note that we don't try to limit how many task of a certain kind can be running
 /// at the same time.
 ///
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(
+    Debug,
+    // NB: enumset::EnumSetType derives PartialEq, Eq, Clone, Copy
+    enumset::EnumSetType,
+    serde::Serialize,
+    serde::Deserialize,
+    strum_macros::IntoStaticStr,
+)]
 pub enum TaskKind {
     // Pageserver startup, i.e., `main`
     Startup,

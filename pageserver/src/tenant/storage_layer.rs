@@ -9,13 +9,21 @@ mod remote_layer;
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::{Key, Value};
+use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
-use pageserver_api::models::HistoricLayerInfo;
+use enum_map::EnumMap;
+use enumset::EnumSet;
+use pageserver_api::models::LayerAccessKind;
+use pageserver_api::models::{
+    HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
+};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use utils::history_buffer::HistoryBufferWithDropCounter;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -81,6 +89,149 @@ pub enum ValueReconstructResult {
     /// the returned LSN. This is usually considered an error, but might be OK
     /// in some circumstances.
     Missing,
+}
+
+#[derive(Debug)]
+pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
+
+#[derive(Debug, Default, Clone)]
+struct LayerAccessStatsInner {
+    first_access: Option<LayerAccessStatFullDetails>,
+    count_by_access_kind: EnumMap<LayerAccessKind, u64>,
+    task_kind_flag: EnumSet<TaskKind>,
+    last_accesses: HistoryBufferWithDropCounter<LayerAccessStatFullDetails, 16>,
+    last_residence_changes: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
+}
+
+#[derive(Debug, Clone)]
+struct LayerAccessStatFullDetails {
+    when: SystemTime,
+    task_kind: TaskKind,
+    access_kind: LayerAccessKind,
+}
+
+#[derive(Clone, Copy, strum_macros::EnumString)]
+pub enum LayerAccessStatsReset {
+    NoReset,
+    JustTaskKindFlags,
+    AllStats,
+}
+
+fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u64 {
+    ts.duration_since(UNIX_EPOCH)
+        .expect("better to die in this unlikely case than report false stats")
+        .as_millis()
+        .try_into()
+        .expect("64 bits is enough for few more years")
+}
+
+impl LayerAccessStatFullDetails {
+    fn to_api_model(&self) -> pageserver_api::models::LayerAccessStatFullDetails {
+        let Self {
+            when,
+            task_kind,
+            access_kind,
+        } = self;
+        pageserver_api::models::LayerAccessStatFullDetails {
+            when_millis_since_epoch: system_time_to_millis_since_epoch(when),
+            task_kind: task_kind.into(), // into static str, powered by strum_macros
+            access_kind: *access_kind,
+        }
+    }
+}
+
+impl LayerAccessStats {
+    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
+        new
+    }
+
+    pub(crate) fn for_new_layer_file() -> Self {
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+        new.record_residence_event(
+            LayerResidenceStatus::Resident,
+            LayerResidenceEventReason::LayerCreate,
+        );
+        new
+    }
+
+    /// Creates a clone of `self` and records `new_status` in the clone.
+    /// The `new_status` is not recorded in `self`
+    pub(crate) fn clone_for_residence_change(
+        &self,
+        new_status: LayerResidenceStatus,
+    ) -> LayerAccessStats {
+        let clone = {
+            let inner = self.0.lock().unwrap();
+            inner.clone()
+        };
+        let new = LayerAccessStats(Mutex::new(clone));
+        new.record_residence_event(new_status, LayerResidenceEventReason::ResidenceChange);
+        new
+    }
+
+    fn record_residence_event(
+        &self,
+        status: LayerResidenceStatus,
+        reason: LayerResidenceEventReason,
+    ) {
+        let mut inner = self.0.lock().unwrap();
+        inner
+            .last_residence_changes
+            .write(LayerResidenceEvent::new(status, reason));
+    }
+
+    fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
+        let mut inner = self.0.lock().unwrap();
+        let this_access = LayerAccessStatFullDetails {
+            when: SystemTime::now(),
+            task_kind,
+            access_kind,
+        };
+        inner
+            .first_access
+            .get_or_insert_with(|| this_access.clone());
+        inner.count_by_access_kind[access_kind] += 1;
+        inner.task_kind_flag |= task_kind;
+        inner.last_accesses.write(this_access);
+    }
+    fn to_api_model(
+        &self,
+        reset: LayerAccessStatsReset,
+    ) -> pageserver_api::models::LayerAccessStats {
+        let mut inner = self.0.lock().unwrap();
+        let LayerAccessStatsInner {
+            first_access,
+            count_by_access_kind,
+            task_kind_flag,
+            last_accesses,
+            last_residence_changes,
+        } = &*inner;
+        let ret = pageserver_api::models::LayerAccessStats {
+            access_count_by_access_kind: count_by_access_kind
+                .iter()
+                .map(|(kind, count)| (kind, *count))
+                .collect(),
+            task_kind_access_flag: task_kind_flag
+                .iter()
+                .map(|task_kind| task_kind.into()) // into static str, powered by strum_macros
+                .collect(),
+            first: first_access.as_ref().map(|a| a.to_api_model()),
+            accesses_history: last_accesses.map(|m| m.to_api_model()),
+            residence_events_history: last_residence_changes.clone(),
+        };
+        match reset {
+            LayerAccessStatsReset::NoReset => (),
+            LayerAccessStatsReset::JustTaskKindFlags => {
+                inner.task_kind_flag.clear();
+            }
+            LayerAccessStatsReset::AllStats => {
+                *inner = LayerAccessStatsInner::default();
+            }
+        }
+        ret
+    }
 }
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
@@ -193,7 +344,9 @@ pub trait PersistentLayer: Layer {
     /// current_physical_size is computed as the som of this value.
     fn file_size(&self) -> Option<u64>;
 
-    fn info(&self) -> HistoricLayerInfo;
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
+
+    fn access_stats(&self) -> &LayerAccessStats;
 }
 
 pub fn downcast_remote_layer(
