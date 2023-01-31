@@ -45,7 +45,7 @@ use storage_broker::{
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
 use utils::project_git_version;
-use utils::sentry_init::{init_sentry, release_name};
+use utils::sentry_init::init_sentry;
 
 project_git_version!(GIT_VERSION);
 
@@ -425,7 +425,7 @@ async fn http1_handler(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry(release_name!(), &[]);
+    let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     let args = Args::parse();
 

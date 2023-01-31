@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -22,6 +23,8 @@ pub struct ComputeSpec {
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
+
+    pub startup_tracing_context: Option<HashMap<String, String>>,
 }
 
 /// Cluster state seen from the perspective of the external tools
@@ -152,8 +155,20 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
             {
                 RoleAction::Update
             } else if let Some(pg_pwd) = &r.encrypted_password {
-                // Check whether password changed or not (trim 'md5:' prefix first)
-                if pg_pwd[3..] != *role.encrypted_password.as_ref().unwrap() {
+                // Check whether password changed or not (trim 'md5' prefix first if any)
+                //
+                // This is a backward compatibility hack, which comes from the times when we were using
+                // md5 for everyone and hashes were stored in the console db without md5 prefix. So when
+                // role comes from the control-plane (json spec) `Role.encrypted_password` doesn't have md5 prefix,
+                // but when role comes from Postgres (`get_existing_roles` / `existing_roles`) it has this prefix.
+                // Here is the only place so far where we compare hashes, so it seems to be the best candidate
+                // to place this compatibility layer.
+                let pg_pwd = if let Some(stripped) = pg_pwd.strip_prefix("md5") {
+                    stripped
+                } else {
+                    pg_pwd
+                };
+                if pg_pwd != *role.encrypted_password.as_ref().unwrap() {
                     RoleAction::Update
                 } else {
                     RoleAction::None
@@ -372,13 +387,13 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     name.pg_quote(),
                     db.owner.pg_quote()
                 );
-                let _ = info_span!("executing", query).entered();
+                let _guard = info_span!("executing", query).entered();
                 client.execute(query.as_str(), &[])?;
             }
             DatabaseAction::Create => {
                 let mut query: String = format!("CREATE DATABASE {} ", name.pg_quote());
                 query.push_str(&db.to_pg_options());
-                let _ = info_span!("executing", query).entered();
+                let _guard = info_span!("executing", query).entered();
                 client.execute(query.as_str(), &[])?;
             }
         };

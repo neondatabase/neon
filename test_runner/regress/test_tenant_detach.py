@@ -6,6 +6,7 @@ from threading import Thread
 import asyncpg
 import pytest
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
@@ -59,11 +60,11 @@ def test_tenant_reattach(
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    with pg.cursor() as cur:
-        cur.execute("CREATE TABLE t(key int primary key, value text)")
-        cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
-        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE t(key int primary key, value text)")
+            cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
     # Wait for the all data to be processed by the pageserver and uploaded in remote storage
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
@@ -78,15 +79,34 @@ def test_tenant_reattach(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
+    ps_metrics = parse_metrics(pageserver_http.get_metrics(), "pageserver")
+    tenant_metric_filter = {
+        "tenant_id": str(tenant_id),
+        "timeline_id": str(timeline_id),
+    }
+    pageserver_last_record_lsn_before_detach = int(
+        ps_metrics.query_one("pageserver_last_record_lsn", filter=tenant_metric_filter).value
+    )
+
     pageserver_http.tenant_detach(tenant_id)
     pageserver_http.tenant_attach(tenant_id)
 
-    with pg.cursor() as cur:
-        assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
+    time.sleep(1)  # for metrics propagation
 
-    # Check that we had to retry the downloads
-    assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
-    assert env.pageserver.log_contains(".*download.*failed, will retry.*")
+    ps_metrics = parse_metrics(pageserver_http.get_metrics(), "pageserver")
+    pageserver_last_record_lsn = int(
+        ps_metrics.query_one("pageserver_last_record_lsn", filter=tenant_metric_filter).value
+    )
+
+    assert pageserver_last_record_lsn_before_detach == pageserver_last_record_lsn
+
+    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
+        with pg.cursor() as cur:
+            assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
+
+        # Check that we had to retry the downloads
+        assert env.pageserver.log_contains(".*list prefixes.*failed, will retry.*")
+        assert env.pageserver.log_contains(".*download.*failed, will retry.*")
 
 
 num_connections = 10
@@ -237,7 +257,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    env.pageserver.allowed_errors.append(".*NotFound\\(Tenant .* not found")
+    env.pageserver.allowed_errors.append(".*NotFound: Tenant .* not found")
 
     # first check for non existing tenant
     tenant_id = TenantId.generate()
@@ -272,8 +292,10 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         bogus_timeline_id = TimelineId.generate()
         pageserver_http.timeline_gc(tenant_id, bogus_timeline_id, 0)
 
-        # the error will be printed to the log too
+    # the error will be printed to the log too
     env.pageserver.allowed_errors.append(".*gc target timeline does not exist.*")
+    # Timelines get stopped during detach, ignore the gc calls that error, whitnessing that
+    env.pageserver.allowed_errors.append(".*InternalServerError\\(timeline is Stopping.*")
 
     # Detach while running manual GC.
     # It should wait for manual GC to finish because it runs in a task associated with the tenant.

@@ -11,10 +11,12 @@
 
 use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, time::Duration};
 
-use crate::task_mgr::TaskKind;
+use super::TaskStateUpdate;
+use crate::broker_client::get_broker_client;
+use crate::context::RequestContext;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
+use crate::task_mgr::{self, TaskKind};
 use crate::tenant::Timeline;
-use crate::{task_mgr, walreceiver::TaskStateUpdate};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
@@ -27,10 +29,7 @@ use storage_broker::Streaming;
 use tokio::{select, sync::watch};
 use tracing::*;
 
-use crate::{
-    exponential_backoff, walreceiver::get_broker_client, DEFAULT_BASE_BACKOFF_SECONDS,
-    DEFAULT_MAX_BACKOFF_SECONDS,
-};
+use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use utils::{
     id::{NodeId, TenantTimelineId},
@@ -46,6 +45,7 @@ pub fn spawn_connection_manager_task(
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
     auth_token: Option<Arc<String>>,
+    ctx: RequestContext,
 ) {
     let mut broker_client = get_broker_client().clone();
 
@@ -78,6 +78,7 @@ pub fn spawn_connection_manager_task(
                     loop_step_result = connection_manager_loop_step(
                         &mut broker_client,
                         &mut walreceiver_state,
+                        &ctx,
                     ) => match loop_step_result {
                         ControlFlow::Continue(()) => continue,
                         ControlFlow::Break(()) => {
@@ -101,6 +102,7 @@ pub fn spawn_connection_manager_task(
 async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     walreceiver_state: &mut WalreceiverState,
+    ctx: &RequestContext,
 ) -> ControlFlow<(), ()> {
     let mut timeline_state_updates = walreceiver_state.timeline.subscribe_for_state_updates();
 
@@ -145,7 +147,7 @@ async fn connection_manager_loop_step(
                 let wal_connection = walreceiver_state.wal_connection.as_mut()
                     .expect("Should have a connection, as checked by the corresponding select! guard");
                 match wal_connection_update {
-                    TaskEvent::Update(TaskStateUpdate::Init | TaskStateUpdate::Started) => {},
+                    TaskEvent::Update(TaskStateUpdate::Started) => {},
                     TaskEvent::Update(TaskStateUpdate::Progress(new_status)) => {
                         if new_status.has_processed_wal {
                             // We have advanced last_record_lsn by processing the WAL received
@@ -183,13 +185,23 @@ async fn connection_manager_loop_step(
 
             new_event = async {
                 loop {
+                    if walreceiver_state.timeline.current_state() == TimelineState::Loading {
+                        warn!("wal connection manager should only be launched after timeline has become active");
+                    }
                     match timeline_state_updates.changed().await {
                         Ok(()) => {
                             let new_state = walreceiver_state.timeline.current_state();
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
-                                TimelineState::Broken | TimelineState::Stopping | TimelineState::Suspended => return ControlFlow::Continue(new_state),
+                                TimelineState::Broken | TimelineState::Stopping => {
+                                    info!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
+                                    return ControlFlow::Break(());
+                                }
+                                TimelineState::Loading => {
+                                    warn!("timeline transitioned back to Loading state, that should not happen");
+                                    return ControlFlow::Continue(new_state);
+                                }
                             }
                         }
                         Err(_sender_dropped_error) => return ControlFlow::Break(()),
@@ -197,7 +209,7 @@ async fn connection_manager_loop_step(
                 }
             } => match new_event {
                 ControlFlow::Continue(new_state) => {
-                    info!("Timeline became inactive (new state: {new_state:?}), dropping current connections until it reactivates");
+                    info!("observed timeline state change, new state is {new_state:?}");
                     return ControlFlow::Continue(());
                 }
                 ControlFlow::Break(()) => {
@@ -226,6 +238,7 @@ async fn connection_manager_loop_step(
                 .change_connection(
                     new_candidate.safekeeper_id,
                     new_candidate.wal_source_connconf,
+                    ctx,
                 )
                 .await
         }
@@ -289,7 +302,9 @@ async fn subscribe_for_timeline_updates(
                 return resp.into_inner();
             }
             Err(e) => {
-                warn!("Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}");
+                // Safekeeper nodes can stop pushing timeline updates to the broker, when no new writes happen and
+                // entire WAL is streamed. Keep this noticeable with logging, but do not warn/error.
+                info!("Attempt #{attempt}, failed to subscribe for timeline {id} updates in broker: {e:#}");
                 continue;
             }
         }
@@ -389,12 +404,17 @@ impl WalreceiverState {
         &mut self,
         new_sk_id: NodeId,
         new_wal_source_connconf: PgConnectionConfig,
+        ctx: &RequestContext,
     ) {
         self.drop_old_connection(true).await;
 
         let id = self.id;
         let connect_timeout = self.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
+        let ctx = ctx.detached_child(
+            TaskKind::WalReceiverConnectionHandler,
+            ctx.download_behavior(),
+        );
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
@@ -403,6 +423,7 @@ impl WalreceiverState {
                     events_sender,
                     cancellation,
                     connect_timeout,
+                    ctx,
                 )
                 .await
                 .context("walreceiver connection handling failure")
@@ -1233,18 +1254,18 @@ mod tests {
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
     async fn dummy_state(harness: &TenantHarness<'_>) -> WalreceiverState {
+        let (tenant, ctx) = harness.load().await;
+        let timeline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION, &ctx)
+            .expect("Failed to create an empty timeline for dummy wal connection manager");
+        let timeline = timeline.initialize(&ctx).unwrap();
+
         WalreceiverState {
             id: TenantTimelineId {
                 tenant_id: harness.tenant_id,
                 timeline_id: TIMELINE_ID,
             },
-            timeline: harness
-                .load()
-                .await
-                .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION)
-                .expect("Failed to create an empty timeline for dummy wal connection manager")
-                .initialize()
-                .unwrap(),
+            timeline,
             wal_connect_timeout: Duration::from_secs(1),
             lagging_wal_timeout: Duration::from_secs(1),
             max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),

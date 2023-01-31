@@ -12,6 +12,7 @@ use tokio_tar::Archive;
 use tracing::*;
 use walkdir::WalkDir;
 
+use crate::context::RequestContext;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
@@ -47,6 +48,7 @@ pub async fn import_timeline_from_postgres_datadir(
     tline: &Timeline,
     pgdata_path: &Path,
     pgdata_lsn: Lsn,
+    ctx: &RequestContext,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
 
@@ -69,7 +71,7 @@ pub async fn import_timeline_from_postgres_datadir(
             let mut file = tokio::fs::File::open(absolute_path).await?;
             let len = metadata.len() as usize;
             if let Some(control_file) =
-                import_file(&mut modification, relative_path, &mut file, len).await?
+                import_file(&mut modification, relative_path, &mut file, len, ctx).await?
             {
                 pg_control = Some(control_file);
             }
@@ -99,6 +101,7 @@ pub async fn import_timeline_from_postgres_datadir(
         tline,
         Lsn(pg_control.checkPointCopy.redo),
         pgdata_lsn,
+        ctx,
     )
     .await?;
 
@@ -113,6 +116,7 @@ async fn import_rel(
     dboid: Oid,
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     // Does it look like a relation file?
     trace!("importing rel file {}", path.display());
@@ -147,7 +151,10 @@ async fn import_rel(
     // FIXME: use proper error type for this, instead of parsing the error message.
     // Or better yet, keep track of which relations we've already created
     // https://github.com/neondatabase/neon/issues/3309
-    if let Err(e) = modification.put_rel_creation(rel, nblocks as u32).await {
+    if let Err(e) = modification
+        .put_rel_creation(rel, nblocks as u32, ctx)
+        .await
+    {
         if e.to_string().contains("already exists") {
             debug!("relation {} already exists. we must be extending it", rel);
         } else {
@@ -182,7 +189,7 @@ async fn import_rel(
     //
     // If we process rel segments out of order,
     // put_rel_extend will skip the update.
-    modification.put_rel_extend(rel, blknum).await?;
+    modification.put_rel_extend(rel, blknum, ctx).await?;
 
     Ok(())
 }
@@ -195,6 +202,7 @@ async fn import_slru(
     path: &Path,
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     info!("importing slru file {path:?}");
 
@@ -211,7 +219,7 @@ async fn import_slru(
     ensure!(nblocks <= pg_constants::SLRU_PAGES_PER_SEGMENT as usize);
 
     modification
-        .put_slru_segment_creation(slru, segno, nblocks as u32)
+        .put_slru_segment_creation(slru, segno, nblocks as u32, ctx)
         .await?;
 
     let mut rpageno = 0;
@@ -252,15 +260,15 @@ async fn import_wal(
     tline: &Timeline,
     startpoint: Lsn,
     endpoint: Lsn,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
-    use std::io::Read;
     let mut waldecoder = WalStreamDecoder::new(startpoint, tline.pg_version);
 
     let mut segno = startpoint.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(tline, startpoint).await?;
+    let mut walingest = WalIngest::new(tline, startpoint, ctx).await?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
@@ -283,6 +291,7 @@ async fn import_wal(
             file.seek(std::io::SeekFrom::Start(offset as u64))?;
         }
 
+        use std::io::Read;
         let nread = file.read_to_end(&mut buf)?;
         if nread != WAL_SEGMENT_SIZE - offset {
             // Maybe allow this for .partial files?
@@ -297,7 +306,7 @@ async fn import_wal(
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
                 last_lsn = lsn;
 
@@ -326,6 +335,7 @@ pub async fn import_basebackup_from_tar(
     tline: &Timeline,
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     base_lsn: Lsn,
+    ctx: &RequestContext,
 ) -> Result<()> {
     info!("importing base at {base_lsn}");
     let mut modification = tline.begin_modification(base_lsn);
@@ -344,7 +354,7 @@ pub async fn import_basebackup_from_tar(
         match header.entry_type() {
             tokio_tar::EntryType::Regular => {
                 if let Some(res) =
-                    import_file(&mut modification, file_path.as_ref(), &mut entry, len).await?
+                    import_file(&mut modification, file_path.as_ref(), &mut entry, len, ctx).await?
                 {
                     // We found the pg_control file.
                     pg_control = Some(res);
@@ -376,13 +386,14 @@ pub async fn import_wal_from_tar(
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     start_lsn: Lsn,
     end_lsn: Lsn,
+    ctx: &RequestContext,
 ) -> Result<()> {
     // Set up walingest mutable state
     let mut waldecoder = WalStreamDecoder::new(start_lsn, tline.pg_version);
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
-    let mut walingest = WalIngest::new(tline, start_lsn).await?;
+    let mut walingest = WalIngest::new(tline, start_lsn, ctx).await?;
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
@@ -431,7 +442,7 @@ pub async fn import_wal_from_tar(
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded)
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
                     .await?;
                 last_lsn = lsn;
 
@@ -466,6 +477,7 @@ async fn import_file(
     file_path: &Path,
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
+    ctx: &RequestContext,
 ) -> Result<Option<ControlFileData>> {
     let file_name = match file_path.file_name() {
         Some(name) => name.to_string_lossy(),
@@ -498,14 +510,16 @@ async fn import_file(
             }
             "pg_filenode.map" => {
                 let bytes = read_all_bytes(reader).await?;
-                modification.put_relmap_file(spcnode, dbnode, bytes).await?;
+                modification
+                    .put_relmap_file(spcnode, dbnode, bytes, ctx)
+                    .await?;
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
                 debug!("ignored PG_VERSION file");
             }
             _ => {
-                import_rel(modification, file_path, spcnode, dbnode, reader, len).await?;
+                import_rel(modification, file_path, spcnode, dbnode, reader, len, ctx).await?;
                 debug!("imported rel creation");
             }
         }
@@ -521,38 +535,40 @@ async fn import_file(
         match file_name.as_ref() {
             "pg_filenode.map" => {
                 let bytes = read_all_bytes(reader).await?;
-                modification.put_relmap_file(spcnode, dbnode, bytes).await?;
+                modification
+                    .put_relmap_file(spcnode, dbnode, bytes, ctx)
+                    .await?;
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
                 debug!("ignored PG_VERSION file");
             }
             _ => {
-                import_rel(modification, file_path, spcnode, dbnode, reader, len).await?;
+                import_rel(modification, file_path, spcnode, dbnode, reader, len, ctx).await?;
                 debug!("imported rel creation");
             }
         }
     } else if file_path.starts_with("pg_xact") {
         let slru = SlruKind::Clog;
 
-        import_slru(modification, slru, file_path, reader, len).await?;
+        import_slru(modification, slru, file_path, reader, len, ctx).await?;
         debug!("imported clog slru");
     } else if file_path.starts_with("pg_multixact/offsets") {
         let slru = SlruKind::MultiXactOffsets;
 
-        import_slru(modification, slru, file_path, reader, len).await?;
+        import_slru(modification, slru, file_path, reader, len, ctx).await?;
         debug!("imported multixact offsets slru");
     } else if file_path.starts_with("pg_multixact/members") {
         let slru = SlruKind::MultiXactMembers;
 
-        import_slru(modification, slru, file_path, reader, len).await?;
+        import_slru(modification, slru, file_path, reader, len, ctx).await?;
         debug!("imported multixact members slru");
     } else if file_path.starts_with("pg_twophase") {
         let xid = u32::from_str_radix(file_name.as_ref(), 16)?;
 
         let bytes = read_all_bytes(reader).await?;
         modification
-            .put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))
+            .put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]), ctx)
             .await?;
         debug!("imported twophase file");
     } else if file_path.starts_with("pg_wal") {

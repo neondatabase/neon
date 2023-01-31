@@ -1,8 +1,5 @@
-#
-# This file is identical to the Dockerfile.compute-node-v15 file
-# except for the version of Postgres that is built.
-#
-
+ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+ARG IMAGE=rust
 ARG TAG=pinned
 
 #########################################################################################
@@ -22,7 +19,8 @@ RUN apt update &&  \
 #
 #########################################################################################
 FROM build-deps AS pg-build
-COPY vendor/postgres-v14 postgres
+ARG PG_VERSION
+COPY vendor/postgres-${PG_VERSION} postgres
 RUN cd postgres && \
     ./configure CFLAGS='-O2 -g3' --enable-debug --with-openssl --with-uuid=ossp && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s install && \
@@ -137,6 +135,27 @@ RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.0.1.tar.gz -O h3
 
 #########################################################################################
 #
+# Layer "unit-pg-build"
+# compile unit extension
+#
+#########################################################################################
+FROM build-deps AS unit-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz && \
+    tar xvzf 7.7.tar.gz && \
+    cd postgresql-unit-7.7 && \
+    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    # unit extension's "create extension" script relies on absolute install path to fill some reference tables.
+    # We move the extension from '/usr/local/pgsql/' to '/usr/local/'  after it is build. So we need to adjust the path.
+    # This one-liner removes pgsql/ part of the path.
+    # NOTE: Other extensions that rely on MODULEDIR variable after building phase will need the same fix.
+    find /usr/local/pgsql/share/extension/ -name "unit*.sql" -print0 | xargs -0 sed -i "s|pgsql/||g" && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/unit.control
+
+#########################################################################################
+#
 # Layer "neon-pg-ext-build"
 # compile neon extensions
 #
@@ -146,6 +165,7 @@ COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=h3-pg-build /h3/usr /
+COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
@@ -158,7 +178,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
 # Compile and run the Neon-specific `compute_ctl` binary
 #
 #########################################################################################
-FROM 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:$TAG AS compute-tools
+FROM $REPOSITORY/$IMAGE:$TAG AS compute-tools
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .

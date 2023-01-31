@@ -6,6 +6,7 @@ use anyhow::Context;
 use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
 
+use crate::context::RequestContext;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 
 use super::Tenant;
@@ -181,6 +182,7 @@ pub(super) async fn gather_inputs(
     tenant: &Tenant,
     limit: &Arc<Semaphore>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
+    ctx: &RequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // with joinset, on drop, all of the tasks will just be de-scheduled, which we can use to
     // our advantage with `?` error handling.
@@ -188,7 +190,7 @@ pub(super) async fn gather_inputs(
 
     // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
     tenant
-        .refresh_gc_info()
+        .refresh_gc_info(ctx)
         .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
@@ -329,7 +331,13 @@ pub(super) async fn gather_inputs(
             } else {
                 let timeline = Arc::clone(&timeline);
                 let parallel_size_calcs = Arc::clone(limit);
-                joinset.spawn(calculate_logical_size(parallel_size_calcs, timeline, *lsn));
+                let ctx = ctx.attached_child();
+                joinset.spawn(calculate_logical_size(
+                    parallel_size_calcs,
+                    timeline,
+                    *lsn,
+                    ctx,
+                ));
             }
         }
 
@@ -387,6 +395,7 @@ pub(super) async fn gather_inputs(
                 parallel_size_calcs,
                 timeline.clone(),
                 lsn,
+                ctx.attached_child(),
             ));
 
             if let Some(parent_id) = timeline.get_ancestor_timeline_id() {
@@ -582,13 +591,14 @@ async fn calculate_logical_size(
     limit: Arc<tokio::sync::Semaphore>,
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
+    ctx: RequestContext,
 ) -> Result<TimelineAtLsnSizeResult, RecvError> {
     let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
         .expect("global semaphore should not had been closed");
 
     let size_res = timeline
-        .spawn_ondemand_logical_size_calculation(lsn)
+        .spawn_ondemand_logical_size_calculation(lsn, ctx)
         .instrument(info_span!("spawn_ondemand_logical_size_calculation"))
         .await?;
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))

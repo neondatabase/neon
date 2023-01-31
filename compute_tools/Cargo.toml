@@ -11,6 +11,7 @@ clap.workspace = true
 futures.workspace = true
 hyper = { workspace = true, features = ["full"] }
 notify.workspace = true
+opentelemetry.workspace = true
 postgres.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -19,7 +20,9 @@ tar.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
+tracing-utils.workspace = true
 url.workspace = true
 
 workspace_hack.workspace = true

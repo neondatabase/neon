@@ -1,6 +1,7 @@
 use hyper::{header, Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::error;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
@@ -76,8 +77,16 @@ impl HttpErrorBody {
 }
 
 pub async fn handler(err: routerify::RouteError) -> Response<Body> {
-    tracing::error!("Error processing HTTP request: {:?}", err);
-    err.downcast::<ApiError>()
-        .expect("handler should always return api error")
-        .into_response()
+    let api_error = err
+        .downcast::<ApiError>()
+        .expect("handler should always return api error");
+
+    // Print a stack trace for Internal Server errors
+    if let ApiError::InternalServerError(_) = api_error.as_ref() {
+        error!("Error processing HTTP request: {api_error:?}");
+    } else {
+        error!("Error processing HTTP request: {api_error:#}");
+    }
+
+    api_error.into_response()
 }

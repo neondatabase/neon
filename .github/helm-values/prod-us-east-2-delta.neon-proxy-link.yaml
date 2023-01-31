@@ -6,17 +6,15 @@ image:
 
 settings:
   authBackend: "link"
-  authEndpoint: "https://console.stage.neon.tech/authenticate_proxy_request/"
-  uri: "https://console.stage.neon.tech/psql_session/"
-  domain: "pg.neon.build"
-  sentryEnvironment: "staging"
-  metricCollectionEndpoint: "http://console-staging.local/billing/api/v1/usage_events"
-  metricCollectionInterval: "1min"
+  authEndpoint: "https://console.neon.tech/authenticate_proxy_request/"
+  uri: "https://console.neon.tech/psql_session/"
+  domain: "pg.neon.tech"
+  sentryEnvironment: "production"
 
-# -- Additional labels for neon-proxy-link pods
+# -- Additional labels for zenith-proxy pods
 podLabels:
   zenith_service: proxy
-  zenith_env: dev
+  zenith_env: production
   zenith_region: us-east-2
   zenith_region_slug: us-east-2
 
@@ -26,21 +24,14 @@ service:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-scheme: internal
-    external-dns.alpha.kubernetes.io/hostname: neon-proxy-link-mgmt.beta.us-east-2.aws.neon.build
+    external-dns.alpha.kubernetes.io/hostname: neon-proxy-link-mgmt.delta.us-east-2.aws.neon.tech
 
 exposedService:
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-    external-dns.alpha.kubernetes.io/hostname: neon-proxy-link.beta.us-east-2.aws.neon.build
-
-#metrics:
-#  enabled: true
-#  serviceMonitor:
-#    enabled: true
-#    selector:
-#      release: kube-prometheus-stack
+    external-dns.alpha.kubernetes.io/hostname: neon-proxy-link.delta.us-east-2.aws.neon.tech
 
 extraManifests:
   - apiVersion: operator.victoriametrics.com/v1beta1

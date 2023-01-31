@@ -46,6 +46,12 @@ PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
     "pageserver_remote_physical_size",
 )
 
+PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
+    "pageserver_storage_operations_seconds_global_count",
+    "pageserver_storage_operations_seconds_global_sum",
+    "pageserver_storage_operations_seconds_global_bucket",
+)
+
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_current_logical_size",
     "pageserver_resident_physical_size",
@@ -61,13 +67,13 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",
     "pageserver_smgr_query_seconds_sum",
-    "pageserver_storage_operations_seconds_bucket",
-    "pageserver_storage_operations_seconds_count",
-    "pageserver_storage_operations_seconds_sum",
+    "pageserver_storage_operations_seconds_count_total",
+    "pageserver_storage_operations_seconds_sum_total",
     "pageserver_wait_lsn_seconds_bucket",
     "pageserver_wait_lsn_seconds_count",
     "pageserver_wait_lsn_seconds_sum",
     "pageserver_created_persistent_files_total",
     "pageserver_written_persistent_bytes_total",
+    "pageserver_tenant_states_count",
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
 )

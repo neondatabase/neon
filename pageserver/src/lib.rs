@@ -1,7 +1,9 @@
 mod auth;
 pub mod basebackup;
+pub mod broker_client;
 pub mod config;
 pub mod consumption_metrics;
+pub mod context;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
@@ -15,7 +17,6 @@ pub mod tenant;
 pub mod trace;
 pub mod virtual_file;
 pub mod walingest;
-pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
 

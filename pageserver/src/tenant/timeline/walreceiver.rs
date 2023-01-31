@@ -23,57 +23,14 @@
 mod connection_manager;
 mod walreceiver_connection;
 
-use crate::config::PageServerConf;
 use crate::task_mgr::WALRECEIVER_RUNTIME;
 
-use anyhow::Context;
-use once_cell::sync::OnceCell;
 use std::future::Future;
-use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 pub use connection_manager::spawn_connection_manager_task;
-
-static BROKER_CLIENT: OnceCell<BrokerClientChannel> = OnceCell::new();
-
-///
-/// Initialize the broker client. This must be called once at page server startup.
-///
-pub async fn init_broker_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
-    let broker_endpoint = conf.broker_endpoint.clone();
-
-    // Note: we do not attempt connecting here (but validate endpoints sanity).
-    let broker_client =
-        storage_broker::connect(broker_endpoint.clone(), conf.broker_keepalive_interval).context(
-            format!(
-                "Failed to create broker client to {}",
-                &conf.broker_endpoint
-            ),
-        )?;
-
-    if BROKER_CLIENT.set(broker_client).is_err() {
-        panic!("broker already initialized");
-    }
-
-    info!(
-        "Initialized broker client with endpoints: {}",
-        broker_endpoint
-    );
-    Ok(())
-}
-
-///
-/// Get a handle to the broker client
-///
-pub fn get_broker_client() -> &'static BrokerClientChannel {
-    BROKER_CLIENT.get().expect("broker client not initialized")
-}
-
-pub fn is_broker_client_initialized() -> bool {
-    BROKER_CLIENT.get().is_some()
-}
 
 /// A handle of an asynchronous task.
 /// The task has a channel that it can use to communicate its lifecycle events in a certain form, see [`TaskEvent`]
@@ -95,7 +52,6 @@ pub enum TaskEvent<E> {
 
 #[derive(Debug, Clone)]
 pub enum TaskStateUpdate<E> {
-    Init,
     Started,
     Progress(E),
 }
