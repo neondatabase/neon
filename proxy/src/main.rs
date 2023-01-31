@@ -146,7 +146,7 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
 
             info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
             let caches = Box::leak(Box::new(console::caches::ApiCaches {
-                node_info: console::caches::NodeInfoCache::new(size, ttl),
+                node_info: console::caches::NodeInfoCache::new("node_info_cache", size, ttl),
             }));
 
             let url = args.get_one::<String>("auth-endpoint").unwrap().parse()?;

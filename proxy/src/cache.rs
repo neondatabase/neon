@@ -5,6 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+// TODO: change to `trace`.
+use tracing::info;
+
 // This seems to make more sense than `lru` or `cached`:
 //
 // * `near/nearcore` ditched `cached` in favor of `lru`
@@ -40,6 +43,9 @@ pub mod timed_lru {
 
     /// A timed LRU cache implementation.
     pub struct TimedLru<K, V> {
+        /// Cache's name for tracing.
+        name: &'static str,
+
         /// The underlying cache implementation.
         cache: parking_lot::Mutex<LruCache<K, Entry<V>>>,
 
@@ -65,14 +71,16 @@ pub mod timed_lru {
 
     impl<K: Hash + Eq, V> TimedLru<K, V> {
         /// Construct a new LRU cache with timed entries.
-        pub fn new(capacity: usize, ttl: Duration) -> Self {
+        pub fn new(name: &'static str, capacity: usize, ttl: Duration) -> Self {
             Self {
+                name,
                 cache: LruCache::new(capacity).into(),
                 ttl,
             }
         }
 
         /// Drop an entry from the cache if it's outdated.
+        #[tracing::instrument(name = "cache_invalidate", fields(cache = self.name), skip_all)]
         fn invalidate_raw(&self, info: &LookupInfo<K>) {
             let now = Instant::now();
 
@@ -91,9 +99,18 @@ pub mod timed_lru {
             if should_remove {
                 raw_entry.remove();
             }
+
+            drop(cache); // drop lock before logging
+            info!(
+                created_at = format_args!("{created_at:?}"),
+                expires_at = format_args!("{expires_at:?}"),
+                entry_removed = should_remove,
+                "processed a cache entry invalidation event"
+            );
         }
 
         /// Try retrieving an entry by its key, then execute `extract` if it exists.
+        #[tracing::instrument(name = "cache_get", fields(cache = self.name), skip_all)]
         fn get_raw<Q, R>(&self, key: &Q, extract: impl FnOnce(&K, &Entry<V>) -> R) -> Option<R>
         where
             K: Borrow<Q>,
@@ -117,16 +134,26 @@ pub mod timed_lru {
             }
 
             let value = extract(raw_entry.key(), entry);
+            let (created_at, expires_at) = (entry.created_at, entry.expires_at);
 
             // Update the deadline and the entry's position in the LRU list.
             raw_entry.get_mut().expires_at = deadline;
             raw_entry.to_back();
+
+            drop(cache); // drop lock before logging
+            info!(
+                created_at = format_args!("{created_at:?}"),
+                old_expires_at = format_args!("{expires_at:?}"),
+                new_expires_at = format_args!("{deadline:?}"),
+                "accessed a cache entry"
+            );
 
             Some(value)
         }
 
         /// Insert an entry to the cache. If an entry with the same key already
         /// existed, return the previous value and its creation timestamp.
+        #[tracing::instrument(name = "cache_insert", fields(cache = self.name), skip_all)]
         fn insert_raw(&self, key: K, value: V) -> (Instant, Option<V>) {
             let created_at = Instant::now();
             let expires_at = created_at.checked_add(self.ttl).expect("time overflow");
@@ -143,6 +170,13 @@ pub mod timed_lru {
                 .lock()
                 .insert(key, entry)
                 .map(|entry| entry.value);
+
+            info!(
+                created_at = format_args!("{created_at:?}"),
+                expires_at = format_args!("{expires_at:?}"),
+                replaced = old.is_some(),
+                "created a cache entry"
+            );
 
             (created_at, old)
         }
