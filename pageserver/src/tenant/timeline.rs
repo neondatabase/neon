@@ -68,6 +68,7 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use walreceiver::spawn_connection_manager_task;
 
+use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
@@ -889,8 +890,7 @@ impl Timeline {
 
         let mut layers = self.layers.write().unwrap();
         let mut updates = layers.batch_update();
-        local_layer.delete()?;
-        updates.remove_historic(local_layer);
+        self.delete_historic_layer(local_layer, &mut updates)?;
         updates.insert_historic(new_remote_layer);
         updates.flush();
         drop(layers);
@@ -1696,6 +1696,30 @@ impl Timeline {
         }
 
         None
+    }
+
+    /// Removes the layer from local FS (if present) and from memory.
+    /// Remote storage is not affected by this operation.
+    fn delete_historic_layer(
+        &self,
+        layer: Arc<dyn PersistentLayer>,
+        updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+    ) -> anyhow::Result<()> {
+        let layer_size = layer.file_size();
+
+        layer.delete()?;
+        if let Some(layer_size) = layer_size {
+            self.metrics.resident_physical_size_gauge.sub(layer_size);
+        }
+
+        // TODO Removing from the bottom of the layer map is expensive.
+        //      Maybe instead discard all layer map historic versions that
+        //      won't be needed for page reconstruction for this timeline,
+        //      and mark what we can't delete yet as deleted from the layer
+        //      map index without actually rebuilding the index.
+        updates.remove_historic(layer);
+
+        Ok(())
     }
 }
 
@@ -2846,14 +2870,8 @@ impl Timeline {
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
-            if let Some(path) = l.local_path() {
-                self.metrics
-                    .resident_physical_size_gauge
-                    .sub(path.metadata()?.len());
-            }
             layer_names_to_delete.push(l.filename());
-            l.delete()?;
-            updates.remove_historic(l);
+            self.delete_historic_layer(l, &mut updates)?;
         }
         updates.flush();
         drop(layers);
@@ -3154,20 +3172,8 @@ impl Timeline {
             // while iterating it. BTreeMap::retain() would be another option)
             let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
             for doomed_layer in layers_to_remove {
-                if let Some(path) = doomed_layer.local_path() {
-                    self.metrics
-                        .resident_physical_size_gauge
-                        .sub(path.metadata()?.len());
-                }
                 layer_names_to_delete.push(doomed_layer.filename());
-                doomed_layer.delete()?; // FIXME: schedule succeeded deletions before returning?
-
-                // TODO Removing from the bottom of the layer map is expensive.
-                //      Maybe instead discard all layer map historic versions that
-                //      won't be needed for page reconstruction for this timeline,
-                //      and mark what we can't delete yet as deleted from the layer
-                //      map index without actually rebuilding the index.
-                updates.remove_historic(doomed_layer);
+                self.delete_historic_layer(doomed_layer, &mut updates)?;
                 result.layers_removed += 1;
             }
 
