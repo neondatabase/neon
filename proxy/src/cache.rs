@@ -74,14 +74,21 @@ pub mod timed_lru {
 
         /// Drop an entry from the cache if it's outdated.
         fn invalidate_raw(&self, info: &LookupInfo<K>) {
+            let now = Instant::now();
+
+            // Do costly things before taking the lock.
             let mut cache = self.cache.lock();
             let raw_entry = match cache.raw_entry_mut().from_key(&info.key) {
                 RawEntryMut::Vacant(_) => return,
                 RawEntryMut::Occupied(x) => x,
             };
 
-            // We shouldn't remove the entry if it's newer!
-            if raw_entry.get().created_at <= info.created_at {
+            // Remove the entry if it was created prior to lookup timestamp.
+            let entry = raw_entry.get();
+            let (created_at, expires_at) = (entry.created_at, entry.expires_at);
+            let should_remove = created_at <= info.created_at || expires_at <= now;
+
+            if should_remove {
                 raw_entry.remove();
             }
         }
