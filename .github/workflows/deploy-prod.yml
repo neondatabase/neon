@@ -162,8 +162,8 @@ jobs:
   # Deploy to old account below          
 
   deploy:
-    runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    runs-on: prod
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     if: inputs.deployStorage
     defaults:
       run:
