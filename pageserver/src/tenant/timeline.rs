@@ -888,6 +888,7 @@ impl Timeline {
             LayerFileName::Test(_) => unreachable!(),
         });
 
+        let mut _gc_lock = self.layer_removal_cs.lock().await;
         let mut layers = self.layers.write().unwrap();
         let mut updates = layers.batch_update();
         self.delete_historic_layer(local_layer, &mut updates)?;
