@@ -193,7 +193,7 @@ fn main() -> Result<()> {
                                     n_skipped += 1;
                                 }
                             } else {
-                                // Iimage layer is always dense, despite to the fact that it doesn't contain all possible
+                                // Image layer is always dense, despite to the fact that it doesn't contain all possible
                                 // key values in the specified range: there are may be no keys in the storage belonging
                                 // to the image layer range but not present in the image layer.
                                 break;
@@ -202,7 +202,7 @@ fn main() -> Result<()> {
                     }
                     if n_deltas_since_last_image >= 3 && n_deltas_since_last_image - n_skipped < 3 {
                         // It is just approximation: it doesn't take in account all image coverage.
-                        // Moerover the new layer map doesn't count total deltas, but the max stack of overlapping deltas.
+                        // Moreover the new layer map doesn't count total deltas, but the max stack of overlapping deltas.
                         n_excess_layers += 1;
                     }
                     n_holes += n_skipped;
