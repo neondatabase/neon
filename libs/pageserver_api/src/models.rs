@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     fmt,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -232,14 +231,14 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LayerMapInfo {
-    pub in_memory_layers: BTreeSet<InMemoryLayerInfo>,
-    pub historic_layers: BTreeSet<HistoricLayerInfo>,
+    pub in_memory_layers: Vec<InMemoryLayerInfo>,
+    pub historic_layers: Vec<HistoricLayerInfo>,
 }
 
+#[derive(Debug, Clone, Serialize)]
 #[serde_as]
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum InMemoryLayerInfo {
     Open {
@@ -254,8 +253,8 @@ pub enum InMemoryLayerInfo {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
 #[serde_as]
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum HistoricLayerInfo {
     Delta {
