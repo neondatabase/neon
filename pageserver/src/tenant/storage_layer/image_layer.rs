@@ -258,6 +258,10 @@ impl PersistentLayer for ImageLayer {
 
         ret
     }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        &self.access_stats
+    }
 }
 
 impl ImageLayer {
@@ -381,6 +385,7 @@ impl ImageLayer {
         tenant_id: TenantId,
         filename: &ImageFileName,
         file_size: u64,
+        existing_access_stats: Option<LayerAccessStats>,
     ) -> ImageLayer {
         ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -389,7 +394,7 @@ impl ImageLayer {
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
             file_size,
-            access_stats: LayerAccessStats::default(),
+            access_stats: existing_access_stats.unwrap_or_default(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,

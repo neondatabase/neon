@@ -88,27 +88,41 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct LayerAccessStatFullDetails {
     when: SystemTime,
     task_kind: TaskKind,
     access_kind: LayerAccessKind,
 }
 
+#[derive(Debug, Clone)]
 struct LayerAccessStatsInner {
     first_access: Option<LayerAccessStatFullDetails>,
     count_by_access_kind: EnumMap<LayerAccessKind, u64>,
     task_kind_flag: EnumSet<TaskKind>,
     last_accesses: VecDeque<LayerAccessStatFullDetails>,
+    last_residence_changes: VecDeque<LayerResidenceStatus>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LayerResidenceStatus {
+    Resident { timestamp: SystemTime },
+    Evicted { timestamp: SystemTime },
 }
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
 pub enum LayerAccessStatsReset {
     JustTaskKindFlags,
     AllStats,
+}
+
+fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u128 {
+    ts.duration_since(UNIX_EPOCH)
+        .expect("better to die in this unlikely case than report false stats")
+        .as_millis()
 }
 
 impl LayerAccessStatFullDetails {
@@ -119,12 +133,38 @@ impl LayerAccessStatFullDetails {
             access_kind,
         } = self;
         pageserver_api::models::LayerAccessStatFullDetails {
-            when_millis_since_epoch: when
-                .duration_since(UNIX_EPOCH)
-                .expect("better to die in this unlikely case than report false stats")
-                .as_millis(),
+            when_millis_since_epoch: system_time_to_millis_since_epoch(when),
             task_kind: task_kind.into(), // into static str, powered by strum_macros
             access_kind: *access_kind,
+        }
+    }
+}
+
+impl LayerResidenceStatus {
+    pub fn evicted() -> Self {
+        LayerResidenceStatus::Evicted {
+            timestamp: SystemTime::now(),
+        }
+    }
+
+    pub fn resident() -> Self {
+        LayerResidenceStatus::Resident {
+            timestamp: SystemTime::now(),
+        }
+    }
+
+    fn to_api_model(&self) -> pageserver_api::models::LayerResidenceStatus {
+        match self {
+            LayerResidenceStatus::Resident { timestamp } => {
+                pageserver_api::models::LayerResidenceStatus::Resident {
+                    timestamp_millis_since_epoch: system_time_to_millis_since_epoch(timestamp),
+                }
+            }
+            LayerResidenceStatus::Evicted { timestamp } => {
+                pageserver_api::models::LayerResidenceStatus::Evicted {
+                    timestamp_millis_since_epoch: system_time_to_millis_since_epoch(timestamp),
+                }
+            }
         }
     }
 }
@@ -138,12 +178,36 @@ impl Default for LayerAccessStatsInner {
             count_by_access_kind: EnumMap::default(),
             task_kind_flag: EnumSet::default(),
             last_accesses: VecDeque::with_capacity(LayerAccessStats::LAST_ACCESSES_MAX_LEN),
+            last_residence_changes: VecDeque::with_capacity(
+                LayerAccessStats::LAST_RESIDENCE_CHANGES_MAX_LEN,
+            ),
         }
     }
 }
 
 impl LayerAccessStats {
     const LAST_ACCESSES_MAX_LEN: usize = 16;
+    const LAST_RESIDENCE_CHANGES_MAX_LEN: usize = 16;
+
+    /// Creates a clone of `self` and records `new_status` in the clone.
+    /// The `new_status` is not recorded in `self`
+    pub(crate) fn clone_for_residence_change(
+        &self,
+        new_status: LayerResidenceStatus,
+    ) -> LayerAccessStats {
+        let mut clone = {
+            let inner = self.0.lock().unwrap();
+            inner.clone()
+        };
+
+        // make room first to avoid reallocs
+        while clone.last_residence_changes.len() >= Self::LAST_RESIDENCE_CHANGES_MAX_LEN {
+            clone.last_residence_changes.pop_back();
+        }
+        clone.last_residence_changes.push_front(new_status.clone());
+
+        LayerAccessStats(Mutex::new(clone))
+    }
 
     fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
         if LAYER_ACCESS_STATS_KILLSWITCH.load(atomic::Ordering::SeqCst) {
@@ -184,6 +248,7 @@ impl LayerAccessStats {
             count_by_access_kind,
             task_kind_flag,
             last_accesses,
+            last_residence_changes,
         } = &*inner;
         pageserver_api::models::LayerAccessStats {
             access_count_by_access_kind: count_by_access_kind
@@ -196,6 +261,10 @@ impl LayerAccessStats {
                 .collect(),
             first: first_access.as_ref().map(|a| a.to_api_model()),
             most_recent: last_accesses.iter().map(|a| a.to_api_model()).collect(),
+            most_recent_residence_changes: last_residence_changes
+                .iter()
+                .map(|s| s.to_api_model())
+                .collect(),
         }
     }
 }
@@ -308,6 +377,8 @@ pub trait PersistentLayer: Layer {
     fn file_size(&self) -> Option<u64>;
 
     fn info(&self, reset: Option<LayerAccessStatsReset>) -> HistoricLayerInfo;
+
+    fn access_stats(&self) -> &LayerAccessStats;
 }
 
 pub fn downcast_remote_layer(

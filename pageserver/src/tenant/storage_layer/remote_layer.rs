@@ -18,7 +18,10 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
-use super::{DeltaLayer, LayerAccessStatsReset, LayerIter, LayerKeyIter, PersistentLayer};
+use super::{
+    DeltaLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
+    LayerResidenceStatus, PersistentLayer,
+};
 
 #[derive(Debug)]
 pub struct RemoteLayer {
@@ -34,6 +37,8 @@ pub struct RemoteLayer {
     is_delta: bool,
 
     is_incremental: bool,
+
+    access_stats: LayerAccessStats,
 
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
 }
@@ -150,7 +155,7 @@ impl PersistentLayer for RemoteLayer {
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
-                access_stats: None, // remote layer doesn't get accessed
+                access_stats: Some(self.access_stats.to_api_model()),
             }
         } else {
             HistoricLayerInfo::Image {
@@ -159,9 +164,13 @@ impl PersistentLayer for RemoteLayer {
                 key_end: key_range.end,
                 lsn_start: lsn_range.start,
                 remote: true,
-                access_stats: None, // remote layer doesn't get accessed
+                access_stats: Some(self.access_stats.to_api_model()),
             }
         }
+    }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        &self.access_stats
     }
 }
 
@@ -171,6 +180,7 @@ impl RemoteLayer {
         timelineid: TimelineId,
         fname: &ImageFileName,
         layer_metadata: &LayerFileMetadata,
+        existing_access_stats: Option<LayerAccessStats>,
     ) -> RemoteLayer {
         RemoteLayer {
             tenantid,
@@ -182,6 +192,7 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            access_stats: existing_access_stats.unwrap_or_default(),
         }
     }
 
@@ -190,6 +201,8 @@ impl RemoteLayer {
         timelineid: TimelineId,
         fname: &DeltaFileName,
         layer_metadata: &LayerFileMetadata,
+
+        existing_access_stats: Option<LayerAccessStats>,
     ) -> RemoteLayer {
         RemoteLayer {
             tenantid,
@@ -201,6 +214,7 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            access_stats: existing_access_stats.unwrap_or_default(),
         }
     }
 
@@ -221,6 +235,10 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
+                Some(
+                    self.access_stats
+                        .clone_for_residence_change(LayerResidenceStatus::resident()),
+                ),
             ))
         } else {
             let fname = ImageFileName {
@@ -233,6 +251,10 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
+                Some(
+                    self.access_stats
+                        .clone_for_residence_change(LayerResidenceStatus::resident()),
+                ),
             ))
         }
     }
