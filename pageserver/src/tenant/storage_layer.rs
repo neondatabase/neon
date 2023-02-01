@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{self, AtomicBool};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use utils::{
@@ -89,7 +89,7 @@ pub enum ValueReconstructResult {
 }
 
 #[derive(Default)]
-pub struct LayerAccessStats(RwLock<LayerAccessStatsInner>);
+pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
 
 #[derive(Clone)]
 struct LayerAccessStatFullDetails {
@@ -98,7 +98,6 @@ struct LayerAccessStatFullDetails {
     access_kind: LayerAccessKind,
 }
 
-#[derive(Default)]
 struct LayerAccessStatsInner {
     first_access: Option<LayerAccessStatFullDetails>,
     count_by_access_kind: EnumMap<LayerAccessKind, u64>,
@@ -132,12 +131,25 @@ impl LayerAccessStatFullDetails {
 
 pub static LAYER_ACCESS_STATS_KILLSWITCH: AtomicBool = AtomicBool::new(false);
 
+impl Default for LayerAccessStatsInner {
+    fn default() -> Self {
+        LayerAccessStatsInner {
+            first_access: None,
+            count_by_access_kind: EnumMap::default(),
+            task_kind_flag: EnumSet::default(),
+            last_accesses: VecDeque::with_capacity(LayerAccessStats::LAST_ACCESSES_MAX_LEN),
+        }
+    }
+}
+
 impl LayerAccessStats {
+    const LAST_ACCESSES_MAX_LEN: usize = 16;
+
     fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
         if LAYER_ACCESS_STATS_KILLSWITCH.load(atomic::Ordering::SeqCst) {
             return;
         }
-        let mut inner = self.0.write().unwrap();
+        let mut inner = self.0.lock().unwrap();
         let this_access = LayerAccessStatFullDetails {
             when: SystemTime::now(),
             task_kind,
@@ -148,11 +160,14 @@ impl LayerAccessStats {
             .get_or_insert_with(|| this_access.clone());
         inner.count_by_access_kind[access_kind] += 1;
         inner.task_kind_flag |= task_kind;
+        // make room first to avoid reallocs
+        while inner.last_accesses.len() >= Self::LAST_ACCESSES_MAX_LEN {
+            inner.last_accesses.pop_back();
+        }
         inner.last_accesses.push_front(this_access);
-        inner.last_accesses.truncate(10); // TODO make runtime-configurable
     }
     fn reset(&self, what: LayerAccessStatsReset) {
-        let mut inner = self.0.write().unwrap();
+        let mut inner = self.0.lock().unwrap();
         match what {
             LayerAccessStatsReset::JustTaskKindFlags => {
                 inner.task_kind_flag.clear();
@@ -163,7 +178,7 @@ impl LayerAccessStats {
         }
     }
     fn to_api_model(&self) -> pageserver_api::models::LayerAccessStats {
-        let inner = self.0.read().unwrap();
+        let inner = self.0.lock().unwrap();
         let LayerAccessStatsInner {
             first_access,
             count_by_access_kind,
