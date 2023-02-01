@@ -608,18 +608,24 @@ fn test_retroactive_simple() {
     // Rebuild so we can start querying
     map.rebuild();
 
-    // Query key 4
-    let version = map.get().unwrap().get_version(90);
-    assert!(version.is_none());
-    let version = map.get().unwrap().get_version(102).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
-    let version = map.get().unwrap().get_version(107).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
-    assert_eq!(version.delta_coverage.query(4), Some("Delta 1".to_string()));
-    let version = map.get().unwrap().get_version(115).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
-    let version = map.get().unwrap().get_version(125).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 3".to_string()));
+    {
+        let map = map.get().expect("rebuilt");
+
+        let version = map.get_version(90);
+        assert!(version.is_none());
+        let version = map.get_version(102).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
+
+        let version = map.get_version(107).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
+        assert_eq!(version.delta_coverage.query(4), Some("Delta 1".to_string()));
+
+        let version = map.get_version(115).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
+
+        let version = map.get_version(125).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 3".to_string()));
+    }
 
     // Remove Image 3
     map.remove(LayerKey {
@@ -629,10 +635,13 @@ fn test_retroactive_simple() {
     });
     map.rebuild();
 
-    // Check deletion worked
-    let version = map.get().unwrap().get_version(125).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
-    assert_eq!(version.image_coverage.query(8), Some("Image 4".to_string()));
+    {
+        // Check deletion worked
+        let map = map.get().expect("rebuilt");
+        let version = map.get_version(125).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
+        assert_eq!(version.image_coverage.query(8), Some("Image 4".to_string()));
+    }
 }
 
 #[test]
