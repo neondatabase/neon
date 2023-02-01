@@ -7,6 +7,7 @@ use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::http::request::{must_get_query_param, parse_query_param};
 
 use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
@@ -235,8 +236,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    let include_non_incremental_logical_size =
-        query_param_present(&request, "include-non-incremental-logical-size");
+    let include_non_incremental_logical_size: Option<bool> =
+        parse_query_param(&request, "include-non-incremental-logical-size")?;
     check_permission(&request, Some(tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -249,13 +250,14 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
-            let timeline_info =
-                build_timeline_info(&timeline, include_non_incremental_logical_size, &ctx)
-                    .await
-                    .context(
-                        "Failed to convert tenant timeline {timeline_id} into the local one: {e:?}",
-                    )
-                    .map_err(ApiError::InternalServerError)?;
+            let timeline_info = build_timeline_info(
+                &timeline,
+                include_non_incremental_logical_size.unwrap_or(false),
+                &ctx,
+            )
+            .await
+            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
+            .map_err(ApiError::InternalServerError)?;
 
             response_data.push(timeline_info);
         }
@@ -267,36 +269,11 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, response_data)
 }
 
-/// Checks if a query param is present in the request's URL
-fn query_param_present(request: &Request<Body>, param: &str) -> bool {
-    request
-        .uri()
-        .query()
-        .map(|v| url::form_urlencoded::parse(v.as_bytes()).any(|(p, _)| p == param))
-        .unwrap_or(false)
-}
-
-fn get_query_param(request: &Request<Body>, param_name: &str) -> Result<String, ApiError> {
-    request.uri().query().map_or(
-        Err(ApiError::BadRequest(anyhow!("empty query in request"))),
-        |v| {
-            url::form_urlencoded::parse(v.as_bytes())
-                .find(|(k, _)| k == param_name)
-                .map_or(
-                    Err(ApiError::BadRequest(anyhow!(
-                        "no {param_name} specified in query parameters"
-                    ))),
-                    |(_, v)| Ok(v.into_owned()),
-                )
-        },
-    )
-}
-
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    let include_non_incremental_logical_size =
-        query_param_present(&request, "include-non-incremental-logical-size");
+    let include_non_incremental_logical_size: Option<bool> =
+        parse_query_param(&request, "include-non-incremental-logical-size")?;
     check_permission(&request, Some(tenant_id))?;
 
     // Logical size calculation needs downloading.
@@ -311,11 +288,14 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             .get_timeline(timeline_id, false)
             .map_err(ApiError::NotFound)?;
 
-        let timeline_info =
-            build_timeline_info(&timeline, include_non_incremental_logical_size, &ctx)
-                .await
-                .context("get local timeline info")
-                .map_err(ApiError::InternalServerError)?;
+        let timeline_info = build_timeline_info(
+            &timeline,
+            include_non_incremental_logical_size.unwrap_or(false),
+            &ctx,
+        )
+        .await
+        .context("get local timeline info")
+        .map_err(ApiError::InternalServerError)?;
 
         Ok::<_, ApiError>(timeline_info)
     }
@@ -330,8 +310,8 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    let timestamp_raw = get_query_param(&request, "timestamp")?;
-    let timestamp = humantime::parse_rfc3339(timestamp_raw.as_str())
+    let timestamp_raw = must_get_query_param(&request, "timestamp")?;
+    let timestamp = humantime::parse_rfc3339(&timestamp_raw)
         .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
@@ -503,13 +483,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let inputs_only = if query_param_present(&request, "inputs_only") {
-        get_query_param(&request, "inputs_only")?
-            .parse()
-            .map_err(|_| ApiError::BadRequest(anyhow!("failed to parse inputs_only")))?
-    } else {
-        false
-    };
+    let inputs_only: Option<bool> = parse_query_param(&request, "inputs_only")?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let tenant = mgr::get_tenant(tenant_id, true)
@@ -522,7 +496,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    let size = if !inputs_only {
+    let size = if !inputs_only.unwrap_or(false) {
         Some(inputs.calculate().map_err(ApiError::InternalServerError)?)
     } else {
         None

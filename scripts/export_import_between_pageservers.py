@@ -293,7 +293,7 @@ class NeonPageserverHttpClient(requests.Session):
 
     def timeline_detail(self, tenant_id: uuid.UUID, timeline_id: uuid.UUID) -> Dict[Any, Any]:
         res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=1"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id.hex}/timeline/{timeline_id.hex}?include-non-incremental-logical-size=true"
         )
         self.verbose_error(res)
         res_json = res.json()

@@ -37,6 +37,7 @@ metrics.workspace = true
 pq_proto.workspace = true
 
 workspace_hack.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 byteorder.workspace = true
