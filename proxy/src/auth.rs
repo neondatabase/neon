@@ -1,7 +1,7 @@
 //! Client authentication mechanisms.
 
 pub mod backend;
-pub use backend::{BackendType, ConsoleReqExtra};
+pub use backend::BackendType;
 
 mod credentials;
 pub use credentials::ClientCredentials;
@@ -12,7 +12,7 @@ use password_hack::PasswordHackPayload;
 mod flow;
 pub use flow::*;
 
-use crate::error::UserFacingError;
+use crate::{console, error::UserFacingError};
 use std::io;
 use thiserror::Error;
 
@@ -26,10 +26,10 @@ pub enum AuthErrorImpl {
     Link(#[from] backend::LinkAuthError),
 
     #[error(transparent)]
-    GetAuthInfo(#[from] backend::GetAuthInfoError),
+    GetAuthInfo(#[from] console::errors::GetAuthInfoError),
 
     #[error(transparent)]
-    WakeCompute(#[from] backend::WakeComputeError),
+    WakeCompute(#[from] console::errors::WakeComputeError),
 
     /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]
