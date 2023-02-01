@@ -52,8 +52,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             # disable background GC
-            "gc_period": "10 m",
-            "gc_horizon": f"{10 * 1024 ** 3}",
+            "gc_period": "0s",
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{1024 ** 2}",
             # set the target size to be large to allow the image layer to cover the whole key space
@@ -85,6 +84,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
 
     # Set the GC horizon so that lsn1 is inside the horizon, which means
     # we can create a new branch starting from lsn1.
+    pageserver_http_client.timeline_checkpoint(tenant, timeline_main)
     pageserver_http_client.timeline_gc(tenant, timeline_main, lsn2 - lsn1 + 1024)
 
     env.neon_cli.create_branch(
@@ -127,8 +127,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             # disable background GC
-            "gc_period": "10 m",
-            "gc_horizon": f"{10 * 1024 ** 3}",
+            "gc_period": "0s",
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{1024 ** 2}",
             # set the target size to be large to allow the image layer to cover the whole key space
@@ -158,6 +157,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     # branch creation task but the individual timeline GC iteration happens *after*
     # the branch creation task.
     pageserver_http_client.configure_failpoints(("before-timeline-gc", "sleep(2000)"))
+    pageserver_http_client.timeline_checkpoint(tenant, b0)
 
     def do_gc():
         pageserver_http_client.timeline_gc(tenant, b0, 0)

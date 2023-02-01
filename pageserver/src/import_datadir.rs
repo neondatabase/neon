@@ -2,15 +2,17 @@
 //! Import data and WAL from a PostgreSQL data directory and WAL segments into
 //! a neon Timeline.
 //!
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
+use futures::StreamExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_tar::Archive;
 use tracing::*;
 use walkdir::WalkDir;
 
+use crate::context::RequestContext;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
@@ -42,10 +44,11 @@ pub fn get_lsn_from_controlfile(path: &Path) -> Result<Lsn> {
 /// This is currently only used to import a cluster freshly created by initdb.
 /// The code that deals with the checkpoint would not work right if the
 /// cluster was not shut down cleanly.
-pub fn import_timeline_from_postgres_datadir(
+pub async fn import_timeline_from_postgres_datadir(
     tline: &Timeline,
     pgdata_path: &Path,
     pgdata_lsn: Lsn,
+    ctx: &RequestContext,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
 
@@ -65,9 +68,11 @@ pub fn import_timeline_from_postgres_datadir(
             let absolute_path = entry.path();
             let relative_path = absolute_path.strip_prefix(pgdata_path)?;
 
-            let file = File::open(absolute_path)?;
+            let mut file = tokio::fs::File::open(absolute_path).await?;
             let len = metadata.len() as usize;
-            if let Some(control_file) = import_file(&mut modification, relative_path, file, len)? {
+            if let Some(control_file) =
+                import_file(&mut modification, relative_path, &mut file, len, ctx).await?
+            {
                 pg_control = Some(control_file);
             }
             modification.flush()?;
@@ -96,19 +101,22 @@ pub fn import_timeline_from_postgres_datadir(
         tline,
         Lsn(pg_control.checkPointCopy.redo),
         pgdata_lsn,
-    )?;
+        ctx,
+    )
+    .await?;
 
     Ok(())
 }
 
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
-fn import_rel<Reader: Read>(
-    modification: &mut DatadirModification,
+async fn import_rel(
+    modification: &mut DatadirModification<'_>,
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
-    mut reader: Reader,
+    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
+    ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     // Does it look like a relation file?
     trace!("importing rel file {}", path.display());
@@ -139,7 +147,14 @@ fn import_rel<Reader: Read>(
     // Call put_rel_creation for every segment of the relation,
     // because there is no guarantee about the order in which we are processing segments.
     // ignore "relation already exists" error
-    if let Err(e) = modification.put_rel_creation(rel, nblocks as u32) {
+    //
+    // FIXME: use proper error type for this, instead of parsing the error message.
+    // Or better yet, keep track of which relations we've already created
+    // https://github.com/neondatabase/neon/issues/3309
+    if let Err(e) = modification
+        .put_rel_creation(rel, nblocks as u32, ctx)
+        .await
+    {
         if e.to_string().contains("already exists") {
             debug!("relation {} already exists. we must be extending it", rel);
         } else {
@@ -148,7 +163,7 @@ fn import_rel<Reader: Read>(
     }
 
     loop {
-        let r = reader.read_exact(&mut buf);
+        let r = reader.read_exact(&mut buf).await;
         match r {
             Ok(_) => {
                 modification.put_rel_page_image(rel, blknum, Bytes::copy_from_slice(&buf))?;
@@ -174,26 +189,27 @@ fn import_rel<Reader: Read>(
     //
     // If we process rel segments out of order,
     // put_rel_extend will skip the update.
-    modification.put_rel_extend(rel, blknum)?;
+    modification.put_rel_extend(rel, blknum, ctx).await?;
 
     Ok(())
 }
 
 /// Import an SLRU segment file
 ///
-fn import_slru<Reader: Read>(
-    modification: &mut DatadirModification,
+async fn import_slru(
+    modification: &mut DatadirModification<'_>,
     slru: SlruKind,
     path: &Path,
-    mut reader: Reader,
+    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
-) -> Result<()> {
-    trace!("importing slru file {}", path.display());
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
+    info!("importing slru file {path:?}");
 
     let mut buf: [u8; 8192] = [0u8; 8192];
     let filename = &path
         .file_name()
-        .expect("missing slru filename")
+        .with_context(|| format!("missing slru filename for path {path:?}"))?
         .to_string_lossy();
     let segno = u32::from_str_radix(filename, 16)?;
 
@@ -202,11 +218,13 @@ fn import_slru<Reader: Read>(
 
     ensure!(nblocks <= pg_constants::SLRU_PAGES_PER_SEGMENT as usize);
 
-    modification.put_slru_segment_creation(slru, segno, nblocks as u32)?;
+    modification
+        .put_slru_segment_creation(slru, segno, nblocks as u32, ctx)
+        .await?;
 
     let mut rpageno = 0;
     loop {
-        let r = reader.read_exact(&mut buf);
+        let r = reader.read_exact(&mut buf).await;
         match r {
             Ok(_) => {
                 modification.put_slru_page_image(
@@ -237,14 +255,20 @@ fn import_slru<Reader: Read>(
 
 /// Scan PostgreSQL WAL files in given directory and load all records between
 /// 'startpoint' and 'endpoint' into the repository.
-fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) -> Result<()> {
+async fn import_wal(
+    walpath: &Path,
+    tline: &Timeline,
+    startpoint: Lsn,
+    endpoint: Lsn,
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
     let mut waldecoder = WalStreamDecoder::new(startpoint, tline.pg_version);
 
     let mut segno = startpoint.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = startpoint.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = startpoint;
 
-    let mut walingest = WalIngest::new(tline, startpoint)?;
+    let mut walingest = WalIngest::new(tline, startpoint, ctx).await?;
 
     while last_lsn <= endpoint {
         // FIXME: assume postgresql tli 1 for now
@@ -260,14 +284,16 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
         }
 
         // Slurp the WAL file
-        let mut file = File::open(&path)?;
+        let mut file = std::fs::File::open(&path)?;
 
         if offset > 0 {
-            file.seek(SeekFrom::Start(offset as u64))?;
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(offset as u64))?;
         }
 
+        use std::io::Read;
         let nread = file.read_to_end(&mut buf)?;
-        if nread != WAL_SEGMENT_SIZE - offset as usize {
+        if nread != WAL_SEGMENT_SIZE - offset {
             // Maybe allow this for .partial files?
             error!("read only {} bytes from WAL file", nread);
         }
@@ -279,7 +305,9 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
+                    .await?;
                 last_lsn = lsn;
 
                 nrecords += 1;
@@ -303,10 +331,11 @@ fn import_wal(walpath: &Path, tline: &Timeline, startpoint: Lsn, endpoint: Lsn) 
     Ok(())
 }
 
-pub fn import_basebackup_from_tar<Reader: Read>(
+pub async fn import_basebackup_from_tar(
     tline: &Timeline,
-    reader: Reader,
+    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     base_lsn: Lsn,
+    ctx: &RequestContext,
 ) -> Result<()> {
     info!("importing base at {base_lsn}");
     let mut modification = tline.begin_modification(base_lsn);
@@ -315,21 +344,24 @@ pub fn import_basebackup_from_tar<Reader: Read>(
     let mut pg_control: Option<ControlFileData> = None;
 
     // Import base
-    for base_tar_entry in tar::Archive::new(reader).entries()? {
-        let entry = base_tar_entry?;
+    let mut entries = Archive::new(reader).entries()?;
+    while let Some(base_tar_entry) = entries.next().await {
+        let mut entry = base_tar_entry?;
         let header = entry.header();
         let len = header.entry_size()? as usize;
         let file_path = header.path()?.into_owned();
 
         match header.entry_type() {
-            tar::EntryType::Regular => {
-                if let Some(res) = import_file(&mut modification, file_path.as_ref(), entry, len)? {
+            tokio_tar::EntryType::Regular => {
+                if let Some(res) =
+                    import_file(&mut modification, file_path.as_ref(), &mut entry, len, ctx).await?
+                {
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
                 modification.flush()?;
             }
-            tar::EntryType::Directory => {
+            tokio_tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);
             }
             _ => {
@@ -349,31 +381,35 @@ pub fn import_basebackup_from_tar<Reader: Read>(
     Ok(())
 }
 
-pub fn import_wal_from_tar<Reader: Read>(
+pub async fn import_wal_from_tar(
     tline: &Timeline,
-    reader: Reader,
+    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     start_lsn: Lsn,
     end_lsn: Lsn,
+    ctx: &RequestContext,
 ) -> Result<()> {
     // Set up walingest mutable state
     let mut waldecoder = WalStreamDecoder::new(start_lsn, tline.pg_version);
     let mut segno = start_lsn.segment_number(WAL_SEGMENT_SIZE);
     let mut offset = start_lsn.segment_offset(WAL_SEGMENT_SIZE);
     let mut last_lsn = start_lsn;
-    let mut walingest = WalIngest::new(tline, start_lsn)?;
+    let mut walingest = WalIngest::new(tline, start_lsn, ctx).await?;
 
     // Ingest wal until end_lsn
     info!("importing wal until {}", end_lsn);
-    let mut pg_wal_tar = tar::Archive::new(reader);
-    let mut pg_wal_entries_iter = pg_wal_tar.entries()?;
+    let mut pg_wal_tar = Archive::new(reader);
+    let mut pg_wal_entries = pg_wal_tar.entries()?;
     while last_lsn <= end_lsn {
         let bytes = {
-            let entry = pg_wal_entries_iter.next().expect("expected more wal")?;
+            let mut entry = pg_wal_entries
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("expected more wal"))??;
             let header = entry.header();
             let file_path = header.path()?.into_owned();
 
             match header.entry_type() {
-                tar::EntryType::Regular => {
+                tokio_tar::EntryType::Regular => {
                     // FIXME: assume postgresql tli 1 for now
                     let expected_filename = XLogFileName(1, segno, WAL_SEGMENT_SIZE);
                     let file_name = file_path
@@ -383,9 +419,9 @@ pub fn import_wal_from_tar<Reader: Read>(
                     ensure!(expected_filename == file_name);
 
                     debug!("processing wal file {:?}", file_path);
-                    read_all_bytes(entry)?
+                    read_all_bytes(&mut entry).await?
                 }
-                tar::EntryType::Directory => {
+                tokio_tar::EntryType::Directory => {
                     debug!("directory {:?}", file_path);
                     continue;
                 }
@@ -405,7 +441,9 @@ pub fn import_wal_from_tar<Reader: Read>(
         let mut decoded = DecodedWALRecord::default();
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                walingest.ingest_record(recdata, lsn, &mut modification, &mut decoded)?;
+                walingest
+                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, ctx)
+                    .await?;
                 last_lsn = lsn;
 
                 debug!("imported record at {} (end {})", lsn, end_lsn);
@@ -424,7 +462,7 @@ pub fn import_wal_from_tar<Reader: Read>(
     }
 
     // Log any extra unused files
-    for e in &mut pg_wal_entries_iter {
+    while let Some(e) = pg_wal_entries.next().await {
         let entry = e?;
         let header = entry.header();
         let file_path = header.path()?.into_owned();
@@ -434,24 +472,31 @@ pub fn import_wal_from_tar<Reader: Read>(
     Ok(())
 }
 
-fn import_file<Reader: Read>(
-    modification: &mut DatadirModification,
+async fn import_file(
+    modification: &mut DatadirModification<'_>,
     file_path: &Path,
-    reader: Reader,
+    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
+    ctx: &RequestContext,
 ) -> Result<Option<ControlFileData>> {
+    let file_name = match file_path.file_name() {
+        Some(name) => name.to_string_lossy(),
+        None => return Ok(None),
+    };
+
+    if file_name.starts_with('.') {
+        // tar archives on macOs, created without COPYFILE_DISABLE=1 env var
+        // will contain "fork files", skip them.
+        return Ok(None);
+    }
+
     if file_path.starts_with("global") {
         let spcnode = postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;
 
-        match file_path
-            .file_name()
-            .expect("missing filename")
-            .to_string_lossy()
-            .as_ref()
-        {
+        match file_name.as_ref() {
             "pg_control" => {
-                let bytes = read_all_bytes(reader)?;
+                let bytes = read_all_bytes(reader).await?;
 
                 // Extract the checkpoint record and import it separately.
                 let pg_control = ControlFileData::decode(&bytes[..])?;
@@ -464,15 +509,17 @@ fn import_file<Reader: Read>(
                 return Ok(Some(pg_control));
             }
             "pg_filenode.map" => {
-                let bytes = read_all_bytes(reader)?;
-                modification.put_relmap_file(spcnode, dbnode, bytes)?;
+                let bytes = read_all_bytes(reader).await?;
+                modification
+                    .put_relmap_file(spcnode, dbnode, bytes, ctx)
+                    .await?;
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
                 debug!("ignored PG_VERSION file");
             }
             _ => {
-                import_rel(modification, file_path, spcnode, dbnode, reader, len)?;
+                import_rel(modification, file_path, spcnode, dbnode, reader, len, ctx).await?;
                 debug!("imported rel creation");
             }
         }
@@ -485,55 +532,50 @@ fn import_file<Reader: Read>(
             .to_string_lossy()
             .parse()?;
 
-        match file_path
-            .file_name()
-            .expect("missing base filename")
-            .to_string_lossy()
-            .as_ref()
-        {
+        match file_name.as_ref() {
             "pg_filenode.map" => {
-                let bytes = read_all_bytes(reader)?;
-                modification.put_relmap_file(spcnode, dbnode, bytes)?;
+                let bytes = read_all_bytes(reader).await?;
+                modification
+                    .put_relmap_file(spcnode, dbnode, bytes, ctx)
+                    .await?;
                 debug!("imported relmap file")
             }
             "PG_VERSION" => {
                 debug!("ignored PG_VERSION file");
             }
             _ => {
-                import_rel(modification, file_path, spcnode, dbnode, reader, len)?;
+                import_rel(modification, file_path, spcnode, dbnode, reader, len, ctx).await?;
                 debug!("imported rel creation");
             }
         }
     } else if file_path.starts_with("pg_xact") {
         let slru = SlruKind::Clog;
 
-        import_slru(modification, slru, file_path, reader, len)?;
+        import_slru(modification, slru, file_path, reader, len, ctx).await?;
         debug!("imported clog slru");
     } else if file_path.starts_with("pg_multixact/offsets") {
         let slru = SlruKind::MultiXactOffsets;
 
-        import_slru(modification, slru, file_path, reader, len)?;
+        import_slru(modification, slru, file_path, reader, len, ctx).await?;
         debug!("imported multixact offsets slru");
     } else if file_path.starts_with("pg_multixact/members") {
         let slru = SlruKind::MultiXactMembers;
 
-        import_slru(modification, slru, file_path, reader, len)?;
+        import_slru(modification, slru, file_path, reader, len, ctx).await?;
         debug!("imported multixact members slru");
     } else if file_path.starts_with("pg_twophase") {
-        let file_name = &file_path
-            .file_name()
-            .expect("missing twophase filename")
-            .to_string_lossy();
-        let xid = u32::from_str_radix(file_name, 16)?;
+        let xid = u32::from_str_radix(file_name.as_ref(), 16)?;
 
-        let bytes = read_all_bytes(reader)?;
-        modification.put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]))?;
+        let bytes = read_all_bytes(reader).await?;
+        modification
+            .put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]), ctx)
+            .await?;
         debug!("imported twophase file");
     } else if file_path.starts_with("pg_wal") {
         debug!("found wal file in base section. ignore it");
     } else if file_path.starts_with("zenith.signal") {
         // Parse zenith signal file to set correct previous LSN
-        let bytes = read_all_bytes(reader)?;
+        let bytes = read_all_bytes(reader).await?;
         // zenith.signal format is "PREV LSN: prev_lsn"
         // TODO write serialization and deserialization in the same place.
         let zenith_signal = std::str::from_utf8(&bytes)?.trim();
@@ -570,8 +612,8 @@ fn import_file<Reader: Read>(
     Ok(None)
 }
 
-fn read_all_bytes<Reader: Read>(mut reader: Reader) -> Result<Bytes> {
+async fn read_all_bytes(reader: &mut (impl AsyncRead + Send + Sync + Unpin)) -> Result<Bytes> {
     let mut buf: Vec<u8> = vec![];
-    reader.read_to_end(&mut buf)?;
+    reader.read_to_end(&mut buf).await?;
     Ok(Bytes::copy_from_slice(&buf[..]))
 }

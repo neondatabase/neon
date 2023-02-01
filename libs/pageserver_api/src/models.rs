@@ -1,4 +1,4 @@
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
@@ -15,28 +15,64 @@ use bytes::{BufMut, Bytes, BytesMut};
 /// A state of a tenant in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TenantState {
-    /// Tenant is fully operational, its background jobs might be running or not.
-    Active { background_jobs_running: bool },
-    /// A tenant is recognized by pageserver, but not yet ready to operate:
-    /// e.g. not present locally and being downloaded or being read into memory from the file system.
-    Paused,
-    /// A tenant is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    // This tenant is being loaded from local disk
+    Loading,
+    // This tenant is being downloaded from cloud storage.
+    Attaching,
+    /// Tenant is fully operational
+    Active,
+    /// A tenant is recognized by pageserver, but it is being detached or the
+    /// system is being shut down.
+    Stopping,
+    /// A tenant is recognized by the pageserver, but can no longer be used for
+    /// any operations, because it failed to be activated.
     Broken,
+}
+
+pub mod state {
+    pub const LOADING: &str = "loading";
+    pub const ATTACHING: &str = "attaching";
+    pub const ACTIVE: &str = "active";
+    pub const STOPPING: &str = "stopping";
+    pub const BROKEN: &str = "broken";
+}
+
+impl TenantState {
+    pub fn has_in_progress_downloads(&self) -> bool {
+        match self {
+            Self::Loading => true,
+            Self::Attaching => true,
+            Self::Active => false,
+            Self::Stopping => false,
+            Self::Broken => false,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TenantState::Loading => state::LOADING,
+            TenantState::Attaching => state::ATTACHING,
+            TenantState::Active => state::ACTIVE,
+            TenantState::Stopping => state::STOPPING,
+            TenantState::Broken => state::BROKEN,
+        }
+    }
 }
 
 /// A state of a timeline in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TimelineState {
-    /// Timeline is fully operational, its background jobs are running.
+    /// The timeline is recognized by the pageserver but is not yet operational.
+    /// In particular, the walreceiver connection loop is not running for this timeline.
+    /// It will eventually transition to state Active or Broken.
+    Loading,
+    /// The timeline is fully operational.
+    /// It can be queried, and the walreceiver connection loop is running.
     Active,
-    /// A timeline is recognized by pageserver, but not yet ready to operate.
-    /// The status indicates, that the timeline could eventually go back to Active automatically:
-    /// for example, if the owning tenant goes back to Active again.
-    Suspended,
-    /// A timeline is recognized by pageserver, but not yet ready to operate and not allowed to
-    /// automatically become Active after certain events: only a management call can change this status.
-    Paused,
-    /// A timeline is recognized by the pageserver, but no longer used for any operations, as failed to get activated.
+    /// The timeline was previously Loading or Active but is shutting down.
+    /// It cannot transition back into any other state.
+    Stopping,
+    /// The timeline is broken and not operational (previous states: Loading or Active).
     Broken,
 }
 
@@ -98,6 +134,7 @@ impl TenantCreateRequest {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TenantConfigRequest {
+    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -143,6 +180,8 @@ pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
     pub state: TenantState,
+    /// Sum of the size of all layer files.
+    /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
     pub has_in_progress_downloads: Option<bool>,
 }
@@ -168,10 +207,15 @@ pub struct TimelineInfo {
     pub latest_gc_cutoff_lsn: Lsn,
     #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
     pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
+    /// Sum of the size of all layer files.
+    /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
     pub current_logical_size_non_incremental: Option<u64>,
-    pub current_physical_size_non_incremental: Option<u64>,
+
+    pub timeline_dir_layer_file_size_sum: Option<u64>,
 
     pub wal_source_connstr: Option<String>,
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -180,34 +224,28 @@ pub struct TimelineInfo {
     pub last_received_msg_ts: Option<u128>,
     pub pg_version: u32,
 
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub remote_consistent_lsn: Option<Lsn>,
-    pub awaits_download: bool,
-
     pub state: TimelineState,
-
-    // Some of the above fields are duplicated in 'local' and 'remote', for backwards-
-    // compatility with older clients.
-    pub local: LocalTimelineInfo,
-    pub remote: RemoteTimelineInfo,
 }
 
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LocalTimelineInfo {
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub ancestor_timeline_id: Option<TimelineId>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub ancestor_lsn: Option<Lsn>,
-    pub current_logical_size: Option<u64>, // is None when timeline is Unloaded
-    pub current_physical_size: Option<u64>, // is None when timeline is Unloaded
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DownloadRemoteLayersTaskSpawnRequest {
+    pub max_concurrent_downloads: NonZeroUsize,
 }
 
-#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RemoteTimelineInfo {
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub remote_consistent_lsn: Option<Lsn>,
+pub struct DownloadRemoteLayersTaskInfo {
+    pub task_id: String,
+    pub state: DownloadRemoteLayersTaskState,
+    pub total_layer_count: u64,         // stable once `completed`
+    pub successful_download_count: u64, // stable once `completed`
+    pub failed_download_count: u64,     // stable once `completed`
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum DownloadRemoteLayersTaskState {
+    Running,
+    Completed,
+    ShutDown,
 }
 
 pub type ConfigureFailpointsRequest = Vec<FailpointConfig>;
@@ -307,7 +345,7 @@ impl PagestreamFeMessage {
         match self {
             Self::Exists(req) => {
                 bytes.put_u8(0);
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
@@ -317,7 +355,7 @@ impl PagestreamFeMessage {
 
             Self::Nblocks(req) => {
                 bytes.put_u8(1);
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
@@ -327,7 +365,7 @@ impl PagestreamFeMessage {
 
             Self::GetPage(req) => {
                 bytes.put_u8(2);
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.rel.spcnode);
                 bytes.put_u32(req.rel.dbnode);
@@ -338,7 +376,7 @@ impl PagestreamFeMessage {
 
             Self::DbSize(req) => {
                 bytes.put_u8(3);
-                bytes.put_u8(if req.latest { 1 } else { 0 });
+                bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.dbnode);
             }

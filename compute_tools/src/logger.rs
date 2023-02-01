@@ -1,43 +1,37 @@
-use std::io::Write;
+use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::prelude::*;
 
-use anyhow::Result;
-use chrono::Utc;
-use env_logger::{Builder, Env};
-
-macro_rules! info_println {
-    ($($tts:tt)*) => {
-        if log_enabled!(Level::Info) {
-            println!($($tts)*);
-        }
-    }
-}
-
-macro_rules! info_print {
-    ($($tts:tt)*) => {
-        if log_enabled!(Level::Info) {
-            print!($($tts)*);
-        }
-    }
-}
-
-/// Initialize `env_logger` using either `default_level` or
+/// Initialize logging to stderr, and OpenTelemetry tracing and exporter.
+///
+/// Logging is configured using either `default_log_level` or
 /// `RUST_LOG` environment variable as default log level.
-pub fn init_logger(default_level: &str) -> Result<()> {
-    let env = Env::default().filter_or("RUST_LOG", default_level);
+///
+/// OpenTelemetry is configured with OTLP/HTTP exporter. It picks up
+/// configuration from environment variables. For example, to change the destination,
+/// set `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318`. See
+/// `tracing-utils` package description.
+///
+pub fn init_tracing_and_logging(default_log_level: &str) -> anyhow::Result<()> {
+    // Initialize Logging
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_log_level));
 
-    Builder::from_env(env)
-        .format(|buf, record| {
-            let thread_handle = std::thread::current();
-            writeln!(
-                buf,
-                "{} [{}] {}: {}",
-                Utc::now().format("%Y-%m-%d %H:%M:%S%.3f %Z"),
-                thread_handle.name().unwrap_or("main"),
-                record.level(),
-                record.args()
-            )
-        })
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_writer(std::io::stderr);
+
+    // Initialize OpenTelemetry
+    let otlp_layer =
+        tracing_utils::init_tracing_without_runtime("compute_ctl").map(OpenTelemetryLayer::new);
+
+    // Put it all together
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(otlp_layer)
+        .with(fmt_layer)
         .init();
+    tracing::info!("logging and tracing started");
 
     Ok(())
 }

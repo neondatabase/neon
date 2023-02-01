@@ -6,32 +6,20 @@ use std::thread;
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
-use log::{error, info};
 use serde_json;
+use tracing::{error, info};
+use tracing_utils::http::OtelName;
 
-use crate::compute::{ComputeNode, ComputeStatus};
+use crate::compute::ComputeNode;
 
 // Service function to handle all available routes.
-async fn routes(req: Request<Body>, compute: Arc<ComputeNode>) -> Response<Body> {
+async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
+    //
+    // NOTE: The URI path is currently included in traces. That's OK because
+    // it doesn't contain any variable parts or sensitive information. But
+    // please keep that in mind if you change the routing here.
+    //
     match (req.method(), req.uri().path()) {
-        // Timestamp of the last Postgres activity in the plain text.
-        // DEPRECATED in favour of /status
-        (&Method::GET, "/last_activity") => {
-            info!("serving /last_active GET request");
-            let state = compute.state.read().unwrap();
-
-            // Use RFC3339 format for consistency.
-            Response::new(Body::from(state.last_active.to_rfc3339()))
-        }
-
-        // Has compute setup process finished? -> true/false.
-        // DEPRECATED in favour of /status
-        (&Method::GET, "/ready") => {
-            info!("serving /ready GET request");
-            let status = compute.get_status();
-            Response::new(Body::from(format!("{}", status == ComputeStatus::Running)))
-        }
-
         // Serialized compute state.
         (&Method::GET, "/status") => {
             info!("serving /status GET request");
@@ -46,19 +34,9 @@ async fn routes(req: Request<Body>, compute: Arc<ComputeNode>) -> Response<Body>
             Response::new(Body::from(serde_json::to_string(&compute.metrics).unwrap()))
         }
 
-        // DEPRECATED, use POST instead
-        (&Method::GET, "/check_writability") => {
-            info!("serving /check_writability GET request");
-            let res = crate::checker::check_writability(&compute).await;
-            match res {
-                Ok(_) => Response::new(Body::from("true")),
-                Err(e) => Response::new(Body::from(e.to_string())),
-            }
-        }
-
         (&Method::POST, "/check_writability") => {
             info!("serving /check_writability POST request");
-            let res = crate::checker::check_writability(&compute).await;
+            let res = crate::checker::check_writability(compute).await;
             match res {
                 Ok(_) => Response::new(Body::from("true")),
                 Err(e) => Response::new(Body::from(e.to_string())),
@@ -84,7 +62,19 @@ async fn serve(state: Arc<ComputeNode>) {
         async move {
             Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
                 let state = state.clone();
-                async move { Ok::<_, Infallible>(routes(req, state).await) }
+                async move {
+                    Ok::<_, Infallible>(
+                        // NOTE: We include the URI path in the string. It
+                        // doesn't contain any variable parts or sensitive
+                        // information in this API.
+                        tracing_utils::http::tracing_handler(
+                            req,
+                            |req| routes(req, &state),
+                            OtelName::UriPath,
+                        )
+                        .await,
+                    )
+                }
             }))
         }
     });

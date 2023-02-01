@@ -52,7 +52,7 @@ typedef struct
 #define NEON_TAG "[NEON_SMGR] "
 #define neon_log(tag, fmt, ...) ereport(tag,                                  \
 										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
-										 errhidestmt(true), errhidecontext(true)))
+										 errhidestmt(true), errhidecontext(true), internalerrposition(0)))
 
 /*
  * supertype of all the Neon*Request structs below
@@ -202,5 +202,12 @@ extern bool get_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumbe
 extern void set_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);
 extern void update_cached_relsize(RelFileNode rnode, ForkNumber forknum, BlockNumber size);
 extern void forget_cached_relsize(RelFileNode rnode, ForkNumber forknum);
+
+/* functions for local file cache */
+extern void lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno, char *buffer);
+extern bool lfc_read(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno, char *buffer);
+extern bool lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno);
+extern void lfc_init(void);
+
 
 #endif

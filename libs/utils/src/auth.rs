@@ -7,7 +7,7 @@ use serde;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation,
 };
@@ -21,8 +21,16 @@ const JWT_ALGORITHM: Algorithm = Algorithm::RS256;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
+    // Provides access to all data for a specific tenant (specified in `struct Claims` below)
+    // TODO: join these two?
     Tenant,
+    // Provides blanket access to all tenants on the pageserver plus pageserver-wide APIs.
+    // Should only be used e.g. for status check/tenant creation/list.
     PageServerApi,
+    // Provides blanket access to all data on the safekeeper plus safekeeper-wide APIs.
+    // Should only be used e.g. for status check.
+    // Currently also used for connection from any pageserver to any safekeeper.
+    SafekeeperData,
 }
 
 #[serde_as]
@@ -37,22 +45,6 @@ pub struct Claims {
 impl Claims {
     pub fn new(tenant_id: Option<TenantId>, scope: Scope) -> Self {
         Self { tenant_id, scope }
-    }
-}
-
-pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<()> {
-    match (&claims.scope, tenant_id) {
-        (Scope::Tenant, None) => {
-            bail!("Attempt to access management api with tenant scope. Permission denied")
-        }
-        (Scope::Tenant, Some(tenant_id)) => {
-            if claims.tenant_id.unwrap() != tenant_id {
-                bail!("Tenant id mismatch. Permission denied")
-            }
-            Ok(())
-        }
-        (Scope::PageServerApi, None) => Ok(()), // access to management api for PageServerApi scope
-        (Scope::PageServerApi, Some(_)) => Ok(()), // access to tenant api using PageServerApi scope
     }
 }
 

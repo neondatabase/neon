@@ -8,18 +8,17 @@ use tokio::net::TcpStream;
 use tokio_postgres::NoTls;
 use tracing::{error, info};
 
+const COULD_NOT_CONNECT: &str = "Could not connect to compute node";
+
 #[derive(Debug, Error)]
 pub enum ConnectionError {
     /// This error doesn't seem to reveal any secrets; for instance,
     /// [`tokio_postgres::error::Kind`] doesn't contain ip addresses and such.
-    #[error("Failed to connect to the compute node: {0}")]
+    #[error("{COULD_NOT_CONNECT}: {0}")]
     Postgres(#[from] tokio_postgres::Error),
 
-    #[error("Failed to connect to the compute node")]
-    FailedToConnectToCompute,
-
-    #[error("Failed to fetch compute node version")]
-    FailedToFetchPgVersion,
+    #[error("{COULD_NOT_CONNECT}: {0}")]
+    CouldNotConnect(#[from] io::Error),
 }
 
 impl UserFacingError for ConnectionError {
@@ -29,10 +28,10 @@ impl UserFacingError for ConnectionError {
             // This helps us drop irrelevant library-specific prefixes.
             // TODO: propagate severity level and other parameters.
             Postgres(err) => match err.as_db_error() {
-                Some(err) => err.message().to_string(),
+                Some(err) => err.message().to_owned(),
                 None => err.to_string(),
             },
-            other => other.to_string(),
+            _ => COULD_NOT_CONNECT.to_owned(),
         }
     }
 }
@@ -43,13 +42,64 @@ pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 /// A config for establishing a connection to compute node.
 /// Eventually, `tokio_postgres` will be replaced with something better.
 /// Newtype allows us to implement methods on top of it.
+#[derive(Clone)]
 #[repr(transparent)]
-pub struct ConnCfg(pub tokio_postgres::Config);
+pub struct ConnCfg(Box<tokio_postgres::Config>);
 
+/// Creation and initialization routines.
 impl ConnCfg {
-    /// Construct a new connection config.
     pub fn new() -> Self {
-        Self(tokio_postgres::Config::new())
+        Self(Default::default())
+    }
+
+    /// Reuse password or auth keys from the other config.
+    pub fn reuse_password(&mut self, other: &Self) {
+        if let Some(password) = other.get_password() {
+            self.password(password);
+        }
+
+        if let Some(keys) = other.get_auth_keys() {
+            self.auth_keys(keys);
+        }
+    }
+
+    /// Apply startup message params to the connection config.
+    pub fn set_startup_params(&mut self, params: &StartupMessageParams) {
+        if let Some(options) = params.options_raw() {
+            // We must drop all proxy-specific parameters.
+            #[allow(unstable_name_collisions)]
+            let options: String = options
+                .filter(|opt| !opt.starts_with("project="))
+                .intersperse(" ") // TODO: use impl from std once it's stabilized
+                .collect();
+
+            self.options(&options);
+        }
+
+        if let Some(app_name) = params.get("application_name") {
+            self.application_name(app_name);
+        }
+
+        // TODO: This is especially ugly...
+        if let Some(replication) = params.get("replication") {
+            use tokio_postgres::config::ReplicationMode;
+            match replication {
+                "true" | "on" | "yes" | "1" => {
+                    self.replication_mode(ReplicationMode::Physical);
+                }
+                "database" => {
+                    self.replication_mode(ReplicationMode::Logical);
+                }
+                _other => {}
+            }
+        }
+
+        // TODO: extend the list of the forwarded startup parameters.
+        // Currently, tokio-postgres doesn't allow us to pass
+        // arbitrary parameters, but the ones above are a good start.
+        //
+        // This and the reverse params problem can be better addressed
+        // in a bespoke connection machinery (a new library for that sake).
     }
 }
 
@@ -95,7 +145,7 @@ impl ConnCfg {
                 io::ErrorKind::Other,
                 format!(
                     "couldn't connect: bad compute config, \
-                        ports and hosts entries' count does not match: {:?}",
+                     ports and hosts entries' count does not match: {:?}",
                     self.0
                 ),
             ));
@@ -131,64 +181,35 @@ impl ConnCfg {
 pub struct PostgresConnection {
     /// Socket connected to a compute node.
     pub stream: TcpStream,
-    /// PostgreSQL version of this instance.
-    pub version: String,
+    /// PostgreSQL connection parameters.
+    pub params: std::collections::HashMap<String, String>,
+    /// Query cancellation token.
+    pub cancel_closure: CancelClosure,
 }
 
 impl ConnCfg {
     /// Connect to a corresponding compute node.
-    pub async fn connect(
-        mut self,
-        params: &StartupMessageParams,
-    ) -> Result<(PostgresConnection, CancelClosure), ConnectionError> {
-        if let Some(options) = params.options_raw() {
-            // We must drop all proxy-specific parameters.
-            #[allow(unstable_name_collisions)]
-            let options: String = options
-                .filter(|opt| !opt.starts_with("project="))
-                .intersperse(" ") // TODO: use impl from std once it's stabilized
-                .collect();
-
-            self.0.options(&options);
-        }
-
-        if let Some(app_name) = params.get("application_name") {
-            self.0.application_name(app_name);
-        }
-
-        if let Some(replication) = params.get("replication") {
-            use tokio_postgres::config::ReplicationMode;
-            match replication {
-                "true" | "on" | "yes" | "1" => {
-                    self.0.replication_mode(ReplicationMode::Physical);
-                }
-                "database" => {
-                    self.0.replication_mode(ReplicationMode::Logical);
-                }
-                _other => {}
-            }
-        }
-
-        // TODO: extend the list of the forwarded startup parameters.
-        // Currently, tokio-postgres doesn't allow us to pass
-        // arbitrary parameters, but the ones above are a good start.
-
-        let (socket_addr, mut stream) = self
-            .connect_raw()
-            .await
-            .map_err(|_| ConnectionError::FailedToConnectToCompute)?;
-
-        // TODO: establish a secure connection to the DB
-        let (client, conn) = self.0.connect_raw(&mut stream, NoTls).await?;
-        let version = conn
-            .parameter("server_version")
-            .ok_or(ConnectionError::FailedToFetchPgVersion)?
-            .into();
-
+    pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
+        // TODO: establish a secure connection to the DB.
+        let (socket_addr, mut stream) = self.connect_raw().await?;
+        let (client, connection) = self.0.connect_raw(&mut stream, NoTls).await?;
         info!("connected to user's compute node at {socket_addr}");
-        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
-        let db = PostgresConnection { stream, version };
 
-        Ok((db, cancel_closure))
+        // This is very ugly but as of now there's no better way to
+        // extract the connection parameters from tokio-postgres' connection.
+        // TODO: solve this problem in a more elegant manner (e.g. the new library).
+        let params = connection.parameters;
+
+        // NB: CancelToken is supposed to hold socket_addr, but we use connect_raw.
+        // Yet another reason to rework the connection establishing code.
+        let cancel_closure = CancelClosure::new(socket_addr, client.cancel_token());
+
+        let connection = PostgresConnection {
+            stream,
+            params,
+            cancel_closure,
+        };
+
+        Ok(connection)
     }
 }

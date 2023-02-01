@@ -11,6 +11,7 @@ use anyhow::{bail, Result};
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
 use serde::Deserialize;
+use tracing::{debug, instrument};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
@@ -119,16 +120,9 @@ pub trait GenericOptionsSearch {
 impl GenericOptionsSearch for GenericOptions {
     /// Lookup option by name
     fn find(&self, name: &str) -> Option<String> {
-        match &self {
-            Some(ops) => {
-                let op = ops.iter().find(|s| s.name == name);
-                match op {
-                    Some(op) => op.value.clone(),
-                    None => None,
-                }
-            }
-            None => None,
-        }
+        let ops = self.as_ref()?;
+        let op = ops.iter().find(|s| s.name == name)?;
+        op.value.clone()
     }
 }
 
@@ -136,8 +130,8 @@ impl Role {
     /// Serialize a list of role parameters into a Postgres-acceptable
     /// string of arguments.
     pub fn to_pg_options(&self) -> String {
-        // XXX: consider putting LOGIN as a default option somewhere higher, e.g. in Rails.
-        // For now we do not use generic `options` for roles. Once used, add
+        // XXX: consider putting LOGIN as a default option somewhere higher, e.g. in control-plane.
+        // For now, we do not use generic `options` for roles. Once used, add
         // `self.options.as_pg_options()` somewhere here.
         let mut params: String = "LOGIN".to_string();
 
@@ -161,6 +155,14 @@ impl Role {
 }
 
 impl Database {
+    pub fn new(name: PgIdent, owner: PgIdent) -> Self {
+        Self {
+            name,
+            owner,
+            options: None,
+        }
+    }
+
     /// Serialize a list of database parameters into a Postgres-acceptable
     /// string of arguments.
     /// NB: `TEMPLATE` is actually also an identifier, but so far we only need
@@ -219,11 +221,7 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
             &[],
         )?
         .iter()
-        .map(|row| Database {
-            name: row.get("datname"),
-            owner: row.get("owner"),
-            options: None,
-        })
+        .map(|row| Database::new(row.get("datname"), row.get("owner")))
         .collect();
 
     Ok(postgres_dbs)
@@ -232,6 +230,7 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
 /// Wait for Postgres to become ready to accept connections. It's ready to
 /// accept connections when the state-field in `pgdata/postmaster.pid` says
 /// 'ready'.
+#[instrument(skip(pg))]
 pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
 
@@ -290,18 +289,18 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
         }
 
         let res = rx.recv_timeout(Duration::from_millis(100));
-        log::debug!("woken up by notify: {res:?}");
+        debug!("woken up by notify: {res:?}");
         // If there are multiple events in the channel already, we only need to be
         // check once. Swallow the extra events before we go ahead to check the
         // pid file.
         while let Ok(res) = rx.try_recv() {
-            log::debug!("swallowing extra event: {res:?}");
+            debug!("swallowing extra event: {res:?}");
         }
 
         // Check that we can open pid file first.
         if let Ok(file) = File::open(&pid_path) {
             if !postmaster_pid_seen {
-                log::debug!("postmaster.pid appeared");
+                debug!("postmaster.pid appeared");
                 watcher
                     .unwatch(pgdata)
                     .expect("Failed to remove pgdata dir watch");
@@ -317,7 +316,7 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
             // Pid file could be there and we could read it, but it could be empty, for example.
             if let Some(Ok(line)) = last_line {
                 let status = line.trim();
-                log::debug!("last line of postmaster.pid: {status:?}");
+                debug!("last line of postmaster.pid: {status:?}");
 
                 // Now Postgres is ready to accept connections
                 if status == "ready" {
@@ -333,7 +332,7 @@ pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
         }
     }
 
-    log::info!("PostgreSQL is now running, continuing to configure it");
+    tracing::info!("PostgreSQL is now running, continuing to configure it");
 
     Ok(())
 }

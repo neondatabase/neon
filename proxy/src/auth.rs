@@ -1,7 +1,7 @@
 //! Client authentication mechanisms.
 
 pub mod backend;
-pub use backend::{BackendType, ConsoleReqExtra};
+pub use backend::BackendType;
 
 mod credentials;
 pub use credentials::ClientCredentials;
@@ -12,7 +12,7 @@ use password_hack::PasswordHackPayload;
 mod flow;
 pub use flow::*;
 
-use crate::error::UserFacingError;
+use crate::{console, error::UserFacingError};
 use std::io;
 use thiserror::Error;
 
@@ -26,10 +26,10 @@ pub enum AuthErrorImpl {
     Link(#[from] backend::LinkAuthError),
 
     #[error(transparent)]
-    GetAuthInfo(#[from] backend::GetAuthInfoError),
+    GetAuthInfo(#[from] console::errors::GetAuthInfoError),
 
     #[error(transparent)]
-    WakeCompute(#[from] backend::WakeComputeError),
+    WakeCompute(#[from] console::errors::WakeComputeError),
 
     /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]
@@ -42,12 +42,15 @@ pub enum AuthErrorImpl {
     MalformedPassword(&'static str),
 
     #[error(
-        "Project ID is not specified. \
+        "Endpoint ID is not specified. \
         Either please upgrade the postgres client library (libpq) for SNI support \
-        or pass the project ID (first part of the domain name) as a parameter: '?options=project%3D<project-id>'. \
+        or pass the endpoint ID (first part of the domain name) as a parameter: '?options=project%3D<endpoint-id>'. \
         See more at https://neon.tech/sni"
     )]
     MissingProjectName,
+
+    #[error("password authentication failed for user '{0}'")]
+    AuthFailed(Box<str>),
 
     /// Errors produced by e.g. [`crate::stream::PqStream`].
     #[error(transparent)]
@@ -61,6 +64,10 @@ pub struct AuthError(Box<AuthErrorImpl>);
 impl AuthError {
     pub fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
         AuthErrorImpl::BadAuthMethod(name.into()).into()
+    }
+
+    pub fn auth_failed(user: impl Into<Box<str>>) -> Self {
+        AuthErrorImpl::AuthFailed(user.into()).into()
     }
 }
 
@@ -78,10 +85,11 @@ impl UserFacingError for AuthError {
             GetAuthInfo(e) => e.to_string_client(),
             WakeCompute(e) => e.to_string_client(),
             Sasl(e) => e.to_string_client(),
+            AuthFailed(_) => self.to_string(),
             BadAuthMethod(_) => self.to_string(),
             MalformedPassword(_) => self.to_string(),
             MissingProjectName => self.to_string(),
-            _ => "Internal error".to_string(),
+            Io(_) => "Internal error".to_string(),
         }
     }
 }

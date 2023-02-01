@@ -77,16 +77,6 @@ paths:
         schema:
           type: string
           format: hex
-      - name: include-non-incremental-logical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_logical_size_non_incremental
-      - name: include-non-incremental-physical-size
-        in: query
-        schema:
-          type: string
-          description: Controls calculation of current_physical_size_non_incremental
     get:
       description: Get timelines for tenant
       responses:
@@ -139,17 +129,6 @@ paths:
           format: hex
     get:
       description: Get info about the timeline
-      parameters:
-        - name: include-non-incremental-logical-size
-          in: query
-          schema:
-            type: string
-          description: Controls calculation of current_logical_size_non_incremental
-        - name: include-non-incremental-physical-size
-          in: query
-          schema:
-            type: string
-            description: Controls calculation of current_physical_size_non_incremental
       responses:
         "200":
           description: TimelineInfo
@@ -274,6 +253,7 @@ paths:
         schema:
           type: string
           format: hex
+
     post:
       description: Schedules attach operation to happen in the background for given tenant
       responses:
@@ -325,10 +305,98 @@ paths:
           type: string
           format: hex
     post:
-      description: Detach local tenant
+      description: |
+        Remove tenant data (including all corresponding timelines) from pageserver's memory and file system.
+        Files on the remote storage are not affected.
       responses:
         "200":
           description: Tenant detached
+        "400":
+          description: Error when no tenant id found in path parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/ignore:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: |
+        Remove tenant data (including all corresponding timelines) from pageserver's memory.
+        Files on local disk and remote storage are not affected.
+
+        Future pageserver restarts won't load the data back until `load` is called on such tenant.
+      responses:
+        "200":
+          description: Tenant ignored
+        "400":
+          description: Error when no tenant id found in path parameters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/tenant/{tenant_id}/load:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    post:
+      description: |
+        Schedules an operation that attempts to load a tenant from the local disk and
+        synchronise it with the remote storage (if enabled), repeating pageserver's restart logic for tenant load.
+        If the tenant was ignored before, removes the ignore mark and continues with load scheduling.
+
+        Errors if the tenant is absent on disk, already present in memory or fails to schedule its load.
+        Scheduling a load does not mean that the tenant would load successfully, check tenant status to ensure load correctness.
+      responses:
+        "202":
+          description: Tenant scheduled to load successfully
         "400":
           description: Error when no tenant id found in path parameters
           content:
@@ -362,6 +430,13 @@ paths:
         schema:
           type: string
           format: hex
+      - name: inputs_only
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: |
+          When true, skip calculation and only provide the model inputs (for debugging). Defaults to false.
     get:
       description: |
         Calculate tenant's size, which is a mixture of WAL (bytes) and logical_size (bytes).
@@ -381,8 +456,9 @@ paths:
                     format: hex
                   size:
                     type: integer
+                    nullable: true
                     description: |
-                      Size metric in bytes.
+                      Size metric in bytes or null if inputs_only=true was given.
         "401":
           description: Unauthorized Error
           content:
@@ -604,13 +680,7 @@ components:
         id:
           type: string
         state:
-            oneOf:
-              - type: string
-              - type: object
-                properties:
-                  background_jobs_running:
-                    type: boolean
-
+          type: string
         current_physical_size:
           type: integer
         has_in_progress_downloads:
@@ -665,7 +735,6 @@ components:
         - tenant_id
         - last_record_lsn
         - disk_consistent_lsn
-        - awaits_download
         - state
         - latest_gc_cutoff_lsn
       properties:
@@ -697,10 +766,6 @@ components:
           type: integer
         current_physical_size:
           type: integer
-        current_logical_size_non_incremental:
-          type: integer
-        current_physical_size_non_incremental:
-          type: integer
         wal_source_connstr:
           type: string
         last_received_msg_lsn:
@@ -708,42 +773,9 @@ components:
           format: hex
         last_received_msg_ts:
           type: integer
-        awaits_download:
-          type: boolean
         state:
           type: string
         latest_gc_cutoff_lsn:
-          type: string
-          format: hex
-
-        # These 'local' and 'remote' fields just duplicate some of the fields
-        # above. They are kept for backwards-compatibility. They can be removed,
-        # when the control plane has been updated to look at the above fields
-        # directly.
-        local:
-          $ref: "#/components/schemas/LocalTimelineInfo"
-        remote:
-          $ref: "#/components/schemas/RemoteTimelineInfo"
-
-    LocalTimelineInfo:
-      type: object
-      properties:
-        ancestor_timeline_id:
-          type: string
-          format: hex
-        ancestor_lsn:
-          type: string
-          format: hex
-        current_logical_size:
-          type: integer
-        current_physical_size:
-          type: integer
-    RemoteTimelineInfo:
-      type: object
-      required:
-        - remote_consistent_lsn
-      properties:
-        remote_consistent_lsn:
           type: string
           format: hex
     Error:

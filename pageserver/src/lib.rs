@@ -1,33 +1,29 @@
+mod auth;
 pub mod basebackup;
+pub mod broker_client;
 pub mod config;
+pub mod consumption_metrics;
+pub mod context;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
-pub mod metrics;
+pub(crate) mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
-pub mod profiling;
 pub mod repository;
-pub mod storage_sync;
 pub mod task_mgr;
 pub mod tenant;
-pub mod tenant_config;
-pub mod tenant_mgr;
-pub mod tenant_tasks;
 pub mod trace;
 pub mod virtual_file;
 pub mod walingest;
-pub mod walreceiver;
 pub mod walrecord;
 pub mod walredo;
 
-use std::collections::HashMap;
-
-use tracing::info;
-use utils::id::{TenantId, TimelineId};
+use std::path::Path;
 
 use crate::task_mgr::TaskKind;
+use tracing::info;
 
 /// Current storage format version
 ///
@@ -46,15 +42,6 @@ pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
-/// Config for the Repository checkpointer
-#[derive(Debug, Clone, Copy)]
-pub enum CheckpointConfig {
-    // Flush all in-memory data
-    Flush,
-    // Flush all in-memory data and reconstruct all page images
-    Forced,
-}
-
 pub async fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
@@ -65,13 +52,13 @@ pub async fn shutdown_pageserver(exit_code: i32) {
 
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
-    tenant_mgr::shutdown_all_tenants().await;
+    tenant::mgr::shutdown_all_tenants().await;
 
     // Stop syncing with remote storage.
     //
     // FIXME: Does this wait for the sync tasks to finish syncing what's queued up?
     // Should it?
-    task_mgr::shutdown_tasks(Some(TaskKind::StorageSync), None, None).await;
+    task_mgr::shutdown_tasks(Some(TaskKind::RemoteUploadTask), None, None).await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
@@ -98,7 +85,7 @@ async fn exponential_backoff(n: u32, base_increment: f64, max_seconds: f64) {
     }
 }
 
-fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
+pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
     if n == 0 {
         0.0
     } else {
@@ -106,23 +93,46 @@ fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds
     }
 }
 
-/// A newtype to store arbitrary data grouped by tenant and timeline ids.
-/// One could use [`utils::id::TenantTimelineId`] for grouping, but that would
-/// not include the cases where a certain tenant has zero timelines.
-/// This is sometimes important: a tenant could be registered during initial load from FS,
-/// even if he has no timelines on disk.
-#[derive(Debug)]
-pub struct TenantTimelineValues<T>(HashMap<TenantId, HashMap<TimelineId, T>>);
+/// The name of the metadata file pageserver creates per timeline.
+/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>/metadata`.
+pub const METADATA_FILE_NAME: &str = "metadata";
 
-impl<T> TenantTimelineValues<T> {
-    fn new() -> Self {
-        Self(HashMap::new())
+/// Per-tenant configuration file.
+/// Full path: `tenants/<tenant_id>/config`.
+pub const TENANT_CONFIG_NAME: &str = "config";
+
+/// A suffix used for various temporary files. Any temporary files found in the
+/// data directory at pageserver startup can be automatically removed.
+pub const TEMP_FILE_SUFFIX: &str = "___temp";
+
+/// A marker file to mark that a timeline directory was not fully initialized.
+/// If a timeline directory with this marker is encountered at pageserver startup,
+/// the timeline directory and the marker file are both removed.
+/// Full path: `tenants/<tenant_id>/timelines/<timeline_id>___uninit`.
+pub const TIMELINE_UNINIT_MARK_SUFFIX: &str = "___uninit";
+
+/// A marker file to prevent pageserver from loading a certain tenant on restart.
+/// Different from [`TIMELINE_UNINIT_MARK_SUFFIX`] due to semantics of the corresponding
+/// `ignore` management API command, that expects the ignored tenant to be properly loaded
+/// into pageserver's memory before being ignored.
+/// Full path: `tenants/<tenant_id>/___ignored_tenant`.
+pub const IGNORED_TENANT_FILE_NAME: &str = "___ignored_tenant";
+
+pub fn is_temporary(path: &Path) -> bool {
+    match path.file_name() {
+        Some(name) => name.to_string_lossy().ends_with(TEMP_FILE_SUFFIX),
+        None => false,
     }
 }
 
-/// A suffix to be used during file sync from the remote storage,
-/// to ensure that we do not leave corrupted files that pretend to be layers.
-const TEMP_FILE_SUFFIX: &str = "___temp";
+pub fn is_uninit_mark(path: &Path) -> bool {
+    match path.file_name() {
+        Some(name) => name
+            .to_string_lossy()
+            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
+        None => false,
+    }
+}
 
 #[cfg(test)]
 mod backoff_defaults_tests {

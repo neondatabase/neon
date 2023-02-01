@@ -3,9 +3,11 @@ storage:
     bucket_name: neon-staging-storage-us-east-2
     bucket_region: us-east-2
     console_mgmt_base_url: http://console-staging.local
-    etcd_endpoints: etcd-0.us-east-2.aws.neon.build:2379
+    broker_endpoint: http://storage-broker-lb.beta.us-east-2.internal.aws.neon.build:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
+      metric_collection_endpoint: http://console-staging.local/billing/api/v1/usage_events
+      metric_collection_interval: 10min
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
@@ -16,6 +18,7 @@ storage:
     ansible_aws_ssm_region: us-east-2
     ansible_aws_ssm_bucket_name: neon-staging-storage-us-east-2
     console_region_id: aws-us-east-2
+    sentry_environment: staging
 
   children:
     pageservers:
@@ -24,6 +27,10 @@ storage:
           ansible_host: i-0c3e70929edb5d691
         pageserver-1.us-east-2.aws.neon.build:
           ansible_host: i-0565a8b4008aa3f40
+        pageserver-2.us-east-2.aws.neon.build:
+          ansible_host: i-01e31cdf7e970586a
+        pageserver-3.us-east-2.aws.neon.build:
+          ansible_host: i-0602a0291365ef7cc
 
     safekeepers:
       hosts:

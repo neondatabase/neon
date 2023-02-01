@@ -3,7 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
+use tokio::sync::oneshot::error::RecvError;
 use tokio::sync::Semaphore;
+
+use crate::context::RequestContext;
+use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 
 use super::Tenant;
 use utils::id::TimelineId;
@@ -20,7 +24,13 @@ use tracing::*;
 pub struct ModelInputs {
     updates: Vec<Update>,
     retention_period: u64,
+
+    /// Relevant lsns per timeline.
+    ///
+    /// This field is not required for deserialization purposes, which is mostly used in tests. The
+    /// LSNs explain the outcome (updates) but are not needed in size calculation.
     #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
+    #[serde(default)]
     timeline_inputs: HashMap<TimelineId, TimelineInputs>,
 }
 
@@ -29,6 +39,8 @@ pub struct ModelInputs {
 #[serde_with::serde_as]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct TimelineInputs {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    ancestor_lsn: Lsn,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     last_record: Lsn,
     #[serde_as(as = "serde_with::DisplayFromStr")]
@@ -39,6 +51,116 @@ struct TimelineInputs {
     pitr_cutoff: Lsn,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     next_gc_cutoff: Lsn,
+}
+
+// Adjust BranchFrom sorting so that we always process ancestor
+// before descendants. This is needed to correctly calculate size of
+// descendant timelines.
+//
+// Note that we may have multiple BranchFroms at the same LSN, so we
+// need to sort them in the tree order.
+//
+// see updates_sort_with_branches_at_same_lsn test below
+fn sort_updates_in_tree_order(updates: Vec<Update>) -> anyhow::Result<Vec<Update>> {
+    let mut sorted_updates = Vec::with_capacity(updates.len());
+    let mut known_timelineids = HashSet::new();
+    let mut i = 0;
+    while i < updates.len() {
+        let curr_upd = &updates[i];
+
+        if let Command::BranchFrom(parent_id) = curr_upd.command {
+            let parent_id = match parent_id {
+                Some(parent_id) if known_timelineids.contains(&parent_id) => {
+                    // we have already processed ancestor
+                    // process this BranchFrom Update normally
+                    known_timelineids.insert(curr_upd.timeline_id);
+                    sorted_updates.push(*curr_upd);
+                    i += 1;
+                    continue;
+                }
+                None => {
+                    known_timelineids.insert(curr_upd.timeline_id);
+                    sorted_updates.push(*curr_upd);
+                    i += 1;
+                    continue;
+                }
+                Some(parent_id) => parent_id,
+            };
+
+            let mut j = i;
+
+            // we have not processed ancestor yet.
+            // there is a chance that it is at the same Lsn
+            if !known_timelineids.contains(&parent_id) {
+                let mut curr_lsn_branchfroms: HashMap<TimelineId, Vec<(TimelineId, usize)>> =
+                    HashMap::new();
+
+                // inspect all branchpoints at the same lsn
+                while j < updates.len() && updates[j].lsn == curr_upd.lsn {
+                    let lookahead_upd = &updates[j];
+                    j += 1;
+
+                    if let Command::BranchFrom(lookahead_parent_id) = lookahead_upd.command {
+                        match lookahead_parent_id {
+                            Some(lookahead_parent_id)
+                                if !known_timelineids.contains(&lookahead_parent_id) =>
+                            {
+                                // we have not processed ancestor yet
+                                // store it for later
+                                let es =
+                                    curr_lsn_branchfroms.entry(lookahead_parent_id).or_default();
+                                es.push((lookahead_upd.timeline_id, j));
+                            }
+                            _ => {
+                                // we have already processed ancestor
+                                // process this BranchFrom Update normally
+                                known_timelineids.insert(lookahead_upd.timeline_id);
+                                sorted_updates.push(*lookahead_upd);
+                            }
+                        }
+                    }
+                }
+
+                // process BranchFroms in the tree order
+                // check that we don't have a cycle if somet entry is orphan
+                // (this should not happen, but better to be safe)
+                let mut processed_some_entry = true;
+                while processed_some_entry {
+                    processed_some_entry = false;
+
+                    curr_lsn_branchfroms.retain(|parent_id, branchfroms| {
+                        if known_timelineids.contains(parent_id) {
+                            for (timeline_id, j) in branchfroms {
+                                known_timelineids.insert(*timeline_id);
+                                sorted_updates.push(updates[*j - 1]);
+                            }
+                            processed_some_entry = true;
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
+
+                if !curr_lsn_branchfroms.is_empty() {
+                    // orphans are expected to be rare and transient between tenant reloads
+                    // for example, an broken ancestor without the child branch being broken.
+                    anyhow::bail!(
+                        "orphan branch(es) detected in BranchFroms: {curr_lsn_branchfroms:?}"
+                    );
+                }
+            }
+
+            assert!(j > i);
+            i = j;
+        } else {
+            // not a BranchFrom, keep the same order
+            sorted_updates.push(*curr_upd);
+            i += 1;
+        }
+    }
+
+    Ok(sorted_updates)
 }
 
 /// Gathers the inputs for the tenant sizing model.
@@ -60,23 +182,26 @@ pub(super) async fn gather_inputs(
     tenant: &Tenant,
     limit: &Arc<Semaphore>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
+    ctx: &RequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // with joinset, on drop, all of the tasks will just be de-scheduled, which we can use to
     // our advantage with `?` error handling.
     let mut joinset = tokio::task::JoinSet::new();
 
-    let timelines = tenant
-        .refresh_gc_info()
+    // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
+    tenant
+        .refresh_gc_info(ctx)
+        .await
         .context("Failed to refresh gc_info before gathering inputs")?;
 
+    let timelines = tenant.list_timelines();
+
     if timelines.is_empty() {
-        // All timelines are below tenant's gc_horizon; alternative would be to use
-        // Tenant::list_timelines but then those gc_info's would not be updated yet, possibly
-        // missing GcInfo::retain_lsns or having obsolete values for cutoff's.
+        // perhaps the tenant has just been created, and as such doesn't have any data yet
         return Ok(ModelInputs {
             updates: vec![],
             retention_period: 0,
-            timeline_inputs: HashMap::new(),
+            timeline_inputs: HashMap::default(),
         });
     }
 
@@ -87,15 +212,25 @@ pub(super) async fn gather_inputs(
 
     let mut updates = Vec::new();
 
-    // record the per timline values used to determine `retention_period`
+    // record the per timeline values useful to debug the model inputs, also used to track
+    // ancestor_lsn without keeping a hold of Timeline
     let mut timeline_inputs = HashMap::with_capacity(timelines.len());
 
     // used to determine the `retention_period` for the size model
     let mut max_cutoff_distance = None;
 
-    // this will probably conflict with on-demand downloaded layers, or at least force them all
-    // to be downloaded
+    // mapping from (TimelineId, Lsn) => if this branch point has been handled already via
+    // GcInfo::retain_lsns or if it needs to have its logical_size calculated.
+    let mut referenced_branch_froms = HashMap::<(TimelineId, Lsn), bool>::new();
+
     for timeline in timelines {
+        if !timeline.is_active() {
+            anyhow::bail!(
+                "timeline {} is not active, cannot calculate tenant_size now",
+                timeline.timeline_id
+            );
+        }
+
         let last_record_lsn = timeline.get_last_record_lsn();
 
         let (interesting_lsns, horizon_cutoff, pitr_cutoff, next_gc_cutoff) = {
@@ -161,13 +296,30 @@ pub(super) async fn gather_inputs(
 
         // all timelines branch from something, because it might be impossible to pinpoint
         // which is the tenant_size_model's "default" branch.
+
+        let ancestor_lsn = timeline.get_ancestor_lsn();
+
         updates.push(Update {
-            lsn: timeline.get_ancestor_lsn(),
+            lsn: ancestor_lsn,
             command: Command::BranchFrom(timeline.get_ancestor_timeline_id()),
             timeline_id: timeline.timeline_id,
         });
 
+        if let Some(parent_timeline_id) = timeline.get_ancestor_timeline_id() {
+            // refresh_gc_info will update branchpoints and pitr_cutoff but only do it for branches
+            // which are over gc_horizon. for example, a "main" branch which never received any
+            // updates apart from initdb not have branch points recorded.
+            referenced_branch_froms
+                .entry((parent_timeline_id, timeline.get_ancestor_lsn()))
+                .or_default();
+        }
+
         for (lsn, _kind) in &interesting_lsns {
+            // mark this visited so don't need to re-process this parent
+            *referenced_branch_froms
+                .entry((timeline.timeline_id, *lsn))
+                .or_default() = true;
+
             if let Some(size) = logical_size_cache.get(&(timeline.timeline_id, *lsn)) {
                 updates.push(Update {
                     lsn: *lsn,
@@ -179,26 +331,20 @@ pub(super) async fn gather_inputs(
             } else {
                 let timeline = Arc::clone(&timeline);
                 let parallel_size_calcs = Arc::clone(limit);
-                joinset.spawn(calculate_logical_size(parallel_size_calcs, timeline, *lsn));
+                let ctx = ctx.attached_child();
+                joinset.spawn(calculate_logical_size(
+                    parallel_size_calcs,
+                    timeline,
+                    *lsn,
+                    ctx,
+                ));
             }
-        }
-
-        // all timelines also have an end point if they have made any progress
-        if last_record_lsn > timeline.get_ancestor_lsn()
-            && !interesting_lsns
-                .iter()
-                .any(|(lsn, _)| lsn == &last_record_lsn)
-        {
-            updates.push(Update {
-                lsn: last_record_lsn,
-                command: Command::EndOfBranch,
-                timeline_id: timeline.timeline_id,
-            });
         }
 
         timeline_inputs.insert(
             timeline.timeline_id,
             TimelineInputs {
+                ancestor_lsn,
                 last_record: last_record_lsn,
                 // this is not used above, because it might not have updated recently enough
                 latest_gc_cutoff: *timeline.get_latest_gc_cutoff_lsn(),
@@ -209,14 +355,108 @@ pub(super) async fn gather_inputs(
         );
     }
 
+    // iterate over discovered branch points and make sure we are getting logical sizes at those
+    // points.
+    for ((timeline_id, lsn), handled) in referenced_branch_froms.iter() {
+        if *handled {
+            continue;
+        }
+
+        let timeline_id = *timeline_id;
+        let lsn = *lsn;
+
+        match timeline_inputs.get(&timeline_id) {
+            Some(inputs) if inputs.ancestor_lsn == lsn => {
+                // we don't need an update at this branch point which is also point where
+                // timeline_id branch was branched from.
+                continue;
+            }
+            Some(_) => {}
+            None => {
+                // we should have this because we have iterated through all of the timelines
+                anyhow::bail!("missing timeline_input for {timeline_id}")
+            }
+        }
+
+        if let Some(size) = logical_size_cache.get(&(timeline_id, lsn)) {
+            updates.push(Update {
+                lsn,
+                timeline_id,
+                command: Command::Update(*size),
+            });
+
+            needed_cache.insert((timeline_id, lsn));
+        } else {
+            let timeline = tenant
+                .get_timeline(timeline_id, false)
+                .context("find referenced ancestor timeline")?;
+            let parallel_size_calcs = Arc::clone(limit);
+            joinset.spawn(calculate_logical_size(
+                parallel_size_calcs,
+                timeline.clone(),
+                lsn,
+                ctx.attached_child(),
+            ));
+
+            if let Some(parent_id) = timeline.get_ancestor_timeline_id() {
+                // we should not find new ones because we iterated tenants all timelines
+                anyhow::ensure!(
+                    timeline_inputs.contains_key(&parent_id),
+                    "discovered new timeline {parent_id} (parent of {timeline_id})"
+                );
+            }
+        };
+    }
+
+    // finally add in EndOfBranch for all timelines where their last_record_lsn is not a branch
+    // point. this is needed by the model.
+    for (timeline_id, inputs) in timeline_inputs.iter() {
+        let lsn = inputs.last_record;
+
+        if referenced_branch_froms.contains_key(&(*timeline_id, lsn)) {
+            // this means that the (timeline_id, last_record_lsn) represents a branch point
+            // we do not want to add EndOfBranch updates for these points because it doesn't fit
+            // into the current tenant_size_model.
+            continue;
+        }
+
+        if lsn > inputs.ancestor_lsn {
+            // all timelines also have an end point if they have made any progress
+            updates.push(Update {
+                lsn,
+                command: Command::EndOfBranch,
+                timeline_id: *timeline_id,
+            });
+        }
+    }
+
     let mut have_any_error = false;
 
     while let Some(res) = joinset.join_next().await {
-        // each of these come with Result<Result<_, JoinError>, JoinError>
+        // each of these come with Result<anyhow::Result<_>, JoinError>
         // because of spawn + spawn_blocking
-        let res = res.and_then(|inner| inner);
         match res {
-            Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size))) => {
+            Err(join_error) if join_error.is_cancelled() => {
+                unreachable!("we are not cancelling any of the futures, nor should be");
+            }
+            Err(join_error) => {
+                // cannot really do anything, as this panic is likely a bug
+                error!("task that calls spawn_ondemand_logical_size_calculation panicked: {join_error:#}");
+                have_any_error = true;
+            }
+            Ok(Err(recv_result_error)) => {
+                // cannot really do anything, as this panic is likely a bug
+                error!("failed to receive logical size query result: {recv_result_error:#}");
+                have_any_error = true;
+            }
+            Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error)))) => {
+                warn!(
+                    timeline_id=%timeline.timeline_id,
+                    "failed to calculate logical size at {lsn}: {error:#}"
+                );
+                have_any_error = true;
+            }
+            Ok(Ok(TimelineAtLsnSizeResult(timeline, lsn, Ok(size)))) => {
                 debug!(timeline_id=%timeline.timeline_id, %lsn, size, "size calculated");
 
                 logical_size_cache.insert((timeline.timeline_id, lsn), size);
@@ -227,21 +467,6 @@ pub(super) async fn gather_inputs(
                     timeline_id: timeline.timeline_id,
                     command: Command::Update(size),
                 });
-            }
-            Ok(TimelineAtLsnSizeResult(timeline, lsn, Err(error))) => {
-                warn!(
-                    timeline_id=%timeline.timeline_id,
-                    "failed to calculate logical size at {lsn}: {error:#}"
-                );
-                have_any_error = true;
-            }
-            Err(join_error) if join_error.is_cancelled() => {
-                unreachable!("we are not cancelling any of the futures, nor should be");
-            }
-            Err(join_error) => {
-                // cannot really do anything, as this panic is likely a bug
-                error!("logical size query panicked: {join_error:#}");
-                have_any_error = true;
             }
         }
     }
@@ -261,7 +486,12 @@ pub(super) async fn gather_inputs(
     // for branch points, which come as multiple updates at the same LSN, the Command::Update
     // is needed before a branch is made out of that branch Command::BranchFrom. this is
     // handled by the variant order in `Command`.
+    //
     updates.sort_unstable();
+
+    // And another sort to handle Command::BranchFrom ordering
+    // in case when there are multiple branches at the same LSN.
+    let sorted_updates = sort_updates_in_tree_order(updates)?;
 
     let retention_period = match max_cutoff_distance {
         Some(max) => max.0,
@@ -271,7 +501,7 @@ pub(super) async fn gather_inputs(
     };
 
     Ok(ModelInputs {
-        updates,
+        updates: sorted_updates,
         retention_period,
         timeline_inputs,
     })
@@ -289,21 +519,23 @@ impl ModelInputs {
                 command: op,
                 timeline_id,
             } = update;
+
             let Lsn(now) = *lsn;
             match op {
                 Command::Update(sz) => {
-                    storage.insert_point(&Some(*timeline_id), "".into(), now, Some(*sz));
+                    storage.insert_point(&Some(*timeline_id), "".into(), now, Some(*sz))?;
                 }
                 Command::EndOfBranch => {
-                    storage.insert_point(&Some(*timeline_id), "".into(), now, None);
+                    storage.insert_point(&Some(*timeline_id), "".into(), now, None)?;
                 }
                 Command::BranchFrom(parent) => {
-                    storage.branch(parent, Some(*timeline_id));
+                    // This branch command may fail if it cannot find a parent to branch from.
+                    storage.branch(parent, Some(*timeline_id))?;
                 }
             }
         }
 
-        Ok(storage.calculate(self.retention_period).total_children())
+        Ok(storage.calculate(self.retention_period)?.total_children())
     }
 }
 
@@ -351,7 +583,7 @@ enum LsnKind {
 struct TimelineAtLsnSizeResult(
     Arc<crate::tenant::Timeline>,
     utils::lsn::Lsn,
-    anyhow::Result<u64>,
+    Result<u64, CalculateLogicalSizeError>,
 );
 
 #[instrument(skip_all, fields(timeline_id=%timeline.timeline_id, lsn=%lsn))]
@@ -359,17 +591,17 @@ async fn calculate_logical_size(
     limit: Arc<tokio::sync::Semaphore>,
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
-) -> Result<TimelineAtLsnSizeResult, tokio::task::JoinError> {
-    let permit = tokio::sync::Semaphore::acquire_owned(limit)
+    ctx: RequestContext,
+) -> Result<TimelineAtLsnSizeResult, RecvError> {
+    let _permit = tokio::sync::Semaphore::acquire_owned(limit)
         .await
         .expect("global semaphore should not had been closed");
 
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let size_res = timeline.calculate_logical_size(lsn);
-        TimelineAtLsnSizeResult(timeline, lsn, size_res)
-    })
-    .await
+    let size_res = timeline
+        .spawn_ondemand_logical_size_calculation(lsn, ctx)
+        .instrument(info_span!("spawn_ondemand_logical_size_calculation"))
+        .await?;
+    Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
 }
 
 #[test]
@@ -453,9 +685,146 @@ fn updates_sort() {
 fn verify_size_for_multiple_branches() {
     // this is generated from integration test test_tenant_size_with_multiple_branches, but this way
     // it has the stable lsn's
-    let doc = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"update":25763840},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/1819818","command":{"update":26075136},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/18B5E40","command":{"update":26427392},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"update":26492928},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"230fc9d756f7363574c0d66533564dcc"},{"lsn":"0/220F438","command":{"update":25239552},"timeline_id":"230fc9d756f7363574c0d66533564dcc"}],"retention_period":131072,"timeline_inputs":{"cd9d9409c216e64bf580904facedb01b":{"last_record":"0/18D5E40","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/18B5E40","pitr_cutoff":"0/18B5E40","next_gc_cutoff":"0/18B5E40"},"10b532a550540bc15385eac4edde416a":{"last_record":"0/1839818","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/1819818","pitr_cutoff":"0/1819818","next_gc_cutoff":"0/1819818"},"230fc9d756f7363574c0d66533564dcc":{"last_record":"0/222F438","latest_gc_cutoff":"0/169ACF0","horizon_cutoff":"0/220F438","pitr_cutoff":"0/220F438","next_gc_cutoff":"0/220F438"}}}"#;
+    //
+    // timelineinputs have been left out, because those explain the inputs, but don't participate
+    // in further size calculations.
+    let doc = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"update":25763840},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/176FA40","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/1819818","command":{"update":26075136},"timeline_id":"10b532a550540bc15385eac4edde416a"},{"lsn":"0/18B5E40","command":{"update":26427392},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"update":26492928},"timeline_id":"cd9d9409c216e64bf580904facedb01b"},{"lsn":"0/18D3DF0","command":{"branch_from":"cd9d9409c216e64bf580904facedb01b"},"timeline_id":"230fc9d756f7363574c0d66533564dcc"},{"lsn":"0/220F438","command":{"update":25239552},"timeline_id":"230fc9d756f7363574c0d66533564dcc"}],"retention_period":131072}"#;
 
     let inputs: ModelInputs = serde_json::from_str(doc).unwrap();
 
     assert_eq!(inputs.calculate().unwrap(), 36_409_872);
+}
+
+#[test]
+fn updates_sort_with_branches_at_same_lsn() {
+    use std::str::FromStr;
+    use Command::{BranchFrom, EndOfBranch};
+
+    macro_rules! lsn {
+        ($e:expr) => {
+            Lsn::from_str($e).unwrap()
+        };
+    }
+
+    let ids = [
+        TimelineId::from_str("00000000000000000000000000000000").unwrap(),
+        TimelineId::from_str("11111111111111111111111111111111").unwrap(),
+        TimelineId::from_str("22222222222222222222222222222222").unwrap(),
+        TimelineId::from_str("33333333333333333333333333333333").unwrap(),
+        TimelineId::from_str("44444444444444444444444444444444").unwrap(),
+    ];
+
+    // issue https://github.com/neondatabase/neon/issues/3179
+    let commands = vec![
+        Update {
+            lsn: lsn!("0/0"),
+            command: BranchFrom(None),
+            timeline_id: ids[0],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: Command::Update(25387008),
+            timeline_id: ids[0],
+        },
+        // next three are wrongly sorted, because
+        // ids[1] is branched from before ids[1] exists
+        // and ids[2] is branched from before ids[2] exists
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[1])),
+            timeline_id: ids[3],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[0])),
+            timeline_id: ids[2],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[2])),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CA85B8"),
+            command: Command::Update(28925952),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CD85B8"),
+            command: Command::Update(29024256),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CD85B8"),
+            command: BranchFrom(Some(ids[1])),
+            timeline_id: ids[4],
+        },
+        Update {
+            lsn: lsn!("0/22DCE70"),
+            command: Command::Update(32546816),
+            timeline_id: ids[3],
+        },
+        Update {
+            lsn: lsn!("0/230CE70"),
+            command: EndOfBranch,
+            timeline_id: ids[3],
+        },
+    ];
+
+    let expected = vec![
+        Update {
+            lsn: lsn!("0/0"),
+            command: BranchFrom(None),
+            timeline_id: ids[0],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: Command::Update(25387008),
+            timeline_id: ids[0],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[0])),
+            timeline_id: ids[2],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[2])),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/169AD58"),
+            command: BranchFrom(Some(ids[1])),
+            timeline_id: ids[3],
+        },
+        Update {
+            lsn: lsn!("0/1CA85B8"),
+            command: Command::Update(28925952),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CD85B8"),
+            command: Command::Update(29024256),
+            timeline_id: ids[1],
+        },
+        Update {
+            lsn: lsn!("0/1CD85B8"),
+            command: BranchFrom(Some(ids[1])),
+            timeline_id: ids[4],
+        },
+        Update {
+            lsn: lsn!("0/22DCE70"),
+            command: Command::Update(32546816),
+            timeline_id: ids[3],
+        },
+        Update {
+            lsn: lsn!("0/230CE70"),
+            command: EndOfBranch,
+            timeline_id: ids[3],
+        },
+    ];
+
+    let sorted_commands = sort_updates_in_tree_order(commands).unwrap();
+
+    assert_eq!(sorted_commands, expected);
 }

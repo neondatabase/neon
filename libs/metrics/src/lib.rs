@@ -8,6 +8,7 @@ pub use prometheus::opts;
 pub use prometheus::register;
 pub use prometheus::{core, default_registry, proto};
 pub use prometheus::{exponential_buckets, linear_buckets};
+pub use prometheus::{register_counter_vec, Counter, CounterVec};
 pub use prometheus::{register_gauge, Gauge};
 pub use prometheus::{register_gauge_vec, GaugeVec};
 pub use prometheus::{register_histogram, Histogram};

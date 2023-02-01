@@ -9,47 +9,48 @@
 //  custom protocol.
 //
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::Context;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
     PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
+use pq_proto::ConnectionError;
+use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::io;
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::pin;
-use tokio_util::io::StreamReader;
-use tokio_util::io::SyncIoBridge;
+use std::time::Duration;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
-    auth::{self, Claims, JwtAuth, Scope},
+    auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
-    postgres_backend_async::{self, PostgresBackend},
+    postgres_backend_async::{self, is_expected_io_error, PostgresBackend, QueryError},
     simple_rcu::RcuReadGuard,
 };
 
+use crate::auth::check_permission;
 use crate::basebackup;
-use crate::config::{PageServerConf, ProfilingConfig};
+use crate::config::PageServerConf;
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir::import_wal_from_tar;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
-use crate::profiling::profpoint_start;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
-use crate::tenant::Timeline;
-use crate::tenant_mgr;
+use crate::tenant::mgr;
+use crate::tenant::{Tenant, Timeline};
 use crate::trace::Tracer;
-use crate::CheckpointConfig;
 
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
@@ -63,8 +64,8 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 _ = task_mgr::shutdown_watcher() => {
                     // We were requested to shut down.
                     let msg = format!("pageserver is shutting down");
-                    let _ = pgb.write_message(&BeMessage::ErrorResponse(&msg));
-                    Err(anyhow::anyhow!(msg))
+                    let _ = pgb.write_message(&BeMessage::ErrorResponse(&msg, None));
+                    Err(QueryError::Other(anyhow::anyhow!(msg)))
                 }
 
                 msg = pgb.read_message() => { msg }
@@ -77,14 +78,15 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::CopyDone => { break },
                         FeMessage::Sync => continue,
                         FeMessage::Terminate => {
-                            let msg = format!("client terminated connection with Terminate message during COPY");
-                            pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
+                            let msg = "client terminated connection with Terminate message during COPY";
+                            let query_error_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                            pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error_error.pg_error_code())))?;
                             Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                             break;
                         }
                         m => {
-                            let msg = format!("unexpected message {:?}", m);
-                            pgb.write_message(&BeMessage::ErrorResponse(&msg))?;
+                            let msg = format!("unexpected message {m:?}");
+                            pgb.write_message(&BeMessage::ErrorResponse(&msg, None))?;
                             Err(io::Error::new(io::ErrorKind::Other, msg))?;
                             break;
                         }
@@ -94,12 +96,16 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 }
                 Ok(None) => {
                     let msg = "client closed connection during COPY";
-                    pgb.write_message(&BeMessage::ErrorResponse(msg))?;
+                    let query_error_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                    pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error_error.pg_error_code())))?;
                     pgb.flush().await?;
                     Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                 }
-                Err(e) => {
-                    Err(io::Error::new(io::ErrorKind::Other, e))?;
+                Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
+                    Err(io_error)?;
+                }
+                Err(other) => {
+                    Err(io::Error::new(io::ErrorKind::Other, other))?;
                 }
             };
         }
@@ -118,6 +124,7 @@ pub async fn libpq_listener_main(
     auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
+    listener_ctx: RequestContext,
 ) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
     let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
@@ -141,6 +148,9 @@ pub async fn libpq_listener_main(
                 debug!("accepted connection from {}", peer_addr);
                 let local_auth = auth.clone();
 
+                let connection_ctx = listener_ctx
+                    .detached_child(TaskKind::PageRequestHandler, DownloadBehavior::Download);
+
                 // PageRequestHandler tasks are not associated with any particular
                 // timeline in the task manager. In practice most connections will
                 // only deal with a particular timeline, but we don't know which one
@@ -152,7 +162,7 @@ pub async fn libpq_listener_main(
                     None,
                     "serving compute connection task",
                     false,
-                    page_service_conn_main(conf, local_auth, socket, auth_type),
+                    page_service_conn_main(conf, local_auth, socket, auth_type, connection_ctx),
                 );
             }
             Err(err) => {
@@ -172,6 +182,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<JwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
+    connection_ctx: RequestContext,
 ) -> anyhow::Result<()> {
     // Immediately increment the gauge, then create a job to decrement it on task exit.
     // One of the pros of `defer!` is that this will *most probably*
@@ -186,34 +197,30 @@ async fn page_service_conn_main(
         .set_nodelay(true)
         .context("could not set TCP_NODELAY")?;
 
-    let mut conn_handler = PageServerHandler::new(conf, auth);
+    // XXX: pgbackend.run() should take the connection_ctx,
+    // and create a child per-query context when it invokes process_query.
+    // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
+    // and create the per-query context in process_query ourselves.
+    let mut conn_handler = PageServerHandler::new(conf, auth, connection_ctx);
     let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
 
-    let result = pgbackend
+    match pgbackend
         .run(&mut conn_handler, task_mgr::shutdown_watcher)
-        .await;
-    match result {
+        .await
+    {
         Ok(()) => {
             // we've been requested to shut down
             Ok(())
         }
-        Err(err) => {
-            let root_cause_io_err_kind = err
-                .root_cause()
-                .downcast_ref::<io::Error>()
-                .map(|e| e.kind());
-
-            // `ConnectionReset` error happens when the Postgres client closes the connection.
-            // As this disconnection happens quite often and is expected,
-            // we decided to downgrade the logging level to `INFO`.
-            // See: https://github.com/neondatabase/neon/issues/1683.
-            if root_cause_io_err_kind == Some(io::ErrorKind::ConnectionReset) {
-                info!("Postgres client disconnected");
+        Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
+            if is_expected_io_error(&io_error) {
+                info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
-                Err(err)
+                Err(io_error).context("Postgres connection error")
             }
         }
+        other => other.context("Postgres query error"),
     }
 }
 
@@ -250,35 +257,46 @@ impl PageRequestMetrics {
     }
 }
 
-#[derive(Debug)]
 struct PageServerHandler {
-    conf: &'static PageServerConf,
+    _conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
+
+    /// The context created for the lifetime of the connection
+    /// services by this PageServerHandler.
+    /// For each query received over the connection,
+    /// `process_query` creates a child context from this one.
+    connection_ctx: RequestContext,
 }
 
 impl PageServerHandler {
-    pub fn new(conf: &'static PageServerConf, auth: Option<Arc<JwtAuth>>) -> Self {
+    pub fn new(
+        conf: &'static PageServerConf,
+        auth: Option<Arc<JwtAuth>>,
+        connection_ctx: RequestContext,
+    ) -> Self {
         PageServerHandler {
-            conf,
+            _conf: conf,
             auth,
             claims: None,
+            connection_ctx,
         }
     }
 
-    #[instrument(skip(self, pgb))]
+    #[instrument(skip(self, pgb, ctx))]
     async fn handle_pagerequests(
         &self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
         timeline_id: TimelineId,
+        ctx: RequestContext,
     ) -> anyhow::Result<()> {
         // NOTE: pagerequests handler exits when connection is closed,
         //       so there is no need to reset the association
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
         // Make request tracer if needed
-        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+        let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
         let mut tracer = if tenant.get_trace_read_requests() {
             let connection_id = ConnectionId::generate();
             let path = tenant
@@ -290,7 +308,7 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timeline = tenant.get_timeline(timeline_id, true)?;
 
         // switch client to COPYBOTH
         pgb.write_message(&BeMessage::CopyBothResponse)?;
@@ -313,8 +331,9 @@ impl PageServerHandler {
 
             let copy_data_bytes = match msg? {
                 Some(FeMessage::CopyData(bytes)) => bytes,
+                Some(FeMessage::Terminate) => break,
                 Some(m) => {
-                    bail!("unexpected message: {m:?} during COPY");
+                    anyhow::bail!("unexpected message: {m:?} during COPY");
                 }
                 None => break, // client disconnected
             };
@@ -328,22 +347,27 @@ impl PageServerHandler {
 
             let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
+            // TODO: We could create a new per-request context here, with unique ID.
+            // Currently we use the same per-timeline context for all requests
+
             let response = match neon_fe_msg {
                 PagestreamFeMessage::Exists(req) => {
                     let _timer = metrics.get_rel_exists.start_timer();
-                    self.handle_get_rel_exists_request(&timeline, &req).await
+                    self.handle_get_rel_exists_request(&timeline, &req, &ctx)
+                        .await
                 }
                 PagestreamFeMessage::Nblocks(req) => {
                     let _timer = metrics.get_rel_size.start_timer();
-                    self.handle_get_nblocks_request(&timeline, &req).await
+                    self.handle_get_nblocks_request(&timeline, &req, &ctx).await
                 }
                 PagestreamFeMessage::GetPage(req) => {
                     let _timer = metrics.get_page_at_lsn.start_timer();
-                    self.handle_get_page_at_lsn_request(&timeline, &req).await
+                    self.handle_get_page_at_lsn_request(&timeline, &req, &ctx)
+                        .await
                 }
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
-                    self.handle_db_size_request(&timeline, &req).await
+                    self.handle_db_size_request(&timeline, &req, &ctx).await
                 }
             };
 
@@ -362,7 +386,8 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip(self, pgb))]
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self, pgb, ctx))]
     async fn handle_import_basebackup(
         &self,
         pgb: &mut PostgresBackend,
@@ -371,12 +396,13 @@ impl PageServerHandler {
         base_lsn: Lsn,
         _end_lsn: Lsn,
         pg_version: u32,
-    ) -> anyhow::Result<()> {
+        ctx: RequestContext,
+    ) -> Result<(), QueryError> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
-        let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version)?;
+        let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
+        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -393,11 +419,9 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
 
-        let copyin_stream = copyin_stream(pgb);
-        pin!(copyin_stream);
-
+        let mut copyin_stream = Box::pin(copyin_stream(pgb));
         timeline
-            .import_basebackup_from_tar(&mut copyin_stream, base_lsn)
+            .import_basebackup_from_tar(&mut copyin_stream, base_lsn, &ctx)
             .await?;
 
         // Drain the rest of the Copy data
@@ -419,7 +443,7 @@ impl PageServerHandler {
         Ok(())
     }
 
-    #[instrument(skip(self, pgb))]
+    #[instrument(skip(self, pgb, ctx))]
     async fn handle_import_wal(
         &self,
         pgb: &mut PostgresBackend,
@@ -427,11 +451,17 @@ impl PageServerHandler {
         timeline_id: TimelineId,
         start_lsn: Lsn,
         end_lsn: Lsn,
-    ) -> anyhow::Result<()> {
+        ctx: RequestContext,
+    ) -> Result<(), QueryError> {
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
 
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
-        ensure!(timeline.get_last_record_lsn() == start_lsn);
+        let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
+        let last_record_lsn = timeline.get_last_record_lsn();
+        if last_record_lsn != start_lsn {
+            return Err(QueryError::Other(
+                anyhow::anyhow!("Cannot import WAL from Lsn {start_lsn} because timeline does not start from the same lsn: {last_record_lsn}"))
+            );
+        }
 
         // TODO leave clean state on error. For now you can use detach to clean
         // up broken state from a failed import.
@@ -441,10 +471,8 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
-        let reader = SyncIoBridge::new(StreamReader::new(&mut copyin_stream));
-        tokio::task::block_in_place(|| {
-            import_wal_from_tar(&*timeline, reader, start_lsn, end_lsn)
-        })?;
+        let mut reader = tokio_util::io::StreamReader::new(&mut copyin_stream);
+        import_wal_from_tar(&timeline, &mut reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
 
         // Drain the rest of the Copy data
@@ -457,13 +485,17 @@ impl PageServerHandler {
         }
 
         // TODO Does it make sense to overshoot?
-        ensure!(timeline.get_last_record_lsn() >= end_lsn);
+        if timeline.get_last_record_lsn() < end_lsn {
+            return Err(QueryError::Other(
+                anyhow::anyhow!("Cannot import WAL from Lsn {start_lsn} because timeline does not start from the same lsn: {last_record_lsn}"))
+            );
+        }
 
         // Flush data to disk, then upload to s3. No need for a forced checkpoint.
         // We only want to persist the data, and it doesn't matter if it's in the
         // shape of deltas or images.
         info!("flushing layers");
-        timeline.checkpoint(CheckpointConfig::Flush).await?;
+        timeline.freeze_and_flush().await?;
 
         info!("done");
         Ok(())
@@ -486,7 +518,8 @@ impl PageServerHandler {
         mut lsn: Lsn,
         latest: bool,
         latest_gc_cutoff_lsn: &RcuReadGuard<Lsn>,
-    ) -> Result<Lsn> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Lsn> {
         if latest {
             // Latest page version was requested. If LSN is given, it is a hint
             // to the page server that there have been no modifications to the
@@ -509,7 +542,7 @@ impl PageServerHandler {
             if lsn <= last_record_lsn {
                 lsn = last_record_lsn;
             } else {
-                timeline.wait_lsn(lsn).await?;
+                timeline.wait_lsn(lsn, ctx).await?;
                 // Since we waited for 'lsn' to arrive, that is now the last
                 // record LSN. (Or close enough for our purposes; the
                 // last-record LSN can advance immediately after we return
@@ -517,11 +550,11 @@ impl PageServerHandler {
             }
         } else {
             if lsn == Lsn(0) {
-                bail!("invalid LSN(0) in request");
+                anyhow::bail!("invalid LSN(0) in request");
             }
-            timeline.wait_lsn(lsn).await?;
+            timeline.wait_lsn(lsn, ctx).await?;
         }
-        ensure!(
+        anyhow::ensure!(
             lsn >= **latest_gc_cutoff_lsn,
             "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
             lsn, **latest_gc_cutoff_lsn
@@ -529,53 +562,61 @@ impl PageServerHandler {
         Ok(lsn)
     }
 
-    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_rel_exists_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamExistsRequest,
-    ) -> Result<PagestreamBeMessage> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
-            .await?;
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
 
-        let exists = timeline.get_rel_exists(req.rel, lsn, req.latest)?;
+        let exists = timeline
+            .get_rel_exists(req.rel, lsn, req.latest, ctx)
+            .await?;
 
         Ok(PagestreamBeMessage::Exists(PagestreamExistsResponse {
             exists,
         }))
     }
 
-    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]
     async fn handle_get_nblocks_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamNblocksRequest,
-    ) -> Result<PagestreamBeMessage> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
-            .await?;
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
 
-        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest)?;
+        let n_blocks = timeline.get_rel_size(req.rel, lsn, req.latest, ctx).await?;
 
         Ok(PagestreamBeMessage::Nblocks(PagestreamNblocksResponse {
             n_blocks,
         }))
     }
 
-    #[instrument(skip(self, timeline, req), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req, ctx), fields(dbnode = %req.dbnode, req_lsn = %req.lsn))]
     async fn handle_db_size_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamDbSizeRequest,
-    ) -> Result<PagestreamBeMessage> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
+
+        let total_blocks = timeline
+            .get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest, ctx)
             .await?;
-
-        let total_blocks =
-            timeline.get_db_size(DEFAULTTABLESPACE_OID, req.dbnode, lsn, req.latest)?;
-
         let db_size = total_blocks as i64 * BLCKSZ as i64;
 
         Ok(PagestreamBeMessage::DbSize(PagestreamDbSizeResponse {
@@ -583,15 +624,17 @@ impl PageServerHandler {
         }))
     }
 
-    #[instrument(skip(self, timeline, req), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
+    #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, blkno = %req.blkno, req_lsn = %req.lsn))]
     async fn handle_get_page_at_lsn_request(
         &self,
         timeline: &Timeline,
         req: &PagestreamGetPageRequest,
-    ) -> Result<PagestreamBeMessage> {
+        ctx: &RequestContext,
+    ) -> anyhow::Result<PagestreamBeMessage> {
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
-        let lsn = Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn)
-            .await?;
+        let lsn =
+            Self::wait_or_get_last_lsn(timeline, req.lsn, req.latest, &latest_gc_cutoff_lsn, ctx)
+                .await?;
         /*
         // Add a 1s delay to some requests. The delay helps the requests to
         // hit the race condition from github issue #1047 more easily.
@@ -601,34 +644,34 @@ impl PageServerHandler {
         }
         */
 
-        // FIXME: this profiling now happens at different place than it used to. The
-        // current profiling is based on a thread-local variable, so it doesn't work
-        // across awaits
-        let _profiling_guard = profpoint_start(self.conf, ProfilingConfig::PageRequests);
-        let page = timeline.get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest)?;
+        let page = timeline
+            .get_rel_page_at_lsn(req.rel, req.blkno, lsn, req.latest, ctx)
+            .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
             page,
         }))
     }
 
-    #[instrument(skip(self, pgb))]
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self, pgb, ctx))]
     async fn handle_basebackup_request(
-        &self,
+        &mut self,
         pgb: &mut PostgresBackend,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         lsn: Option<Lsn>,
         prev_lsn: Option<Lsn>,
         full_backup: bool,
+        ctx: RequestContext,
     ) -> anyhow::Result<()> {
         // check that the timeline exists
-        let timeline = get_local_timeline(tenant_id, timeline_id)?;
+        let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
         if let Some(lsn) = lsn {
             // Backup was requested at a particular LSN. Wait for it to arrive.
             info!("waiting for {}", lsn);
-            timeline.wait_lsn(lsn).await?;
+            timeline.wait_lsn(lsn, &ctx).await?;
             timeline
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;
@@ -638,17 +681,20 @@ impl PageServerHandler {
         pgb.write_message(&BeMessage::CopyOutResponse)?;
         pgb.flush().await?;
 
-        /* Send a tarball of the latest layer on the timeline */
-        let mut writer = CopyDataSink {
-            pgb,
-            rt: tokio::runtime::Handle::current(),
-        };
-        tokio::task::block_in_place(|| {
-            let basebackup =
-                basebackup::Basebackup::new(&mut writer, &timeline, lsn, prev_lsn, full_backup)?;
-            tracing::Span::current().record("lsn", &basebackup.lsn.to_string().as_str());
-            basebackup.send_tarball()
-        })?;
+        // Send a tarball of the latest layer on the timeline
+        {
+            let mut writer = pgb.copyout_writer();
+            basebackup::send_basebackup_tarball(
+                &mut writer,
+                &timeline,
+                lsn,
+                prev_lsn,
+                full_backup,
+                &ctx,
+            )
+            .await?;
+        }
+
         pgb.write_message(&BeMessage::CopyDone)?;
         pgb.flush().await?;
         info!("basebackup complete");
@@ -658,7 +704,7 @@ impl PageServerHandler {
 
     // when accessing management api supply None as an argument
     // when using to authorize tenant pass corresponding tenant id
-    fn check_permission(&self, tenant_id: Option<TenantId>) -> Result<()> {
+    fn check_permission(&self, tenant_id: Option<TenantId>) -> anyhow::Result<()> {
         if self.auth.is_none() {
             // auth is set to Trust, nothing to check so just return ok
             return Ok(());
@@ -670,7 +716,7 @@ impl PageServerHandler {
             .claims
             .as_ref()
             .expect("claims presence already checked");
-        auth::check_permission(claims, tenant_id)
+        check_permission(claims, tenant_id)
     }
 }
 
@@ -680,20 +726,19 @@ impl postgres_backend_async::Handler for PageServerHandler {
         &mut self,
         _pgb: &mut PostgresBackend,
         jwt_response: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
         // which requires auth to be present
         let data = self
             .auth
             .as_ref()
             .unwrap()
-            .decode(str::from_utf8(jwt_response)?)?;
+            .decode(str::from_utf8(jwt_response).context("jwt response is not UTF-8")?)?;
 
-        if matches!(data.claims.scope, Scope::Tenant) {
-            ensure!(
-                data.claims.tenant_id.is_some(),
+        if matches!(data.claims.scope, Scope::Tenant) && data.claims.tenant_id.is_none() {
+            return Err(QueryError::Other(anyhow::anyhow!(
                 "jwt token scope is Tenant, but tenant id is missing"
-            )
+            )));
         }
 
         info!(
@@ -705,49 +750,67 @@ impl postgres_backend_async::Handler for PageServerHandler {
         Ok(())
     }
 
+    fn startup(
+        &mut self,
+        _pgb: &mut PostgresBackend,
+        _sm: &FeStartupPacket,
+    ) -> Result<(), QueryError> {
+        Ok(())
+    }
+
     async fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
-    ) -> anyhow::Result<()> {
-        debug!("process query {:?}", query_string);
+    ) -> Result<(), QueryError> {
+        let ctx = self.connection_ctx.attached_child();
+        debug!("process query {query_string:?}");
 
         if query_string.starts_with("pagestream ") {
             let (_, params_raw) = query_string.split_at("pagestream ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
-            ensure!(
-                params.len() == 2,
-                "invalid param number for pagestream command"
-            );
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
+            if params.len() != 2 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for pagestream command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
 
-            self.handle_pagerequests(pgb, tenant_id, timeline_id)
+            self.handle_pagerequests(pgb, tenant_id, timeline_id, ctx)
                 .await?;
         } else if query_string.starts_with("basebackup ") {
             let (_, params_raw) = query_string.split_at("basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
-            ensure!(
-                params.len() >= 2,
-                "invalid param number for basebackup command"
-            );
+            if params.len() < 2 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for basebackup command"
+                )));
+            }
 
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
 
             let lsn = if params.len() == 3 {
-                Some(Lsn::from_str(params[2])?)
+                Some(
+                    Lsn::from_str(params[2])
+                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                )
             } else {
                 None
             };
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, None, false)
+            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, None, false, ctx)
                 .await?;
             pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
@@ -756,16 +819,19 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
-            ensure!(
-                params.len() == 2,
-                "invalid param number for get_last_record_rlsn command"
-            );
+            if params.len() != 2 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for get_last_record_rlsn command"
+                )));
+            }
 
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             self.check_permission(Some(tenant_id))?;
-            let timeline = get_local_timeline(tenant_id, timeline_id)?;
+            let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
@@ -784,22 +850,31 @@ impl postgres_backend_async::Handler for PageServerHandler {
             let (_, params_raw) = query_string.split_at("fullbackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
-            ensure!(
-                params.len() >= 2,
-                "invalid param number for fullbackup command"
-            );
+            if params.len() < 2 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for fullbackup command"
+                )));
+            }
 
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
 
             // The caller is responsible for providing correct lsn and prev_lsn.
             let lsn = if params.len() > 2 {
-                Some(Lsn::from_str(params[2])?)
+                Some(
+                    Lsn::from_str(params[2])
+                        .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
+                )
             } else {
                 None
             };
             let prev_lsn = if params.len() > 3 {
-                Some(Lsn::from_str(params[3])?)
+                Some(
+                    Lsn::from_str(params[3])
+                        .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?,
+                )
             } else {
                 None
             };
@@ -807,7 +882,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             self.check_permission(Some(tenant_id))?;
 
             // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, prev_lsn, true)
+            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, prev_lsn, true, ctx)
                 .await?;
             pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
@@ -824,12 +899,21 @@ impl postgres_backend_async::Handler for PageServerHandler {
             //     -c "import basebackup $TENANT $TIMELINE $START_LSN $END_LSN $PG_VERSION"
             let (_, params_raw) = query_string.split_at("import basebackup ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 5);
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
-            let base_lsn = Lsn::from_str(params[2])?;
-            let end_lsn = Lsn::from_str(params[3])?;
-            let pg_version = u32::from_str(params[4])?;
+            if params.len() != 5 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for import basebackup command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+            let base_lsn = Lsn::from_str(params[2])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
+            let end_lsn = Lsn::from_str(params[3])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
+            let pg_version = u32::from_str(params[4])
+                .with_context(|| format!("Failed to parse pg_version from {}", params[4]))?;
 
             self.check_permission(Some(tenant_id))?;
 
@@ -841,13 +925,17 @@ impl postgres_backend_async::Handler for PageServerHandler {
                     base_lsn,
                     end_lsn,
                     pg_version,
+                    ctx,
                 )
                 .await
             {
                 Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
                 Err(e) => {
                     error!("error importing base backup between {base_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message(&BeMessage::ErrorResponse(&e.to_string()))?
+                    pgb.write_message(&BeMessage::ErrorResponse(
+                        &e.to_string(),
+                        Some(e.pg_error_code()),
+                    ))?
                 }
             };
         } else if query_string.starts_with("import wal ") {
@@ -857,22 +945,33 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // caller should poll the http api to check when that is done.
             let (_, params_raw) = query_string.split_at("import wal ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
-            ensure!(params.len() == 4);
-            let tenant_id = TenantId::from_str(params[0])?;
-            let timeline_id = TimelineId::from_str(params[1])?;
-            let start_lsn = Lsn::from_str(params[2])?;
-            let end_lsn = Lsn::from_str(params[3])?;
+            if params.len() != 4 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for import wal command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+            let start_lsn = Lsn::from_str(params[2])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?;
+            let end_lsn = Lsn::from_str(params[3])
+                .with_context(|| format!("Failed to parse Lsn from {}", params[3]))?;
 
             self.check_permission(Some(tenant_id))?;
 
             match self
-                .handle_import_wal(pgb, tenant_id, timeline_id, start_lsn, end_lsn)
+                .handle_import_wal(pgb, tenant_id, timeline_id, start_lsn, end_lsn, ctx)
                 .await
             {
                 Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
                 Err(e) => {
                     error!("error importing WAL between {start_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message(&BeMessage::ErrorResponse(&e.to_string()))?
+                    pgb.write_message(&BeMessage::ErrorResponse(
+                        &e.to_string(),
+                        Some(e.pg_error_code()),
+                    ))?
                 }
             };
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
@@ -883,12 +982,17 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // show <tenant_id>
             let (_, params_raw) = query_string.split_at("show ".len());
             let params = params_raw.split(' ').collect::<Vec<_>>();
-            ensure!(params.len() == 1, "invalid param number for config command");
-            let tenant_id = TenantId::from_str(params[0])?;
+            if params.len() != 1 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for config command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
 
             self.check_permission(Some(tenant_id))?;
 
-            let tenant = tenant_mgr::get_tenant(tenant_id, true)?;
+            let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
             pgb.write_message(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
@@ -925,43 +1029,75 @@ impl postgres_backend_async::Handler for PageServerHandler {
             ]))?
             .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
-            bail!("unknown command");
+            return Err(QueryError::Other(anyhow::anyhow!(
+                "unknown command {query_string}"
+            )));
         }
 
         Ok(())
     }
 }
 
-fn get_local_timeline(tenant_id: TenantId, timeline_id: TimelineId) -> Result<Arc<Timeline>> {
-    tenant_mgr::get_tenant(tenant_id, true)
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
+#[derive(thiserror::Error, Debug)]
+enum GetActiveTenantError {
+    #[error(
+        "Timed out waiting {wait_time:?} for tenant active state. Latest state: {latest_state:?}"
+    )]
+    WaitForActiveTimeout {
+        latest_state: TenantState,
+        wait_time: Duration,
+    },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
-///
-/// A std::io::Write implementation that wraps all data written to it in CopyData
-/// messages.
-///
-struct CopyDataSink<'a> {
-    pgb: &'a mut PostgresBackend,
-    rt: tokio::runtime::Handle,
+impl From<GetActiveTenantError> for QueryError {
+    fn from(e: GetActiveTenantError) -> Self {
+        match e {
+            GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
+                ConnectionError::Socket(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
+            ),
+            GetActiveTenantError::Other(e) => QueryError::Other(e),
+        }
+    }
 }
 
-impl<'a> io::Write for CopyDataSink<'a> {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        // CopyData
-        // FIXME: if the input is large, we should split it into multiple messages.
-        // Not sure what the threshold should be, but the ultimate hard limit is that
-        // the length cannot exceed u32.
-        // FIXME: flush isn't really required, but makes it easier
-        // to view in wireshark
-        self.pgb.write_message(&BeMessage::CopyData(data))?;
-        self.rt.block_on(self.pgb.flush())?;
-        trace!("CopyData sent for {} bytes!", data.len());
+/// Get active tenant.
+///
+/// If the tenant is Loading, waits for it to become Active, for up to 30 s. That
+/// ensures that queries don't fail immediately after pageserver startup, because
+/// all tenants are still loading.
+async fn get_active_tenant_with_timeout(
+    tenant_id: TenantId,
+    _ctx: &RequestContext, /* require get a context to support cancellation in the future */
+) -> Result<Arc<Tenant>, GetActiveTenantError> {
+    let tenant = mgr::get_tenant(tenant_id, false).await?;
+    let wait_time = Duration::from_secs(30);
+    match tokio::time::timeout(wait_time, tenant.wait_to_become_active()).await {
+        Ok(Ok(())) => Ok(tenant),
+        // no .context(), the error message is good enough and some tests depend on it
+        Ok(Err(wait_error)) => Err(GetActiveTenantError::Other(wait_error)),
+        Err(_) => {
+            let latest_state = tenant.current_state();
+            if latest_state == TenantState::Active {
+                Ok(tenant)
+            } else {
+                Err(GetActiveTenantError::WaitForActiveTimeout {
+                    latest_state,
+                    wait_time,
+                })
+            }
+        }
+    }
+}
 
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        // no-op
-        Ok(())
-    }
+/// Shorthand for getting a reference to a Timeline of an Active tenant.
+async fn get_active_tenant_timeline(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    ctx: &RequestContext,
+) -> Result<Arc<Timeline>, GetActiveTenantError> {
+    let tenant = get_active_tenant_with_timeout(tenant_id, ctx).await?;
+    let timeline = tenant.get_timeline(timeline_id, true)?;
+    Ok(timeline)
 }

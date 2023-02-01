@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +8,12 @@ from typing import List
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import PAGESERVER_PER_TENANT_METRICS, parse_metrics
+from fixtures.metrics import (
+    PAGESERVER_GLOBAL_METRICS,
+    PAGESERVER_PER_TENANT_METRICS,
+    PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
+    parse_metrics,
+)
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
@@ -156,9 +162,29 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
             f"process_start_time_seconds (UTC): {datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)}"
         )
 
+    # Test (a subset of) pageserver global metrics
+    for metric in PAGESERVER_GLOBAL_METRICS:
+        ps_samples = ps_metrics.query_all(metric, {})
+        assert len(ps_samples) > 0
+        for sample in ps_samples:
+            labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
+            log.info(f"{sample.name}{{{labels}}} {sample.value}")
 
-def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilder):
+
+@pytest.mark.parametrize(
+    "remote_storage_kind",
+    # exercise both the code paths where remote_storage=None and remote_storage=Some(...)
+    [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3],
+)
+def test_pageserver_metrics_removed_after_detach(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
     """Tests that when a tenant is detached, the tenant specific metrics are not left behind"""
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_pageserver_metrics_removed_after_detach",
+    )
 
     neon_env_builder.num_safekeepers = 3
 
@@ -192,7 +218,11 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
 
     for tenant in [tenant_1, tenant_2]:
         pre_detach_samples = set([x.name for x in get_ps_metric_samples_for_tenant(tenant)])
-        assert pre_detach_samples == set(PAGESERVER_PER_TENANT_METRICS)
+        expected = set(PAGESERVER_PER_TENANT_METRICS)
+        if remote_storage_kind == RemoteStorageKind.NOOP:
+            # if there's no remote storage configured, we don't expose the remote timeline client metrics
+            expected -= set(PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS)
+        assert pre_detach_samples == expected
 
         env.pageserver.http_client().tenant_detach(tenant)
 
@@ -217,21 +247,13 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.allowed_errors.append(
         ".*marking .* as locally complete, while it doesnt exist in remote index.*"
     )
-    env.pageserver.allowed_errors.append(".*Tenant .* has no timelines directory.*")
-    env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
+    env.pageserver.allowed_errors.append(
+        ".*could not load tenant.*Failed to list timelines directory.*"
+    )
 
     client = env.pageserver.http_client()
 
-    tenant_without_timelines_dir = env.initial_tenant
-    log.info(
-        f"Tenant {tenant_without_timelines_dir} becomes broken: it abnormally looses tenants/ directory and is expected to be completely ignored when pageserver restarts"
-    )
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
-
     tenant_with_empty_timelines_dir = client.tenant_create()
-    log.info(
-        f"Tenant {tenant_with_empty_timelines_dir} gets all of its timelines deleted: still should be functional"
-    )
     temp_timelines = client.timeline_list(tenant_with_empty_timelines_dir)
     for temp_timeline in temp_timelines:
         client.timeline_delete(
@@ -247,30 +269,70 @@ def test_pageserver_with_empty_tenants(
         files_in_timelines_dir == 0
     ), f"Tenant {tenant_with_empty_timelines_dir} should have an empty timelines/ directory"
 
-    # Trigger timeline reinitialization after pageserver restart
+    # Trigger timeline re-initialization after pageserver restart
     env.postgres.stop_all()
     env.pageserver.stop()
+
+    tenant_without_timelines_dir = env.initial_tenant
+    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_without_timelines_dir) / "timelines")
+
     env.pageserver.start()
 
     client = env.pageserver.http_client()
     tenants = client.tenant_list()
 
-    assert (
-        len(tenants) == 2
-    ), "Pageserver should attach only tenants with empty or not existing timelines/ dir on restart"
+    assert len(tenants) == 2
 
     [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
-    assert (
-        broken_tenant
-    ), f"A broken tenant {tenant_without_timelines_dir} should exists in the tenant list"
     assert (
         broken_tenant["state"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
+    broken_tenant_status = client.tenant_status(tenant_without_timelines_dir)
+    assert (
+        broken_tenant_status["state"] == "Broken"
+    ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
+
+    assert env.pageserver.log_contains(".*Setting tenant as Broken state, reason:.*")
+
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
     assert (
-        loaded_tenant
-    ), f"Tenant {tenant_with_empty_timelines_dir} should be loaded as the only one with tenants/ directory"
-    assert loaded_tenant["state"] == {
-        "Active": {"background_jobs_running": False}
-    }, "Empty tenant should be loaded and ready for timeline creation"
+        loaded_tenant["state"] == "Active"
+    ), "Tenant {tenant_with_empty_timelines_dir} with empty timelines dir should be active and ready for timeline creation"
+
+    loaded_tenant_status = client.tenant_status(tenant_with_empty_timelines_dir)
+    assert (
+        loaded_tenant_status["state"] == "Active"
+    ), f"Tenant {tenant_with_empty_timelines_dir} without timelines dir should be active"
+
+    time.sleep(1)  # to allow metrics propagation
+
+    ps_metrics = parse_metrics(client.get_metrics(), "pageserver")
+    broken_tenants_metric_filter = {
+        "tenant_id": str(tenant_without_timelines_dir),
+        "state": "broken",
+    }
+    active_tenants_metric_filter = {
+        "tenant_id": str(tenant_with_empty_timelines_dir),
+        "state": "active",
+    }
+
+    tenant_active_count = int(
+        ps_metrics.query_one(
+            "pageserver_tenant_states_count", filter=active_tenants_metric_filter
+        ).value
+    )
+
+    assert (
+        tenant_active_count == 1
+    ), f"Tenant {tenant_with_empty_timelines_dir} should have metric as active"
+
+    tenant_broken_count = int(
+        ps_metrics.query_one(
+            "pageserver_tenant_states_count", filter=broken_tenants_metric_filter
+        ).value
+    )
+
+    assert (
+        tenant_broken_count == 1
+    ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"

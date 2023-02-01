@@ -52,6 +52,7 @@
 #include "access/xlogdefs.h"
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
+#include "executor/instrument.h"
 #include "pagestore_client.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/autovacuum.h"
@@ -242,23 +243,117 @@ PrefetchState *MyPState;
 	) \
 )
 
-int			n_prefetch_hits = 0;
-int			n_prefetch_misses = 0;
-int			n_prefetch_missed_caches = 0;
-int			n_prefetch_dupes = 0;
+#define ReceiveBufferNeedsCompaction() (\
+	(MyPState->n_responses_buffered / 8) < ( \
+		MyPState->ring_receive - \
+			MyPState->ring_last - \
+			MyPState->n_responses_buffered \
+	) \
+)
 
 XLogRecPtr	prefetch_lsn = 0;
 
+static bool compact_prefetch_buffers(void);
 static void consume_prefetch_responses(void);
 static uint64 prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_lsn);
 static bool prefetch_read(PrefetchRequest *slot);
 static void prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force_lsn);
 static bool prefetch_wait_for(uint64 ring_index);
-static void prefetch_cleanup(void);
+static void prefetch_cleanup_trailing_unused(void);
 static inline void prefetch_set_unused(uint64 ring_index);
 
 static XLogRecPtr neon_get_request_lsn(bool *latest, RelFileNode rnode,
 									   ForkNumber forknum, BlockNumber blkno);
+
+static bool
+compact_prefetch_buffers(void)
+{
+	uint64	empty_ring_index = MyPState->ring_last;
+	uint64	search_ring_index = MyPState->ring_receive;
+	int n_moved = 0;
+	
+	if (MyPState->ring_receive == MyPState->ring_last)
+		return false;
+
+	while (search_ring_index > MyPState->ring_last)
+	{
+		search_ring_index--;
+		if (GetPrfSlot(search_ring_index)->status == PRFS_UNUSED)
+		{
+			empty_ring_index = search_ring_index;
+			break;
+		}
+	}
+
+	/*
+	 * Here we have established:
+	 *   slots < search_ring_index have an unknown state (not scanned)
+	 *   slots >= search_ring_index and <= empty_ring_index are unused
+	 *   slots > empty_ring_index are in use, or outside our buffer's range.
+	 * ... unless search_ring_index <= ring_last
+	 * 
+	 * Therefore, there is a gap of at least one unused items between
+	 * search_ring_index and empty_ring_index (both inclusive), which grows as we hit
+	 * more unused items while moving backwards through the array.
+	 */
+
+	while (search_ring_index > MyPState->ring_last)
+	{
+		PrefetchRequest *source_slot;
+		PrefetchRequest *target_slot;
+		bool		found;
+
+		/* update search index to an unprocessed entry */
+		search_ring_index--;
+
+		source_slot = GetPrfSlot(search_ring_index);
+
+		if (source_slot->status == PRFS_UNUSED)
+			continue;
+
+		/* slot is used -- start moving slot */
+		target_slot = GetPrfSlot(empty_ring_index);
+
+		Assert(source_slot->status == PRFS_RECEIVED);
+		Assert(target_slot->status == PRFS_UNUSED);
+
+		target_slot->buftag = source_slot->buftag;
+		target_slot->status = source_slot->status;
+		target_slot->response = source_slot->response;
+		target_slot->effective_request_lsn = source_slot->effective_request_lsn;
+		target_slot->my_ring_index = empty_ring_index;
+
+		prfh_delete(MyPState->prf_hash, source_slot);
+		prfh_insert(MyPState->prf_hash, target_slot, &found);
+
+		Assert(!found);
+
+		/* Adjust the location of our known-empty slot */
+		empty_ring_index--;
+
+		/* empty the moved slot */
+		source_slot->status = PRFS_UNUSED;
+		source_slot->buftag = (BufferTag) {0};
+		source_slot->response = NULL;
+		source_slot->my_ring_index = 0;
+		source_slot->effective_request_lsn = 0;
+
+		/* update bookkeeping */
+		n_moved++;
+	}
+
+	/*
+	 * Only when we've moved slots we can expect trailing unused slots,
+	 * so only then we clean up trailing unused slots.
+	 */
+	if (n_moved > 0)
+	{
+		prefetch_cleanup_trailing_unused();
+		return true;
+	}
+
+	return false;
+}
 
 void
 readahead_buffer_resize(int newsize, void *extra)
@@ -267,7 +362,7 @@ readahead_buffer_resize(int newsize, void *extra)
 				nfree = newsize;
 	PrefetchState *newPState;
 	Size 		newprfs_size = offsetof(PrefetchState, prf_buffer) + (
-		sizeof(PrefetchRequest) * readahead_buffer_size
+		sizeof(PrefetchRequest) * newsize
 	);
 	
 	/* don't try to re-initialize if we haven't initialized yet */
@@ -323,7 +418,7 @@ readahead_buffer_resize(int newsize, void *extra)
 		prfh_insert(newPState->prf_hash, newslot, &found);
 
 		Assert(!found);
-		
+
 		switch (newslot->status)
 		{
 			case PRFS_UNUSED:
@@ -370,7 +465,7 @@ consume_prefetch_responses(void)
 }
 
 static void
-prefetch_cleanup(void)
+prefetch_cleanup_trailing_unused(void)
 {
 	uint64	ring_index;
 	PrefetchRequest *slot;
@@ -531,7 +626,10 @@ prefetch_set_unused(uint64 ring_index)
 
 	/* run cleanup if we're holding back ring_last */
 	if (MyPState->ring_last == ring_index)
-		prefetch_cleanup();
+		prefetch_cleanup_trailing_unused();
+	/* ... and try to store the buffered responses more compactly if > 12.5% of the buffer is gaps */
+	else if (ReceiveBufferNeedsCompaction())
+		compact_prefetch_buffers();
 }
 
 static void
@@ -677,7 +775,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 		else
 		{
 			/* The buffered request is good enough, return that index */
-			n_prefetch_dupes++;
+			pgBufferUsage.prefetch.duplicates++;
 			return ring_index;
 		}
 	}
@@ -702,20 +800,31 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 
 		Assert(slot->status != PRFS_UNUSED);
 
-		/* We have the slot for ring_last, so that must still be in progress */
-		switch (slot->status)
+		/*
+		 * If there is good reason to run compaction on the prefetch buffers,
+		 * try to do that.
+		 */
+		if (ReceiveBufferNeedsCompaction() && compact_prefetch_buffers())
 		{
-			case PRFS_REQUESTED:
-				Assert(MyPState->ring_receive == cleanup_index);
-				prefetch_wait_for(cleanup_index);
-				prefetch_set_unused(cleanup_index);
-				break;
-			case PRFS_RECEIVED:
-			case PRFS_TAG_REMAINS:
-				prefetch_set_unused(cleanup_index);
-				break;
-			default:
-				pg_unreachable();
+			Assert(slot->status == PRFS_UNUSED);
+		}
+		else
+		{
+			/* We have the slot for ring_last, so that must still be in progress */
+			switch (slot->status)
+			{
+				case PRFS_REQUESTED:
+					Assert(MyPState->ring_receive == cleanup_index);
+					prefetch_wait_for(cleanup_index);
+					prefetch_set_unused(cleanup_index);
+					break;
+				case PRFS_RECEIVED:
+				case PRFS_TAG_REMAINS:
+					prefetch_set_unused(cleanup_index);
+					break;
+				default:
+					pg_unreachable();
+			}
 		}
 	}
 
@@ -1102,7 +1211,7 @@ PageIsEmptyHeapPage(char *buffer)
 }
 
 static void
-neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer)
+neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool force)
 {
 	XLogRecPtr	lsn = PageGetLSN(buffer);
 
@@ -1116,7 +1225,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 	 * correctness, the non-logged updates are not critical. But we want to
 	 * have a reasonably up-to-date VM and FSM in the page server.
 	 */
-	if (forknum == FSM_FORKNUM && !RecoveryInProgress())
+	if ((force || forknum == FSM_FORKNUM || forknum == VISIBILITYMAP_FORKNUM) && !RecoveryInProgress())
 	{
 		/* FSM is never WAL-logged and we don't care. */
 		XLogRecPtr	recptr;
@@ -1125,30 +1234,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 		XLogFlush(recptr);
 		lsn = recptr;
 		ereport(SmgrTrace,
-				(errmsg("FSM page %u of relation %u/%u/%u.%u was force logged. Evicted at lsn=%X/%X",
-						blocknum,
-						reln->smgr_rnode.node.spcNode,
-						reln->smgr_rnode.node.dbNode,
-						reln->smgr_rnode.node.relNode,
-						forknum, LSN_FORMAT_ARGS(lsn))));
-	}
-	else if (forknum == VISIBILITYMAP_FORKNUM && !RecoveryInProgress())
-	{
-		/*
-		 * Always WAL-log vm. We should never miss clearing visibility map
-		 * bits.
-		 *
-		 * TODO Is it too bad for performance? Hopefully we do not evict
-		 * actively used vm too often.
-		 */
-		XLogRecPtr	recptr;
-
-		recptr = log_newpage_copy(&reln->smgr_rnode.node, forknum, blocknum, buffer, false);
-		XLogFlush(recptr);
-		lsn = recptr;
-
-		ereport(SmgrTrace,
-				(errmsg("Visibilitymap page %u of relation %u/%u/%u.%u was force logged at lsn=%X/%X",
+				(errmsg("Page %u of relation %u/%u/%u.%u was force logged. Evicted at lsn=%X/%X",
 						blocknum,
 						reln->smgr_rnode.node.spcNode,
 						reln->smgr_rnode.node.dbNode,
@@ -1543,6 +1629,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			char *buffer, bool skipFsync)
 {
 	XLogRecPtr	lsn;
+	BlockNumber	n_blocks = 0;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -1582,7 +1669,16 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 					 errhint("This limit is defined by neon.max_cluster_size GUC")));
 	}
 
-	neon_wallog_page(reln, forkNum, blkno, buffer);
+	/*
+	 * Usually Postgres doesn't extend relation on more than one page
+	 * (leaving holes). But this rule is violated in PG-15 where CreateAndCopyRelationData
+	 * call smgrextend for destination relation n using size of source relation
+	 */
+	n_blocks = neon_nblocks(reln, forkNum);
+	while (n_blocks < blkno)
+		neon_wallog_page(reln, forkNum, n_blocks++, buffer, true);
+
+	neon_wallog_page(reln, forkNum, blkno, buffer, false);
 	set_cached_relsize(reln->smgr_rnode.node, forkNum, blkno + 1);
 
 	lsn = PageGetLSN(buffer);
@@ -1592,6 +1688,8 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		 reln->smgr_rnode.node.relNode,
 		 forkNum, blkno,
 		 (uint32) (lsn >> 32), (uint32) lsn);
+
+	lfc_write(reln->smgr_rnode.node, forkNum, blkno, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1665,6 +1763,9 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 		default:
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
+
+	if (lfc_cache_contains(reln->smgr_rnode.node, forknum, blocknum))
+		return false;
 
 	tag = (BufferTag) {
 		.rnode = reln->smgr_rnode.node,
@@ -1749,7 +1850,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		if (slot->effective_request_lsn >= request_lsn)
 		{
 			ring_index = slot->my_ring_index;
-			n_prefetch_hits += 1;
+			pgBufferUsage.prefetch.hits += 1;
 		}
 		else /* the current prefetch LSN is not large enough, so drop the prefetch */
 		{
@@ -1764,7 +1865,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 			}
 			/* drop caches */
 			prefetch_set_unused(slot->my_ring_index);
-			n_prefetch_missed_caches += 1;
+			pgBufferUsage.prefetch.expired += 1;
 			/* make it look like a prefetch cache miss */
 			entry = NULL;
 		}
@@ -1774,11 +1875,22 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	{
 		if (entry == NULL)
 		{
-			n_prefetch_misses += 1;
+			pgBufferUsage.prefetch.misses += 1;
 
 			ring_index = prefetch_register_buffer(buftag, &request_latest,
 												  &request_lsn);
 			slot = GetPrfSlot(ring_index);
+		}
+		else
+		{
+			/*
+			 * Empty our reference to the prefetch buffer's hash entry.
+			 * When we wait for prefetches, the entry reference is invalidated by 
+			 * potential updates to the hash, and when we reconnect to the 
+			 * pageserver the prefetch we're waiting for may be dropped,
+			 * in which case we need to retry and take the branch above.
+			 */
+			entry = NULL;
 		}
 
 		Assert(slot->my_ring_index == ring_index);
@@ -1797,6 +1909,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	{
 		case T_NeonGetPageResponse:
 			memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
+			lfc_write(rnode, forkNum, blkno, buffer);
 			break;
 
 		case T_NeonErrorResponse:
@@ -1818,7 +1931,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 
 	/* buffer was used, clean up for later reuse */
 	prefetch_set_unused(ring_index);
-	prefetch_cleanup();
+	prefetch_cleanup_trailing_unused();
 }
 
 /*
@@ -1846,6 +1959,12 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 
 		default:
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
+	}
+
+	/* Try to read from local file cache */
+	if (lfc_read(reln->smgr_rnode.node, forkNum, blkno, buffer))
+	{
+		return;
 	}
 
 	request_lsn = neon_get_request_lsn(&latest, reln->smgr_rnode.node, forkNum, blkno);
@@ -1999,7 +2118,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
 
-	neon_wallog_page(reln, forknum, blocknum, buffer);
+	neon_wallog_page(reln, forknum, blocknum, buffer, false);
 
 	lsn = PageGetLSN(buffer);
 	elog(SmgrTrace, "smgrwrite called for %u/%u/%u.%u blk %u, page LSN: %X/%08X",
@@ -2008,6 +2127,8 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 reln->smgr_rnode.node.relNode,
 		 forknum, blocknum,
 		 (uint32) (lsn >> 32), (uint32) lsn);
+
+	lfc_write(reln->smgr_rnode.node, forknum, blocknum, buffer);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))

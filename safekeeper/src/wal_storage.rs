@@ -8,6 +8,7 @@
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
 use anyhow::{bail, Context, Result};
+use remote_storage::RemotePath;
 
 use std::io::{self, Seek, SeekFrom};
 use std::pin::Pin;
@@ -53,6 +54,12 @@ pub trait Storage {
     /// Remove all segments <= given segno. Returns closure as we want to do
     /// that without timeline lock.
     fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>>;
+
+    /// Release resources associated with the storage -- technically, close FDs.
+    /// Currently we don't remove timelines until restart (#3146), so need to
+    /// spare descriptors. This would be useful for temporary tli detach as
+    /// well.
+    fn close(&mut self) {}
 
     /// Get metrics for this timeline.
     fn get_metrics(&self) -> WalStorageMetrics;
@@ -222,7 +229,7 @@ impl PhysicalStorage {
             // Rename partial file to completed file
             let (wal_file_path, wal_file_partial_path) =
                 wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
-            fs::rename(&wal_file_partial_path, &wal_file_path)?;
+            fs::rename(wal_file_partial_path, wal_file_path)?;
         } else {
             // otherwise, file can be reused later
             self.file = Some(file);
@@ -248,7 +255,7 @@ impl PhysicalStorage {
 
         while !buf.is_empty() {
             // Extract WAL location for this block
-            let xlogoff = self.write_lsn.segment_offset(self.wal_seg_size) as usize;
+            let xlogoff = self.write_lsn.segment_offset(self.wal_seg_size);
             let segno = self.write_lsn.segment_number(self.wal_seg_size);
 
             // If crossing a WAL boundary, only write up until we reach wal segment size.
@@ -365,7 +372,7 @@ impl Storage for PhysicalStorage {
             self.fdatasync_file(&mut unflushed_file)?;
         }
 
-        let xlogoff = end_pos.segment_offset(self.wal_seg_size) as usize;
+        let xlogoff = end_pos.segment_offset(self.wal_seg_size);
         let segno = end_pos.segment_number(self.wal_seg_size);
 
         // Remove all segments after the given LSN.
@@ -382,7 +389,7 @@ impl Storage for PhysicalStorage {
             // Make segment partial once again
             let (wal_file_path, wal_file_partial_path) =
                 wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
-            fs::rename(&wal_file_path, &wal_file_partial_path)?;
+            fs::rename(wal_file_path, wal_file_partial_path)?;
         }
 
         // Update LSNs
@@ -400,6 +407,11 @@ impl Storage for PhysicalStorage {
         })
     }
 
+    fn close(&mut self) {
+        // close happens in destructor
+        let _open_file = self.file.take();
+    }
+
     fn get_metrics(&self) -> WalStorageMetrics {
         self.metrics.clone()
     }
@@ -415,7 +427,7 @@ fn remove_segments_from_disk(
     let mut min_removed = u64::MAX;
     let mut max_removed = u64::MIN;
 
-    for entry in fs::read_dir(&timeline_dir)? {
+    for entry in fs::read_dir(timeline_dir)? {
         let entry = entry?;
         let entry_path = entry.path();
         let fname = entry_path.file_name().unwrap();
@@ -445,6 +457,7 @@ fn remove_segments_from_disk(
 }
 
 pub struct WalReader {
+    workdir: PathBuf,
     timeline_dir: PathBuf,
     wal_seg_size: usize,
     pos: Lsn,
@@ -459,6 +472,7 @@ pub struct WalReader {
 
 impl WalReader {
     pub fn new(
+        workdir: PathBuf,
         timeline_dir: PathBuf,
         state: &SafeKeeperState,
         start_pos: Lsn,
@@ -478,6 +492,7 @@ impl WalReader {
         }
 
         Ok(Self {
+            workdir,
             timeline_dir,
             wal_seg_size: state.server.wal_seg_size as usize,
             pos: start_pos,
@@ -495,7 +510,7 @@ impl WalReader {
 
         // How much to read and send in message? We cannot cross the WAL file
         // boundary, and we don't want send more than provided buffer.
-        let xlogoff = self.pos.segment_offset(self.wal_seg_size) as usize;
+        let xlogoff = self.pos.segment_offset(self.wal_seg_size);
         let send_size = min(buf.len(), self.wal_seg_size - xlogoff);
 
         // Read some data from the file.
@@ -514,7 +529,7 @@ impl WalReader {
 
     /// Open WAL segment at the current position of the reader.
     async fn open_segment(&self) -> Result<Pin<Box<dyn AsyncRead>>> {
-        let xlogoff = self.pos.segment_offset(self.wal_seg_size) as usize;
+        let xlogoff = self.pos.segment_offset(self.wal_seg_size);
         let segno = self.pos.segment_number(self.wal_seg_size);
         let wal_file_name = XLogFileName(PG_TLI, segno, self.wal_seg_size);
         let wal_file_path = self.timeline_dir.join(wal_file_name);
@@ -545,7 +560,17 @@ impl WalReader {
 
         // Try to open remote file, if remote reads are enabled
         if self.enable_remote_read {
-            return read_object(wal_file_path, xlogoff as u64).await;
+            let remote_wal_file_path = wal_file_path
+                .strip_prefix(&self.workdir)
+                .context("Failed to strip workdir prefix")
+                .and_then(RemotePath::new)
+                .with_context(|| {
+                    format!(
+                        "Failed to resolve remote part of path {:?} for base {:?}",
+                        wal_file_path, self.workdir,
+                    )
+                })?;
+            return read_object(&remote_wal_file_path, xlogoff as u64).await;
         }
 
         bail!("WAL segment is not found")

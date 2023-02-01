@@ -22,3 +22,13 @@ AS 'MODULE_PATHNAME', 'backpressure_throttling_time'
 LANGUAGE C STRICT
 PARALLEL UNSAFE;
 
+CREATE FUNCTION local_cache_pages()
+RETURNS SETOF RECORD
+AS 'MODULE_PATHNAME', 'local_cache_pages'
+LANGUAGE C PARALLEL SAFE;
+
+-- Create a view for convenient access.
+CREATE VIEW local_cache AS
+	SELECT P.* FROM local_cache_pages() AS P
+	(pageoffs int8, relfilenode oid, reltablespace oid, reldatabase oid,
+	 relforknumber int2, relblocknumber int8, accesscount int4);

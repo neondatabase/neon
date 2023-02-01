@@ -18,6 +18,10 @@
 //! - `http-endpoint` runs a Hyper HTTP API server, which serves readiness and the
 //!   last activity requests.
 //!
+//! If the `vm-informant` binary is present at `/bin/vm-informant`, it will also be started. For VM
+//! compute nodes, `vm-informant` communicates with the VM autoscaling system. It coordinates
+//! downscaling and (eventually) will request immediate upscaling under resource pressure.
+//!
 //! Usage example:
 //! ```sh
 //! compute_ctl -D /var/db/postgres/compute \
@@ -36,10 +40,11 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use log::{error, info};
+use tracing::{error, info};
 
 use compute_tools::compute::{ComputeMetrics, ComputeNode, ComputeState, ComputeStatus};
 use compute_tools::http::api::launch_http_server;
+use compute_tools::informant::spawn_vm_informant_if_present;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
@@ -48,8 +53,7 @@ use compute_tools::spec::*;
 use url::Url;
 
 fn main() -> Result<()> {
-    // TODO: re-use `utils::logging` later
-    init_logger(DEFAULT_LOG_LEVEL)?;
+    init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let matches = cli().get_matches();
 
@@ -80,6 +84,29 @@ fn main() -> Result<()> {
         }
     };
 
+    // Extract OpenTelemetry context for the startup actions from the spec, and
+    // attach it to the current tracing context.
+    //
+    // This is used to propagate the context for the 'start_compute' operation
+    // from the neon control plane. This allows linking together the wider
+    // 'start_compute' operation that creates the compute container, with the
+    // startup actions here within the container.
+    //
+    // Switch to the startup context here, and exit it once the startup has
+    // completed and Postgres is up and running.
+    //
+    // NOTE: This is supposed to only cover the *startup* actions. Once
+    // postgres is configured and up-and-running, we exit this span. Any other
+    // actions that are performed on incoming HTTP requests, for example, are
+    // performed in separate spans.
+    let startup_context_guard = if let Some(ref carrier) = spec.startup_tracing_context {
+        use opentelemetry::propagation::TextMapPropagator;
+        use opentelemetry::sdk::propagation::TraceContextPropagator;
+        Some(TraceContextPropagator::new().extract(carrier).attach())
+    } else {
+        None
+    };
+
     let pageserver_connstr = spec
         .cluster
         .settings
@@ -105,7 +132,7 @@ fn main() -> Result<()> {
         tenant,
         timeline,
         pageserver_connstr,
-        metrics: ComputeMetrics::new(),
+        metrics: ComputeMetrics::default(),
         state: RwLock::new(ComputeState::new()),
     };
     let compute = Arc::new(compute_state);
@@ -114,30 +141,55 @@ fn main() -> Result<()> {
     // requests, while configuration is still in progress.
     let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
+    // Also spawn the thread responsible for handling the VM informant -- if it's present
+    let _vm_informant_handle = spawn_vm_informant_if_present().expect("cannot launch VM informant");
 
-    // Run compute (Postgres) and hang waiting on it.
-    match compute.prepare_and_run() {
-        Ok(ec) => {
-            let code = ec.code().unwrap_or(1);
-            info!("Postgres exited with code {}, shutting down", code);
-            exit(code)
-        }
-        Err(error) => {
-            error!("could not start the compute node: {:?}", error);
-
+    // Start Postgres
+    let mut delay_exit = false;
+    let mut exit_code = None;
+    let pg = match compute.start_compute() {
+        Ok(pg) => Some(pg),
+        Err(err) => {
+            error!("could not start the compute node: {:?}", err);
             let mut state = compute.state.write().unwrap();
-            state.error = Some(format!("{:?}", error));
+            state.error = Some(format!("{:?}", err));
             state.status = ComputeStatus::Failed;
             drop(state);
-
-            // Keep serving HTTP requests, so the cloud control plane was able to
-            // get the actual error.
-            info!("giving control plane 30s to collect the error before shutdown");
-            thread::sleep(Duration::from_secs(30));
-            info!("shutting down");
-            Err(error)
+            delay_exit = true;
+            None
         }
+    };
+
+    // Wait for the child Postgres process forever. In this state Ctrl+C will
+    // propagate to Postgres and it will be shut down as well.
+    if let Some(mut pg) = pg {
+        // Startup is finished, exit the startup tracing span
+        drop(startup_context_guard);
+
+        let ecode = pg
+            .wait()
+            .expect("failed to start waiting on Postgres process");
+        info!("Postgres exited with code {}, shutting down", ecode);
+        exit_code = ecode.code()
     }
+
+    if let Err(err) = compute.check_for_core_dumps() {
+        error!("error while checking for core dumps: {err:?}");
+    }
+
+    // If launch failed, keep serving HTTP requests for a while, so the cloud
+    // control plane can get the actual error.
+    if delay_exit {
+        info!("giving control plane 30s to collect the error before shutdown");
+        thread::sleep(Duration::from_secs(30));
+        info!("shutting down");
+    }
+
+    // Shutdown trace pipeline gracefully, so that it has a chance to send any
+    // pending traces before we exit.
+    tracing_utils::shutdown_tracing();
+
+    exit(exit_code.unwrap_or(1))
 }
 
 fn cli() -> clap::Command {

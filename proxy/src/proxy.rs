@@ -1,15 +1,26 @@
-use crate::auth;
-use crate::cancellation::{self, CancelMap};
-use crate::config::{ProxyConfig, TlsConfig};
-use crate::stream::{MeasuredStream, PqStream, Stream};
+#[cfg(test)]
+mod tests;
+
+use crate::{
+    auth::{self, backend::AuthSuccess},
+    cancellation::{self, CancelMap},
+    compute::{self, PostgresConnection},
+    config::{ProxyConfig, TlsConfig},
+    console::{self, messages::MetricsAuxInfo},
+    error::io_error,
+    stream::{MeasuredStream, PqStream, Stream},
+};
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
-use pq_proto::{BeMessage as Be, *};
+use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
+
+/// Number of times we should retry the `/proxy_wake_compute` http request.
+const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -30,30 +41,23 @@ static NUM_CONNECTIONS_CLOSED_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
-static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+static NUM_CONNECTION_FAILURES: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "proxy_io_bytes_per_client",
-        "Number of bytes sent/received between client and backend.",
-        &[
-            // Received (rx) / sent (tx).
-            "direction",
-            // Proxy can keep calling it `project` internally.
-            "endpoint_id"
-        ]
+        "proxy_connection_failures_total",
+        "Number of connection failures (per kind).",
+        &["kind"],
     )
     .unwrap()
 });
 
-/// A small combinator for pluggable error logging.
-async fn log_error<R, F>(future: F) -> F::Output
-where
-    F: std::future::Future<Output = anyhow::Result<R>>,
-{
-    future.await.map_err(|err| {
-        error!("{err}");
-        err
-    })
-}
+static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "proxy_io_bytes_per_client",
+        "Number of bytes sent/received between client and backend.",
+        crate::console::messages::MetricsAuxInfo::TRAFFIC_LABELS,
+    )
+    .unwrap()
+});
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -75,7 +79,7 @@ pub async fn task_main(
         let session_id = uuid::Uuid::new_v4();
         let cancel_map = Arc::clone(&cancel_map);
         tokio::spawn(
-            log_error(async move {
+            async move {
                 info!("spawned a task for {peer_addr}");
 
                 socket
@@ -83,17 +87,23 @@ pub async fn task_main(
                     .context("failed to set socket option")?;
 
                 handle_client(config, &cancel_map, session_id, socket).await
+            }
+            .unwrap_or_else(|e| {
+                // Acknowledge that the task has finished with an error.
+                error!("per-client task finished with an error: {e:#}");
             })
             .instrument(info_span!("client", session = format_args!("{session_id}"))),
         );
     }
 }
 
-async fn handle_client(
-    config: &ProxyConfig,
+// TODO(tech debt): unite this with its twin below.
+pub async fn handle_ws_client(
+    config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
-    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    hostname: Option<String>,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -102,7 +112,47 @@ async fn handle_client(
     }
 
     let tls = config.tls_config.as_ref();
-    let do_handshake = handshake(stream, tls, cancel_map).instrument(info_span!("handshake"));
+    let hostname = hostname.as_deref();
+
+    // TLS is None here, because the connection is already encrypted.
+    let do_handshake = handshake(stream, None, cancel_map);
+    let (mut stream, params) = match do_handshake.await? {
+        Some(x) => x,
+        None => return Ok(()), // it's a cancellation request
+    };
+
+    // Extract credentials which we're going to use for auth.
+    let creds = {
+        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        let result = config
+            .auth_backend
+            .as_ref()
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name, true))
+            .transpose();
+
+        async { result }.or_else(|e| stream.throw_error(e)).await?
+    };
+
+    let client = Client::new(stream, creds, &params, session_id);
+    cancel_map
+        .with_session(|session| client.connect_to_db(session))
+        .await
+}
+
+async fn handle_client(
+    config: &'static ProxyConfig,
+    cancel_map: &CancelMap,
+    session_id: uuid::Uuid,
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+) -> anyhow::Result<()> {
+    // The `closed` counter will increase when this future is destroyed.
+    NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
+    scopeguard::defer! {
+        NUM_CONNECTIONS_CLOSED_COUNTER.inc();
+    }
+
+    let tls = config.tls_config.as_ref();
+    let do_handshake = handshake(stream, tls, cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
         None => return Ok(()), // it's a cancellation request
@@ -115,7 +165,7 @@ async fn handle_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name, false))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
@@ -131,6 +181,7 @@ async fn handle_client(
 /// For better testing experience, `stream` can be any object satisfying the traits.
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
+#[tracing::instrument(skip_all)]
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<&TlsConfig>,
@@ -192,6 +243,133 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+/// Try to connect to the compute node once.
+#[tracing::instrument(name = "connect_once", skip_all)]
+async fn connect_to_compute_once(
+    node_info: &console::CachedNodeInfo,
+) -> Result<PostgresConnection, compute::ConnectionError> {
+    // If we couldn't connect, a cached connection info might be to blame
+    // (e.g. the compute node's address might've changed at the wrong time).
+    // Invalidate the cache entry (if any) to prevent subsequent errors.
+    let invalidate_cache = |_: &compute::ConnectionError| {
+        let is_cached = node_info.cached();
+        if is_cached {
+            warn!("invalidating stalled compute node info cache entry");
+            node_info.invalidate();
+        }
+
+        let label = match is_cached {
+            true => "compute_cached",
+            false => "compute_uncached",
+        };
+        NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+    };
+
+    node_info
+        .config
+        .connect()
+        .inspect_err(invalidate_cache)
+        .await
+}
+
+/// Try to connect to the compute node, retrying if necessary.
+/// This function might update `node_info`, so we take it by `&mut`.
+#[tracing::instrument(skip_all)]
+async fn connect_to_compute(
+    node_info: &mut console::CachedNodeInfo,
+    params: &StartupMessageParams,
+    extra: &console::ConsoleReqExtra<'_>,
+    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
+) -> Result<PostgresConnection, compute::ConnectionError> {
+    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
+    loop {
+        // Apply startup params to the (possibly, cached) compute node info.
+        node_info.config.set_startup_params(params);
+        match connect_to_compute_once(node_info).await {
+            Err(e) if num_retries > 0 => {
+                info!("compute node's state has changed; requesting a wake-up");
+                match creds.wake_compute(extra).map_err(io_error).await? {
+                    // Update `node_info` and try one more time.
+                    Some(mut new) => {
+                        new.config.reuse_password(&node_info.config);
+                        *node_info = new;
+                    }
+                    // Link auth doesn't work that way, so we just exit.
+                    None => return Err(e),
+                }
+            }
+            other => return other,
+        }
+
+        num_retries -= 1;
+        info!("retrying after wake-up ({num_retries} attempts left)");
+    }
+}
+
+/// Finish client connection initialization: confirm auth success, send params, etc.
+#[tracing::instrument(skip_all)]
+async fn prepare_client_connection(
+    node: &compute::PostgresConnection,
+    reported_auth_ok: bool,
+    session: cancellation::Session<'_>,
+    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+) -> anyhow::Result<()> {
+    // Register compute's query cancellation token and produce a new, unique one.
+    // The new token (cancel_key_data) will be sent to the client.
+    let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
+
+    // Report authentication success if we haven't done this already.
+    // Note that we do this only (for the most part) after we've connected
+    // to a compute (see above) which performs its own authentication.
+    if !reported_auth_ok {
+        stream.write_message_noflush(&Be::AuthenticationOk)?;
+    }
+
+    // Forward all postgres connection params to the client.
+    // Right now the implementation is very hacky and inefficent (ideally,
+    // we don't need an intermediate hashmap), but at least it should be correct.
+    for (name, value) in &node.params {
+        // TODO: Theoretically, this could result in a big pile of params...
+        stream.write_message_noflush(&Be::ParameterStatus {
+            name: name.as_bytes(),
+            value: value.as_bytes(),
+        })?;
+    }
+
+    stream
+        .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
+        .write_message(&Be::ReadyForQuery)
+        .await?;
+
+    Ok(())
+}
+
+/// Forward bytes in both directions (client <-> compute).
+#[tracing::instrument(skip_all)]
+async fn proxy_pass(
+    client: impl AsyncRead + AsyncWrite + Unpin,
+    compute: impl AsyncRead + AsyncWrite + Unpin,
+    aux: &MetricsAuxInfo,
+) -> anyhow::Result<()> {
+    let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
+    let mut client = MeasuredStream::new(client, |cnt| {
+        // Number of bytes we sent to the client (outbound).
+        m_sent.inc_by(cnt as u64);
+    });
+
+    let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
+    let mut compute = MeasuredStream::new(compute, |cnt| {
+        // Number of bytes the client sent to the compute node (inbound).
+        m_recv.inc_by(cnt as u64);
+    });
+
+    // Starting from here we only proxy the client's traffic.
+    info!("performing the proxy pass...");
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut compute).await?;
+
+    Ok(())
+}
+
 /// Thin connection context.
 struct Client<'a, S> {
     /// The underlying libpq protocol stream.
@@ -221,17 +399,17 @@ impl<'a, S> Client<'a, S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
     async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
         let Self {
             mut stream,
-            creds,
+            mut creds,
             params,
             session_id,
         } = self;
 
-        let extra = auth::ConsoleReqExtra {
+        let extra = console::ConsoleReqExtra {
             session_id, // aka this connection's id
             application_name: params.get("application_name"),
         };
@@ -244,346 +422,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
         .instrument(info_span!("auth"))
         .await?;
 
-        let node = auth_result.value;
-        let (db, cancel_closure) = node
-            .config
-            .connect(params)
+        let AuthSuccess {
+            reported_auth_ok,
+            value: mut node_info,
+        } = auth_result;
+
+        let node = connect_to_compute(&mut node_info, params, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
 
-        let cancel_key_data = session.enable_query_cancellation(cancel_closure);
-
-        // Report authentication success if we haven't done this already.
-        // Note that we do this only (for the most part) after we've connected
-        // to a compute (see above) which performs its own authentication.
-        if !auth_result.reported_auth_ok {
-            stream
-                .write_message_noflush(&Be::AuthenticationOk)?
-                .write_message_noflush(&BeParameterStatusMessage::encoding())?;
-        }
-
-        stream
-            .write_message_noflush(&BeMessage::ParameterStatus(
-                BeParameterStatusMessage::ServerVersion(&db.version),
-            ))?
-            .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-            .write_message(&BeMessage::ReadyForQuery)
-            .await?;
-
-        // TODO: add more identifiers.
-        let metric_id = node.project;
-
-        let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["tx", &metric_id]);
-        let mut client = MeasuredStream::new(stream.into_inner(), |cnt| {
-            // Number of bytes we sent to the client (outbound).
-            m_sent.inc_by(cnt as u64);
-        });
-
-        let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&["rx", &metric_id]);
-        let mut db = MeasuredStream::new(db.stream, |cnt| {
-            // Number of bytes the client sent to the compute node (inbound).
-            m_recv.inc_by(cnt as u64);
-        });
-
-        // Starting from here we only proxy the client's traffic.
-        info!("performing the proxy pass...");
-        let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{auth, scram};
-    use async_trait::async_trait;
-    use rstest::rstest;
-    use tokio_postgres::config::SslMode;
-    use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-    use tokio_postgres_rustls::MakeRustlsConnect;
-
-    /// Generate a set of TLS certificates: CA + server.
-    fn generate_certs(
-        hostname: &str,
-    ) -> anyhow::Result<(rustls::Certificate, rustls::Certificate, rustls::PrivateKey)> {
-        let ca = rcgen::Certificate::from_params({
-            let mut params = rcgen::CertificateParams::default();
-            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-            params
-        })?;
-
-        let cert = rcgen::generate_simple_self_signed(vec![hostname.into()])?;
-        Ok((
-            rustls::Certificate(ca.serialize_der()?),
-            rustls::Certificate(cert.serialize_der_with_signer(&ca)?),
-            rustls::PrivateKey(cert.serialize_private_key_der()),
-        ))
-    }
-
-    struct ClientConfig<'a> {
-        config: rustls::ClientConfig,
-        hostname: &'a str,
-    }
-
-    impl ClientConfig<'_> {
-        fn make_tls_connect<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
-            self,
-        ) -> anyhow::Result<impl tokio_postgres::tls::TlsConnect<S>> {
-            let mut mk = MakeRustlsConnect::new(self.config);
-            let tls = MakeTlsConnect::<S>::make_tls_connect(&mut mk, self.hostname)?;
-            Ok(tls)
-        }
-    }
-
-    /// Generate TLS certificates and build rustls configs for client and server.
-    fn generate_tls_config<'a>(
-        hostname: &'a str,
-        common_name: &'a str,
-    ) -> anyhow::Result<(ClientConfig<'a>, TlsConfig)> {
-        let (ca, cert, key) = generate_certs(hostname)?;
-
-        let tls_config = {
-            let config = rustls::ServerConfig::builder()
-                .with_safe_defaults()
-                .with_no_client_auth()
-                .with_single_cert(vec![cert], key)?
-                .into();
-
-            TlsConfig {
-                config,
-                common_name: Some(common_name.to_string()),
-            }
-        };
-
-        let client_config = {
-            let config = rustls::ClientConfig::builder()
-                .with_safe_defaults()
-                .with_root_certificates({
-                    let mut store = rustls::RootCertStore::empty();
-                    store.add(&ca)?;
-                    store
-                })
-                .with_no_client_auth();
-
-            ClientConfig { config, hostname }
-        };
-
-        Ok((client_config, tls_config))
-    }
-
-    #[async_trait]
-    trait TestAuth: Sized {
-        async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
-            self,
-            _stream: &mut PqStream<Stream<S>>,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct NoAuth;
-    impl TestAuth for NoAuth {}
-
-    struct Scram(scram::ServerSecret);
-
-    impl Scram {
-        fn new(password: &str) -> anyhow::Result<Self> {
-            let salt = rand::random::<[u8; 16]>();
-            let secret = scram::ServerSecret::build(password, &salt, 256)
-                .context("failed to generate scram secret")?;
-            Ok(Scram(secret))
-        }
-
-        fn mock(user: &str) -> Self {
-            let salt = rand::random::<[u8; 32]>();
-            Scram(scram::ServerSecret::mock(user, &salt))
-        }
-    }
-
-    #[async_trait]
-    impl TestAuth for Scram {
-        async fn authenticate<S: AsyncRead + AsyncWrite + Unpin + Send>(
-            self,
-            stream: &mut PqStream<Stream<S>>,
-        ) -> anyhow::Result<()> {
-            auth::AuthFlow::new(stream)
-                .begin(auth::Scram(&self.0))
-                .await?
-                .authenticate()
-                .await?;
-
-            Ok(())
-        }
-    }
-
-    /// A dummy proxy impl which performs a handshake and reports auth success.
-    async fn dummy_proxy(
-        client: impl AsyncRead + AsyncWrite + Unpin + Send,
-        tls: Option<TlsConfig>,
-        auth: impl TestAuth + Send,
-    ) -> anyhow::Result<()> {
-        let cancel_map = CancelMap::default();
-        let (mut stream, _params) = handshake(client, tls.as_ref(), &cancel_map)
-            .await?
-            .context("handshake failed")?;
-
-        auth.authenticate(&mut stream).await?;
-
-        stream
-            .write_message_noflush(&Be::AuthenticationOk)?
-            .write_message_noflush(&BeParameterStatusMessage::encoding())?
-            .write_message(&BeMessage::ReadyForQuery)
-            .await?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
-        let (client, server) = tokio::io::duplex(1024);
-
-        let (_, server_config) =
-            generate_tls_config("generic-project-name.localhost", "localhost")?;
-        let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
-
-        let client_err = tokio_postgres::Config::new()
-            .user("john_doe")
-            .dbname("earth")
-            .ssl_mode(SslMode::Disable)
-            .connect_raw(server, NoTls)
-            .await
-            .err() // -> Option<E>
-            .context("client shouldn't be able to connect")?;
-
-        assert!(client_err.to_string().contains(ERR_INSECURE_CONNECTION));
-
-        let server_err = proxy
-            .await?
-            .err() // -> Option<E>
-            .context("server shouldn't accept client")?;
-
-        assert!(client_err.to_string().contains(&server_err.to_string()));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn handshake_tls() -> anyhow::Result<()> {
-        let (client, server) = tokio::io::duplex(1024);
-
-        let (client_config, server_config) =
-            generate_tls_config("generic-project-name.localhost", "localhost")?;
-        let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
-
-        let (_client, _conn) = tokio_postgres::Config::new()
-            .user("john_doe")
-            .dbname("earth")
-            .ssl_mode(SslMode::Require)
-            .connect_raw(server, client_config.make_tls_connect()?)
-            .await?;
-
-        proxy.await?
-    }
-
-    #[tokio::test]
-    async fn handshake_raw() -> anyhow::Result<()> {
-        let (client, server) = tokio::io::duplex(1024);
-
-        let proxy = tokio::spawn(dummy_proxy(client, None, NoAuth));
-
-        let (_client, _conn) = tokio_postgres::Config::new()
-            .user("john_doe")
-            .dbname("earth")
-            .options("project=generic-project-name")
-            .ssl_mode(SslMode::Prefer)
-            .connect_raw(server, NoTls)
-            .await?;
-
-        proxy.await?
-    }
-
-    #[tokio::test]
-    async fn keepalive_is_inherited() -> anyhow::Result<()> {
-        use tokio::net::{TcpListener, TcpStream};
-
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let port = listener.local_addr()?.port();
-        socket2::SockRef::from(&listener).set_keepalive(true)?;
-
-        let t = tokio::spawn(async move {
-            let (client, _) = listener.accept().await?;
-            let keepalive = socket2::SockRef::from(&client).keepalive()?;
-            anyhow::Ok(keepalive)
-        });
-
-        let _ = TcpStream::connect(("127.0.0.1", port)).await?;
-        assert!(t.await??, "keepalive should be inherited");
-
-        Ok(())
-    }
-
-    #[rstest]
-    #[case("password_foo")]
-    #[case("pwd-bar")]
-    #[case("")]
-    #[tokio::test]
-    async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
-        let (client, server) = tokio::io::duplex(1024);
-
-        let (client_config, server_config) =
-            generate_tls_config("generic-project-name.localhost", "localhost")?;
-        let proxy = tokio::spawn(dummy_proxy(
-            client,
-            Some(server_config),
-            Scram::new(password)?,
-        ));
-
-        let (_client, _conn) = tokio_postgres::Config::new()
-            .user("user")
-            .dbname("db")
-            .password(password)
-            .ssl_mode(SslMode::Require)
-            .connect_raw(server, client_config.make_tls_connect()?)
-            .await?;
-
-        proxy.await?
-    }
-
-    #[tokio::test]
-    async fn scram_auth_mock() -> anyhow::Result<()> {
-        let (client, server) = tokio::io::duplex(1024);
-
-        let (client_config, server_config) =
-            generate_tls_config("generic-project-name.localhost", "localhost")?;
-        let proxy = tokio::spawn(dummy_proxy(
-            client,
-            Some(server_config),
-            Scram::mock("user"),
-        ));
-
-        use rand::{distributions::Alphanumeric, Rng};
-        let password: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(rand::random::<u8>() as usize)
-            .map(char::from)
-            .collect();
-
-        let _client_err = tokio_postgres::Config::new()
-            .user("user")
-            .dbname("db")
-            .password(&password) // no password will match the mocked secret
-            .ssl_mode(SslMode::Require)
-            .connect_raw(server, client_config.make_tls_connect()?)
-            .await
-            .err() // -> Option<E>
-            .context("client shouldn't be able to connect")?;
-
-        let _server_err = proxy
-            .await?
-            .err() // -> Option<E>
-            .context("server shouldn't accept client")?;
-
-        Ok(())
+        prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
+        proxy_pass(stream.into_inner(), node.stream, &node_info.aux).await
     }
 }

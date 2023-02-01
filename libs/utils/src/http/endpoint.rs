@@ -1,6 +1,5 @@
-use crate::auth::{self, Claims, JwtAuth};
+use crate::auth::{Claims, JwtAuth};
 use crate::http::error;
-use crate::id::TenantId;
 use anyhow::anyhow;
 use hyper::header::AUTHORIZATION;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
@@ -144,10 +143,14 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
     })
 }
 
-pub fn check_permission(req: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
+pub fn check_permission_with(
+    req: &Request<Body>,
+    check_permission: impl Fn(&Claims) -> Result<(), anyhow::Error>,
+) -> Result<(), ApiError> {
     match req.context::<Claims>() {
-        Some(claims) => Ok(auth::check_permission(&claims, tenant_id)
-            .map_err(|err| ApiError::Forbidden(err.to_string()))?),
+        Some(claims) => {
+            Ok(check_permission(&claims).map_err(|err| ApiError::Forbidden(err.to_string()))?)
+        }
         None => Ok(()), // claims is None because auth is disabled
     }
 }

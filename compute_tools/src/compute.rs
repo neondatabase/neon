@@ -17,17 +17,17 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use log::info;
 use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
+use tracing::{info, instrument, warn};
 
-use crate::checker::create_writablity_check_data;
+use crate::checker::create_writability_check_data;
 use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -91,29 +91,12 @@ pub enum ComputeStatus {
     Failed,
 }
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 pub struct ComputeMetrics {
     pub sync_safekeepers_ms: AtomicU64,
     pub basebackup_ms: AtomicU64,
     pub config_ms: AtomicU64,
     pub total_startup_ms: AtomicU64,
-}
-
-impl ComputeMetrics {
-    pub fn new() -> Self {
-        Self {
-            sync_safekeepers_ms: AtomicU64::new(0),
-            basebackup_ms: AtomicU64::new(0),
-            config_ms: AtomicU64::new(0),
-            total_startup_ms: AtomicU64::new(0),
-        }
-    }
-}
-
-impl Default for ComputeMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl ComputeNode {
@@ -138,6 +121,7 @@ impl ComputeNode {
 
     // Get basebackup from the libpq connection to pageserver using `connstr` and
     // unarchive it to `pgdata` directory overriding all its previous content.
+    #[instrument(skip(self))]
     fn get_basebackup(&self, lsn: &str) -> Result<()> {
         let start_time = Utc::now();
 
@@ -171,11 +155,12 @@ impl ComputeNode {
 
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
+    #[instrument(skip(self))]
     fn sync_safekeepers(&self) -> Result<String> {
         let start_time = Utc::now();
 
         let sync_handle = Command::new(&self.pgbin)
-            .args(&["--sync-safekeepers"])
+            .args(["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
             .stdout(Stdio::piped())
             .spawn()
@@ -213,6 +198,7 @@ impl ComputeNode {
 
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
+    #[instrument(skip(self))]
     pub fn prepare_pgdata(&self) -> Result<()> {
         let spec = &self.spec;
         let pgdata_path = Path::new(&self.pgdata);
@@ -246,23 +232,27 @@ impl ComputeNode {
 
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
-    pub fn run(&self) -> Result<ExitStatus> {
-        let start_time = Utc::now();
-
+    #[instrument(skip(self))]
+    pub fn start_postgres(&self) -> Result<std::process::Child> {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
         let mut pg = Command::new(&self.pgbin)
-            .args(&["-D", &self.pgdata])
+            .args(["-D", &self.pgdata])
             .spawn()
             .expect("cannot start postgres process");
 
         wait_for_postgres(&mut pg, pgdata_path)?;
 
+        Ok(pg)
+    }
+
+    #[instrument(skip(self))]
+    pub fn apply_config(&self) -> Result<()> {
         // If connection fails,
         // it may be the old node with `zenith_admin` superuser.
         //
-        // In this case we need to connect with old `zenith_admin`name
+        // In this case we need to connect with old `zenith_admin` name
         // and create new user. We cannot simply rename connected user,
         // but we can create a new one and grant it all privileges.
         let mut client = match Client::connect(self.connstr.as_str(), NoTls) {
@@ -288,16 +278,43 @@ impl ComputeNode {
             Ok(client) => client,
         };
 
+        // Proceed with post-startup configuration. Note, that order of operations is important.
         handle_roles(&self.spec, &mut client)?;
         handle_databases(&self.spec, &mut client)?;
         handle_role_deletions(self, &mut client)?;
         handle_grants(self, &mut client)?;
-        create_writablity_check_data(&mut client)?;
+        create_writability_check_data(&mut client)?;
 
         // 'Close' connection
         drop(client);
-        let startup_end_time = Utc::now();
 
+        info!(
+            "finished configuration of compute for project {}",
+            self.spec.cluster.cluster_id
+        );
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    pub fn start_compute(&self) -> Result<std::process::Child> {
+        info!(
+            "starting compute for project {}, operation {}, tenant {}, timeline {}",
+            self.spec.cluster.cluster_id,
+            self.spec.operation_uuid.as_ref().unwrap(),
+            self.tenant,
+            self.timeline,
+        );
+
+        self.prepare_pgdata()?;
+
+        let start_time = Utc::now();
+
+        let pg = self.start_postgres()?;
+
+        self.apply_config()?;
+
+        let startup_end_time = Utc::now();
         self.metrics.config_ms.store(
             startup_end_time
                 .signed_duration_since(start_time)
@@ -317,30 +334,70 @@ impl ComputeNode {
 
         self.set_status(ComputeStatus::Running);
 
-        info!(
-            "finished configuration of compute for project {}",
-            self.spec.cluster.cluster_id
-        );
-
-        // Wait for child Postgres process basically forever. In this state Ctrl+C
-        // will propagate to Postgres and it will be shut down as well.
-        let ecode = pg
-            .wait()
-            .expect("failed to start waiting on Postgres process");
-
-        Ok(ecode)
+        Ok(pg)
     }
 
-    pub fn prepare_and_run(&self) -> Result<ExitStatus> {
-        info!(
-            "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            self.spec.cluster.cluster_id,
-            self.spec.operation_uuid.as_ref().unwrap(),
-            self.tenant,
-            self.timeline,
-        );
+    // Look for core dumps and collect backtraces.
+    //
+    // EKS worker nodes have following core dump settings:
+    //   /proc/sys/kernel/core_pattern -> core
+    //   /proc/sys/kernel/core_uses_pid -> 1
+    //   ulimint -c -> unlimited
+    // which results in core dumps being written to postgres data directory as core.<pid>.
+    //
+    // Use that as a default location and pattern, except macos where core dumps are written
+    // to /cores/ directory by default.
+    pub fn check_for_core_dumps(&self) -> Result<()> {
+        let core_dump_dir = match std::env::consts::OS {
+            "macos" => Path::new("/cores/"),
+            _ => Path::new(&self.pgdata),
+        };
 
-        self.prepare_pgdata()?;
-        self.run()
+        // Collect core dump paths if any
+        info!("checking for core dumps in {}", core_dump_dir.display());
+        let files = fs::read_dir(core_dump_dir)?;
+        let cores = files.filter_map(|entry| {
+            let entry = entry.ok()?;
+            let _ = entry.file_name().to_str()?.strip_prefix("core.")?;
+            Some(entry.path())
+        });
+
+        // Print backtrace for each core dump
+        for core_path in cores {
+            warn!(
+                "core dump found: {}, collecting backtrace",
+                core_path.display()
+            );
+
+            // Try first with gdb
+            let backtrace = Command::new("gdb")
+                .args(["--batch", "-q", "-ex", "bt", &self.pgbin])
+                .arg(&core_path)
+                .output();
+
+            // Try lldb if no gdb is found -- that is handy for local testing on macOS
+            let backtrace = match backtrace {
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    warn!("cannot find gdb, trying lldb");
+                    Command::new("lldb")
+                        .arg("-c")
+                        .arg(&core_path)
+                        .args(["--batch", "-o", "bt all", "-o", "quit"])
+                        .output()
+                }
+                _ => backtrace,
+            }?;
+
+            warn!(
+                "core dump backtrace: {}",
+                String::from_utf8_lossy(&backtrace.stdout)
+            );
+            warn!(
+                "debugger stderr: {}",
+                String::from_utf8_lossy(&backtrace.stderr)
+            );
+        }
+
+        Ok(())
     }
 }

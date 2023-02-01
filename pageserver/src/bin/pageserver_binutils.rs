@@ -12,7 +12,9 @@ use anyhow::Context;
 use clap::{value_parser, Arg, Command};
 
 use pageserver::{
+    context::{DownloadBehavior, RequestContext},
     page_cache,
+    task_mgr::TaskKind,
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
     virtual_file,
 };
@@ -60,7 +62,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn read_pg_control_file(control_file_path: &Path) -> anyhow::Result<()> {
-    let control_file = ControlFileData::decode(&std::fs::read(&control_file_path)?)?;
+    let control_file = ControlFileData::decode(&std::fs::read(control_file_path)?)?;
     println!("{control_file:?}");
     let control_file_initdb = Lsn(control_file.checkPoint);
     println!(
@@ -75,11 +77,12 @@ fn print_layerfile(path: &Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
     virtual_file::init(10);
     page_cache::init(100);
-    dump_layerfile_from_path(path, true)
+    let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
+    dump_layerfile_from_path(path, true, &ctx)
 }
 
 fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), anyhow::Error> {
-    let metadata_bytes = std::fs::read(&path)?;
+    let metadata_bytes = std::fs::read(path)?;
     let mut meta = TimelineMetadata::from_bytes(&metadata_bytes)?;
     println!("Current metadata:\n{meta:?}");
     let mut update_meta = false;
@@ -110,7 +113,7 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
 
     if update_meta {
         let metadata_bytes = meta.to_bytes()?;
-        std::fs::write(&path, &metadata_bytes)?;
+        std::fs::write(path, metadata_bytes)?;
     }
 
     Ok(())

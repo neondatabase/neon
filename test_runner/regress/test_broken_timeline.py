@@ -15,10 +15,12 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*No timelines to attach received.*",
-            ".*Failed to process timeline dir contents.*",
             ".*Failed to load delta layer.*",
-            ".*Timeline .* was not found.*",
+            ".*could not find data for key.*",
+            ".*is not active. Current state: Broken.*",
+            ".*will not become active. Current state: Broken.*",
+            ".*failed to load metadata.*",
+            ".*could not load tenant.*load local timeline.*",
         ]
     )
 
@@ -77,20 +79,25 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # But all others are broken
 
     # First timeline would not get loaded into pageserver due to corrupt metadata file
-    with pytest.raises(Exception, match=f"Timeline {tenant1}/{timeline1} was not found") as err:
+    with pytest.raises(
+        Exception, match=f"Tenant {tenant1} will not become active. Current state: Broken"
+    ) as err:
         pg1.start()
     log.info(
         f"As expected, compute startup failed eagerly for timeline with corrupt metadata: {err}"
     )
 
-    # Second timeline has no ancestors, only the metadata file and no layer files
-    # We don't have the remote storage enabled, which means timeline is in an incorrect state,
-    # it's not loaded at all
-    with pytest.raises(Exception, match=f"Timeline {tenant2}/{timeline2} was not found") as err:
+    # Second timeline has no ancestors, only the metadata file and no layer files locally,
+    # and we don't have the remote storage enabled. It is loaded into memory, but getting
+    # the basebackup from it will fail.
+    with pytest.raises(
+        Exception, match=f"Tenant {tenant2} will not become active. Current state: Broken"
+    ) as err:
         pg2.start()
     log.info(f"As expected, compute startup failed for timeline with missing layers: {err}")
 
     # Third timeline will also fail during basebackup, because the layer file is corrupt.
+    # It will fail when we try to read (and reconstruct) a page from it, ergo the error message.
     # (We don't check layer file contents on startup, when loading the timeline)
     with pytest.raises(Exception, match="Failed to load delta layer") as err:
         pg3.start()
