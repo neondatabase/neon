@@ -45,7 +45,7 @@
             },
             {
                 "name": "shared_buffers",
-                "value": "1MB",
+                "value": "128MB",
                 "vartype": "string"
             },
             {

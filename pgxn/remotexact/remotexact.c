@@ -267,7 +267,7 @@ rx_collect_insert(Relation relation, HeapTuple newtuple)
 	pq_sendbyte(buf, region);
 
 #if PG_VERSION_NUM >= 150000
-	// TODO (ctring): logicalrep_write_insert in postgres 15 requires a tuple slot,
+	// TODO(ctring): logicalrep_write_insert in postgres 15 requires a tuple slot,
 	//				  so creating it here to make things compile for now. This
 	//				  might not be efficient and should be revised.
 	newslot = MakeTupleTableSlot(RelationGetDescr(relation), &TTSOpsHeapTuple);
@@ -319,7 +319,7 @@ rx_collect_update(Relation relation, HeapTuple oldtuple, HeapTuple newtuple)
 	pq_sendbyte(buf, region);
 
 #if PG_VERSION_NUM >= 150000
-	// TODO (ctring): logicalrep_write_update in postgres 15 requires tuple slots,
+	// TODO(ctring): logicalrep_write_update in postgres 15 requires tuple slots,
 	//				  so creating them here to make things compile for now. This
 	//				  might not be efficient and should be revised.
 	oldslot = MakeTupleTableSlot(RelationGetDescr(relation), &TTSOpsHeapTuple);
@@ -376,7 +376,7 @@ rx_collect_delete(Relation relation, HeapTuple oldtuple)
 	pq_sendbyte(buf, region);
 
 #if PG_VERSION_NUM >= 150000
-	// TODO (ctring): logicalrep_write_delete in postgres 15 requires a tuple slot,
+	// TODO(ctring): logicalrep_write_delete in postgres 15 requires a tuple slot,
 	//				  so creating it here to make things compile for now. This
 	//				  might not be efficient and should be revised.
 	oldslot = MakeTupleTableSlot(RelationGetDescr(relation), &TTSOpsHeapTuple);
@@ -492,7 +492,7 @@ rx_execute_remote_xact(void)
 								  PQerrorMessage(XactServerConn)));
 	}
 
-	// TODO (ctring): include more information in the response so that we can report
+	// TODO(ctring): include more information in the response so that we can report
 	//				  the cause of abort in more details
 	committed = pq_getmsgbyte(&resp_buf);
 	PQfreemem(resp_buf.data);
@@ -580,7 +580,7 @@ get_collected_relation(Oid relid, bool create_if_not_found)
 	return relation;
 }
 
-// TODO (ctring): need better handling of interrupted connection / reconnection
+// TODO(ctring): need better handling of interrupted connection / reconnection
 static bool
 connect_to_txn_server(void)
 {

@@ -1748,7 +1748,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		case RELPERSISTENCE_PERMANENT:
 			/*
 			 * Remotexact
-			 * TODO (ctring) Write back temporary writes to remote relations?
+			 * TODO(ctring) Write back temporary writes to remote relations?
 			 */
 			break;
 
@@ -1914,7 +1914,7 @@ neon_writeback(SMgrRelation reln, ForkNumber forknum,
 		case RELPERSISTENCE_PERMANENT:
 			/*
 			 * Remotexact
-			 * TODO (ctring): Write back temporary writes to remote relations?
+			 * TODO(ctring): Write back temporary writes to remote relations?
 			 */
 			break;
 
@@ -2251,7 +2251,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		case RELPERSISTENCE_PERMANENT:
 			/*
 			 * Remotexact
-			 * TODO (ctring): Write back temporary writes to remote relations?
+			 * TODO(ctring): Write back temporary writes to remote relations?
 			 */
 			break;
 

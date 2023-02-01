@@ -131,7 +131,7 @@ validate_table_scan(RWSetRelation *rw_rel)
          * as seen by the current snapshot here. In-progress and aborted tuples
          * are never visible to read_csn.
          * 
-         * TODO (ctring): There is an edge case where a tuple is removed and
+         * TODO(ctring): There is an edge case where a tuple is removed and
          * then immediately vacuumed after the remote transaction starts but
          * before validation. The physical tuple is no longer available for
          * us to do these checks, resulting in wrong validation. One way to counter
