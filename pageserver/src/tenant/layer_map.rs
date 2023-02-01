@@ -254,14 +254,8 @@ where
     /// Helper function for BatchedUpdates::insert_historic
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
-        let kr = layer.get_key_range();
-        let lr = layer.get_lsn_range();
         self.historic.insert(
-            historic_layer_coverage::LayerKey {
-                key: kr.start.to_i128()..kr.end.to_i128(),
-                lsn: lr.start.0..lr.end.0,
-                is_image: !layer.is_incremental(),
-            },
+            historic_layer_coverage::LayerKey::from(&*layer),
             Arc::clone(&layer),
         );
 
@@ -278,13 +272,8 @@ where
     /// Helper function for BatchedUpdates::remove_historic
     ///
     pub fn remove_historic_noflush(&mut self, layer: Arc<L>) {
-        let kr = layer.get_key_range();
-        let lr = layer.get_lsn_range();
-        self.historic.remove(historic_layer_coverage::LayerKey {
-            key: kr.start.to_i128()..kr.end.to_i128(),
-            lsn: lr.start.0..lr.end.0,
-            is_image: !layer.is_incremental(),
-        });
+        self.historic
+            .remove(historic_layer_coverage::LayerKey::from(&*layer));
 
         if Self::is_l0(&layer) {
             let len_before = self.l0_delta_layers.len();
