@@ -19,6 +19,7 @@ use futures::TryFutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use scopeguard::ScopeGuard;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::*;
@@ -115,6 +116,19 @@ pub const TIMELINES_SEGMENT_NAME: &str = "timelines";
 pub const TENANT_ATTACHING_LEGACY_MARKER_FILENAME: &str = "attaching";
 pub const TENANT_ATTACHING_MARKER_SUFFIX: &str = "___attaching";
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct AttachMarkerFileContentsV1 {
+    format_version: u32,
+}
+
+impl AttachMarkerFileContentsV1 {
+    fn new() -> Self {
+        Self { format_version: 1 }
+    }
+}
+
+type AttachMarkerFileContents = AttachMarkerFileContentsV1;
+
 /// The error message does not include the tenant ID.
 /// The caller is responsible for adding it.
 #[derive(Debug, thiserror::Error)]
@@ -126,10 +140,17 @@ pub enum AttachError {
         op: &'static str,
         path: PathBuf,
         #[source]
-        error: std::io::Error,
+        error: Box<dyn std::error::Error>,
     },
     #[error("marker file is missing: {path:?}")]
     MarkerFileMissing { path: PathBuf },
+    #[error("{op} marker file {path:?}: {error:#}")]
+    ReadMarkerFile {
+        op: &'static str,
+        path: PathBuf,
+        #[source]
+        error: Box<dyn std::error::Error>,
+    },
 }
 
 /// Attach invokes the load routine after it has set up the local filesystem state.
@@ -690,6 +711,96 @@ impl Tenant {
         Ok(())
     }
 
+    /// Create the attach marker file, i.e., `/tenants/${tenant_id}___attaching`.
+    /// If we fail during the creating process, this function returns an error and tries
+    /// to remove the unfinished marker. It logs a warn-level message if that cleanup fails.
+    fn create_attach_marker_file(path: &Path) -> Result<(), AttachError> {
+        let contents = AttachMarkerFileContents::new();
+        // Serialize before creating the file.
+        let contents_string =
+            serde_json::to_string(&contents).map_err(|error| AttachError::CreateMarkerFile {
+                op: "serialize contents of",
+                path: path.to_owned(),
+                error: Box::new(error),
+            })?;
+        // Atomically create the file, fail if it already exists.
+        let mut file = match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(AttachError::LocalStateExists {
+                    what: "marker file",
+                    path: path.to_owned(),
+                });
+            }
+            Err(error) => {
+                return Err(AttachError::CreateMarkerFile {
+                    op: "create",
+                    path: path.to_owned(),
+                    error: Box::new(error),
+                });
+            }
+        };
+        // If we fail in any of the steps starting from here, try to clean up.
+        let guard = scopeguard::guard((), |()| {
+            if let Err(e) = std::fs::remove_file(path) {
+                warn!("failed to remove attach marker {path:?}: {e:#}");
+            }
+        });
+        file.write_all(contents_string.as_bytes())
+            .map_err(|error| AttachError::CreateMarkerFile {
+                op: "write",
+                path: path.to_owned(),
+                error: Box::new(error),
+            })?;
+        crashsafe::fsync_file_and_parent(path).map_err(|error| AttachError::CreateMarkerFile {
+            op: "fsync_file_and_parent",
+            path: path.to_owned(),
+            error: Box::new(error),
+        })?;
+        // All good, don't remove the file upon return!
+        ScopeGuard::into_inner(guard);
+        Ok(())
+    }
+
+    /// Read the marker file at the given path
+    fn read_attach_marker_file(path: &Path) -> Result<AttachMarkerFileContents, AttachError> {
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(AttachError::MarkerFileMissing {
+                    path: path.to_owned(),
+                });
+            }
+            Err(error) => {
+                return Err(AttachError::ReadMarkerFile {
+                    op: "open",
+                    path: path.to_owned(),
+                    error: Box::new(error),
+                });
+            }
+        };
+        let mut contents = String::new();
+        use std::io::Read;
+        file.read_to_string(&mut contents)
+            .map_err(|error| AttachError::ReadMarkerFile {
+                op: "read_to_string",
+                path: path.to_owned(),
+                error: Box::new(error),
+            })?;
+        // XXX if we change the format, check format_version to handle updates
+        let contents =
+            serde_json::from_str(&contents).map_err(|error| AttachError::ReadMarkerFile {
+                op: "parse",
+                path: path.to_owned(),
+                error: Box::new(error),
+            })?;
+        Ok(contents)
+    }
+
     ///
     /// Attach a tenant that's available in cloud storage.
     ///
@@ -717,26 +828,8 @@ impl Tenant {
                 path: tenant_dir,
             });
         }
-        if marker_file.exists() {
-            return Err(AttachError::LocalStateExists {
-                what: "attaching marker file",
-                path: marker_file,
-            });
-        }
-
-        // create the marker file, i.e., /tenants/${tenant_id}___attaching
-        std::fs::File::create(&marker_file).map_err(|error| AttachError::CreateMarkerFile {
-            op: "create",
-            path: marker_file.clone(),
-            error,
-        })?;
-        crashsafe::fsync_file_and_parent(&marker_file).map_err(|error| {
-            AttachError::CreateMarkerFile {
-                op: "fsync_file_and_parent",
-                path: marker_file.clone(),
-                error,
-            }
-        })?;
+        // fails if the marker file already exists
+        Self::create_attach_marker_file(&marker_file)?;
 
         Self::spawn_resume_attach(conf, tenant_id, remote_storage, ctx)
     }
@@ -752,15 +845,16 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> Result<Arc<Tenant>, AttachError> {
-        // Sanity-check, shouldn't happen in practice.
+        // Sanity-check, duplicated from `Tenant::resume_attach`
         let marker_file_path = conf.tenant_attaching_mark_file_path(&tenant_id);
-        if !marker_file_path.is_file() {
-            return Err(AttachError::MarkerFileMissing {
-                path: marker_file_path,
-            });
-        }
+        let _marker_file_contents = Self::read_attach_marker_file(&marker_file_path)?;
 
-        // XXX: Attach should provide the config, especially during tenant migration.
+        // XXX: In the future, spawn_start_attach will receive a tenant config from control plane
+        // and persist it in the attach marker file. When resuming attach,
+        // the Tenant::resume_attach function should read it and persist it in the final location.
+        // For now, the contract is that the tenant starts with the default config after attach,
+        // and if the control plane requires tenant config changes, it will make another API call
+        // after the tenant has become active.
         //      See https://github.com/neondatabase/neon/issues/1555
         let tenant_conf = TenantConfOpt::default();
 
