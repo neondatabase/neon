@@ -253,12 +253,20 @@ pub struct LayerAccessStatFullDetails {
     pub access_kind: LayerAccessKind,
 }
 
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum LayerResidenceStatus {
+    Resident { timestamp_millis_since_epoch: u128 },
+    Evicted { timestamp_millis_since_epoch: u128 },
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LayerAccessStats {
     pub access_count_by_access_kind: HashMap<LayerAccessKind, u64>,
     pub task_kind_access_flag: Vec<&'static str>,
     pub first: Option<LayerAccessStatFullDetails>,
     pub most_recent: Vec<LayerAccessStatFullDetails>,
+    pub most_recent_residence_changes: Vec<LayerResidenceStatus>,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]

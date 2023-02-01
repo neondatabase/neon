@@ -447,6 +447,10 @@ impl PersistentLayer for DeltaLayer {
 
         ret
     }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        &self.access_stats
+    }
 }
 
 impl DeltaLayer {
@@ -578,6 +582,7 @@ impl DeltaLayer {
         tenant_id: TenantId,
         filename: &DeltaFileName,
         file_size: u64,
+        existing_access_stats: Option<LayerAccessStats>,
     ) -> DeltaLayer {
         DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -586,7 +591,7 @@ impl DeltaLayer {
             key_range: filename.key_range.clone(),
             lsn_range: filename.lsn_range.clone(),
             file_size,
-            access_stats: LayerAccessStats::default(),
+            access_stats: existing_access_stats.unwrap_or_default(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,

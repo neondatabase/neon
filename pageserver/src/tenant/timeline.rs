@@ -71,7 +71,9 @@ use walreceiver::spawn_connection_manager_task;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset};
+use super::storage_layer::{
+    DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset, LayerResidenceStatus,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {
@@ -877,12 +879,22 @@ impl Timeline {
                 self.timeline_id,
                 &image_name,
                 &layer_metadata,
+                Some(
+                    local_layer
+                        .access_stats()
+                        .clone_for_residence_change(LayerResidenceStatus::evicted()),
+                ),
             ),
             LayerFileName::Delta(delta_name) => RemoteLayer::new_delta(
                 self.tenant_id,
                 self.timeline_id,
                 &delta_name,
                 &layer_metadata,
+                Some(
+                    local_layer
+                        .access_stats()
+                        .clone_for_residence_change(LayerResidenceStatus::evicted()),
+                ),
             ),
             #[cfg(test)]
             LayerFileName::Test(_) => unreachable!(),
@@ -1159,6 +1171,7 @@ impl Timeline {
                     self.tenant_id,
                     &imgfilename,
                     file_size,
+                    None,
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1190,6 +1203,7 @@ impl Timeline {
                     self.tenant_id,
                     &deltafilename,
                     file_size,
+                    None,
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1327,6 +1341,7 @@ impl Timeline {
                         self.timeline_id,
                         imgfilename,
                         &remote_layer_metadata,
+                        None,
                     );
                     let remote_layer = Arc::new(remote_layer);
 
@@ -1351,6 +1366,7 @@ impl Timeline {
                         self.timeline_id,
                         deltafilename,
                         &remote_layer_metadata,
+                        None,
                     );
                     let remote_layer = Arc::new(remote_layer);
                     updates.insert_historic(remote_layer);
