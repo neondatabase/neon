@@ -20,6 +20,7 @@
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
@@ -143,7 +144,7 @@ impl Layer for ImageLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool) -> Result<()> {
+    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} ----",
             self.tenant_id, self.timeline_id, self.key_range.start, self.key_range.end, self.lsn
@@ -153,7 +154,7 @@ impl Layer for ImageLayer {
             return Ok(());
         }
 
-        let inner = self.load()?;
+        let inner = self.load(ctx)?;
         let file = inner.file.as_ref().unwrap();
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -174,12 +175,13 @@ impl Layer for ImageLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         assert!(self.key_range.contains(&key));
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load()?;
+        let inner = self.load(ctx)?;
 
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -220,7 +222,7 @@ impl PersistentLayer for ImageLayer {
     fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
-    fn iter(&self) -> Result<LayerIter<'_>> {
+    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
         unimplemented!();
     }
 
@@ -270,7 +272,7 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self) -> Result<RwLockReadGuard<ImageLayerInner>> {
+    fn load(&self, _ctx: &RequestContext) -> Result<RwLockReadGuard<ImageLayerInner>> {
         loop {
             // Quick exit if already loaded
             let inner = self.inner.read().unwrap();

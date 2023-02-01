@@ -2,6 +2,7 @@
 //! in remote storage.
 //!
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::repository::Key;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
@@ -51,6 +52,7 @@ impl Layer for RemoteLayer {
         _key: Key,
         _lsn_range: Range<Lsn>,
         _reconstruct_state: &mut ValueReconstructState,
+        _ctx: &RequestContext,
     ) -> Result<ValueReconstructResult> {
         bail!(
             "layer {} needs to be downloaded",
@@ -63,7 +65,7 @@ impl Layer for RemoteLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, _verbose: bool) -> Result<()> {
+    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         println!(
             "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
             self.tenantid,
@@ -111,11 +113,11 @@ impl PersistentLayer for RemoteLayer {
         None
     }
 
-    fn iter(&self) -> Result<LayerIter<'_>> {
+    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
         bail!("cannot iterate a remote layer");
     }
 
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
+    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
         bail!("cannot iterate a remote layer");
     }
 

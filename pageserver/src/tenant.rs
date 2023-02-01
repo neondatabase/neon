@@ -2643,7 +2643,11 @@ impl Drop for Tenant {
     }
 }
 /// Dump contents of a layer file to stdout.
-pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> anyhow::Result<()> {
+pub fn dump_layerfile_from_path(
+    path: &Path,
+    verbose: bool,
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
     use std::os::unix::fs::FileExt;
 
     // All layer files start with a two-byte "magic" value, to identify the kind of
@@ -2653,8 +2657,8 @@ pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> anyhow::Result<()
     file.read_exact_at(&mut header_buf, 0)?;
 
     match u16::from_be_bytes(header_buf) {
-        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose)?,
-        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose)?,
+        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose, ctx)?,
+        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose, ctx)?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 

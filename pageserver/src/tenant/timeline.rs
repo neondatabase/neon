@@ -696,7 +696,7 @@ impl Timeline {
 
                 // 3. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size).await?;
+                self.compact_level0(target_file_size, ctx).await?;
                 timer.stop_and_record();
 
                 // If `create_image_layers' or `compact_level0` scheduled any
@@ -1767,6 +1767,7 @@ impl Timeline {
                                 key,
                                 lsn_floor..cont_lsn,
                                 reconstruct_state,
+                                ctx,
                             ) {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
@@ -1792,6 +1793,7 @@ impl Timeline {
                                 key,
                                 lsn_floor..cont_lsn,
                                 reconstruct_state,
+                                ctx,
                             ) {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
@@ -1825,6 +1827,7 @@ impl Timeline {
                                 key,
                                 lsn_floor..cont_lsn,
                                 reconstruct_state,
+                                ctx,
                             ) {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
@@ -2463,6 +2466,7 @@ impl Timeline {
     async fn compact_level0_phase1(
         &self,
         target_file_size: u64,
+        ctx: &RequestContext,
     ) -> anyhow::Result<CompactLevel0Phase1Result> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
@@ -2522,8 +2526,9 @@ impl Timeline {
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
-        let all_values_iter =
-            itertools::process_results(deltas_to_compact.iter().map(|l| l.iter()), |iter_iter| {
+        let all_values_iter = itertools::process_results(
+            deltas_to_compact.iter().map(|l| l.iter(ctx)),
+            |iter_iter| {
                 iter_iter.kmerge_by(|a, b| {
                     if let Ok((a_key, a_lsn, _)) = a {
                         if let Ok((b_key, b_lsn, _)) = b {
@@ -2539,11 +2544,12 @@ impl Timeline {
                         true
                     }
                 })
-            })?;
+            },
+        )?;
 
         // This iterator walks through all keys and is needed to calculate size used by each key
         let mut all_keys_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.key_iter()),
+            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
             |iter_iter| {
                 iter_iter.kmerge_by(|a, b| {
                     let (a_key, a_lsn, _) = a;
@@ -2719,11 +2725,15 @@ impl Timeline {
     /// Collect a bunch of Level 0 layer files, and compact and reshuffle them as
     /// as Level 1 files.
     ///
-    async fn compact_level0(&self, target_file_size: u64) -> anyhow::Result<()> {
+    async fn compact_level0(
+        &self,
+        target_file_size: u64,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = self.compact_level0_phase1(target_file_size).await?;
+        } = self.compact_level0_phase1(target_file_size, ctx).await?;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do

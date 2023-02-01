@@ -46,6 +46,7 @@
 mod historic_layer_coverage;
 mod layer_coverage;
 
+use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
 use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
@@ -654,22 +655,22 @@ where
 
     /// debugging function to print out the contents of the layer map
     #[allow(unused)]
-    pub fn dump(&self, verbose: bool) -> Result<()> {
+    pub fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!("Begin dump LayerMap");
 
         println!("open_layer:");
         if let Some(open_layer) = &self.open_layer {
-            open_layer.dump(verbose)?;
+            open_layer.dump(verbose, ctx)?;
         }
 
         println!("frozen_layers:");
         for frozen_layer in self.frozen_layers.iter() {
-            frozen_layer.dump(verbose)?;
+            frozen_layer.dump(verbose, ctx)?;
         }
 
         println!("historic_layers:");
         for layer in self.iter_historic_layers() {
-            layer.dump(verbose)?;
+            layer.dump(verbose, ctx)?;
         }
         println!("End dump LayerMap");
         Ok(())
