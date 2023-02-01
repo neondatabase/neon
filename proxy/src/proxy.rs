@@ -307,6 +307,7 @@ async fn connect_to_compute(
 }
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
+#[tracing::instrument(skip_all)]
 async fn prepare_client_connection(
     node: &compute::PostgresConnection,
     reported_auth_ok: bool,
@@ -344,6 +345,7 @@ async fn prepare_client_connection(
 }
 
 /// Forward bytes in both directions (client <-> compute).
+#[tracing::instrument(skip_all)]
 async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,

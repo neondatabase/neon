@@ -62,6 +62,7 @@ pub mod timed_lru {
     ///
     /// * There's an API for immediate invalidation (removal) of a cache entry;
     ///   It's useful in case we know for sure that the entry is no longer correct.
+    ///   See [`timed_lru::LookupInfo`] & [`timed_lru::Cached`] for more information.
     ///
     /// * Expired entries are kept in the cache, until they are evicted by the LRU policy,
     ///   or by a successful lookup (i.e. the entry hasn't expired yet).
@@ -243,8 +244,15 @@ pub mod timed_lru {
         }
     }
 
+    /// Lookup information for key invalidation.
     pub struct LookupInfo<K> {
+        /// Time of creation of a cache [`Entry`].
+        /// We use this during invalidation lookups to prevent eviction of a newer
+        /// entry sharing the same key (it might've been inserted by a different
+        /// task after we got the entry we're trying to invalidate now).
         created_at: Instant,
+
+        /// Search by this key.
         key: K,
     }
 
