@@ -610,19 +610,33 @@ impl Tenant {
     #[instrument(skip_all)]
     pub fn migrate_attaching_marker_files(tenants_dir: &Path) -> anyhow::Result<()> {
         info!("starting on {tenants_dir:?}");
-        let mut dir_entries = std::fs::read_dir(tenants_dir)
+        let dir_entries = std::fs::read_dir(tenants_dir)
             .with_context(|| format!("list tenants dir {tenants_dir:?}"))?;
 
         // key: dst, value: src,
         let mut needed_renames: HashMap<PathBuf, PathBuf> = HashMap::new();
-        loop {
-            let dir_entry = match dir_entries.next() {
-                None => break,
-                Some(res) => res.context("read tenants dir entry")?,
-            };
+        for read_dir_entry_res in dir_entries {
+            let dir_entry = read_dir_entry_res.context("read tenants dir entry")?;
+
             if !dir_entry.path().is_dir() {
                 continue;
             }
+
+            let tenant_id = match dir_entry
+                .file_name()
+                .to_str()
+                .with_context(|| format!("non-utf8 directory entry: {dir_entry:?}"))?
+                .parse::<TenantId>()
+            {
+                Ok(tenant_id) => tenant_id,
+                Err(e) => {
+                    info!(
+                        "skipping directory, assuming not a tenant dir {:?}: {:#}",
+                        dir_entry, e
+                    );
+                    continue;
+                }
+            };
 
             let legacy_attach_marker_path = dir_entry
                 .path()
@@ -632,25 +646,9 @@ impl Tenant {
                 continue;
             }
 
-            let legacy_marker_parent = legacy_attach_marker_path.parent().unwrap();
+            info!("found legacy attaching marker file for tenant {tenant_id}: {legacy_attach_marker_path:?}");
 
-            match legacy_marker_parent
-                .file_name()
-                .and_then(OsStr::to_str)
-                .unwrap()
-                .parse::<TenantId>()
-            {
-                Ok(tenant_id) => {
-                    info!("found legacy attaching marker file for tenant {tenant_id}: {legacy_attach_marker_path:?}")
-                }
-                Err(e) => {
-                    warn!("skipping migration of legacy attach marker {legacy_attach_marker_path:?} because parent directory name is not a tenant ID: {e:#}");
-                    continue;
-                }
-            }
-
-            let dst =
-                path_with_suffix_extension(legacy_marker_parent, TENANT_ATTACHING_MARKER_SUFFIX);
+            let dst = path_with_suffix_extension(dir_entry.path(), TENANT_ATTACHING_MARKER_SUFFIX);
             match needed_renames.entry(dst) {
                 hash_map::Entry::Occupied(o) => anyhow::bail!(
                     "marker file collision: existing dst {:?} existing src {:?} offender: {:?}",
@@ -694,8 +692,10 @@ impl Tenant {
                 .open(dst)
                 .with_context(|| format!("open for create marker file at {dst:?}"))?;
             drop(dst_file);
-            crashsafe::fsync_file_and_parent(dst).with_context(|| format!("fsync {dst:?}"))?;
+            crashsafe::fsync(dst).with_context(|| format!("fsync {dst:?}"))?;
         }
+        crashsafe::fsync(tenants_dir)
+            .context("fsync tenants dir to persist new marker file dir entries")?;
 
         // Remove old marker files
         for (dst, src) in &needed_renames {
@@ -703,7 +703,7 @@ impl Tenant {
             std::fs::remove_file(src)
                 .with_context(|| format!("remove old marker file at {src:?}"))?;
             crashsafe::fsync(src.parent().unwrap())
-                .with_context(|| format!("fsync src directory {src:?}"))?;
+                .with_context(|| format!("fsync src's parent directory {src:?}"))?;
         }
 
         info!("done");
