@@ -14,7 +14,7 @@ use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, instrument, Instrument};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -71,17 +71,35 @@ pub async fn task_main(
                     .set_nodelay(true)
                     .context("failed to set socket option")?;
 
-                handle_client(config, &cancel_map, session_id, socket).await
+                handle_postgres_client(config, &cancel_map, session_id, socket).await
             }
             .unwrap_or_else(|e| {
                 // Acknowledge that the task has finished with an error.
                 error!("per-client task finished with an error: {e:#}");
-            })
-            .instrument(info_span!("client", session = format_args!("{session_id}"))),
+            }),
         );
     }
 }
 
+/// Handle an incoming PostgreSQL connection
+pub async fn handle_postgres_client(
+    config: &ProxyConfig,
+    cancel_map: &CancelMap,
+    session_id: uuid::Uuid,
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
+) -> anyhow::Result<()> {
+    handle_client(
+        config,
+        cancel_map,
+        session_id,
+        stream,
+        HostnameMethod::Sni,
+        false,
+    )
+    .await
+}
+
+/// Handle an incoming Postgres connection that's wrapped in websocket
 pub async fn handle_ws_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
@@ -89,45 +107,32 @@ pub async fn handle_ws_client(
     stream: impl AsyncRead + AsyncWrite + Unpin + Send,
     hostname: Option<String>,
 ) -> anyhow::Result<()> {
-    // The `closed` counter will increase when this future is destroyed.
-    NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
-    scopeguard::defer! {
-        NUM_CONNECTIONS_CLOSED_COUNTER.inc();
-    }
-
-    let tls = config.tls_config.as_ref();
-    let hostname = hostname.as_deref();
-
-    // TLS is None here, because the connection is already encrypted.
-    let do_handshake = handshake(stream, None, cancel_map).instrument(info_span!("handshake"));
-    let (mut stream, params) = match do_handshake.await? {
-        Some(x) => x,
-        None => return Ok(()), // it's a cancellation request
-    };
-
-    // Extract credentials which we're going to use for auth.
-    let creds = {
-        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
-        let result = config
-            .auth_backend
-            .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name, true))
-            .transpose();
-
-        async { result }.or_else(|e| stream.throw_error(e)).await?
-    };
-
-    let client = Client::new(stream, creds, &params, session_id);
-    cancel_map
-        .with_session(|session| client.connect_to_db(session))
-        .await
+    handle_client(
+        config,
+        cancel_map,
+        session_id,
+        stream,
+        HostnameMethod::Param(hostname),
+        true,
+    )
+    .await
 }
 
+enum HostnameMethod {
+    Param(Option<String>),
+    Sni,
+}
+
+/// Handle an incoming client connection, handshake and authentication.
+/// After that, keeps forwarding all the data. This doesn't return until the
+/// connection is lost.
 async fn handle_client(
     config: &ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
-    stream: impl AsyncRead + AsyncWrite + Unpin + Send,
+    raw_stream: impl AsyncRead + AsyncWrite + Unpin + Send,
+    hostname_method: HostnameMethod,
+    use_cleartext_password_flow: bool,
 ) -> anyhow::Result<()> {
     // The `closed` counter will increase when this future is destroyed.
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
@@ -135,36 +140,73 @@ async fn handle_client(
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
     }
 
-    let tls = config.tls_config.as_ref();
-    let do_handshake = handshake(stream, tls, cancel_map).instrument(info_span!("handshake"));
-    let (mut stream, params) = match do_handshake.await? {
-        Some(x) => x,
-        None => return Ok(()), // it's a cancellation request
-    };
+    // Accept the connection from the client, authenticate it, and establish
+    // connection to the database.
+    //
+    // We cover all these activities in a one tracing span, so that they are
+    // traced as one request. That makes it convenient to investigate where
+    // the time is spent when establishing a new connection. After the
+    // connection has been established, we exit the span, and use a separate
+    // span for the (rest of the) duration of the connection.
+    let conn = async {
+        // Process postgres startup packet and upgrade to TLS (if applicable)
+        let tls = config.tls_config.as_ref();
+        let (mut stream, params) = match handshake(raw_stream, tls, cancel_map).await? {
+            Some(x) => x,
+            None => return Ok::<_, anyhow::Error>(None), // it's a cancellation request
+        };
 
-    // Extract credentials which we're going to use for auth.
-    let creds = {
-        let sni = stream.get_ref().sni_hostname();
-        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
-        let result = config
-            .auth_backend
-            .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name, false))
-            .transpose();
+        // Extract credentials which we're going to use for auth.
+        let creds = {
+            let sni = match &hostname_method {
+                HostnameMethod::Param(hostname) => hostname.as_deref(),
+                HostnameMethod::Sni => stream.get_ref().sni_hostname(),
+            };
+            let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+            let result = config
+                .auth_backend
+                .as_ref()
+                .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
+                .transpose();
 
-        async { result }.or_else(|e| stream.throw_error(e)).await?
-    };
+            async { result }.or_else(|e| stream.throw_error(e)).await?
+        };
 
-    let client = Client::new(stream, creds, &params, session_id);
-    cancel_map
-        .with_session(|session| client.connect_to_db(session))
-        .await
+        Ok(Some(
+            EstablishedConnection::connect_to_db(
+                stream,
+                creds,
+                &params,
+                session_id,
+                use_cleartext_password_flow,
+                cancel_map,
+            )
+            .await?,
+        ))
+    }
+    .instrument(info_span!("establish_connection", session_id=%session_id))
+    .await?;
+
+    match conn {
+        Some(conn) => {
+            // Connection established in both ways. Forward all traffic until the
+            // either connection is lost.
+            conn.handle_connection()
+                .instrument(info_span!("forward", session_id=%session_id))
+                .await
+        }
+        None => {
+            // It was a cancellation request. It was handled in 'handshake' already.
+            Ok(())
+        }
+    }
 }
 
 /// Establish a (most probably, secure) connection with the client.
 /// For better testing experience, `stream` can be any object satisfying the traits.
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
+#[instrument(skip_all)]
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<&TlsConfig>,
@@ -227,43 +269,36 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Thin connection context.
-struct Client<'a, S> {
-    /// The underlying libpq protocol stream.
-    stream: PqStream<S>,
-    /// Client credentials that we care about.
-    creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
-    /// KV-dictionary with PostgreSQL connection params.
-    params: &'a StartupMessageParams,
-    /// Unique connection ID.
-    session_id: uuid::Uuid,
+struct EstablishedConnection<'a, S> {
+    client_stream: MeasuredStream<S>,
+    db_stream: MeasuredStream<tokio::net::TcpStream>,
+
+    /// Hold on to the Session for as long as the connection is alive, so that
+    /// it can be cancelled.
+    _session: cancellation::Session<'a>,
 }
 
-impl<'a, S> Client<'a, S> {
-    /// Construct a new connection context.
-    fn new(
-        stream: PqStream<S>,
-        creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
-        params: &'a StartupMessageParams,
-        session_id: uuid::Uuid,
-    ) -> Self {
-        Self {
-            stream,
-            creds,
-            params,
-            session_id,
-        }
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> EstablishedConnection<'_, S> {
+    async fn handle_connection(mut self) -> anyhow::Result<()> {
+        // Starting from here we only proxy the client's traffic.
+        info!("performing the proxy pass...");
+        let _ = tokio::io::copy_bidirectional(&mut self.client_stream, &mut self.db_stream).await?;
+        Ok(())
     }
-}
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
-    async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
-        let Self {
-            mut stream,
-            creds,
-            params,
-            session_id,
-        } = self;
+    /// On return, the connection is fully established in both ways, and we can start
+    /// forwarding the bytes.
+    #[instrument(skip_all)]
+    async fn connect_to_db<'a>(
+        mut stream: PqStream<S>,
+        creds: auth::BackendType<'a, auth::ClientCredentials<'_>>,
+        params: &'_ StartupMessageParams,
+        session_id: uuid::Uuid,
+        use_cleartext_password_flow: bool,
+        cancel_map: &'a CancelMap,
+    ) -> anyhow::Result<EstablishedConnection<'a, S>> {
+        let session = cancel_map.new_session()?;
 
         let extra = auth::ConsoleReqExtra {
             session_id, // aka this connection's id
@@ -272,10 +307,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
 
         let auth_result = async {
             // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds.authenticate(&extra, &mut stream).await;
+            let res = creds
+                .authenticate(&extra, &mut stream, use_cleartext_password_flow)
+                .await;
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
-        .instrument(info_span!("auth"))
         .await?;
 
         let node = auth_result.value;
@@ -311,21 +347,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<'_, S> {
             .await?;
 
         let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("tx"));
-        let mut client = MeasuredStream::new(stream.into_inner(), |cnt| {
-            // Number of bytes we sent to the client (outbound).
-            m_sent.inc_by(cnt as u64);
-        });
+        let client_stream = MeasuredStream::new(stream.into_inner(), m_sent);
 
         let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&node.aux.traffic_labels("rx"));
-        let mut db = MeasuredStream::new(db.stream, |cnt| {
-            // Number of bytes the client sent to the compute node (inbound).
-            m_recv.inc_by(cnt as u64);
-        });
+        let db_stream = MeasuredStream::new(db.stream, m_recv);
 
-        // Starting from here we only proxy the client's traffic.
-        info!("performing the proxy pass...");
-        let _ = tokio::io::copy_bidirectional(&mut client, &mut db).await?;
-
-        Ok(())
+        Ok(EstablishedConnection {
+            client_stream,
+            db_stream,
+            _session: session,
+        })
     }
 }
