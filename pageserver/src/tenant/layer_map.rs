@@ -286,14 +286,8 @@ where
 
         if Self::is_l0(&layer) {
             let len_before = self.l0_delta_layers.len();
-
-            // FIXME: ptr_eq might fail to return true for 'dyn'
-            // references.  Clippy complains about this. In practice it
-            // seems to work, the assertion below would be triggered
-            // otherwise but this ought to be fixed.
-            #[allow(clippy::vtable_address_comparisons)]
             self.l0_delta_layers
-                .retain(|other| !Arc::ptr_eq(other, &layer));
+                .retain(|other| !Self::compare_arced_layers(other, &layer));
             assert_eq!(self.l0_delta_layers.len(), len_before - 1);
         }
 
@@ -322,11 +316,7 @@ where
             Some(
                 self.l0_delta_layers
                     .iter()
-                    .position(|slot| {
-                        // See: remove_historic_noflush
-                        #[allow(clippy::vtable_address_comparisons)]
-                        Arc::ptr_eq(slot, expected)
-                    })
+                    .position(|slot| Self::compare_arced_layers(slot, expected))
                     .ok_or_else(|| anyhow::anyhow!("existing l0 delta layer was not found"))?,
             )
         } else {
@@ -334,9 +324,7 @@ where
         };
 
         let replaced = self.historic.replace(&key, new.clone(), |existing| {
-            // See: remove_historic_noflush
-            #[allow(clippy::vtable_address_comparisons)]
-            Arc::ptr_eq(existing, expected)
+            Self::compare_arced_layers(existing, expected)
         });
 
         if !replaced {
@@ -722,5 +710,17 @@ where
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+
+    #[inline(always)]
+    fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
+        // FIXME: ptr_eq might fail to return true for 'dyn' references because of multiple vtables
+        // can be created in compilation. Clippy complains about this. In practice it seems to
+        // work, the assertion below would be triggered otherwise but this ought to be fixed.
+        //
+        // In future rust versions this might become Arc::as_ptr(left) as *const () ==
+        // Arc::as_ptr(right) as *const (), we could change to that before.
+        #[allow(clippy::vtable_address_comparisons)]
+        Arc::ptr_eq(left, right)
     }
 }
