@@ -13,6 +13,6 @@ bytes.workspace = true
 byteorder.workspace = true
 utils.workspace = true
 postgres_ffi.workspace = true
+enum-map.workspace = true
 
 workspace_hack.workspace = true
-enum-map = "2.4.2"
