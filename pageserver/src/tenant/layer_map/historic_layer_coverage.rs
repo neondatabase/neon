@@ -600,7 +600,7 @@ fn test_retroactive_simple() {
         LayerKey {
             key: 2..5,
             lsn: 105..106,
-            is_image: true,
+            is_image: false,
         },
         "Delta 1".to_string(),
     );
@@ -614,7 +614,8 @@ fn test_retroactive_simple() {
     let version = map.get().unwrap().get_version(102).unwrap();
     assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
     let version = map.get().unwrap().get_version(107).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Delta 1".to_string()));
+    assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
+    assert_eq!(version.delta_coverage.query(4), Some("Delta 1".to_string()));
     let version = map.get().unwrap().get_version(115).unwrap();
     assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
     let version = map.get().unwrap().get_version(125).unwrap();
