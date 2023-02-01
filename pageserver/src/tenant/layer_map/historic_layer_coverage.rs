@@ -94,15 +94,13 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         }
 
         // Insert into data structure
-        if layer_key.is_image {
-            self.head
-                .image_coverage
-                .insert(layer_key.key, layer_key.lsn.clone(), value);
+        let target = if layer_key.is_image {
+            &mut self.head.image_coverage
         } else {
-            self.head
-                .delta_coverage
-                .insert(layer_key.key, layer_key.lsn.clone(), value);
-        }
+            &mut self.head.delta_coverage
+        };
+
+        target.insert(layer_key.key, layer_key.lsn.clone(), value);
 
         // Remember history. Clone is O(1)
         self.historic.insert(layer_key.lsn.start, self.head.clone());
