@@ -3387,9 +3387,14 @@ impl Timeline {
                     let mut updates = layers.batch_update();
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        updates.remove_historic(l);
+                        match updates.replace_historic(&l, new_layer) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                todo!("what then? start the search all over again, remove downloaded file?")
+                            }
+                            Err(e) => todo!("how is this possible? {e:?}"),
+                        }
                     }
-                    updates.insert_historic(new_layer);
                     updates.flush();
                     drop(layers);
 
