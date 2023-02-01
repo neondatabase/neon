@@ -682,7 +682,7 @@ fn test_retroactive_replacement() {
 
         // evict
         assert!(
-            map.replace(&key, replacement.clone(), |l| l == orig_layer),
+            map.replace(key, replacement.clone(), |l| l == orig_layer),
             "replace {orig_layer}"
         );
         map.rebuild();
@@ -698,7 +698,7 @@ fn test_retroactive_replacement() {
 
         // download
         assert!(
-            map.replace(&key, orig_layer.clone(), |l| l == &replacement),
+            map.replace(key, orig_layer.clone(), |l| l == &replacement),
             "replace {orig_layer} back"
         );
         map.rebuild();
