@@ -57,7 +57,7 @@ use utils::{
 
 use super::{
     DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerFileName, LayerIter,
-    LayerKeyIter, PathOrConf,
+    LayerKeyIter, LayerResidenceStatus, PathOrConf,
 };
 
 ///
@@ -438,7 +438,7 @@ impl PersistentLayer for DeltaLayer {
             lsn_start: lsn_range.start,
             lsn_end: lsn_range.end,
             remote: false,
-            access_stats: Some(self.access_stats.to_api_model()),
+            access_stats: self.access_stats.to_api_model(),
         };
 
         if let Some(reset) = reset {
@@ -582,7 +582,7 @@ impl DeltaLayer {
         tenant_id: TenantId,
         filename: &DeltaFileName,
         file_size: u64,
-        existing_access_stats: Option<LayerAccessStats>,
+        access_stats: LayerAccessStats,
     ) -> DeltaLayer {
         DeltaLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -591,7 +591,7 @@ impl DeltaLayer {
             key_range: filename.key_range.clone(),
             lsn_range: filename.lsn_range.clone(),
             file_size,
-            access_stats: existing_access_stats.unwrap_or_default(),
+            access_stats,
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -621,7 +621,9 @@ impl DeltaLayer {
             key_range: summary.key_range,
             lsn_range: summary.lsn_range,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::default(),
+            access_stats: LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident(
+                false,
+            )),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -792,7 +794,7 @@ impl DeltaLayerWriterInner {
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::default(),
+            access_stats: LayerAccessStats::new_for_new_layer_file(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,

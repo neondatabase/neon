@@ -155,7 +155,7 @@ impl PersistentLayer for RemoteLayer {
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
-                access_stats: Some(self.access_stats.to_api_model()),
+                access_stats: self.access_stats.to_api_model(),
             }
         } else {
             HistoricLayerInfo::Image {
@@ -164,7 +164,7 @@ impl PersistentLayer for RemoteLayer {
                 key_end: key_range.end,
                 lsn_start: lsn_range.start,
                 remote: true,
-                access_stats: Some(self.access_stats.to_api_model()),
+                access_stats: self.access_stats.to_api_model(),
             }
         }
     }
@@ -180,7 +180,7 @@ impl RemoteLayer {
         timelineid: TimelineId,
         fname: &ImageFileName,
         layer_metadata: &LayerFileMetadata,
-        existing_access_stats: Option<LayerAccessStats>,
+        access_stats: LayerAccessStats,
     ) -> RemoteLayer {
         RemoteLayer {
             tenantid,
@@ -192,7 +192,7 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
-            access_stats: existing_access_stats.unwrap_or_default(),
+            access_stats,
         }
     }
 
@@ -201,8 +201,7 @@ impl RemoteLayer {
         timelineid: TimelineId,
         fname: &DeltaFileName,
         layer_metadata: &LayerFileMetadata,
-
-        existing_access_stats: Option<LayerAccessStats>,
+        access_stats: LayerAccessStats,
     ) -> RemoteLayer {
         RemoteLayer {
             tenantid,
@@ -214,7 +213,7 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
-            access_stats: existing_access_stats.unwrap_or_default(),
+            access_stats,
         }
     }
 
@@ -235,10 +234,8 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
-                Some(
-                    self.access_stats
-                        .clone_for_residence_change(LayerResidenceStatus::resident()),
-                ),
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::resident(false)),
             ))
         } else {
             let fname = ImageFileName {
@@ -251,10 +248,8 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
-                Some(
-                    self.access_stats
-                        .clone_for_residence_change(LayerResidenceStatus::resident()),
-                ),
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::resident(false)),
             ))
         }
     }

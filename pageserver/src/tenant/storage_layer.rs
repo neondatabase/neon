@@ -88,7 +88,7 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
 
 #[derive(Debug, Clone)]
@@ -109,8 +109,13 @@ struct LayerAccessStatsInner {
 
 #[derive(Debug, Clone)]
 pub enum LayerResidenceStatus {
-    Resident { timestamp: SystemTime },
-    Evicted { timestamp: SystemTime },
+    Resident {
+        timestamp: SystemTime,
+        creating: bool,
+    },
+    Evicted {
+        timestamp: SystemTime,
+    },
 }
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
@@ -147,19 +152,22 @@ impl LayerResidenceStatus {
         }
     }
 
-    pub fn resident() -> Self {
+    pub fn resident(creating: bool) -> Self {
         LayerResidenceStatus::Resident {
             timestamp: SystemTime::now(),
+            creating,
         }
     }
 
     fn to_api_model(&self) -> pageserver_api::models::LayerResidenceStatus {
         match self {
-            LayerResidenceStatus::Resident { timestamp } => {
-                pageserver_api::models::LayerResidenceStatus::Resident {
-                    timestamp_millis_since_epoch: system_time_to_millis_since_epoch(timestamp),
-                }
-            }
+            LayerResidenceStatus::Resident {
+                timestamp,
+                creating,
+            } => pageserver_api::models::LayerResidenceStatus::Resident {
+                timestamp_millis_since_epoch: system_time_to_millis_since_epoch(timestamp),
+                creating: *creating,
+            },
             LayerResidenceStatus::Evicted { timestamp } => {
                 pageserver_api::models::LayerResidenceStatus::Evicted {
                     timestamp_millis_since_epoch: system_time_to_millis_since_epoch(timestamp),
@@ -189,24 +197,44 @@ impl LayerAccessStats {
     const LAST_ACCESSES_MAX_LEN: usize = 16;
     const LAST_RESIDENCE_CHANGES_MAX_LEN: usize = 16;
 
+    pub(crate) fn new_for_loading_layer(residence_status: LayerResidenceStatus) -> Self {
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+        new.record_residence_change(residence_status);
+        new
+    }
+
+    pub(crate) fn new_for_new_layer_file() -> Self {
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+        new.record_residence_change(LayerResidenceStatus::resident(true));
+        new
+    }
+
     /// Creates a clone of `self` and records `new_status` in the clone.
     /// The `new_status` is not recorded in `self`
     pub(crate) fn clone_for_residence_change(
         &self,
         new_status: LayerResidenceStatus,
     ) -> LayerAccessStats {
-        let mut clone = {
+        let clone = {
             let inner = self.0.lock().unwrap();
             inner.clone()
         };
+        let new = LayerAccessStats(Mutex::new(clone));
+        new.record_residence_change(new_status);
+        new
+    }
+
+    fn record_residence_change(&self, new_status: LayerResidenceStatus) {
+        if LAYER_ACCESS_STATS_KILLSWITCH.load(atomic::Ordering::SeqCst) {
+            return;
+        }
+        let mut inner = self.0.lock().unwrap();
 
         // make room first to avoid reallocs
-        while clone.last_residence_changes.len() >= Self::LAST_RESIDENCE_CHANGES_MAX_LEN {
-            clone.last_residence_changes.pop_back();
+        while inner.last_residence_changes.len() >= Self::LAST_RESIDENCE_CHANGES_MAX_LEN {
+            inner.last_residence_changes.pop_back();
         }
-        clone.last_residence_changes.push_front(new_status.clone());
-
-        LayerAccessStats(Mutex::new(clone))
+        inner.last_residence_changes.push_front(new_status);
     }
 
     fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {

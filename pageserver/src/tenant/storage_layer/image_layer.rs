@@ -52,7 +52,7 @@ use utils::{
 };
 
 use super::filename::{ImageFileName, LayerFileName, PathOrConf};
-use super::{Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter};
+use super::{Layer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerResidenceStatus};
 
 ///
 /// Header stored in the beginning of the file
@@ -249,7 +249,7 @@ impl PersistentLayer for ImageLayer {
             key_end: key_range.end,
             lsn_start: lsn_range.start,
             remote: false,
-            access_stats: Some(self.access_stats.to_api_model()),
+            access_stats: self.access_stats.to_api_model(),
         };
 
         if let Some(reset) = reset {
@@ -385,7 +385,7 @@ impl ImageLayer {
         tenant_id: TenantId,
         filename: &ImageFileName,
         file_size: u64,
-        existing_access_stats: Option<LayerAccessStats>,
+        access_stats: LayerAccessStats,
     ) -> ImageLayer {
         ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -394,7 +394,7 @@ impl ImageLayer {
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
             file_size,
-            access_stats: existing_access_stats.unwrap_or_default(),
+            access_stats,
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,
@@ -422,7 +422,9 @@ impl ImageLayer {
             key_range: summary.key_range,
             lsn: summary.lsn,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::default(),
+            access_stats: LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident(
+                false,
+            )),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
                 loaded: false,
@@ -582,7 +584,7 @@ impl ImageLayerWriterInner {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::default(),
+            access_stats: LayerAccessStats::new_for_new_layer_file(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,
