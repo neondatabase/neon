@@ -46,12 +46,14 @@ pub struct PageserverConsumptionMetricsKey {
 pub async fn collect_metrics(
     metric_collection_endpoint: &Url,
     metric_collection_interval: Duration,
+    cached_metric_collection_interval: Duration,
     synthetic_size_calculation_interval: Duration,
     node_id: NodeId,
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(metric_collection_interval);
-
+    let send_cached_every_iter =
+        cached_metric_collection_interval.as_secs() / metric_collection_interval.as_secs();
     info!("starting collect_metrics");
 
     // spin up background worker that caclulates tenant sizes
@@ -75,6 +77,7 @@ pub async fn collect_metrics(
     // define client here to reuse it for all requests
     let client = reqwest::Client::new();
     let mut cached_metrics: HashMap<PageserverConsumptionMetricsKey, u64> = HashMap::new();
+    let mut iter_num: u64 = 0;
 
     loop {
         tokio::select! {
@@ -83,6 +86,13 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
+                // send cached metrics every send_cached_every_iter iterations
+                iter_num += 1;
+                let send_cached = iter_num >= send_cached_every_iter;
+                if send_cached {
+                    iter_num = 0;
+                }
+
                 collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx).await;
             }
         }
@@ -105,6 +115,7 @@ pub async fn collect_metrics_iteration(
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
     ctx: &RequestContext,
+    send_cached: bool,
 ) {
     let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, u64)> = Vec::new();
     trace!(
@@ -222,11 +233,13 @@ pub async fn collect_metrics_iteration(
         ));
     }
 
-    // Filter metrics
-    current_metrics.retain(|(curr_key, curr_val)| match cached_metrics.get(curr_key) {
-        Some(val) => val != curr_val,
-        None => true,
-    });
+    // Filter metrics, unless we want to send all metrics, including cached ones.
+    if !send_cached {
+        current_metrics.retain(|(curr_key, curr_val)| match cached_metrics.get(curr_key) {
+            Some(val) => val != curr_val,
+            None => true,
+        });
+    }
 
     if current_metrics.is_empty() {
         trace!("no new metrics to send");
