@@ -138,6 +138,10 @@ where
         self.layer_map.remove_historic_noflush(layer)
     }
 
+    pub fn replace_historic(&mut self, expected: &Arc<L>, new: Arc<L>) -> anyhow::Result<bool> {
+        self.layer_map.replace_historic_noflush(expected, new)
+    }
+
     // We will flush on drop anyway, but this method makes it
     // more explicit that there is some work being done.
     /// Apply all updates
@@ -289,6 +293,56 @@ where
         }
 
         NUM_ONDISK_LAYERS.dec();
+    }
+
+    /// Replace existing layer with another on having downloaded or layer eviction.
+    pub(self) fn replace_historic_noflush(
+        &mut self,
+        expected: &Arc<L>,
+        new: Arc<L>,
+    ) -> anyhow::Result<bool> {
+        let key = historic_layer_coverage::LayerKey::from(&**expected);
+        let other = historic_layer_coverage::LayerKey::from(&*new);
+
+        let was_l0 = Self::is_l0(expected);
+
+        anyhow::ensure!(
+            was_l0 == Self::is_l0(&new),
+            "replaced must both be l0 deltas or neither"
+        );
+        anyhow::ensure!(key == other, "replaced must have same layerkeys");
+
+        let l0_index = if was_l0 {
+            // find the index in case replace worked, we need to replace that as well
+            Some(
+                self.l0_delta_layers
+                    .iter()
+                    .position(|slot| {
+                        // See: remove_historic_noflush
+                        #[allow(clippy::vtable_address_comparisons)]
+                        Arc::ptr_eq(slot, expected)
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("existing l0 delta layer was not found"))?,
+            )
+        } else {
+            None
+        };
+
+        let replaced = self.historic.replace(&key, new.clone(), |existing| {
+            // See: remove_historic_noflush
+            #[allow(clippy::vtable_address_comparisons)]
+            Arc::ptr_eq(existing, expected)
+        });
+
+        if !replaced {
+            return Ok(false);
+        }
+
+        if let Some(index) = l0_index {
+            self.l0_delta_layers[index] = new;
+        }
+
+        Ok(true)
     }
 
     /// Helper function for BatchedUpdates::drop.

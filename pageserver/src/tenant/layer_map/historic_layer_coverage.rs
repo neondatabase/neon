@@ -427,6 +427,33 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.buffer.insert(layer_key, None);
     }
 
+    /// Replaces a previous layer with a new layer value.
+    ///
+    /// Takes an odd looking `&mut Option<Value>` which allows for "maybe move".
+    ///
+    /// Returns `true` if the map was modified meaning the replacement was done for all keys or
+    /// `false` if nothing was changed.
+    ///
+    /// ## Panics
+    ///
+    /// When called with `new: None` value.
+    pub fn replace<F>(&mut self, layer_key: &LayerKey, new: Value, check_expected: F) -> bool
+    where
+        F: FnOnce(&Value) -> bool,
+    {
+        let slot = self.layers.get(layer_key);
+
+        match slot {
+            Some(existing) if !check_expected(existing) => return false,
+            None => return false,
+            Some(_existing) => {
+                self.insert(layer_key.to_owned(), new);
+            }
+        };
+
+        true
+    }
+
     pub fn rebuild(&mut self) {
         // Find the first LSN that needs to be rebuilt
         let rebuild_since: u64 = match self.buffer.iter().next() {
