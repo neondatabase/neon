@@ -427,31 +427,44 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.buffer.insert(layer_key, None);
     }
 
-    /// Replaces a previous layer with a new layer value.
+    /// Replaces a previous layer with a new layer value if it the given closure returns true.
     ///
-    /// Takes an odd looking `&mut Option<Value>` which allows for "maybe move".
-    ///
-    /// Returns `true` if the map was modified meaning the replacement was done for all keys or
-    /// `false` if nothing was changed.
-    ///
-    /// ## Panics
-    ///
-    /// When called with `new: None` value.
+    /// Returns `true` if a modification was made and rebuild will be needed, `false` otherwise.
     pub fn replace<F>(&mut self, layer_key: &LayerKey, new: Value, check_expected: F) -> bool
     where
         F: FnOnce(&Value) -> bool,
     {
-        let slot = self.layers.get(layer_key);
-
-        match slot {
-            Some(existing) if !check_expected(existing) => return false,
-            None => return false,
-            Some(_existing) => {
-                self.insert(layer_key.to_owned(), new);
+        let slot = match self.buffer.get(layer_key) {
+            Some(inner @ Some(_)) => {
+                // we compare against the buffered version, because there will be a later
+                // rebuild before querying
+                inner.as_ref()
+            }
+            Some(None) => {
+                // buffer has removal for this key; it will not be equivalent by any check_expected.
+                return false;
+            }
+            None => {
+                // no pending modification for the key, check layers
+                self.layers.get(layer_key)
             }
         };
 
-        true
+        match slot {
+            Some(existing) if !check_expected(existing) => {
+                // mismatch
+                false
+            }
+            None => {
+                // we have no such layer
+                false
+            }
+            Some(_existing) => {
+                // matched, buffer the switch
+                self.insert(layer_key.to_owned(), new);
+                true
+            }
+        }
     }
 
     pub fn rebuild(&mut self) {
