@@ -264,6 +264,8 @@ pub enum TaskKind {
 
     DebugTool,
 
+    Benchmark,
+
     #[cfg(test)]
     UnitTest,
 }

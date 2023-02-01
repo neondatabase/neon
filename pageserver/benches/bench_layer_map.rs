@@ -1,5 +1,7 @@
+use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
+use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::{Layer, LayerDescriptor, LayerFileName};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
@@ -106,15 +108,15 @@ fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, _lsn: Lsn) ->
 // a project where we have run pgbench many timmes. The pgbench database was initialized
 // between each test run.
 fn bench_from_captest_env(c: &mut Criterion) {
+    let ctx = RequestContext::new(TaskKind::Benchmark, DownloadBehavior::Error);
     // TODO consider compressing this file
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
-
     // Test with uniform query pattern
     c.bench_function("captest_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1);
+                layer_map.search(q.0, q.1, &ctx);
             }
         });
     });
@@ -126,6 +128,7 @@ fn bench_from_captest_env(c: &mut Criterion) {
                 Key::from_hex("000000067F00008000000000000000000001").unwrap(),
                 // This LSN is higher than any of the LSNs in the tree
                 Lsn::from_str("D0/80208AE1").unwrap(),
+                &ctx,
             );
             result.unwrap();
         });
@@ -135,6 +138,7 @@ fn bench_from_captest_env(c: &mut Criterion) {
 // Benchmark using metadata extracted from a real project that was taknig
 // too long processing layer map queries.
 fn bench_from_real_project(c: &mut Criterion) {
+    let ctx = RequestContext::new(TaskKind::Benchmark, DownloadBehavior::Error);
     // Init layer map
     let now = Instant::now();
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
@@ -157,12 +161,13 @@ fn bench_from_real_project(c: &mut Criterion) {
         println!("running correctness check");
 
         let now = Instant::now();
-        let result_bruteforce = layer_map.get_difficulty_map_bruteforce(latest_lsn, &partitioning);
+        let result_bruteforce =
+            layer_map.get_difficulty_map_bruteforce(latest_lsn, &partitioning, &ctx);
         assert!(result_bruteforce.len() == partitioning.parts.len());
         println!("Finished bruteforce in {:?}", now.elapsed());
 
         let now = Instant::now();
-        let result_fast = layer_map.get_difficulty_map(latest_lsn, &partitioning, None);
+        let result_fast = layer_map.get_difficulty_map(latest_lsn, &partitioning, None, &ctx);
         assert!(result_fast.len() == partitioning.parts.len());
         println!("Finished fast in {:?}", now.elapsed());
 
@@ -183,13 +188,13 @@ fn bench_from_real_project(c: &mut Criterion) {
     group.bench_function("uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1);
+                layer_map.search(q.0, q.1, &ctx);
             }
         });
     });
     group.bench_function("get_difficulty_map", |b| {
         b.iter(|| {
-            layer_map.get_difficulty_map(latest_lsn, &partitioning, Some(3));
+            layer_map.get_difficulty_map(latest_lsn, &partitioning, Some(3), &ctx);
         });
     });
     group.finish();
@@ -197,6 +202,7 @@ fn bench_from_real_project(c: &mut Criterion) {
 
 // Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
 fn bench_sequential(c: &mut Criterion) {
+    let ctx = RequestContext::new(TaskKind::Benchmark, DownloadBehavior::Error);
     // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
     //
     // TODO This code is pretty slow and runs even if we're only running other
@@ -232,7 +238,7 @@ fn bench_sequential(c: &mut Criterion) {
     group.bench_function("uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1);
+                layer_map.search(q.0, q.1, &ctx);
             }
         });
     });

@@ -220,7 +220,7 @@ where
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
+    pub fn search(&self, key: Key, end_lsn: Lsn, ctx: &RequestContext) -> Option<SearchResult<L>> {
         let mut version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
         let mut latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
@@ -237,7 +237,7 @@ where
                 }
                 (Some(delta), None) => {
                     let lsn_floor = delta.get_lsn_range().start;
-                    if let Ok(contains) = delta.overlaps(&singleton_range(key)) {
+                    if let Ok(contains) = delta.overlaps(&singleton_range(key), ctx) {
                         if !contains {
                             version = self.historic.get().unwrap().get_version(lsn_floor.0 - 1)?;
                             latest_delta = version.delta_coverage.query(key.to_i128());
@@ -259,7 +259,7 @@ where
                             lsn_floor: img_lsn,
                         })
                     } else {
-                        if let Ok(contains) = delta.overlaps(&singleton_range(key)) {
+                        if let Ok(contains) = delta.overlaps(&singleton_range(key), ctx) {
                             if !contains {
                                 version = self
                                     .historic
@@ -495,8 +495,12 @@ where
     /// TODO The optimal number should probably be slightly higher than 1, but to
     ///      implement that we need to plumb a lot more context into this function
     ///      than just the current partition_range.
-    pub fn is_reimage_worthy(layer: &L, partition_range: &Range<Key>) -> Result<bool> {
-        if !layer.overlaps(partition_range)? {
+    pub fn is_reimage_worthy(
+        layer: &L,
+        partition_range: &Range<Key>,
+        ctx: &RequestContext,
+    ) -> Result<bool> {
+        if !layer.overlaps(partition_range, ctx)? {
             return Ok(false);
         }
         // Case 1
@@ -525,6 +529,7 @@ where
         key: &Range<Key>,
         lsn: &Range<Lsn>,
         limit: Option<usize>,
+        ctx: &RequestContext,
     ) -> Result<usize> {
         // We get the delta coverage of the region, and for each part of the coverage
         // we recurse right underneath the delta. The recursion depth is limited by
@@ -556,10 +561,10 @@ where
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
-                        let base_count = Self::is_reimage_worthy(&val, key)? as usize;
+                        let base_count = Self::is_reimage_worthy(&val, key, ctx)? as usize;
                         let new_limit = limit.map(|l| l - base_count);
                         let max_stacked_deltas_underneath =
-                            self.count_deltas(&kr, &lr, new_limit)?;
+                            self.count_deltas(&kr, &lr, new_limit, ctx)?;
                         max_stacked_deltas = std::cmp::max(
                             max_stacked_deltas,
                             base_count + max_stacked_deltas_underneath,
@@ -578,9 +583,10 @@ where
                 let lr = lsn.start..val.get_lsn_range().start;
 
                 if !kr.is_empty() {
-                    let base_count = Self::is_reimage_worthy(&val, key)? as usize;
+                    let base_count = Self::is_reimage_worthy(&val, key, ctx)? as usize;
                     let new_limit = limit.map(|l| l - base_count);
-                    let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit)?;
+                    let max_stacked_deltas_underneath =
+                        self.count_deltas(&kr, &lr, new_limit, ctx)?;
                     max_stacked_deltas = std::cmp::max(
                         max_stacked_deltas,
                         base_count + max_stacked_deltas_underneath,
@@ -597,13 +603,19 @@ where
     /// The `partition_range` argument is used as context for the reimage-worthiness decision.
     ///
     /// Used as a helper for correctness checks only. Performance not critical.
-    pub fn get_difficulty(&self, lsn: Lsn, key: Key, partition_range: &Range<Key>) -> usize {
-        match self.search(key, lsn) {
+    pub fn get_difficulty(
+        &self,
+        lsn: Lsn,
+        key: Key,
+        partition_range: &Range<Key>,
+        ctx: &RequestContext,
+    ) -> usize {
+        match self.search(key, lsn, ctx) {
             Some(search_result) => {
                 if search_result.layer.is_incremental() {
-                    (Self::is_reimage_worthy(&search_result.layer, partition_range).unwrap()
+                    (Self::is_reimage_worthy(&search_result.layer, partition_range, ctx).unwrap()
                         as usize)
-                        + self.get_difficulty(search_result.lsn_floor, key, partition_range)
+                        + self.get_difficulty(search_result.lsn_floor, key, partition_range, ctx)
                 } else {
                     0
                 }
@@ -618,6 +630,7 @@ where
         &self,
         lsn: Lsn,
         partitioning: &KeyPartitioning,
+        ctx: &RequestContext,
     ) -> Vec<usize> {
         // Looking at the difficulty as a function of key, it could only increase
         // when a delta layer starts or an image layer ends. Therefore it's sufficient
@@ -652,8 +665,10 @@ where
                 // TODO assert it
                 for range in &part.ranges {
                     if !range.is_empty() {
-                        difficulty =
-                            std::cmp::max(difficulty, self.get_difficulty(lsn, range.start, range));
+                        difficulty = std::cmp::max(
+                            difficulty,
+                            self.get_difficulty(lsn, range.start, range, ctx),
+                        );
                     }
                     while let Some(key) = keys_iter.peek() {
                         if key >= &range.end {
@@ -664,7 +679,7 @@ where
                             continue;
                         }
                         difficulty =
-                            std::cmp::max(difficulty, self.get_difficulty(lsn, key, range));
+                            std::cmp::max(difficulty, self.get_difficulty(lsn, key, range, ctx));
                     }
                 }
                 difficulty
@@ -689,6 +704,7 @@ where
         lsn: Lsn,
         partitioning: &KeyPartitioning,
         limit: Option<usize>,
+        ctx: &RequestContext,
     ) -> Vec<usize> {
         // TODO This is a naive implementation. Perf improvements to do:
         // 1. Instead of calling self.image_coverage and self.count_deltas,
@@ -717,7 +733,7 @@ where
 
                         if img_lsn < lsn {
                             let num_deltas = self
-                                .count_deltas(&img_range, &(img_lsn..lsn), limit)
+                                .count_deltas(&img_range, &(img_lsn..lsn), limit, ctx)
                                 .expect("why would this err lol?");
                             difficulty = std::cmp::max(difficulty, num_deltas);
                         }

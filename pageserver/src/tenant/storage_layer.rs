@@ -289,12 +289,12 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 
     /// Checks if layer contains any entries belonging to the specified key range
-    fn overlaps(&self, key_range: &Range<Key>) -> Result<bool> {
+    fn overlaps(&self, key_range: &Range<Key>, _ctx: &RequestContext) -> Result<bool> {
         Ok(range_overlaps(&self.get_key_range(), key_range))
     }
 
     /// Skip holes in this layer key range
-    fn get_occupied_ranges(&self) -> Result<Vec<Range<Key>>> {
+    fn get_occupied_ranges(&self, _ctx: &RequestContext) -> Result<Vec<Range<Key>>> {
         Ok(vec![self.get_key_range()])
     }
 
@@ -303,7 +303,7 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     /// Only delta layers can contain holes. Image is consdered as always dense, despite to the fact that it doesn't
     /// contain all possible key values in the specified range: there are may be no keys in the storage belonging
     /// to the image layer range but not present in the image layer.
-    fn get_holes(&self) -> Result<Option<Vec<Hole>>> {
+    fn get_holes(&self, _ctx: &RequestContext) -> Result<Option<Vec<Hole>>> {
         Ok(None)
     }
 }

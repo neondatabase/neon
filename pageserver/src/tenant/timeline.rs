@@ -1503,11 +1503,12 @@ impl Timeline {
     /// # TODO
     /// May be a bit cleaner to do things based on populated remote client,
     /// and then do things based on its upload_queue.latest_files.
-    #[instrument(skip(self, index_part, up_to_date_metadata))]
+    #[instrument(skip(self, index_part, up_to_date_metadata, ctx))]
     pub async fn reconcile_with_remote(
         &self,
         up_to_date_metadata: &TimelineMetadata,
         index_part: Option<&IndexPart>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         info!("starting");
         let remote_client = self
@@ -1555,7 +1556,7 @@ impl Timeline {
             info!("scheduling {layer_path:?} for upload");
             remote_client.schedule_layer_file_upload(
                 layer_name,
-                &LayerFileMetadata::new(layer_size, layer.get_holes()?),
+                &LayerFileMetadata::new(layer_size, layer.get_holes(ctx)?),
             )?;
         }
         remote_client.schedule_index_upload_for_file_changes()?;
@@ -2039,7 +2040,9 @@ impl Timeline {
                         }
                     }
 
-                    if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
+                    if let Some(SearchResult { lsn_floor, layer }) =
+                        layers.search(key, cont_lsn, ctx)
+                    {
                         // If it's a remote layer, download it and retry.
                         if let Some(remote_layer) =
                             super::storage_layer::downcast_remote_layer(&layer)
@@ -2362,7 +2365,7 @@ impl Timeline {
                     .await?
             } else {
                 // normal case, write out a L0 delta layer file.
-                let (delta_path, metadata) = self.create_delta_layer(&frozen_layer)?;
+                let (delta_path, metadata) = self.create_delta_layer(&frozen_layer, ctx)?;
                 HashMap::from([(delta_path, metadata)])
             };
 
@@ -2468,6 +2471,7 @@ impl Timeline {
     fn create_delta_layer(
         &self,
         frozen_layer: &InMemoryLayer,
+        ctx: &RequestContext,
     ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
         // Write it out
         let new_delta = frozen_layer.write_to_disk()?;
@@ -2487,7 +2491,7 @@ impl Timeline {
             self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
         ])?;
 
-        let holes = new_delta.get_holes()?;
+        let holes = new_delta.get_holes(ctx)?;
 
         // Add it to the layer map
         self.layers
@@ -2535,7 +2539,12 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<bool> {
+    fn time_for_new_image_layer(
+        &self,
+        partition: &KeySpace,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<bool> {
         let layers = self.layers.read().unwrap();
 
         for part_range in &partition.ranges {
@@ -2561,7 +2570,7 @@ impl Timeline {
                 if img_lsn < lsn {
                     let threshold = self.get_image_creation_threshold();
                     let num_deltas =
-                        layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
+                        layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold), ctx)?;
 
                     debug!(
                         "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
@@ -2587,7 +2596,7 @@ impl Timeline {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
         for partition in partitioning.parts.iter() {
-            if force || self.time_for_new_image_layer(partition, lsn)? {
+            if force || self.time_for_new_image_layer(partition, lsn, ctx)? {
                 let img_range =
                     partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
                 let mut image_layer_writer = ImageLayerWriter::new(
@@ -2993,7 +3002,7 @@ impl Timeline {
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
                     &l.filename(),
-                    &LayerFileMetadata::new(metadata.len(), l.get_holes()?),
+                    &LayerFileMetadata::new(metadata.len(), l.get_holes(ctx)?),
                 )?;
             }
 
@@ -3004,7 +3013,7 @@ impl Timeline {
 
             new_layer_paths.insert(
                 new_delta_path,
-                LayerFileMetadata::new(metadata.len(), l.get_holes()?),
+                LayerFileMetadata::new(metadata.len(), l.get_holes(ctx)?),
             );
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
             updates.insert_historic(x);
@@ -3130,7 +3139,7 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+    pub(super) async fn gc(&self, ctx: &RequestContext) -> anyhow::Result<GcResult> {
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
         fail_point!("before-timeline-gc");
@@ -3160,6 +3169,7 @@ impl Timeline {
                 pitr_cutoff,
                 retain_lsns,
                 new_gc_cutoff,
+				ctx,
             )
             .instrument(
                 info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
@@ -3179,6 +3189,7 @@ impl Timeline {
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
         let now = SystemTime::now();
         let mut result: GcResult = GcResult::default();
@@ -3300,7 +3311,7 @@ impl Timeline {
             // If GC horizon is at 2500, we can remove layers A and B, but
             // we cannot remove C, even though it's older than 2500, because
             // the delta layer 2000-3000 depends on it.
-            for occupied_range in &l.get_occupied_ranges()? {
+            for occupied_range in &l.get_occupied_ranges(ctx)? {
                 if !layers
                     .image_layer_exists(occupied_range, &(l.get_lsn_range().end..new_gc_cutoff))?
                 {
@@ -3489,6 +3500,10 @@ impl Timeline {
             false,
             async move {
                 let remote_client = self_clone.remote_client.as_ref().unwrap();
+                let ctx = RequestContext::new(
+                    TaskKind::DownloadAllRemoteLayers,
+                    DownloadBehavior::Download,
+                );
 
                 // Does retries + exponential back-off internally.
                 // When this fails, don't layer further retry attempts here.
@@ -3503,7 +3518,8 @@ impl Timeline {
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
+                    let new_layer =
+                        remote_layer.create_downloaded_layer(self_clone.conf, *size, &ctx);
 
                     // Update the metadata for given layer file. The remote index file
                     // might be missing some information for the file; this allows us
@@ -3512,7 +3528,7 @@ impl Timeline {
                         || (remote_layer.is_delta && remote_layer.layer_metadata.holes().is_none())
                     {
                         let new_metadata =
-                            LayerFileMetadata::new(*size, new_layer.get_holes().unwrap());
+                            LayerFileMetadata::new(*size, new_layer.get_holes(&ctx).unwrap());
                         remote_client
                             .upgrade_layer_metadata(
                                 &remote_layer.file_name,

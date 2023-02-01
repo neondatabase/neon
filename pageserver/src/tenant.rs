@@ -459,7 +459,7 @@ impl Tenant {
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
 
@@ -528,6 +528,7 @@ impl Tenant {
                 .reconcile_with_remote(
                     up_to_date_metadata,
                     remote_startup_data.as_ref().map(|r| &r.index_part),
+                    ctx,
                 )
                 .await
                 .context("failed to reconcile with remote")?
@@ -1954,7 +1955,7 @@ impl Tenant {
                 // made.
                 break;
             }
-            let result = timeline.gc().await?;
+            let result = timeline.gc(ctx).await?;
             totals += result;
         }
 
@@ -3426,7 +3427,7 @@ mod tests {
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&ctx).await?;
-            tline.gc().await?;
+            tline.gc(&ctx).await?;
         }
 
         Ok(())
@@ -3498,7 +3499,7 @@ mod tests {
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&ctx).await?;
-            tline.gc().await?;
+            tline.gc(&ctx).await?;
         }
 
         Ok(())
@@ -3582,7 +3583,7 @@ mod tests {
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&ctx).await?;
-            tline.gc().await?;
+            tline.gc(&ctx).await?;
         }
 
         Ok(())

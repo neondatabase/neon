@@ -89,7 +89,7 @@ impl Layer for RemoteLayer {
         self.is_incremental
     }
 
-    fn get_occupied_ranges(&self) -> Result<Vec<Range<Key>>> {
+    fn get_occupied_ranges(&self, _ctx: &RequestContext) -> Result<Vec<Range<Key>>> {
         if let Some(holes) = &self.layer_metadata.holes() {
             let mut occ = Vec::with_capacity(holes.len() + 1);
             let key_range = self.get_key_range();
@@ -105,11 +105,11 @@ impl Layer for RemoteLayer {
         }
     }
 
-    fn get_holes(&self) -> Result<Option<Vec<Hole>>> {
+    fn get_holes(&self, _ctx: &RequestContext) -> Result<Option<Vec<Hole>>> {
         Ok(self.layer_metadata.holes())
     }
 
-    fn overlaps(&self, key_range: &Range<Key>) -> anyhow::Result<bool> {
+    fn overlaps(&self, key_range: &Range<Key>, _ctx: &RequestContext) -> anyhow::Result<bool> {
         if !range_overlaps(&self.key_range, key_range) {
             Ok(false)
         } else if let Some(holes) = &self.layer_metadata.holes() {
@@ -278,6 +278,7 @@ impl RemoteLayer {
         &self,
         conf: &'static PageServerConf,
         file_size: u64,
+        ctx: &RequestContext,
     ) -> Arc<dyn PersistentLayer> {
         if self.is_delta {
             let fname = DeltaFileName {
@@ -293,6 +294,7 @@ impl RemoteLayer {
                 self.access_stats
                     .clone_for_residence_change(LayerResidenceStatus::Resident),
                 self.get_holes().unwrap(),
+                self.get_holes(ctx).unwrap(),
             ))
         } else {
             let fname = ImageFileName {
