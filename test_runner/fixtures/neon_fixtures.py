@@ -1228,6 +1228,13 @@ class PageserverHttpClient(requests.Session):
         assert type(inputs) is dict
         return (size, inputs)
 
+    def tenant_size_debug(self, tenant_id: TenantId) -> str:
+        """
+        FIXME Returns the tenant size, together with the model inputs as the second tuple item.
+        """
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/size_debug")
+        return res.text
+
     def timeline_list(
         self,
         tenant_id: TenantId,

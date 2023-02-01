@@ -1,10 +1,40 @@
+import json
 from typing import Any, List, Tuple
+from pathlib import Path
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
+
+
+def mask_model_inputs(x):
+    if isinstance(x, dict):
+        newx = {}
+        for k, v in x.items():
+            if k == "size":
+                if v is None or v == 0:
+                    # no change
+                    newx[k] = v
+                elif v < 0:
+                    newx[k] = "<0"
+                else:
+                    newx[k] = ">0"
+            elif k.endswith("lsn") or k.endswith("cutoff") or k == "last_record":
+                if v is None or v == 0 or v == "0/0":
+                    # no change
+                    newx[k] = v
+                else:
+                    newx[k] = "masked"
+            else:
+                newx[k] = mask_model_inputs(v)
+        return newx
+    elif isinstance(x, list):
+        newlist = [mask_model_inputs(v) for v in x]
+        return newlist
+    else:
+        return x
 
 
 def test_empty_tenant_size(neon_simple_env: NeonEnv):
@@ -17,6 +47,9 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
     assert initial_size > 0, "initial implementation returns ~initdb tenant_size"
 
     main_branch_name = "main"
+
+    branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
+    assert branch_name == main_branch_name
 
     with env.postgres.create_start(
         main_branch_name,
@@ -39,9 +72,36 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
     size, inputs = http_client.tenant_size_and_modelinputs(tenant_id)
     assert size == initial_size, "tenant_size should not be affected by shutdown of compute"
 
-    expected_commands: List[Any] = [{"branch_from": None}, "end_of_branch"]
-    actual_commands: List[Any] = list(map(lambda x: x["command"], inputs["updates"]))  # type: ignore
-    assert actual_commands == expected_commands
+    expected_inputs = {
+        "segments": [
+            {
+                "segment": {"parent": None, "lsn": 23694408, "size": 25362432, "needed": True},
+                "timeline_id": f"{main_timeline_id}",
+                "kind": "BranchStart",
+            },
+            {
+                "segment": {"parent": 0, "lsn": 23694528, "size": None, "needed": True},
+                "timeline_id": f"{main_timeline_id}",
+                "kind": "BranchEnd",
+            },
+        ],
+        "timeline_inputs": [
+            {
+                "timeline_id": f"{main_timeline_id}",
+                "ancestor_lsn": "0/0",
+                "last_record": "0/1698CC0",
+                "latest_gc_cutoff": "0/1698C48",
+                "horizon_cutoff": "0/0",
+                "pitr_cutoff": "0/0",
+                "next_gc_cutoff": "0/0",
+                "retention_param_cutoff": None,
+            }
+        ],
+    }
+    expected_inputs = mask_model_inputs(expected_inputs)
+    actual_inputs = mask_model_inputs(inputs)
+
+    assert expected_inputs == actual_inputs
 
 
 def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
@@ -254,7 +314,9 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv):
             latest_size = size_now
 
 
-def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
+def test_single_branch_get_tenant_size_grows(
+    neon_env_builder: NeonEnvBuilder, test_output_dir: Path
+):
     """
     Operate on single branch reading the tenants size after each transaction.
     """
@@ -279,6 +341,8 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
     collected_responses: List[Tuple[Lsn, int]] = []
 
+    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+
     with env.postgres.create_start(branch_name, tenant_id=tenant_id) as pg:
         with pg.cursor() as cur:
             cur.execute("CREATE TABLE t0 (i BIGINT NOT NULL)")
@@ -297,7 +361,13 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size = http_client.tenant_size(tenant_id)
+            size, inputs, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+
+            size_debug = http_client.tenant_size_debug(tenant_id)
+            size_debug_file.write(size_debug)
+
+            log.info(f"INSERT_{i}: {json.dumps(inputs, indent=2)}")
+            log.info(f"INSERT_{i}: {json.dumps(sizes, indent=2)}")
 
             if len(collected_responses) > 0:
                 prev = collected_responses[-1][1]
@@ -323,7 +393,13 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size = http_client.tenant_size(tenant_id)
+            size, inputs, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+
+            size_debug = http_client.tenant_size_debug(tenant_id)
+            size_debug_file.write(size_debug)
+
+            log.info(f"UPDATE: {json.dumps(inputs, indent=2)}")
+            log.info(f"UPDATE: {json.dumps(sizes, indent=2)}")
             prev = collected_responses[-1][1]
             assert size > prev, "tenant_size should grow with updates"
             collected_responses.append((current_lsn, size))
@@ -363,6 +439,8 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.stop()
     env.pageserver.start()
+
+    size_debug_file.close()
 
     size_after = http_client.tenant_size(tenant_id)
     prev = collected_responses[-1][1]
