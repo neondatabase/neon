@@ -125,7 +125,29 @@ jobs:
         run: cargo build --all --release --timings
 
       - name: Upload the build stats
-        uses: actions/upload-artifact@v3
+        id: upload-stats
+        env:
+          BUCKET: neon-github-public-dev
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/build-stats/${SHA}/${GITHUB_RUN_ID}/cargo-timing.html
+          aws s3 cp --only-show-errors ./target/cargo-timings/ "s3://${BUCKET}/build-stats/${SHA}/${GITHUB_RUN_ID}/"
+          echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
+
+      - name: Publish build stats report
+        uses: actions/github-script@v6
+        env:
+          REPORT_URL: ${{ steps.upload-stats.outputs.report-url }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
-          name: neon-${{ runner.os }}-release-build-stats
-          path: ./target/cargo-timings/
+          script: |
+            const { REPORT_URL, SHA } = process.env
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: `${SHA}`,
+              state: 'success',
+              target_url: `${REPORT_URL}`,
+              context: `Built stats (release)`,
+            })
