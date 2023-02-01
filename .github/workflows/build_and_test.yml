@@ -868,7 +868,7 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             gh workflow run deploy-dev.yml --ref main -f branch=${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            gh workflow run deploy-prod.yml --ref release -f branch=${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}}
+            gh workflow run deploy-prod.yml --ref release -f branch=${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}} -f disclamerAcknowledged=true
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1

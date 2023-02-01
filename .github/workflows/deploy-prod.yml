@@ -11,7 +11,7 @@ on:
         description: 'Branch or commit used for deploy scripts and configs'
         required: true
         type: string
-        default: 'main'
+        default: 'release'
       deployStorage:
         description: 'Deploy storage'
         required: true
@@ -27,6 +27,11 @@ on:
         required: true
         type: boolean
         default: true
+      disclamerAcknowledged:
+        description: 'I confirm that there is an emergency and I can not use regular release workflow'
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-prod
@@ -36,7 +41,7 @@ jobs:
   deploy-prod-new:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    if: inputs.deployStorage
+    if: inputs.deployStorage && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -67,7 +72,7 @@ jobs:
   deploy-proxy-prod-new:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    if: inputs.deployProxy
+    if: inputs.deployProxy && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -125,7 +130,7 @@ jobs:
   deploy-storage-broker-prod-new:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    if: inputs.deployStorageBroker
+    if: inputs.deployStorageBroker && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -164,7 +169,7 @@ jobs:
   deploy:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    if: inputs.deployStorage
+    if: inputs.deployStorage && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -202,7 +207,7 @@ jobs:
   deploy-proxy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    if: inputs.deployProxy
+    if: inputs.deployProxy && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -238,7 +243,7 @@ jobs:
     name: deploy storage broker on old staging and old prod
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    if: inputs.deployStorageBroker
+    if: inputs.deployStorageBroker && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
