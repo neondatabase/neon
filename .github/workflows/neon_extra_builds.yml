@@ -4,6 +4,7 @@ on:
   push:
     branches:
     - main
+  pull_request:
 
 defaults:
   run:
@@ -20,6 +21,7 @@ env:
 
 jobs:
   check-macos-build:
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')
     timeout-minutes: 90
     runs-on: macos-latest
 
@@ -93,6 +95,7 @@ jobs:
         run: ./run_clippy.sh
 
   gather-rust-build-stats:
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats')
     timeout-minutes: 90
     runs-on: ubuntu-latest
 
