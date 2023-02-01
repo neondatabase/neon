@@ -256,8 +256,13 @@ pub struct LayerAccessStatFullDetails {
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum LayerResidenceStatus {
-    Resident { timestamp_millis_since_epoch: u128 },
-    Evicted { timestamp_millis_since_epoch: u128 },
+    Resident {
+        timestamp_millis_since_epoch: u128,
+        creating: bool,
+    },
+    Evicted {
+        timestamp_millis_since_epoch: u128,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -300,7 +305,7 @@ pub enum HistoricLayerInfo {
         #[serde_as(as = "DisplayFromStr")]
         lsn_end: Lsn,
         remote: bool,
-        access_stats: Option<LayerAccessStats>,
+        access_stats: LayerAccessStats,
     },
     Image {
         layer_file_name: String,
@@ -311,7 +316,7 @@ pub enum HistoricLayerInfo {
         #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
         remote: bool,
-        access_stats: Option<LayerAccessStats>,
+        access_stats: LayerAccessStats,
     },
 }
 
