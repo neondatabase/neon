@@ -418,25 +418,18 @@ impl Drop for TimelineUninitMark {
     }
 }
 
-// We should not blindly overwrite local metadata with remote one.
-// For example, consider the following case:
-//     Image layer is flushed to disk as a new delta layer, we update local metadata and start upload task but after that
-//     pageserver crashes. During startup we'll load new metadata, and then reset it
-//     to the state of remote one. But current layermap will have layers from the old
-//     metadata which is inconsistent.
-//     And with current logic it wont disgard them during load because during layermap
-//     load it sees local disk consistent lsn which is ahead of layer lsns.
-//     If we treat remote as source of truth we need to completely sync with it,
-//     i e delete local files which are missing on the remote. This will add extra work,
-//     wal for these layers needs to be reingested for example
-//
-// So the solution is to take remote metadata only when we're attaching.
-pub fn merge_local_remote_metadata<'a>(
+/// Verify that the local state is en-par or ahead of the remote state.
+/// If this function returns an error, it is likely that some other pageserver
+/// wrote to the remote, so, we better bail out to avoid the risk of split-brain.
+///
+/// If `remote` is None, it is assumed that there is not remote state, so, the
+/// function returns `Ok()` in that case.
+fn verify_local_metadata_is_not_behind_remote<'a>(
     local: &'a TimelineMetadata,
     remote: Option<&'a TimelineMetadata>,
-) -> anyhow::Result<(&'a TimelineMetadata, bool)> {
+) -> anyhow::Result<()> {
     match (local, remote) {
-        (local, None) => Ok((local, true)),
+        (_local, None) => Ok(()),
         // This is the regular case where we crash/exit before finishing queued uploads.
         (local, Some(remote)) => {
             let consistent_lsn_cmp = local
@@ -448,13 +441,13 @@ pub fn merge_local_remote_metadata<'a>(
             use std::cmp::Ordering::*;
             match (consistent_lsn_cmp, gc_cutoff_lsn_cmp) {
                 // It wouldn't matter, but pick the local one so that we don't rewrite the metadata file.
-                (Equal, Equal) => Ok((local, true)),
+                (Equal, Equal) => Ok(()),
                 // Local state is clearly ahead of the remote.
-                (Greater, Greater) => Ok((local, true)),
+                (Greater, Greater) => Ok(()),
                 // We have local layer files that aren't on the remote, but GC horizon is on par.
-                (Greater, Equal) => Ok((local, true)),
+                (Greater, Equal) => Ok(()),
                 // Local GC started running but we couldn't sync it to the remote.
-                (Equal, Greater) => Ok((local, true)),
+                (Equal, Greater) => Ok(()),
 
                 // We always update the local value first, so something else must have
                 // updated the remote value, probably a different pageserver.
@@ -506,12 +499,11 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
 
-        let (up_to_date_metadata, picked_local) = merge_local_remote_metadata(
+        verify_local_metadata_is_not_behind_remote(
             &local_metadata,
             remote_startup_data.as_ref().map(|r| &r.remote_metadata),
         )
-        .context("merge_local_remote_metadata")?
-        .to_owned();
+        .context("merge_local_remote_metadata")?;
 
         let timeline = {
             // avoiding holding it across awaits
@@ -524,7 +516,7 @@ impl Tenant {
 
             let dummy_timeline = self.create_timeline_data(
                 timeline_id,
-                up_to_date_metadata.clone(),
+                local_metadata.clone(),
                 ancestor.clone(),
                 remote_client,
             )?;
@@ -549,7 +541,7 @@ impl Tenant {
                     let broken_timeline = self
                         .create_timeline_data(
                             timeline_id,
-                            up_to_date_metadata.clone(),
+                            local_metadata.clone(),
                             ancestor.clone(),
                             None,
                         )
@@ -569,7 +561,7 @@ impl Tenant {
             // in remote storage.
             timeline
                 .reconcile_with_remote(
-                    up_to_date_metadata,
+                    &local_metadata,
                     remote_startup_data.as_ref().map(|r| &r.index_part),
                 )
                 .await
@@ -588,18 +580,6 @@ impl Tenant {
                     .is_some(),
             "Timeline has no ancestor and no layer files"
         );
-
-        // Save the metadata file to local disk.
-        if !picked_local {
-            save_metadata(
-                self.conf,
-                timeline_id,
-                tenant_id,
-                up_to_date_metadata,
-                false,
-            )
-            .context("save_metadata")?;
-        }
 
         Ok(())
     }
