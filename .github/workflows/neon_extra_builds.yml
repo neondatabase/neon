@@ -4,6 +4,7 @@ on:
   push:
     branches:
     - main
+  pull_request:
 
 defaults:
   run:
@@ -20,6 +21,7 @@ env:
 
 jobs:
   check-macos-build:
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')
     timeout-minutes: 90
     runs-on: macos-latest
 
@@ -93,11 +95,16 @@ jobs:
         run: ./run_clippy.sh
 
   gather-rust-build-stats:
-    timeout-minutes: 90
-    runs-on: ubuntu-latest
+    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats')
+    runs-on: [ self-hosted, gen3, large ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
 
     env:
       BUILD_TYPE: release
+      # remove the cachepot wrapper and build without crate caches
+      RUSTC_WRAPPER: ""
       # build with incremental compilation produce partial results
       # so do not attempt to cache this build, also disable the incremental compilation
       CARGO_INCREMENTAL: 0
@@ -109,11 +116,6 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      - name: Install Ubuntu postgres dependencies
-        run: |
-          sudo apt update
-          sudo apt install build-essential libreadline-dev zlib1g-dev flex bison libseccomp-dev libssl-dev protobuf-compiler
-
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
@@ -122,7 +124,31 @@ jobs:
         run: cargo build --all --release --timings
 
       - name: Upload the build stats
-        uses: actions/upload-artifact@v3
+        id: upload-stats
+        env:
+          BUCKET: neon-github-public-dev
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+        run: |
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/build-stats/${SHA}/${GITHUB_RUN_ID}/cargo-timing.html
+          aws s3 cp --only-show-errors ./target/cargo-timings/cargo-timing.html "s3://${BUCKET}/build-stats/${SHA}/${GITHUB_RUN_ID}/"
+          echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
+
+      - name: Publish build stats report
+        uses: actions/github-script@v6
+        env:
+          REPORT_URL: ${{ steps.upload-stats.outputs.report-url }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
-          name: neon-${{ runner.os }}-release-build-stats
-          path: ./target/cargo-timings/
+          script: |
+            const { REPORT_URL, SHA } = process.env
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: `${SHA}`,
+              state: 'success',
+              target_url: `${REPORT_URL}`,
+              context: `Build stats (release)`,
+            })
