@@ -3386,14 +3386,29 @@ impl Timeline {
                     let mut layers = self_clone.layers.write().unwrap();
                     let mut updates = layers.batch_update();
                     {
+                        use crate::tenant::layer_map::Replacement;
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
                         match updates.replace_historic(&l, new_layer) {
-                            Ok(true) => { /* expected */ }
-                            Ok(false) => {
+                            Ok(Replacement::Replaced { .. }) => { /* expected */ }
+                            Ok(Replacement::NotFound) => {
                                 // TODO: the downloaded file should probably be removed, otherwise
                                 // it will be added to the layermap on next load? we should
                                 // probably restart any get_reconstruct_data search as well.
                                 warn!("replacing downloaded layer into layermap failed because layer was not found");
+                            }
+                            Ok(Replacement::RemovalBuffered) => {
+                                unreachable!("current implementation does not remove anything")
+                            }
+                            Ok(Replacement::Unexpected(other)) => {
+                                // if the other layer would have the same pointer value as
+                                // expected, it means they differ only on vtables.
+                                //
+                                // otherwise there's no known reason for this to happen.
+                                error!(
+                                    expected = ?Arc::as_ptr(&l),
+                                    other = ?Arc::as_ptr(other),
+                                    "replacing downloaded layer into layermap failed because another layer was found instead of expected"
+                                );
                             }
                             Err(e) => {
                                 // this is a precondition failure, the layer filename derived

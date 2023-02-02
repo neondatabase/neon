@@ -437,39 +437,38 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     /// inaccessible via `PartialEq` trait.
     ///
     /// Returns `true` if a modification was made and rebuild will be needed, `false` otherwise.
-    pub fn replace<F>(&mut self, layer_key: &LayerKey, new: Value, check_expected: F) -> bool
+    pub fn replace<'a, F>(
+        &'a mut self,
+        layer_key: &LayerKey,
+        new: Value,
+        check_expected: F,
+    ) -> Replacement<'a, Value>
     where
         F: FnOnce(&Value) -> bool,
     {
-        let slot = match self.buffer.get(layer_key) {
+        let (slot, in_buffered) = match self.buffer.get(layer_key) {
             Some(inner @ Some(_)) => {
                 // we compare against the buffered version, because there will be a later
                 // rebuild before querying
-                inner.as_ref()
+                (inner.as_ref(), true)
             }
             Some(None) => {
                 // buffer has removal for this key; it will not be equivalent by any check_expected.
-                return false;
+                return Replacement::RemovalBuffered;
             }
             None => {
                 // no pending modification for the key, check layers
-                self.layers.get(layer_key)
+                (self.layers.get(layer_key), false)
             }
         };
 
         match slot {
-            Some(existing) if !check_expected(existing) => {
-                // mismatch
-                false
-            }
-            None => {
-                // we have no such layer
-                false
-            }
+            Some(existing) if !check_expected(existing) => Replacement::Unexpected(existing),
+            None => Replacement::NotFound,
             Some(_existing) => {
                 // matched, buffer the switch
                 self.insert(layer_key.to_owned(), new);
-                true
+                Replacement::Replaced { in_buffered }
             }
         }
     }
@@ -540,6 +539,25 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
 
         Ok(&self.historic_coverage)
     }
+}
+
+/// Outcome of the replace operation.
+#[derive(Debug)]
+pub enum Replacement<'a, Value> {
+    /// Previous value was replaced with the new value.
+    Replaced {
+        /// Replacement happened for a scheduled insert.
+        in_buffered: bool,
+    },
+
+    /// Key was not found buffered updates or existing layers.
+    NotFound,
+
+    /// Key has been scheduled for removal, it was not replaced.
+    RemovalBuffered,
+
+    /// Previous value was rejected by the closure.
+    Unexpected(&'a Value),
 }
 
 #[test]
@@ -690,9 +708,10 @@ fn test_retroactive_replacement() {
         let replacement = format!("Remote {orig_layer}");
 
         // evict
+        let ret = map.replace(key, replacement.clone(), |l| l == orig_layer);
         assert!(
-            map.replace(key, replacement.clone(), |l| l == orig_layer),
-            "replace {orig_layer}"
+            matches!(ret, Replacement::Replaced { .. }),
+            "replace {orig_layer}: {ret:?}"
         );
         map.rebuild();
 
@@ -706,9 +725,10 @@ fn test_retroactive_replacement() {
         );
 
         // download
+        let ret = map.replace(key, orig_layer.clone(), |l| l == &replacement);
         assert!(
-            map.replace(key, orig_layer.clone(), |l| l == &replacement),
-            "replace {orig_layer} back"
+            matches!(ret, Replacement::Replaced { .. }),
+            "replace {orig_layer} back: {ret:?}"
         );
         map.rebuild();
         let version = map.get().expect("rebuilt").get_version(at).unwrap();
@@ -729,7 +749,8 @@ fn missing_key_is_not_inserted_with_replace() {
         is_image: true,
     };
 
-    assert!(!map.replace(&key, "should not replace", |_| true));
+    let ret = map.replace(&key, "should not replace", |_| true);
+    assert!(matches!(ret, Replacement::NotFound), "{ret:?}");
     assert!(map
         .get()
         .expect("no changes to rebuild")
@@ -760,7 +781,11 @@ fn replacing_buffered_insert_and_remove() {
     };
 
     map.insert(key.clone(), "Image 1");
-    assert!(map.replace(&key, "Remote Image 1", |&l| l == "Image 1"));
+    let ret = map.replace(&key, "Remote Image 1", |&l| l == "Image 1");
+    assert!(
+        matches!(ret, Replacement::Replaced { in_buffered: true }),
+        "{ret:?}"
+    );
     map.rebuild();
 
     assert_eq!(
@@ -774,16 +799,18 @@ fn replacing_buffered_insert_and_remove() {
     );
 
     map.remove(key.clone());
+    let ret = map.replace(&key, "should not replace", |_| true);
     assert!(
-        !map.replace(&key, "should not replace", |_| true),
-        "cannot replace after scheduled remove"
+        matches!(ret, Replacement::RemovalBuffered),
+        "cannot replace after scheduled remove: {ret:?}"
     );
 
     map.rebuild();
 
+    let ret = map.replace(&key, "should not replace", |_| true);
     assert!(
-        !map.replace(&key, "should not replace", |_| true),
-        "cannot replace after remove + rebuild"
+        matches!(ret, Replacement::NotFound),
+        "cannot replace after remove + rebuild: {ret:?}"
     );
 
     let at_version = map.get().expect("rebuilt").get_version(102);
