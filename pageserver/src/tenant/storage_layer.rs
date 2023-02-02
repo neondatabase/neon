@@ -212,13 +212,13 @@ impl LayerAccessStats {
     const LAST_ACCESSES_MAX_LEN: usize = 16;
     const LAST_RESIDENCE_CHANGES_MAX_LEN: usize = 16;
 
-    pub(crate) fn new_for_loading_layer(residence_status: LayerResidenceStatus) -> Self {
+    pub(crate) fn for_loading_layer(residence_status: LayerResidenceStatus) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
         new.record_residence_change(residence_status);
         new
     }
 
-    pub(crate) fn new_for_new_layer_file() -> Self {
+    pub(crate) fn for_new_layer_file() -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
         new.record_residence_change(LayerResidenceStatus::created());
         new

@@ -1165,7 +1165,7 @@ impl Timeline {
                     self.tenant_id,
                     &imgfilename,
                     file_size,
-                    LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident()),
+                    LayerAccessStats::for_loading_layer(LayerResidenceStatus::resident()),
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1197,7 +1197,7 @@ impl Timeline {
                     self.tenant_id,
                     &deltafilename,
                     file_size,
-                    LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident()),
+                    LayerAccessStats::for_loading_layer(LayerResidenceStatus::resident()),
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1335,7 +1335,7 @@ impl Timeline {
                         self.timeline_id,
                         imgfilename,
                         &remote_layer_metadata,
-                        LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::evicted()),
+                        LayerAccessStats::for_loading_layer(LayerResidenceStatus::evicted()),
                     );
                     let remote_layer = Arc::new(remote_layer);
 
@@ -1360,7 +1360,7 @@ impl Timeline {
                         self.timeline_id,
                         deltafilename,
                         &remote_layer_metadata,
-                        LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::evicted()),
+                        LayerAccessStats::for_loading_layer(LayerResidenceStatus::evicted()),
                     );
                     let remote_layer = Arc::new(remote_layer);
                     updates.insert_historic(remote_layer);

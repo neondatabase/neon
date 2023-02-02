@@ -621,7 +621,7 @@ impl DeltaLayer {
             key_range: summary.key_range,
             lsn_range: summary.lsn_range,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident()),
+            access_stats: LayerAccessStats::for_loading_layer(LayerResidenceStatus::resident()),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -792,7 +792,7 @@ impl DeltaLayerWriterInner {
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::new_for_new_layer_file(),
+            access_stats: LayerAccessStats::for_new_layer_file(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
