@@ -316,15 +316,20 @@ where
         let key = historic_layer_coverage::LayerKey::from(&**expected);
         let other = historic_layer_coverage::LayerKey::from(&*new);
 
-        let was_l0 = Self::is_l0(expected);
+        let expected_l0 = Self::is_l0(expected);
+        let new_l0 = Self::is_l0(&new);
 
         anyhow::ensure!(
-            was_l0 == Self::is_l0(&new),
-            "replaced must both be l0 deltas or neither"
+            key == other,
+            "expected and new must have equal LayerKeys: {key:?} != {other:?}"
         );
-        anyhow::ensure!(key == other, "replaced must have same layerkeys");
 
-        let l0_index = if was_l0 {
+        anyhow::ensure!(
+            expected_l0 == new_l0,
+            "expected and new must both be l0 deltas or neither should be: {expected_l0} != {new_l0}"
+        );
+
+        let l0_index = if expected_l0 {
             // find the index in case replace worked, we need to replace that as well
             Some(
                 self.l0_delta_layers
