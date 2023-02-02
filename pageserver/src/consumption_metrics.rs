@@ -83,10 +83,7 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
-                if let Err(err) = collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx).await
-                {
-                    error!("metrics collection failed: {err:?}");
-                }
+                collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx).await;
             }
         }
     }
@@ -97,6 +94,9 @@ pub async fn collect_metrics(
 /// Gather per-tenant and per-timeline metrics and send them to the `metric_collection_endpoint`.
 /// Cache metrics to avoid sending the same metrics multiple times.
 ///
+/// This function handles all errors internally
+/// and doesn't break iteration if just one tenant fails.
+///
 /// TODO
 /// - refactor this function (chunking+sending part) to reuse it in proxy module;
 pub async fn collect_metrics_iteration(
@@ -105,7 +105,7 @@ pub async fn collect_metrics_iteration(
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
     ctx: &RequestContext,
-) -> anyhow::Result<()> {
+) {
     let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, u64)> = Vec::new();
     trace!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
@@ -113,7 +113,13 @@ pub async fn collect_metrics_iteration(
     );
 
     // get list of tenants
-    let tenants = mgr::list_tenants().await?;
+    let tenants = match mgr::list_tenants().await {
+        Ok(tenants) => tenants,
+        Err(err) => {
+            error!("failed to list tenants: {:?}", err);
+            return;
+        }
+    };
 
     // iterate through list of Active tenants and collect metrics
     for (tenant_id, tenant_state) in tenants {
@@ -224,7 +230,7 @@ pub async fn collect_metrics_iteration(
 
     if current_metrics.is_empty() {
         trace!("no new metrics to send");
-        return Ok(());
+        return;
     }
 
     // Send metrics.
@@ -275,8 +281,6 @@ pub async fn collect_metrics_iteration(
             }
         }
     }
-
-    Ok(())
 }
 
 /// Caclculate synthetic size for each active tenant
