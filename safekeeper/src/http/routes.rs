@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+
 use std::sync::Arc;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
@@ -181,12 +182,9 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             .commit_lsn
             .segment_lsn(server_info.wal_seg_size as usize)
     });
-    tokio::task::spawn_blocking(move || {
-        GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
-    })
-    .await
-    .map_err(|e| ApiError::InternalServerError(e.into()))?
-    .map_err(ApiError::InternalServerError)?;
+    GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }

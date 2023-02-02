@@ -13,8 +13,6 @@ pub mod simple_rcu;
 pub mod vec_map;
 
 pub mod bin_ser;
-pub mod postgres_backend;
-pub mod postgres_backend_async;
 
 // helper functions for creating and fsyncing
 pub mod crashsafe;
@@ -26,9 +24,6 @@ pub mod auth;
 pub mod id;
 // http endpoint utils
 pub mod http;
-
-// socket splitting utils
-pub mod sock_split;
 
 // common log initialisation routine
 pub mod logging;

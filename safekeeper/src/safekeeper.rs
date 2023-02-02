@@ -486,7 +486,7 @@ impl AcceptorProposerMessage {
                 buf.put_u64_le(msg.hs_feedback.xmin);
                 buf.put_u64_le(msg.hs_feedback.catalog_xmin);
 
-                msg.pageserver_feedback.serialize(buf)?
+                msg.pageserver_feedback.serialize(buf);
             }
         }
 

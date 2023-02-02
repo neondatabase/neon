@@ -5,6 +5,7 @@
 
 use anyhow::{bail, ensure, Context};
 
+use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -19,7 +20,6 @@ use std::process::{Command, Stdio};
 use utils::{
     auth::{encode_from_key_file, Claims, Scope},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    postgres_backend::AuthType,
 };
 
 use crate::safekeeper::SafekeeperNode;

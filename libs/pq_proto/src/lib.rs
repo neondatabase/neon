@@ -2,24 +2,18 @@
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
 
-// Tools for calling certain async methods in sync contexts.
-pub mod sync;
+pub mod framed;
 
-use anyhow::{ensure, Context, Result};
+use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_protocol::PG_EPOCH;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     collections::HashMap,
-    fmt,
-    future::Future,
-    io::{self, Cursor},
-    str,
+    fmt, io, str,
     time::{Duration, SystemTime},
 };
-use sync::{AsyncishRead, SyncFuture};
-use tokio::io::AsyncReadExt;
 use tracing::{trace, warn};
 
 pub type Oid = u32;
@@ -31,7 +25,6 @@ pub const TEXT_OID: Oid = 25;
 
 #[derive(Debug)]
 pub enum FeMessage {
-    StartupPacket(FeStartupPacket),
     // Simple query.
     Query(Bytes),
     // Extended query protocol.
@@ -191,260 +184,207 @@ pub struct FeExecuteMessage {
 #[derive(Debug)]
 pub struct FeCloseMessage;
 
-/// Retry a read on EINTR
-///
-/// This runs the enclosed expression, and if it returns
-/// Err(io::ErrorKind::Interrupted), retries it.
-macro_rules! retry_read {
-    ( $x:expr ) => {
-        loop {
-            match $x {
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                res => break res,
-            }
-        }
-    };
-}
-
-/// An error occured during connection being open.
+/// An error occured while parsing or serializing raw stream into Postgres
+/// messages.
 #[derive(thiserror::Error, Debug)]
-pub enum ConnectionError {
-    /// IO error during writing to or reading from the connection socket.
-    #[error("Socket IO error: {0}")]
-    Socket(std::io::Error),
-    /// Invalid packet was received from client
+pub enum ProtocolError {
+    /// Invalid packet was received from the client (e.g. unexpected message
+    /// type or broken len).
     #[error("Protocol error: {0}")]
     Protocol(String),
-    /// Failed to parse a protocol mesage
+    /// Failed to parse or, (unlikely), serialize a protocol message.
     #[error("Message parse error: {0}")]
-    MessageParse(anyhow::Error),
+    BadMessage(String),
 }
 
-impl From<anyhow::Error> for ConnectionError {
-    fn from(e: anyhow::Error) -> Self {
-        Self::MessageParse(e)
-    }
-}
-
-impl ConnectionError {
+impl ProtocolError {
+    /// Proxy stream.rs uses only io::Error; provide it.
     pub fn into_io_error(self) -> io::Error {
-        match self {
-            ConnectionError::Socket(io) => io,
-            other => io::Error::new(io::ErrorKind::Other, other.to_string()),
-        }
+        io::Error::new(io::ErrorKind::Other, self.to_string())
     }
 }
 
 impl FeMessage {
-    /// Read one message from the stream.
-    /// This function returns `Ok(None)` in case of EOF.
-    /// One way to handle this properly:
+    /// Read and parse one message from the `buf` input buffer. If there is at
+    /// least one valid message, returns it, advancing `buf`; redundant copies
+    /// are avoided, as thanks to `bytes` crate ptrs in parsed message point
+    /// directly into the `buf` (processed data is garbage collected after
+    /// parsed message is dropped).
     ///
-    /// ```
-    /// # use std::io;
-    /// # use pq_proto::FeMessage;
-    /// #
-    /// # fn process_message(msg: FeMessage) -> anyhow::Result<()> {
-    /// #     Ok(())
-    /// # };
-    /// #
-    /// fn do_the_job(stream: &mut (impl io::Read + Unpin)) -> anyhow::Result<()> {
-    ///     while let Some(msg) = FeMessage::read(stream)? {
-    ///         process_message(msg)?;
-    ///     }
+    /// Returns None if `buf` doesn't contain enough data for a single message.
+    /// For efficiency, tries to reserve large enough space in `buf` for the
+    /// next message in this case to save the repeated calls.
     ///
-    ///     Ok(())
-    /// }
-    /// ```
-    #[inline(never)]
-    pub fn read(
-        stream: &mut (impl io::Read + Unpin),
-    ) -> Result<Option<FeMessage>, ConnectionError> {
-        Self::read_fut(&mut AsyncishRead(stream)).wait()
-    }
+    /// Returns Error if message is malformed, the only possible ErrorKind is
+    /// InvalidInput.
+    //
+    // Inspired by rust-postgres Message::parse.
+    pub fn parse(buf: &mut BytesMut) -> Result<Option<FeMessage>, ProtocolError> {
+        // Every message contains message type byte and 4 bytes len; can't do
+        // much without them.
+        if buf.len() < 5 {
+            let to_read = 5 - buf.len();
+            buf.reserve(to_read);
+            return Ok(None);
+        }
 
-    /// Read one message from the stream.
-    /// See documentation for `Self::read`.
-    pub fn read_fut<Reader>(
-        stream: &mut Reader,
-    ) -> SyncFuture<Reader, impl Future<Output = Result<Option<FeMessage>, ConnectionError>> + '_>
-    where
-        Reader: tokio::io::AsyncRead + Unpin,
-    {
-        // We return a Future that's sync (has a `wait` method) if and only if the provided stream is SyncProof.
-        // SyncFuture contract: we are only allowed to await on sync-proof futures, the AsyncRead and
-        // AsyncReadExt methods of the stream.
-        SyncFuture::new(async move {
-            // Each libpq message begins with a message type byte, followed by message length
-            // If the client closes the connection, return None. But if the client closes the
-            // connection in the middle of a message, we will return an error.
-            let tag = match retry_read!(stream.read_u8().await) {
-                Ok(b) => b,
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(ConnectionError::Socket(e)),
-            };
+        // We shouldn't advance `buf` as probably full message is not there yet,
+        // so can't directly use Bytes::get_u32 etc.
+        let tag = buf[0];
+        let len = (&buf[1..5]).read_u32::<BigEndian>().unwrap();
+        if len < 4 {
+            return Err(ProtocolError::Protocol(format!(
+                "invalid message length {}",
+                len
+            )));
+        }
 
-            // The message length includes itself, so it better be at least 4.
-            let len = retry_read!(stream.read_u32().await)
-                .map_err(ConnectionError::Socket)?
-                .checked_sub(4)
-                .ok_or_else(|| ConnectionError::Protocol("invalid message length".to_string()))?;
+        // length field includes itself, but not message type.
+        let total_len = len as usize + 1;
+        if buf.len() < total_len {
+            // Don't have full message yet.
+            let to_read = total_len - buf.len();
+            buf.reserve(to_read);
+            return Ok(None);
+        }
 
-            let body = {
-                let mut buffer = vec![0u8; len as usize];
-                stream
-                    .read_exact(&mut buffer)
-                    .await
-                    .map_err(ConnectionError::Socket)?;
-                Bytes::from(buffer)
-            };
+        // got the message, advance buffer
+        let mut msg = buf.split_to(total_len).freeze();
+        msg.advance(5); // consume message type and len
 
-            match tag {
-                b'Q' => Ok(Some(FeMessage::Query(body))),
-                b'P' => Ok(Some(FeParseMessage::parse(body)?)),
-                b'D' => Ok(Some(FeDescribeMessage::parse(body)?)),
-                b'E' => Ok(Some(FeExecuteMessage::parse(body)?)),
-                b'B' => Ok(Some(FeBindMessage::parse(body)?)),
-                b'C' => Ok(Some(FeCloseMessage::parse(body)?)),
-                b'S' => Ok(Some(FeMessage::Sync)),
-                b'X' => Ok(Some(FeMessage::Terminate)),
-                b'd' => Ok(Some(FeMessage::CopyData(body))),
-                b'c' => Ok(Some(FeMessage::CopyDone)),
-                b'f' => Ok(Some(FeMessage::CopyFail)),
-                b'p' => Ok(Some(FeMessage::PasswordMessage(body))),
-                tag => {
-                    return Err(ConnectionError::Protocol(format!(
-                        "unknown message tag: {tag},'{body:?}'"
-                    )))
-                }
+        match tag {
+            b'Q' => Ok(Some(FeMessage::Query(msg))),
+            b'P' => Ok(Some(FeParseMessage::parse(msg)?)),
+            b'D' => Ok(Some(FeDescribeMessage::parse(msg)?)),
+            b'E' => Ok(Some(FeExecuteMessage::parse(msg)?)),
+            b'B' => Ok(Some(FeBindMessage::parse(msg)?)),
+            b'C' => Ok(Some(FeCloseMessage::parse(msg)?)),
+            b'S' => Ok(Some(FeMessage::Sync)),
+            b'X' => Ok(Some(FeMessage::Terminate)),
+            b'd' => Ok(Some(FeMessage::CopyData(msg))),
+            b'c' => Ok(Some(FeMessage::CopyDone)),
+            b'f' => Ok(Some(FeMessage::CopyFail)),
+            b'p' => Ok(Some(FeMessage::PasswordMessage(msg))),
+            tag => {
+                return Err(ProtocolError::Protocol(format!(
+                    "unknown message tag: {tag},'{msg:?}'"
+                )))
             }
-        })
+        }
     }
 }
 
 impl FeStartupPacket {
-    /// Read startup message from the stream.
-    // XXX: It's tempting yet undesirable to accept `stream` by value,
-    // since such a change will cause user-supplied &mut references to be consumed
-    pub fn read(
-        stream: &mut (impl io::Read + Unpin),
-    ) -> Result<Option<FeMessage>, ConnectionError> {
-        Self::read_fut(&mut AsyncishRead(stream)).wait()
-    }
-
-    /// Read startup message from the stream.
-    // XXX: It's tempting yet undesirable to accept `stream` by value,
-    // since such a change will cause user-supplied &mut references to be consumed
-    pub fn read_fut<Reader>(
-        stream: &mut Reader,
-    ) -> SyncFuture<Reader, impl Future<Output = Result<Option<FeMessage>, ConnectionError>> + '_>
-    where
-        Reader: tokio::io::AsyncRead + Unpin,
-    {
+    /// Read and parse startup message from the `buf` input buffer. It is
+    /// different from [`FeMessage::parse`] because startup messages don't have
+    /// message type byte; otherwise, its comments apply.
+    pub fn parse(buf: &mut BytesMut) -> Result<Option<FeStartupPacket>, ProtocolError> {
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
         const RESERVED_INVALID_MAJOR_VERSION: u32 = 1234;
         const CANCEL_REQUEST_CODE: u32 = 5678;
         const NEGOTIATE_SSL_CODE: u32 = 5679;
         const NEGOTIATE_GSS_CODE: u32 = 5680;
 
-        SyncFuture::new(async move {
-            // Read length. If the connection is closed before reading anything (or before
-            // reading 4 bytes, to be precise), return None to indicate that the connection
-            // was closed. This matches the PostgreSQL server's behavior, which avoids noise
-            // in the log if the client opens connection but closes it immediately.
-            let len = match retry_read!(stream.read_u32().await) {
-                Ok(len) => len as usize,
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(ConnectionError::Socket(e)),
-            };
+        // need at least 4 bytes with packet len
+        if buf.len() < 4 {
+            let to_read = 4 - buf.len();
+            buf.reserve(to_read);
+            return Ok(None);
+        }
 
-            #[allow(clippy::manual_range_contains)]
-            if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
-                return Err(ConnectionError::Protocol(format!(
-                    "invalid message length {len}"
+        // We shouldn't advance `buf` as probably full message is not there yet,
+        // so can't directly use Bytes::get_u32 etc.
+        let len = (&buf[0..4]).read_u32::<BigEndian>().unwrap() as usize;
+        if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
+            return Err(ProtocolError::Protocol(format!(
+                "invalid startup packet message length {}",
+                len
+            )));
+        }
+
+        if buf.len() < len {
+            // Don't have full message yet.
+            let to_read = len - buf.len();
+            buf.reserve(to_read);
+            return Ok(None);
+        }
+
+        // got the message, advance buffer
+        let mut msg = buf.split_to(len).freeze();
+        msg.advance(4); // consume len
+
+        let request_code = msg.get_u32();
+        let req_hi = request_code >> 16;
+        let req_lo = request_code & ((1 << 16) - 1);
+        // StartupMessage, CancelRequest, SSLRequest etc are differentiated by request code.
+        let message = match (req_hi, req_lo) {
+            (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
+                if msg.remaining() != 8 {
+                    return Err(ProtocolError::BadMessage(
+                        "CancelRequest message is malformed, backend PID / secret key missing"
+                            .to_owned(),
+                    ));
+                }
+                FeStartupPacket::CancelRequest(CancelKeyData {
+                    backend_pid: msg.get_i32(),
+                    cancel_key: msg.get_i32(),
+                })
+            }
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => {
+                // Requested upgrade to SSL (aka TLS)
+                FeStartupPacket::SslRequest
+            }
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => {
+                // Requested upgrade to GSSAPI
+                FeStartupPacket::GssEncRequest
+            }
+            (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
+                return Err(ProtocolError::Protocol(format!(
+                    "Unrecognized request code {unrecognized_code}"
                 )));
             }
+            // TODO bail if protocol major_version is not 3?
+            (major_version, minor_version) => {
+                // StartupMessage
 
-            let request_code =
-                retry_read!(stream.read_u32().await).map_err(ConnectionError::Socket)?;
+                // Parse pairs of null-terminated strings (key, value).
+                // See `postgres: ProcessStartupPacket, build_startup_packet`.
+                let mut tokens = str::from_utf8(&msg)
+                    .map_err(|_e| {
+                        ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
+                    })?
+                    .strip_suffix('\0') // drop packet's own null
+                    .ok_or_else(|| {
+                        ProtocolError::Protocol(
+                            "StartupMessage params: missing null terminator".to_string(),
+                        )
+                    })?
+                    .split_terminator('\0');
 
-            // the rest of startup packet are params
-            let params_len = len - 8;
-            let mut params_bytes = vec![0u8; params_len];
-            stream
-                .read_exact(params_bytes.as_mut())
-                .await
-                .map_err(ConnectionError::Socket)?;
+                let mut params = HashMap::new();
+                while let Some(name) = tokens.next() {
+                    let value = tokens.next().ok_or_else(|| {
+                        ProtocolError::Protocol(
+                            "StartupMessage params: key without value".to_string(),
+                        )
+                    })?;
 
-            // Parse params depending on request code
-            let req_hi = request_code >> 16;
-            let req_lo = request_code & ((1 << 16) - 1);
-            let message = match (req_hi, req_lo) {
-                (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
-                    if params_len != 8 {
-                        return Err(ConnectionError::Protocol(
-                            "expected 8 bytes for CancelRequest params".to_string(),
-                        ));
-                    }
-                    let mut cursor = Cursor::new(params_bytes);
-                    FeStartupPacket::CancelRequest(CancelKeyData {
-                        backend_pid: cursor.read_i32().await.map_err(ConnectionError::Socket)?,
-                        cancel_key: cursor.read_i32().await.map_err(ConnectionError::Socket)?,
-                    })
+                    params.insert(name.to_owned(), value.to_owned());
                 }
-                (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => {
-                    // Requested upgrade to SSL (aka TLS)
-                    FeStartupPacket::SslRequest
-                }
-                (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => {
-                    // Requested upgrade to GSSAPI
-                    FeStartupPacket::GssEncRequest
-                }
-                (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
-                    return Err(ConnectionError::Protocol(format!(
-                        "Unrecognized request code {unrecognized_code}"
-                    )));
-                }
-                // TODO bail if protocol major_version is not 3?
-                (major_version, minor_version) => {
-                    // Parse pairs of null-terminated strings (key, value).
-                    // See `postgres: ProcessStartupPacket, build_startup_packet`.
-                    let mut tokens = str::from_utf8(&params_bytes)
-                        .context("StartupMessage params: invalid utf-8")?
-                        .strip_suffix('\0') // drop packet's own null
-                        .ok_or_else(|| {
-                            ConnectionError::Protocol(
-                                "StartupMessage params: missing null terminator".to_string(),
-                            )
-                        })?
-                        .split_terminator('\0');
 
-                    let mut params = HashMap::new();
-                    while let Some(name) = tokens.next() {
-                        let value = tokens.next().ok_or_else(|| {
-                            ConnectionError::Protocol(
-                                "StartupMessage params: key without value".to_string(),
-                            )
-                        })?;
-
-                        params.insert(name.to_owned(), value.to_owned());
-                    }
-
-                    FeStartupPacket::StartupMessage {
-                        major_version,
-                        minor_version,
-                        params: StartupMessageParams { params },
-                    }
+                FeStartupPacket::StartupMessage {
+                    major_version,
+                    minor_version,
+                    params: StartupMessageParams { params },
                 }
-            };
-
-            Ok(Some(FeMessage::StartupPacket(message)))
-        })
+            }
+        };
+        Ok(Some(message))
     }
 }
 
 impl FeParseMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         // FIXME: the rust-postgres driver uses a named prepared statement
         // for copy_out(). We're not prepared to handle that correctly. For
         // now, just ignore the statement name, assuming that the client never
@@ -452,55 +392,82 @@ impl FeParseMessage {
 
         let _pstmt_name = read_cstr(&mut buf)?;
         let query_string = read_cstr(&mut buf)?;
+        if buf.remaining() < 2 {
+            return Err(ProtocolError::BadMessage(
+                "Parse message is malformed, nparams missing".to_string(),
+            ));
+        }
         let nparams = buf.get_i16();
 
-        ensure!(nparams == 0, "query params not implemented");
+        if nparams != 0 {
+            return Err(ProtocolError::BadMessage(
+                "query params not implemented".to_string(),
+            ));
+        }
 
         Ok(FeMessage::Parse(FeParseMessage { query_string }))
     }
 }
 
 impl FeDescribeMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let kind = buf.get_u8();
         let _pstmt_name = read_cstr(&mut buf)?;
 
         // FIXME: see FeParseMessage::parse
-        ensure!(
-            kind == b'S',
-            "only prepared statemement Describe is implemented"
-        );
+        if kind != b'S' {
+            return Err(ProtocolError::BadMessage(
+                "only prepared statemement Describe is implemented".to_string(),
+            ));
+        }
 
         Ok(FeMessage::Describe(FeDescribeMessage { kind }))
     }
 }
 
 impl FeExecuteMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let portal_name = read_cstr(&mut buf)?;
+        if buf.remaining() < 4 {
+            return Err(ProtocolError::BadMessage(
+                "FeExecuteMessage message is malformed, maxrows missing".to_string(),
+            ));
+        }
         let maxrows = buf.get_i32();
 
-        ensure!(portal_name.is_empty(), "named portals not implemented");
-        ensure!(maxrows == 0, "row limit in Execute message not implemented");
+        if !portal_name.is_empty() {
+            return Err(ProtocolError::BadMessage(
+                "named portals not implemented".to_string(),
+            ));
+        }
+        if maxrows != 0 {
+            return Err(ProtocolError::BadMessage(
+                "row limit in Execute message not implemented".to_string(),
+            ));
+        }
 
         Ok(FeMessage::Execute(FeExecuteMessage { maxrows }))
     }
 }
 
 impl FeBindMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let portal_name = read_cstr(&mut buf)?;
         let _pstmt_name = read_cstr(&mut buf)?;
 
         // FIXME: see FeParseMessage::parse
-        ensure!(portal_name.is_empty(), "named portals not implemented");
+        if !portal_name.is_empty() {
+            return Err(ProtocolError::BadMessage(
+                "named portals not implemented".to_string(),
+            ));
+        }
 
         Ok(FeMessage::Bind(FeBindMessage))
     }
 }
 
 impl FeCloseMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let _kind = buf.get_u8();
         let _pstmt_or_portal_name = read_cstr(&mut buf)?;
 
@@ -529,6 +496,7 @@ pub enum BeMessage<'a> {
     CloseComplete,
     // None means column is NULL
     DataRow(&'a [Option<&'a [u8]>]),
+    // None errcode means internal_error will be sent.
     ErrorResponse(&'a str, Option<&'a [u8; 5]>),
     /// Single byte - used in response to SSLRequest/GSSENCRequest.
     EncryptionResponse(bool),
@@ -557,6 +525,11 @@ impl<'a> BeMessage<'a> {
     pub const CLIENT_ENCODING: Self = Self::ParameterStatus {
         name: b"client_encoding",
         value: b"UTF8",
+    };
+
+    pub const INTEGER_DATETIMES: Self = Self::ParameterStatus {
+        name: b"integer_datetimes",
+        value: b"on",
     };
 
     /// Build a [`BeMessage::ParameterStatus`] holding the server version.
@@ -637,7 +610,7 @@ impl RowDescriptor<'_> {
 #[derive(Debug)]
 pub struct XLogDataBody<'a> {
     pub wal_start: u64,
-    pub wal_end: u64,
+    pub wal_end: u64, // current end of WAL on the server
     pub timestamp: i64,
     pub data: &'a [u8],
 }
@@ -677,12 +650,11 @@ fn write_body<R>(buf: &mut BytesMut, f: impl FnOnce(&mut BytesMut) -> R) -> R {
 }
 
 /// Safe write of s into buf as cstring (String in the protocol).
-fn write_cstr(s: impl AsRef<[u8]>, buf: &mut BytesMut) -> io::Result<()> {
+fn write_cstr(s: impl AsRef<[u8]>, buf: &mut BytesMut) -> Result<(), ProtocolError> {
     let bytes = s.as_ref();
     if bytes.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "string contains embedded null",
+        return Err(ProtocolError::BadMessage(
+            "string contains embedded null".to_owned(),
         ));
     }
     buf.put_slice(bytes);
@@ -690,22 +662,27 @@ fn write_cstr(s: impl AsRef<[u8]>, buf: &mut BytesMut) -> io::Result<()> {
     Ok(())
 }
 
-fn read_cstr(buf: &mut Bytes) -> anyhow::Result<Bytes> {
-    let pos = buf.iter().position(|x| *x == 0);
-    let result = buf.split_to(pos.context("missing terminator")?);
+/// Read cstring from buf, advancing it.
+fn read_cstr(buf: &mut Bytes) -> Result<Bytes, ProtocolError> {
+    let pos = buf
+        .iter()
+        .position(|x| *x == 0)
+        .ok_or_else(|| ProtocolError::BadMessage("missing cstring terminator".to_owned()))?;
+    let result = buf.split_to(pos);
     buf.advance(1); // drop the null terminator
     Ok(result)
 }
 
 pub const SQLSTATE_INTERNAL_ERROR: &[u8; 5] = b"XX000";
+pub const SQLSTATE_SUCCESSFUL_COMPLETION: &[u8; 5] = b"00000";
 
 impl<'a> BeMessage<'a> {
-    /// Write message to the given buf.
-    // Unlike the reading side, we use BytesMut
-    // here as msg len precedes its body and it is handy to write it down first
-    // and then fill the length. With Write we would have to either calc it
-    // manually or have one more buffer.
-    pub fn write(buf: &mut BytesMut, message: &BeMessage) -> io::Result<()> {
+    /// Serialize `message` to the given `buf`.
+    /// Apart from smart memory managemet, BytesMut is good here as msg len
+    /// precedes its body and it is handy to write it down first and then fill
+    /// the length. With Write we would have to either calc it manually or have
+    /// one more buffer.
+    pub fn write(buf: &mut BytesMut, message: &BeMessage) -> Result<(), ProtocolError> {
         match message {
             BeMessage::AuthenticationOk => {
                 buf.put_u8(b'R');
@@ -750,7 +727,7 @@ impl<'a> BeMessage<'a> {
                             buf.put_slice(extra);
                         }
                     }
-                    Ok::<_, io::Error>(())
+                    Ok(())
                 })?;
             }
 
@@ -841,7 +818,7 @@ impl<'a> BeMessage<'a> {
             BeMessage::ErrorResponse(error_msg, pg_error_code) => {
                 // 'E' signalizes ErrorResponse messages
                 buf.put_u8(b'E');
-                write_body(buf, |buf| {
+                write_body(buf, |buf| -> Result<(), ProtocolError> {
                     buf.put_u8(b'S'); // severity
                     buf.put_slice(b"ERROR\0");
 
@@ -854,7 +831,7 @@ impl<'a> BeMessage<'a> {
                     write_cstr(error_msg, buf)?;
 
                     buf.put_u8(0); // terminator
-                    Ok::<_, io::Error>(())
+                    Ok(())
                 })?;
             }
 
@@ -866,7 +843,7 @@ impl<'a> BeMessage<'a> {
 
                 // 'N' signalizes NoticeResponse messages
                 buf.put_u8(b'N');
-                write_body(buf, |buf| {
+                write_body(buf, |buf| -> Result<(), ProtocolError> {
                     buf.put_u8(b'S'); // severity
                     buf.put_slice(b"NOTICE\0");
 
@@ -877,7 +854,7 @@ impl<'a> BeMessage<'a> {
                     write_cstr(error_msg.as_bytes(), buf)?;
 
                     buf.put_u8(0); // terminator
-                    Ok::<_, io::Error>(())
+                    Ok(())
                 })?;
             }
 
@@ -921,7 +898,7 @@ impl<'a> BeMessage<'a> {
 
             BeMessage::RowDescription(rows) => {
                 buf.put_u8(b'T');
-                write_body(buf, |buf| {
+                write_body(buf, |buf| -> Result<(), ProtocolError> {
                     buf.put_i16(rows.len() as i16); // # of fields
                     for row in rows.iter() {
                         write_cstr(row.name, buf)?;
@@ -932,7 +909,7 @@ impl<'a> BeMessage<'a> {
                         buf.put_i32(-1); /* typmod */
                         buf.put_i16(0); /* format code */
                     }
-                    Ok::<_, io::Error>(())
+                    Ok(())
                 })?;
             }
 
@@ -999,7 +976,7 @@ impl ReplicationFeedback {
     // null-terminated string - key,
     // uint32 - value length in bytes
     // value itself
-    pub fn serialize(&self, buf: &mut BytesMut) -> Result<()> {
+    pub fn serialize(&self, buf: &mut BytesMut) {
         buf.put_u8(REPLICATION_FEEDBACK_FIELDS_NUMBER); // # of keys
         buf.put_slice(b"current_timeline_size\0");
         buf.put_i32(8);
@@ -1024,7 +1001,6 @@ impl ReplicationFeedback {
         buf.put_slice(b"ps_replytime\0");
         buf.put_i32(8);
         buf.put_i64(timestamp);
-        Ok(())
     }
 
     // Deserialize ReplicationFeedback message
@@ -1092,7 +1068,7 @@ mod tests {
         // because it is rounded up to microseconds during serialization.
         rf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
         let mut data = BytesMut::new();
-        rf.serialize(&mut data).unwrap();
+        rf.serialize(&mut data);
 
         let rf_parsed = ReplicationFeedback::parse(data.freeze());
         assert_eq!(rf, rf_parsed);
@@ -1107,7 +1083,7 @@ mod tests {
         // because it is rounded up to microseconds during serialization.
         rf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
         let mut data = BytesMut::new();
-        rf.serialize(&mut data).unwrap();
+        rf.serialize(&mut data);
 
         // Add an extra field to the buffer and adjust number of keys
         if let Some(first) = data.first_mut() {
@@ -1148,15 +1124,6 @@ mod tests {
 
         let params = make_params("foo\\ bar \\ \\\\ baz\\  lol");
         assert_eq!(split_options(&params), ["foo bar", " \\", "baz ", "lol"]);
-    }
-
-    // Make sure that `read` is sync/async callable
-    async fn _assert(stream: &mut (impl tokio::io::AsyncRead + Unpin)) {
-        let _ = FeMessage::read(&mut [].as_ref());
-        let _ = FeMessage::read_fut(stream).await;
-
-        let _ = FeStartupPacket::read(&mut [].as_ref());
-        let _ = FeStartupPacket::read_fut(stream).await;
     }
 }
 

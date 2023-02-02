@@ -35,6 +35,7 @@ toml_edit.workspace = true
 tracing.workspace = true
 url.workspace = true
 metrics.workspace = true
+postgres_backend.workspace = true
 postgres_ffi.workspace = true
 pq_proto.workspace = true
 remote_storage.workspace = true

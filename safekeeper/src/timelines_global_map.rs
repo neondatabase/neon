@@ -161,7 +161,7 @@ impl GlobalTimelines {
 
     /// Create a new timeline with the given id. If the timeline already exists, returns
     /// an existing timeline.
-    pub fn create(
+    pub async fn create(
         ttid: TenantTimelineId,
         server_info: ServerInfo,
         commit_lsn: Lsn,
@@ -189,28 +189,20 @@ impl GlobalTimelines {
 
         // Take a lock and finish the initialization holding this mutex. No other threads
         // can interfere with creation after we will insert timeline into the map.
-        let mut shared_state = timeline.write_shared_state();
+        {
+            let mut shared_state = timeline.write_shared_state();
 
-        // We can get a race condition here in case of concurrent create calls, but only
-        // in theory. create() will return valid timeline on the next try.
-        TIMELINES_STATE
-            .lock()
-            .unwrap()
-            .try_insert(timeline.clone())?;
+            // We can get a race condition here in case of concurrent create calls, but only
+            // in theory. create() will return valid timeline on the next try.
+            TIMELINES_STATE
+                .lock()
+                .unwrap()
+                .try_insert(timeline.clone())?;
 
-        // Write the new timeline to the disk and start background workers.
-        // Bootstrap is transactional, so if it fails, the timeline will be deleted,
-        // and the state on disk should remain unchanged.
-        match timeline.bootstrap(&mut shared_state) {
-            Ok(_) => {
-                // We are done with bootstrap, release the lock, return the timeline.
-                drop(shared_state);
-                timeline
-                    .wal_backup_launcher_tx
-                    .blocking_send(timeline.ttid)?;
-                Ok(timeline)
-            }
-            Err(e) => {
+            // Write the new timeline to the disk and start background workers.
+            // Bootstrap is transactional, so if it fails, the timeline will be deleted,
+            // and the state on disk should remain unchanged.
+            if let Err(e) = timeline.bootstrap(&mut shared_state) {
                 // Note: the most likely reason for bootstrap failure is that the timeline
                 // directory already exists on disk. This happens when timeline is corrupted
                 // and wasn't loaded from disk on startup because of that. We want to preserve
@@ -222,9 +214,13 @@ impl GlobalTimelines {
 
                 // Timeline failed to bootstrap, it cannot be used. Remove it from the map.
                 TIMELINES_STATE.lock().unwrap().timelines.remove(&ttid);
-                Err(e)
+                return Err(e);
             }
+            // We are done with bootstrap, release the lock, return the timeline.
+            // {} block forces release before .await
         }
+        timeline.wal_backup_launcher_tx.send(timeline.ttid).await?;
+        Ok(timeline)
     }
 
     /// Get a timeline from the global map. If it's not present, it doesn't exist on disk,
@@ -244,7 +240,7 @@ impl GlobalTimelines {
         }
     }
 
-    /// Returns all timelines. This is used for background timeline proccesses.
+    /// Returns all timelines. This is used for background timeline processes.
     pub fn get_all() -> Vec<Arc<Timeline>> {
         let global_lock = TIMELINES_STATE.lock().unwrap();
         global_lock

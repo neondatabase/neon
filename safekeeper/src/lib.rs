@@ -1,8 +1,7 @@
-use storage_broker::Uri;
-//
 use remote_storage::RemoteStorageConfig;
 use std::path::PathBuf;
 use std::time::Duration;
+use storage_broker::Uri;
 
 use utils::id::{NodeId, TenantId, TenantTimelineId};
 
