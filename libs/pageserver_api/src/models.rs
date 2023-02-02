@@ -258,7 +258,7 @@ pub struct LayerAccessStatFullDetails {
 pub enum LayerResidenceStatus {
     Resident {
         timestamp_millis_since_epoch: u128,
-        creating: bool,
+        created: bool,
     },
     Evicted {
         timestamp_millis_since_epoch: u128,

@@ -235,7 +235,7 @@ impl RemoteLayer {
                 &fname,
                 file_size,
                 self.access_stats
-                    .clone_for_residence_change(LayerResidenceStatus::resident(false)),
+                    .clone_for_residence_change(LayerResidenceStatus::resident()),
             ))
         } else {
             let fname = ImageFileName {
@@ -249,7 +249,7 @@ impl RemoteLayer {
                 &fname,
                 file_size,
                 self.access_stats
-                    .clone_for_residence_change(LayerResidenceStatus::resident(false)),
+                    .clone_for_residence_change(LayerResidenceStatus::resident()),
             ))
         }
     }

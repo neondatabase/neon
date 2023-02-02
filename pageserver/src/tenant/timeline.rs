@@ -1165,7 +1165,7 @@ impl Timeline {
                     self.tenant_id,
                     &imgfilename,
                     file_size,
-                    LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident(false)),
+                    LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident()),
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1197,7 +1197,7 @@ impl Timeline {
                     self.tenant_id,
                     &deltafilename,
                     file_size,
-                    LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident(false)),
+                    LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident()),
                 );
 
                 trace!("found layer {}", layer.path().display());
