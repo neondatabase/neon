@@ -52,7 +52,8 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{ImageFileName, Layer, LayerFileName, LayerIter, PathOrConf};
+use super::filename::{ImageFileName, LayerFileName};
+use super::{Layer, LayerIter, PathOrConf};
 
 ///
 /// Header stored in the beginning of the file

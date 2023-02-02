@@ -17,11 +17,9 @@ use utils::{
     lsn::Lsn,
 };
 
+use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
-use super::{
-    DeltaFileName, DeltaLayer, ImageFileName, LayerFileName, LayerIter, LayerKeyIter,
-    PersistentLayer,
-};
+use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
 
 #[derive(Debug)]
 pub struct RemoteLayer {

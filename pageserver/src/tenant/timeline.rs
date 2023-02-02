@@ -30,7 +30,8 @@ use crate::broker_client::is_broker_client_initialized;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
-    DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer, RemoteLayer,
+    DeltaFileName, DeltaLayerWriter, ImageFileName, ImageLayerWriter, InMemoryLayer, LayerFileName,
+    RemoteLayer,
 };
 use crate::tenant::{
     ephemeral_file::is_ephemeral_file,
@@ -71,7 +72,7 @@ use walreceiver::spawn_connection_manager_task;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
-use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerFileName};
+use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FlushLoopState {

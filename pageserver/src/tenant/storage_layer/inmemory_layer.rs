@@ -120,6 +120,7 @@ impl Layer for InMemoryLayer {
         let end_lsn = inner.end_lsn.unwrap_or(Lsn(u64::MAX));
         format!("inmem-{:016X}-{:016X}", self.start_lsn.0, end_lsn.0)
     }
+
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();
