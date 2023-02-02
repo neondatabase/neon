@@ -820,7 +820,7 @@ impl Timeline {
         self.state.subscribe()
     }
 
-    pub fn layer_map_info(&self, reset: Option<LayerAccessStatsReset>) -> LayerMapInfo {
+    pub fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
         let mut in_memory_layers = Vec::new();
         let layer_map = self.layers.read().unwrap();
         if let Some(open_layer) = &layer_map.open_layer {

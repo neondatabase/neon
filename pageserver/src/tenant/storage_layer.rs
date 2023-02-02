@@ -121,6 +121,7 @@ pub enum LayerResidenceStatus {
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
 pub enum LayerAccessStatsReset {
+    NoReset,
     JustTaskKindFlags,
     AllStats,
 }
@@ -249,19 +250,11 @@ impl LayerAccessStats {
         inner.task_kind_flag |= task_kind;
         inner.last_accesses.write(this_access);
     }
-    fn reset(&self, what: LayerAccessStatsReset) {
+    fn to_api_model(
+        &self,
+        reset: LayerAccessStatsReset,
+    ) -> pageserver_api::models::LayerAccessStats {
         let mut inner = self.0.lock().unwrap();
-        match what {
-            LayerAccessStatsReset::JustTaskKindFlags => {
-                inner.task_kind_flag.clear();
-            }
-            LayerAccessStatsReset::AllStats => {
-                *inner = LayerAccessStatsInner::default();
-            }
-        }
-    }
-    fn to_api_model(&self) -> pageserver_api::models::LayerAccessStats {
-        let inner = self.0.lock().unwrap();
         let LayerAccessStatsInner {
             first_access,
             count_by_access_kind,
@@ -269,7 +262,7 @@ impl LayerAccessStats {
             last_accesses,
             last_residence_changes,
         } = &*inner;
-        pageserver_api::models::LayerAccessStats {
+        let ret = pageserver_api::models::LayerAccessStats {
             access_count_by_access_kind: count_by_access_kind
                 .iter()
                 .map(|(kind, count)| (kind, *count))
@@ -284,7 +277,17 @@ impl LayerAccessStats {
                 .iter()
                 .map(|s| s.to_api_model())
                 .collect(),
+        };
+        match reset {
+            LayerAccessStatsReset::NoReset => (),
+            LayerAccessStatsReset::JustTaskKindFlags => {
+                inner.task_kind_flag.clear();
+            }
+            LayerAccessStatsReset::AllStats => {
+                *inner = LayerAccessStatsInner::default();
+            }
         }
+        ret
     }
 }
 
@@ -395,7 +398,7 @@ pub trait PersistentLayer: Layer {
     /// current_physical_size is computed as the som of this value.
     fn file_size(&self) -> Option<u64>;
 
-    fn info(&self, reset: Option<LayerAccessStatsReset>) -> HistoricLayerInfo;
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
 
     fn access_stats(&self) -> &LayerAccessStats;
 }

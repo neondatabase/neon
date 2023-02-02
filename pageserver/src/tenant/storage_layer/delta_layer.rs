@@ -426,26 +426,22 @@ impl PersistentLayer for DeltaLayer {
         Some(self.file_size)
     }
 
-    fn info(&self, reset: Option<LayerAccessStatsReset>) -> HistoricLayerInfo {
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let key_range = self.get_key_range();
         let lsn_range = self.get_lsn_range();
 
-        let ret = HistoricLayerInfo::Delta {
+        let access_stats = self.access_stats.to_api_model(reset);
+
+        HistoricLayerInfo::Delta {
             layer_file_name,
             key_start: key_range.start,
             key_end: key_range.end,
             lsn_start: lsn_range.start,
             lsn_end: lsn_range.end,
             remote: false,
-            access_stats: self.access_stats.to_api_model(),
-        };
-
-        if let Some(reset) = reset {
-            self.access_stats.reset(reset);
+            access_stats,
         }
-
-        ret
     }
 
     fn access_stats(&self) -> &LayerAccessStats {

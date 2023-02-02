@@ -142,7 +142,7 @@ impl PersistentLayer for RemoteLayer {
         self.layer_metadata.file_size()
     }
 
-    fn info(&self, _reset: Option<LayerAccessStatsReset>) -> HistoricLayerInfo {
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let key_range = self.get_key_range();
         let lsn_range = self.get_lsn_range();
@@ -155,7 +155,7 @@ impl PersistentLayer for RemoteLayer {
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
-                access_stats: self.access_stats.to_api_model(),
+                access_stats: self.access_stats.to_api_model(reset),
             }
         } else {
             HistoricLayerInfo::Image {
@@ -164,7 +164,7 @@ impl PersistentLayer for RemoteLayer {
                 key_end: key_range.end,
                 lsn_start: lsn_range.start,
                 remote: true,
-                access_stats: self.access_stats.to_api_model(),
+                access_stats: self.access_stats.to_api_model(reset),
             }
         }
     }

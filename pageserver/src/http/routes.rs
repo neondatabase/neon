@@ -536,7 +536,8 @@ async fn layer_map_info_handler(request: Request<Body>) -> Result<Response<Body>
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let reset: Option<LayerAccessStatsReset> = parse_query_param(&request, "reset")?;
+    let reset: LayerAccessStatsReset =
+        parse_query_param(&request, "reset")?.unwrap_or(LayerAccessStatsReset::NoReset);
 
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
