@@ -3388,11 +3388,17 @@ impl Timeline {
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
                         match updates.replace_historic(&l, new_layer) {
-                            Ok(true) => {}
+                            Ok(true) => { /* expected */ }
                             Ok(false) => {
-                                todo!("what then? start the search all over again, remove downloaded file?")
+                                // FIXME: the downloaded file should probably be removed, otherwise
+                                // it will be added to the layermap on next load?
+                                warn!("replacing downloaded layer into layermap failed because layer was not found");
                             }
-                            Err(e) => todo!("how is this possible? {e:?}"),
+                            Err(e) => {
+                                // this is a precondition failure, the layer filename derived
+                                // attributes didn't match up, which doesn't seem likely.
+                                error!("replacing downloaded layer into layermap failed: {e:#?}")
+                            }
                         }
                     }
                     updates.flush();
