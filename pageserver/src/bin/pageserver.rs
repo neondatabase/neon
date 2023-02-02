@@ -23,11 +23,10 @@ use pageserver::{
     tenant::mgr,
     virtual_file,
 };
+use postgres_backend::AuthType;
 use utils::{
     auth::JwtAuth,
-    logging,
-    postgres_backend::AuthType,
-    project_git_version,
+    logging, project_git_version,
     sentry_init::init_sentry,
     signals::{self, Signal},
     tcp_listener,

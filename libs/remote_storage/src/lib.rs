@@ -111,7 +111,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
 }
 
 pub struct Download {
-    pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send>>,
+    pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send + Sync>>,
     /// Extra key-value data, associated with the current remote file.
     pub metadata: Option<StorageMetadata>,
 }

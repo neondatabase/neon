@@ -913,6 +913,7 @@ dependencies = [
  "once_cell",
  "pageserver_api",
  "postgres",
+ "postgres_backend",
  "postgres_connection",
  "regex",
  "reqwest",
@@ -2696,7 +2697,6 @@ dependencies = [
  "tokio-postgres-rustls",
  "tokio-rustls",
  "tracing",
- "utils",
  "workspace_hack",
 ]
 
@@ -2922,6 +2922,7 @@ dependencies = [
  "opentelemetry",
  "parking_lot",
  "pin-project-lite",
+ "postgres_backend",
  "pq_proto",
  "prometheus",
  "rand",
@@ -3302,15 +3303,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-split"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78802c9612b4689d207acff746f38132ca1b12dadb55d471aa5f10fd580f47d3"
-dependencies = [
- "rustls",
-]
-
-[[package]]
 name = "rustversion"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3346,6 +3338,7 @@ dependencies = [
  "parking_lot",
  "postgres",
  "postgres-protocol",
+ "postgres_backend",
  "postgres_ffi",
  "pq_proto",
  "regex",
@@ -4539,12 +4532,8 @@ dependencies = [
  "metrics",
  "nix",
  "once_cell",
- "pq_proto",
  "rand",
  "routerify",
- "rustls",
- "rustls-pemfile",
- "rustls-split",
  "sentry",
  "serde",
  "serde_json",
@@ -4858,14 +4847,19 @@ name = "workspace_hack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "byteorder",
  "bytes",
  "chrono",
  "clap 4.1.4",
  "crossbeam-utils",
+ "digest",
  "either",
  "fail",
  "futures",
+ "futures-channel",
+ "futures-core",
  "futures-executor",
+ "futures-sink",
  "futures-util",
  "hashbrown 0.12.3",
  "indexmap",
@@ -4890,6 +4884,7 @@ dependencies = [
  "socket2",
  "syn",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tonic",
  "tower",

@@ -2,8 +2,7 @@
 //! <https://www.postgresql.org/docs/devel/protocol-message-formats.html>
 //! on message formats.
 
-// Tools for calling certain async methods in sync contexts.
-pub mod sync;
+pub mod framed;
 
 use anyhow::{ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -13,12 +12,10 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     fmt,
-    future::Future,
     io::{self, Cursor},
     str,
     time::{Duration, SystemTime},
 };
-use sync::{AsyncishRead, SyncFuture};
 use tokio::io::AsyncReadExt;
 use tracing::{trace, warn};
 
@@ -211,7 +208,7 @@ macro_rules! retry_read {
 pub enum ConnectionError {
     /// IO error during writing to or reading from the connection socket.
     #[error("Socket IO error: {0}")]
-    Socket(std::io::Error),
+    Socket(#[from] std::io::Error),
     /// Invalid packet was received from client
     #[error("Protocol error: {0}")]
     Protocol(String),
@@ -238,87 +235,56 @@ impl ConnectionError {
 impl FeMessage {
     /// Read one message from the stream.
     /// This function returns `Ok(None)` in case of EOF.
-    /// One way to handle this properly:
-    ///
-    /// ```
-    /// # use std::io;
-    /// # use pq_proto::FeMessage;
-    /// #
-    /// # fn process_message(msg: FeMessage) -> anyhow::Result<()> {
-    /// #     Ok(())
-    /// # };
-    /// #
-    /// fn do_the_job(stream: &mut (impl io::Read + Unpin)) -> anyhow::Result<()> {
-    ///     while let Some(msg) = FeMessage::read(stream)? {
-    ///         process_message(msg)?;
-    ///     }
-    ///
-    ///     Ok(())
-    /// }
-    /// ```
-    #[inline(never)]
-    pub fn read(
-        stream: &mut (impl io::Read + Unpin),
-    ) -> Result<Option<FeMessage>, ConnectionError> {
-        Self::read_fut(&mut AsyncishRead(stream)).wait()
-    }
-
-    /// Read one message from the stream.
-    /// See documentation for `Self::read`.
-    pub fn read_fut<Reader>(
-        stream: &mut Reader,
-    ) -> SyncFuture<Reader, impl Future<Output = Result<Option<FeMessage>, ConnectionError>> + '_>
+    pub async fn read<Reader>(stream: &mut Reader) -> Result<Option<FeMessage>, ConnectionError>
     where
         Reader: tokio::io::AsyncRead + Unpin,
     {
         // We return a Future that's sync (has a `wait` method) if and only if the provided stream is SyncProof.
         // SyncFuture contract: we are only allowed to await on sync-proof futures, the AsyncRead and
         // AsyncReadExt methods of the stream.
-        SyncFuture::new(async move {
-            // Each libpq message begins with a message type byte, followed by message length
-            // If the client closes the connection, return None. But if the client closes the
-            // connection in the middle of a message, we will return an error.
-            let tag = match retry_read!(stream.read_u8().await) {
-                Ok(b) => b,
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(ConnectionError::Socket(e)),
-            };
+        // Each libpq message begins with a message type byte, followed by message length
+        // If the client closes the connection, return None. But if the client closes the
+        // connection in the middle of a message, we will return an error.
+        let tag = match retry_read!(stream.read_u8().await) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(ConnectionError::Socket(e)),
+        };
 
-            // The message length includes itself, so it better be at least 4.
-            let len = retry_read!(stream.read_u32().await)
-                .map_err(ConnectionError::Socket)?
-                .checked_sub(4)
-                .ok_or_else(|| ConnectionError::Protocol("invalid message length".to_string()))?;
+        // The message length includes itself, so it better be at least 4.
+        let len = retry_read!(stream.read_u32().await)
+            .map_err(ConnectionError::Socket)?
+            .checked_sub(4)
+            .ok_or_else(|| ConnectionError::Protocol("invalid message length".to_string()))?;
 
-            let body = {
-                let mut buffer = vec![0u8; len as usize];
-                stream
-                    .read_exact(&mut buffer)
-                    .await
-                    .map_err(ConnectionError::Socket)?;
-                Bytes::from(buffer)
-            };
+        let body = {
+            let mut buffer = vec![0u8; len as usize];
+            stream
+                .read_exact(&mut buffer)
+                .await
+                .map_err(ConnectionError::Socket)?;
+            Bytes::from(buffer)
+        };
 
-            match tag {
-                b'Q' => Ok(Some(FeMessage::Query(body))),
-                b'P' => Ok(Some(FeParseMessage::parse(body)?)),
-                b'D' => Ok(Some(FeDescribeMessage::parse(body)?)),
-                b'E' => Ok(Some(FeExecuteMessage::parse(body)?)),
-                b'B' => Ok(Some(FeBindMessage::parse(body)?)),
-                b'C' => Ok(Some(FeCloseMessage::parse(body)?)),
-                b'S' => Ok(Some(FeMessage::Sync)),
-                b'X' => Ok(Some(FeMessage::Terminate)),
-                b'd' => Ok(Some(FeMessage::CopyData(body))),
-                b'c' => Ok(Some(FeMessage::CopyDone)),
-                b'f' => Ok(Some(FeMessage::CopyFail)),
-                b'p' => Ok(Some(FeMessage::PasswordMessage(body))),
-                tag => {
-                    return Err(ConnectionError::Protocol(format!(
-                        "unknown message tag: {tag},'{body:?}'"
-                    )))
-                }
+        match tag {
+            b'Q' => Ok(Some(FeMessage::Query(body))),
+            b'P' => Ok(Some(FeParseMessage::parse(body)?)),
+            b'D' => Ok(Some(FeDescribeMessage::parse(body)?)),
+            b'E' => Ok(Some(FeExecuteMessage::parse(body)?)),
+            b'B' => Ok(Some(FeBindMessage::parse(body)?)),
+            b'C' => Ok(Some(FeCloseMessage::parse(body)?)),
+            b'S' => Ok(Some(FeMessage::Sync)),
+            b'X' => Ok(Some(FeMessage::Terminate)),
+            b'd' => Ok(Some(FeMessage::CopyData(body))),
+            b'c' => Ok(Some(FeMessage::CopyDone)),
+            b'f' => Ok(Some(FeMessage::CopyFail)),
+            b'p' => Ok(Some(FeMessage::PasswordMessage(body))),
+            tag => {
+                return Err(ConnectionError::Protocol(format!(
+                    "unknown message tag: {tag},'{body:?}'"
+                )))
             }
-        })
+        }
     }
 }
 
@@ -326,18 +292,7 @@ impl FeStartupPacket {
     /// Read startup message from the stream.
     // XXX: It's tempting yet undesirable to accept `stream` by value,
     // since such a change will cause user-supplied &mut references to be consumed
-    pub fn read(
-        stream: &mut (impl io::Read + Unpin),
-    ) -> Result<Option<FeMessage>, ConnectionError> {
-        Self::read_fut(&mut AsyncishRead(stream)).wait()
-    }
-
-    /// Read startup message from the stream.
-    // XXX: It's tempting yet undesirable to accept `stream` by value,
-    // since such a change will cause user-supplied &mut references to be consumed
-    pub fn read_fut<Reader>(
-        stream: &mut Reader,
-    ) -> SyncFuture<Reader, impl Future<Output = Result<Option<FeMessage>, ConnectionError>> + '_>
+    pub async fn read<Reader>(stream: &mut Reader) -> Result<Option<FeMessage>, ConnectionError>
     where
         Reader: tokio::io::AsyncRead + Unpin,
     {
@@ -347,99 +302,96 @@ impl FeStartupPacket {
         const NEGOTIATE_SSL_CODE: u32 = 5679;
         const NEGOTIATE_GSS_CODE: u32 = 5680;
 
-        SyncFuture::new(async move {
-            // Read length. If the connection is closed before reading anything (or before
-            // reading 4 bytes, to be precise), return None to indicate that the connection
-            // was closed. This matches the PostgreSQL server's behavior, which avoids noise
-            // in the log if the client opens connection but closes it immediately.
-            let len = match retry_read!(stream.read_u32().await) {
-                Ok(len) => len as usize,
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-                Err(e) => return Err(ConnectionError::Socket(e)),
-            };
+        // Read length. If the connection is closed before reading anything (or before
+        // reading 4 bytes, to be precise), return None to indicate that the connection
+        // was closed. This matches the PostgreSQL server's behavior, which avoids noise
+        // in the log if the client opens connection but closes it immediately.
+        let len = match retry_read!(stream.read_u32().await) {
+            Ok(len) => len as usize,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(ConnectionError::Socket(e)),
+        };
 
-            #[allow(clippy::manual_range_contains)]
-            if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
+        #[allow(clippy::manual_range_contains)]
+        if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
+            return Err(ConnectionError::Protocol(format!(
+                "invalid message length {len}"
+            )));
+        }
+
+        let request_code = retry_read!(stream.read_u32().await).map_err(ConnectionError::Socket)?;
+
+        // the rest of startup packet are params
+        let params_len = len - 8;
+        let mut params_bytes = vec![0u8; params_len];
+        stream
+            .read_exact(params_bytes.as_mut())
+            .await
+            .map_err(ConnectionError::Socket)?;
+
+        // Parse params depending on request code
+        let req_hi = request_code >> 16;
+        let req_lo = request_code & ((1 << 16) - 1);
+        let message = match (req_hi, req_lo) {
+            (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
+                if params_len != 8 {
+                    return Err(ConnectionError::Protocol(
+                        "expected 8 bytes for CancelRequest params".to_string(),
+                    ));
+                }
+                let mut cursor = Cursor::new(params_bytes);
+                FeStartupPacket::CancelRequest(CancelKeyData {
+                    backend_pid: cursor.read_i32().await.map_err(ConnectionError::Socket)?,
+                    cancel_key: cursor.read_i32().await.map_err(ConnectionError::Socket)?,
+                })
+            }
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => {
+                // Requested upgrade to SSL (aka TLS)
+                FeStartupPacket::SslRequest
+            }
+            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => {
+                // Requested upgrade to GSSAPI
+                FeStartupPacket::GssEncRequest
+            }
+            (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
                 return Err(ConnectionError::Protocol(format!(
-                    "invalid message length {len}"
+                    "Unrecognized request code {unrecognized_code}"
                 )));
             }
+            // TODO bail if protocol major_version is not 3?
+            (major_version, minor_version) => {
+                // Parse pairs of null-terminated strings (key, value).
+                // See `postgres: ProcessStartupPacket, build_startup_packet`.
+                let mut tokens = str::from_utf8(&params_bytes)
+                    .context("StartupMessage params: invalid utf-8")?
+                    .strip_suffix('\0') // drop packet's own null
+                    .ok_or_else(|| {
+                        ConnectionError::Protocol(
+                            "StartupMessage params: missing null terminator".to_string(),
+                        )
+                    })?
+                    .split_terminator('\0');
 
-            let request_code =
-                retry_read!(stream.read_u32().await).map_err(ConnectionError::Socket)?;
+                let mut params = HashMap::new();
+                while let Some(name) = tokens.next() {
+                    let value = tokens.next().ok_or_else(|| {
+                        ConnectionError::Protocol(
+                            "StartupMessage params: key without value".to_string(),
+                        )
+                    })?;
 
-            // the rest of startup packet are params
-            let params_len = len - 8;
-            let mut params_bytes = vec![0u8; params_len];
-            stream
-                .read_exact(params_bytes.as_mut())
-                .await
-                .map_err(ConnectionError::Socket)?;
-
-            // Parse params depending on request code
-            let req_hi = request_code >> 16;
-            let req_lo = request_code & ((1 << 16) - 1);
-            let message = match (req_hi, req_lo) {
-                (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
-                    if params_len != 8 {
-                        return Err(ConnectionError::Protocol(
-                            "expected 8 bytes for CancelRequest params".to_string(),
-                        ));
-                    }
-                    let mut cursor = Cursor::new(params_bytes);
-                    FeStartupPacket::CancelRequest(CancelKeyData {
-                        backend_pid: cursor.read_i32().await.map_err(ConnectionError::Socket)?,
-                        cancel_key: cursor.read_i32().await.map_err(ConnectionError::Socket)?,
-                    })
+                    params.insert(name.to_owned(), value.to_owned());
                 }
-                (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => {
-                    // Requested upgrade to SSL (aka TLS)
-                    FeStartupPacket::SslRequest
-                }
-                (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => {
-                    // Requested upgrade to GSSAPI
-                    FeStartupPacket::GssEncRequest
-                }
-                (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
-                    return Err(ConnectionError::Protocol(format!(
-                        "Unrecognized request code {unrecognized_code}"
-                    )));
-                }
-                // TODO bail if protocol major_version is not 3?
-                (major_version, minor_version) => {
-                    // Parse pairs of null-terminated strings (key, value).
-                    // See `postgres: ProcessStartupPacket, build_startup_packet`.
-                    let mut tokens = str::from_utf8(&params_bytes)
-                        .context("StartupMessage params: invalid utf-8")?
-                        .strip_suffix('\0') // drop packet's own null
-                        .ok_or_else(|| {
-                            ConnectionError::Protocol(
-                                "StartupMessage params: missing null terminator".to_string(),
-                            )
-                        })?
-                        .split_terminator('\0');
 
-                    let mut params = HashMap::new();
-                    while let Some(name) = tokens.next() {
-                        let value = tokens.next().ok_or_else(|| {
-                            ConnectionError::Protocol(
-                                "StartupMessage params: key without value".to_string(),
-                            )
-                        })?;
-
-                        params.insert(name.to_owned(), value.to_owned());
-                    }
-
-                    FeStartupPacket::StartupMessage {
-                        major_version,
-                        minor_version,
-                        params: StartupMessageParams { params },
-                    }
+                FeStartupPacket::StartupMessage {
+                    major_version,
+                    minor_version,
+                    params: StartupMessageParams { params },
                 }
-            };
+            }
+        };
 
-            Ok(Some(FeMessage::StartupPacket(message)))
-        })
+        Ok(Some(FeMessage::StartupPacket(message)))
     }
 }
 
@@ -557,6 +509,11 @@ impl<'a> BeMessage<'a> {
     pub const CLIENT_ENCODING: Self = Self::ParameterStatus {
         name: b"client_encoding",
         value: b"UTF8",
+    };
+
+    pub const INTEGER_DATETIMES: Self = Self::ParameterStatus {
+        name: b"integer_datetimes",
+        value: b"on",
     };
 
     /// Build a [`BeMessage::ParameterStatus`] holding the server version.
@@ -698,6 +655,7 @@ fn read_cstr(buf: &mut Bytes) -> anyhow::Result<Bytes> {
 }
 
 pub const SQLSTATE_INTERNAL_ERROR: &[u8; 5] = b"XX000";
+pub const SQLSTATE_SUCCESSFUL_COMPLETION: &[u8; 5] = b"00000";
 
 impl<'a> BeMessage<'a> {
     /// Write message to the given buf.
@@ -1148,15 +1106,6 @@ mod tests {
 
         let params = make_params("foo\\ bar \\ \\\\ baz\\  lol");
         assert_eq!(split_options(&params), ["foo bar", " \\", "baz ", "lol"]);
-    }
-
-    // Make sure that `read` is sync/async callable
-    async fn _assert(stream: &mut (impl tokio::io::AsyncRead + Unpin)) {
-        let _ = FeMessage::read(&mut [].as_ref());
-        let _ = FeMessage::read_fut(stream).await;
-
-        let _ = FeStartupPacket::read(&mut [].as_ref());
-        let _ = FeStartupPacket::read_fut(stream).await;
     }
 }
 
