@@ -2,6 +2,13 @@
 ### The image itself is mainly used as a container for the binaries and for starting e2e tests with custom parameters.
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
 ### inside this image in the real deployments.
+###
+### Local build instructions:
+### 1. Clone the `neondatabase/build` repo somewhere. Recommended location is `../build`.
+### 2. Build rust `docker build -t neondatabase/rust:local ../build/rust/`
+### 3. Build neon `docker build --build-arg REPOSITORY=neondatabase --build-arg TAG=local -t neondatabase/neon:local .`
+
+# Neon base rust image. See /rust in the neondatabase/build repo
 ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
 ARG IMAGE=rust
 ARG TAG=pinned
@@ -39,7 +46,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
-COPY . .
+COPY --chown=nonroot . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
