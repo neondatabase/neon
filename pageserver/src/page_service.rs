@@ -21,7 +21,7 @@ use pageserver_api::models::{
     PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
 use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, QueryError};
-use pq_proto::ConnectionError;
+use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::io;
@@ -78,7 +78,7 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::Sync => continue,
                         FeMessage::Terminate => {
                             let msg = "client terminated connection with Terminate message during COPY";
-                            let query_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                            let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
                             // error can't happen here, ErrorResponse serialization should be always ok
                             pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
                             Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
@@ -97,13 +97,13 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 }
                 Ok(None) => {
                     let msg = "client closed connection during COPY";
-                    let query_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                    let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
                     // error can't happen here, ErrorResponse serialization should be always ok
                     pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
                     pgb.flush().await?;
                     Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                 }
-                Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
+                Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
                     Err(io_error)?;
                 }
                 Err(other) => {
@@ -214,7 +214,7 @@ async fn page_service_conn_main(
             // we've been requested to shut down
             Ok(())
         }
-        Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
+        Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
             if is_expected_io_error(&io_error) {
                 info!("Postgres client disconnected ({io_error})");
                 Ok(())
@@ -1057,7 +1057,7 @@ impl From<GetActiveTenantError> for QueryError {
     fn from(e: GetActiveTenantError) -> Self {
         match e {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
-                ConnectionError::Socket(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
+                ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
             GetActiveTenantError::Other(e) => QueryError::Other(e),
         }

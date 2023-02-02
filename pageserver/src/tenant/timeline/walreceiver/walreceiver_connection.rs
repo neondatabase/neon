@@ -354,7 +354,7 @@ pub async fn handle_walreceiver_connection(
             debug!("neon_status_update {status_update:?}");
 
             let mut data = BytesMut::new();
-            status_update.serialize(&mut data)?;
+            status_update.serialize(&mut data);
             physical_stream
                 .as_mut()
                 .zenith_status_update(data.len() as u64, &data)
