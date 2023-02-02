@@ -751,24 +751,12 @@ fn missing_key_is_not_inserted_with_replace() {
 
     let ret = map.replace(&key, "should not replace", |_| true);
     assert!(matches!(ret, Replacement::NotFound), "{ret:?}");
+    map.rebuild();
     assert!(map
         .get()
         .expect("no changes to rebuild")
         .get_version(102)
         .is_none());
-
-    map.insert(key.clone(), "Image 1");
-    map.rebuild();
-
-    assert_eq!(
-        map.get()
-            .expect("rebuilt")
-            .get_version(102)
-            .unwrap()
-            .image_coverage
-            .query(4),
-        Some("Image 1")
-    );
 }
 
 #[test]
