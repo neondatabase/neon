@@ -288,7 +288,14 @@ where
             let len_before = self.l0_delta_layers.len();
             self.l0_delta_layers
                 .retain(|other| !Self::compare_arced_layers(other, &layer));
-            assert_eq!(self.l0_delta_layers.len(), len_before - 1);
+            // this assertion is related to use of Arc::ptr_eq in Self::compare_arced_layers,
+            // there's a chance that the comparison fails at runtime due to it comparing (pointer,
+            // vtable) pairs.
+            assert_eq!(
+                self.l0_delta_layers.len(),
+                len_before - 1,
+                "failed to locate removed historic layer from l0_delta_layers"
+            );
         }
 
         NUM_ONDISK_LAYERS.dec();
@@ -716,7 +723,7 @@ where
     fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
         // FIXME: ptr_eq might fail to return true for 'dyn' references because of multiple vtables
         // can be created in compilation. Clippy complains about this. In practice it seems to
-        // work, the assertion below would be triggered otherwise but this ought to be fixed.
+        // work.
         //
         // In future rust versions this might become Arc::as_ptr(left) as *const () ==
         // Arc::as_ptr(right) as *const (), we could change to that before.
