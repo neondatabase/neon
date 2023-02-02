@@ -1135,18 +1135,29 @@ mod tests {
         client.init_upload_queue_for_empty_remote(&metadata)?;
 
         // Create a couple of dummy files,  schedule upload for them
-        let content_foo = dummy_contents("foo");
-        let content_bar = dummy_contents("bar");
-        std::fs::write(timeline_path.join("foo"), &content_foo)?;
-        std::fs::write(timeline_path.join("bar"), &content_bar)?;
+        let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
+        let layer_file_name_2: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D9-00000000016B5A52".parse().unwrap();
+        let layer_file_name_3: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59DA-00000000016B5A53".parse().unwrap();
+        let content_1 = dummy_contents("foo");
+        let content_2 = dummy_contents("bar");
+        let content_3 = dummy_contents("baz");
+        std::fs::write(
+            timeline_path.join(layer_file_name_1.file_name()),
+            &content_1,
+        )?;
+        std::fs::write(
+            timeline_path.join(layer_file_name_2.file_name()),
+            &content_2,
+        )?;
+        std::fs::write(timeline_path.join(layer_file_name_3.file_name()), content_3)?;
 
         client.schedule_layer_file_upload(
-            &LayerFileName::Test("foo".to_owned()),
-            &LayerFileMetadata::new(content_foo.len() as u64),
+            &layer_file_name_1,
+            &LayerFileMetadata::new(content_1.len() as u64),
         )?;
         client.schedule_layer_file_upload(
-            &LayerFileName::Test("bar".to_owned()),
-            &LayerFileMetadata::new(content_bar.len() as u64),
+            &layer_file_name_2,
+            &LayerFileMetadata::new(content_2.len() as u64),
         )?;
 
         // Check that they are started immediately, not queued
@@ -1183,7 +1194,13 @@ mod tests {
 
         // Download back the index.json, and check that the list of files is correct
         let index_part = runtime.block_on(client.download_index_file())?;
-        assert_file_list(&index_part.timeline_layers, &["foo", "bar"]);
+        assert_file_list(
+            &index_part.timeline_layers,
+            &[
+                &layer_file_name_1.file_name(),
+                &layer_file_name_2.file_name(),
+            ],
+        );
         let downloaded_metadata = index_part.parse_metadata()?;
         assert_eq!(downloaded_metadata, metadata);
 
@@ -1191,10 +1208,10 @@ mod tests {
         let content_baz = dummy_contents("baz");
         std::fs::write(timeline_path.join("baz"), &content_baz)?;
         client.schedule_layer_file_upload(
-            &LayerFileName::Test("baz".to_owned()),
+            &layer_file_name_3,
             &LayerFileMetadata::new(content_baz.len() as u64),
         )?;
-        client.schedule_layer_file_deletion(&[LayerFileName::Test("foo".to_owned())])?;
+        client.schedule_layer_file_deletion(&[layer_file_name_1.clone()])?;
         {
             let mut guard = client.upload_queue.lock().unwrap();
             let upload_queue = guard.initialized_mut().unwrap();
@@ -1206,12 +1223,26 @@ mod tests {
             assert!(upload_queue.num_inprogress_deletions == 0);
             assert!(upload_queue.latest_files_changes_since_metadata_upload_scheduled == 0);
         }
-        assert_remote_files(&["foo", "bar", "index_part.json"], &remote_timeline_dir);
+        assert_remote_files(
+            &[
+                &layer_file_name_1.file_name(),
+                &layer_file_name_2.file_name(),
+                "index_part.json",
+            ],
+            &remote_timeline_dir,
+        );
 
         // Finish them
         runtime.block_on(client.wait_completion())?;
 
-        assert_remote_files(&["bar", "baz", "index_part.json"], &remote_timeline_dir);
+        assert_remote_files(
+            &[
+                &layer_file_name_2.file_name(),
+                &layer_file_name_3.file_name(),
+                "index_part.json",
+            ],
+            &remote_timeline_dir,
+        );
 
         Ok(())
     }

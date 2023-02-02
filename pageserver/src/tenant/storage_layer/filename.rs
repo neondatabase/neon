@@ -175,49 +175,32 @@ impl fmt::Display for ImageFileName {
 pub enum LayerFileName {
     Image(ImageFileName),
     Delta(DeltaFileName),
-    #[cfg(test)]
-    Test(String),
 }
 
 impl LayerFileName {
     pub fn file_name(&self) -> String {
         match self {
-            LayerFileName::Image(fname) => format!("{fname}"),
-            LayerFileName::Delta(fname) => format!("{fname}"),
-            #[cfg(test)]
-            LayerFileName::Test(fname) => fname.to_string(),
+            Self::Image(fname) => fname.to_string(),
+            Self::Delta(fname) => fname.to_string(),
         }
-    }
-    #[cfg(test)]
-    pub(crate) fn new_test(name: &str) -> LayerFileName {
-        LayerFileName::Test(name.to_owned())
     }
 }
 
 impl From<ImageFileName> for LayerFileName {
     fn from(fname: ImageFileName) -> Self {
-        LayerFileName::Image(fname)
+        Self::Image(fname)
     }
 }
 impl From<DeltaFileName> for LayerFileName {
     fn from(fname: DeltaFileName) -> Self {
-        LayerFileName::Delta(fname)
+        Self::Delta(fname)
     }
 }
-
-// include a `/` in the name as an additional layer of robustness
-// because `/` chars are not allowed in UNIX paths
-#[cfg(test)]
-const LAYER_FILE_NAME_TEST_PREFIX: &str = "LAYER_FILE_NAME::test/";
 
 impl FromStr for LayerFileName {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        #[cfg(test)]
-        if let Some(value) = value.strip_prefix(LAYER_FILE_NAME_TEST_PREFIX) {
-            return Ok(LayerFileName::Test(value.to_owned()));
-        }
         let delta = DeltaFileName::parse_str(value);
         let image = ImageFileName::parse_str(value);
         let ok = match (delta, image) {
@@ -226,8 +209,8 @@ impl FromStr for LayerFileName {
                     "neither delta nor image layer file name: {value:?}"
                 ))
             }
-            (Some(delta), None) => LayerFileName::Delta(delta),
-            (None, Some(image)) => LayerFileName::Image(image),
+            (Some(delta), None) => Self::Delta(delta),
+            (None, Some(image)) => Self::Image(image),
             (Some(_), Some(_)) => unreachable!(),
         };
         Ok(ok)
@@ -240,12 +223,8 @@ impl serde::Serialize for LayerFileName {
         S: serde::Serializer,
     {
         match self {
-            LayerFileName::Image(fname) => serializer.serialize_str(&format!("{}", fname)),
-            LayerFileName::Delta(fname) => serializer.serialize_str(&format!("{}", fname)),
-            #[cfg(test)]
-            LayerFileName::Test(t) => {
-                serializer.serialize_str(&format!("{LAYER_FILE_NAME_TEST_PREFIX}{t}"))
-            }
+            Self::Image(fname) => serializer.serialize_str(&fname.to_string()),
+            Self::Delta(fname) => serializer.serialize_str(&fname.to_string()),
         }
     }
 }

@@ -898,8 +898,6 @@ impl Timeline {
                 &delta_name,
                 &layer_metadata,
             ),
-            #[cfg(test)]
-            LayerFileName::Test(_) => unreachable!(),
         });
 
         let gc_lock = self.layer_removal_cs.lock().await;
@@ -1370,8 +1368,6 @@ impl Timeline {
                     let remote_layer = Arc::new(remote_layer);
                     updates.insert_historic(remote_layer);
                 }
-                #[cfg(test)]
-                LayerFileName::Test(_) => unreachable!(),
             }
         }
 
