@@ -621,9 +621,7 @@ impl DeltaLayer {
             key_range: summary.key_range,
             lsn_range: summary.lsn_range,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident(
-                false,
-            )),
+            access_stats: LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident()),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,

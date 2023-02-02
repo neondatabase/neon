@@ -422,9 +422,7 @@ impl ImageLayer {
             key_range: summary.key_range,
             lsn: summary.lsn,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident(
-                false,
-            )),
+            access_stats: LayerAccessStats::new_for_loading_layer(LayerResidenceStatus::resident()),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
                 loaded: false,

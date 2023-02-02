@@ -111,7 +111,8 @@ struct LayerAccessStatsInner {
 pub enum LayerResidenceStatus {
     Resident {
         timestamp: SystemTime,
-        creating: bool,
+        /// If `true`, then this resident status marks the birth time of the layer.
+        created: bool,
     },
     Evicted {
         timestamp: SystemTime,
@@ -146,28 +147,42 @@ impl LayerAccessStatFullDetails {
 }
 
 impl LayerResidenceStatus {
+    /// Residence status for a layer file that only exists on the remote.
     pub fn evicted() -> Self {
         LayerResidenceStatus::Evicted {
             timestamp: SystemTime::now(),
         }
     }
 
-    pub fn resident(creating: bool) -> Self {
+    /// Residence status for a layer file that exists locally.
+    /// It may also exist on the remote, we don't care here.
+    /// NB: use this for existing layer files, e.g., during timeline load.
+    /// For newly written layer files, use [`created`].
+    pub fn resident() -> Self {
         LayerResidenceStatus::Resident {
             timestamp: SystemTime::now(),
-            creating,
+            created: false,
+        }
+    }
+
+    /// Residence status for a local layer file that we just wrote.
+    /// Example: a layer file created by compaction.
+    /// Private, because callers are supposed to use [`LayerAccessStats::new_for_new_layer_file`].
+    fn created() -> Self {
+        LayerResidenceStatus::Resident {
+            timestamp: SystemTime::now(),
+            created: true,
         }
     }
 
     fn to_api_model(&self) -> pageserver_api::models::LayerResidenceStatus {
         match self {
-            LayerResidenceStatus::Resident {
-                timestamp,
-                creating,
-            } => pageserver_api::models::LayerResidenceStatus::Resident {
-                timestamp_millis_since_epoch: system_time_to_millis_since_epoch(timestamp),
-                creating: *creating,
-            },
+            LayerResidenceStatus::Resident { timestamp, created } => {
+                pageserver_api::models::LayerResidenceStatus::Resident {
+                    timestamp_millis_since_epoch: system_time_to_millis_since_epoch(timestamp),
+                    created: *created,
+                }
+            }
             LayerResidenceStatus::Evicted { timestamp } => {
                 pageserver_api::models::LayerResidenceStatus::Evicted {
                     timestamp_millis_since_epoch: system_time_to_millis_since_epoch(timestamp),
@@ -205,7 +220,7 @@ impl LayerAccessStats {
 
     pub(crate) fn new_for_new_layer_file() -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
-        new.record_residence_change(LayerResidenceStatus::resident(true));
+        new.record_residence_change(LayerResidenceStatus::created());
         new
     }
 
