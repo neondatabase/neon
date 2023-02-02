@@ -91,7 +91,7 @@ pub enum ValueReconstructResult {
 #[derive(Debug)]
 pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 struct LayerAccessStatsInner {
     first_access: Option<LayerAccessStatFullDetails>,
     count_by_access_kind: EnumMap<LayerAccessKind, u64>,
@@ -195,18 +195,6 @@ impl LayerResidenceStatus {
 }
 
 pub static LAYER_ACCESS_STATS_KILLSWITCH: AtomicBool = AtomicBool::new(false);
-
-impl Default for LayerAccessStatsInner {
-    fn default() -> Self {
-        LayerAccessStatsInner {
-            first_access: None,
-            count_by_access_kind: EnumMap::default(),
-            task_kind_flag: EnumSet::default(),
-            last_accesses: HistoryBuffer::default(),
-            last_residence_changes: HistoryBuffer::default(),
-        }
-    }
-}
 
 impl LayerAccessStats {
     pub(crate) fn for_loading_layer(residence_status: LayerResidenceStatus) -> Self {
