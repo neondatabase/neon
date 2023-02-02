@@ -46,6 +46,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 git-version = "0.3"
 hashbrown = "0.13"
+heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "340e0cec99a73759a5704f726c2fa3eed8fc3af6" } # upstream release pending
 hex = "0.4"
 hex-literal = "0.3"
 hmac = "0.12.1"

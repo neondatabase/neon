@@ -13,9 +13,9 @@ use anyhow::Result;
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
+use heapless::HistoryBuffer;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{HistoricLayerInfo, Key};
-use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{self, AtomicBool};
@@ -92,19 +92,19 @@ pub enum ValueReconstructResult {
 pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
 
 #[derive(Debug, Clone)]
-struct LayerAccessStatFullDetails {
-    when: SystemTime,
-    task_kind: TaskKind,
-    access_kind: LayerAccessKind,
-}
-
-#[derive(Debug, Clone)]
 struct LayerAccessStatsInner {
     first_access: Option<LayerAccessStatFullDetails>,
     count_by_access_kind: EnumMap<LayerAccessKind, u64>,
     task_kind_flag: EnumSet<TaskKind>,
-    last_accesses: VecDeque<LayerAccessStatFullDetails>,
-    last_residence_changes: VecDeque<LayerResidenceStatus>,
+    last_accesses: HistoryBuffer<LayerAccessStatFullDetails, 16>,
+    last_residence_changes: HistoryBuffer<LayerResidenceStatus, 16>,
+}
+
+#[derive(Debug, Clone)]
+struct LayerAccessStatFullDetails {
+    when: SystemTime,
+    task_kind: TaskKind,
+    access_kind: LayerAccessKind,
 }
 
 #[derive(Debug, Clone)]
@@ -200,18 +200,13 @@ impl Default for LayerAccessStatsInner {
             first_access: None,
             count_by_access_kind: EnumMap::default(),
             task_kind_flag: EnumSet::default(),
-            last_accesses: VecDeque::with_capacity(LayerAccessStats::LAST_ACCESSES_MAX_LEN),
-            last_residence_changes: VecDeque::with_capacity(
-                LayerAccessStats::LAST_RESIDENCE_CHANGES_MAX_LEN,
-            ),
+            last_accesses: HistoryBuffer::default(),
+            last_residence_changes: HistoryBuffer::default(),
         }
     }
 }
 
 impl LayerAccessStats {
-    const LAST_ACCESSES_MAX_LEN: usize = 16;
-    const LAST_RESIDENCE_CHANGES_MAX_LEN: usize = 16;
-
     pub(crate) fn for_loading_layer(residence_status: LayerResidenceStatus) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
         new.record_residence_change(residence_status);
@@ -244,12 +239,7 @@ impl LayerAccessStats {
             return;
         }
         let mut inner = self.0.lock().unwrap();
-
-        // make room first to avoid reallocs
-        while inner.last_residence_changes.len() >= Self::LAST_RESIDENCE_CHANGES_MAX_LEN {
-            inner.last_residence_changes.pop_back();
-        }
-        inner.last_residence_changes.push_front(new_status);
+        inner.last_residence_changes.write(new_status);
     }
 
     fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
@@ -267,11 +257,7 @@ impl LayerAccessStats {
             .get_or_insert_with(|| this_access.clone());
         inner.count_by_access_kind[access_kind] += 1;
         inner.task_kind_flag |= task_kind;
-        // make room first to avoid reallocs
-        while inner.last_accesses.len() >= Self::LAST_ACCESSES_MAX_LEN {
-            inner.last_accesses.pop_back();
-        }
-        inner.last_accesses.push_front(this_access);
+        inner.last_accesses.write(this_access);
     }
     fn reset(&self, what: LayerAccessStatsReset) {
         let mut inner = self.0.lock().unwrap();
