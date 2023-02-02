@@ -2019,6 +2019,7 @@ dependencies = [
 name = "metrics"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "libc",
  "once_cell",
  "prometheus",

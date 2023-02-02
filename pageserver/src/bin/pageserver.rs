@@ -7,6 +7,7 @@ use std::{env, ops::ControlFlow, path::Path, str::FromStr};
 use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
+use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
@@ -52,6 +53,8 @@ fn version() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
+    let launch_ts = Box::leak(Box::new(LaunchTimestamp::generate()));
+
     let arg_matches = cli().get_matches();
 
     if arg_matches.get_flag("enabled-features") {
@@ -108,7 +111,7 @@ fn main() -> anyhow::Result<()> {
     virtual_file::init(conf.max_file_descriptors);
     page_cache::init(conf.page_cache_size);
 
-    start_pageserver(conf).context("Failed to start pageserver")?;
+    start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
 
     scenario.teardown();
     Ok(())
@@ -203,13 +206,24 @@ fn initialize_config(
     })
 }
 
-fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
+fn start_pageserver(
+    launch_ts: &'static LaunchTimestamp,
+    conf: &'static PageServerConf,
+) -> anyhow::Result<()> {
     // Initialize logging
     logging::init(conf.log_format)?;
 
-    // Print version to the log, and expose it as a prometheus metric too.
-    info!("version: {}", version());
+    // Print version and launch timestamp to the log,
+    // and expose them as prometheus metrics.
+    // A changed version string indicates changed software.
+    // A changed launch timestamp indicates a pageserver restart.
+    info!(
+        "version: {} launch_timestamp: {}",
+        version(),
+        launch_ts.to_string()
+    );
     set_build_info_metric(GIT_VERSION);
+    set_launch_timestamp_metric(launch_ts);
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
@@ -307,7 +321,7 @@ fn start_pageserver(conf: &'static PageServerConf) -> anyhow::Result<()> {
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, auth.clone(), remote_storage)?
+        let router = http::make_router(conf, launch_ts, auth.clone(), remote_storage)?
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
