@@ -425,7 +425,16 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.buffer.insert(layer_key, None);
     }
 
-    /// Replaces a previous layer with a new layer value if it the given closure returns true.
+    /// Replaces a previous layer with a new layer value.
+    ///
+    /// The replacement is conditional on:
+    /// - there is an existing `LayerKey` record
+    /// - there is no buffered removal for the given `LayerKey`
+    /// - the given closure returns true for the current `Value`
+    ///
+    /// The closure is used to compare the latest value (buffered insert, or existing layer)
+    /// against some expectation. This allows to use `Arc::ptr_eq` or similar which would be
+    /// inaccessible via `PartialEq` trait.
     ///
     /// Returns `true` if a modification was made and rebuild will be needed, `false` otherwise.
     pub fn replace<F>(&mut self, layer_key: &LayerKey, new: Value, check_expected: F) -> bool

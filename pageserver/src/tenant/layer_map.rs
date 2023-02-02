@@ -142,7 +142,9 @@ where
     ///
     /// If the expected layer has been removed it will not be inserted by this function.
     ///
-    /// Returns `true` if the layer map was changed, `false` otherwise.
+    /// Returns `true` if the layer map was changed, `false` otherwise. Errors are returned for
+    /// precondition failures, such as trying to replace two different kind of layers with each
+    /// other, and no modification is done in the case of precondition failure.
     pub fn replace_historic(&mut self, expected: &Arc<L>, new: Arc<L>) -> anyhow::Result<bool> {
         self.layer_map.replace_historic_noflush(expected, new)
     }
