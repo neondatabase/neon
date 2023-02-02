@@ -34,6 +34,11 @@ set -eu
 
 neon_data=$2
 
+if [ ! -d $neon_data ]; then
+  echo "Neon data directory \"$neon_data\" does not exist"
+  exit 1
+fi
+
 minio_image=quay.io/minio/minio:RELEASE.2022-11-17T23-20-09Z
 
 echo "Starting minio server"
@@ -62,6 +67,11 @@ elif [ "$mode" = "swarm" ]; then
 
   if [ ! -z $(docker service ls -q -f name="minio") ]; then
     echo "Service \"minio\" exists. Please stop and remove it before running this script."
+    exit 1
+  fi
+
+  if [ ! -z $(docker service ls -q -f name="registry") ]; then
+    echo "Service \"registry\" exists. Please stop and remove it before running this script."
     exit 1
   fi
 
