@@ -125,10 +125,12 @@ pub enum LayerAccessStatsReset {
     AllStats,
 }
 
-fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u128 {
+fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u64 {
     ts.duration_since(UNIX_EPOCH)
         .expect("better to die in this unlikely case than report false stats")
         .as_millis()
+        .try_into()
+        .expect("64 bits is enough for few more years")
 }
 
 impl LayerAccessStatFullDetails {
