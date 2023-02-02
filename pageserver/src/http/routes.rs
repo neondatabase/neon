@@ -7,7 +7,7 @@ use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::http::request::{must_get_query_param, parse_query_param};
+use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
@@ -317,10 +317,7 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let timeline = mgr::get_tenant(tenant_id, true)
-        .await
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
-        .map_err(ApiError::NotFound)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &ctx)
         .await
@@ -526,6 +523,62 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
             inputs,
         },
     )
+}
+
+async fn layer_map_info_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let layer_map_info = timeline.layer_map_info();
+
+    json_response(StatusCode::OK, layer_map_info)
+}
+
+async fn layer_download_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let layer_file_name = get_request_param(&request, "layer_file_name")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let downloaded = timeline
+        .download_layer(layer_file_name)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    match downloaded {
+        Some(true) => json_response(StatusCode::OK, ()),
+        Some(false) => json_response(StatusCode::NOT_MODIFIED, ()),
+        None => json_response(
+            StatusCode::BAD_REQUEST,
+            format!("Layer {tenant_id}/{timeline_id}/{layer_file_name} not found"),
+        ),
+    }
+}
+
+async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let layer_file_name = get_request_param(&request, "layer_file_name")?;
+
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let evicted = timeline
+        .evict_layer(layer_file_name)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    match evicted {
+        Some(true) => json_response(StatusCode::OK, ()),
+        Some(false) => json_response(StatusCode::NOT_MODIFIED, ()),
+        None => json_response(
+            StatusCode::BAD_REQUEST,
+            format!("Layer {tenant_id}/{timeline_id}/{layer_file_name} not found"),
+        ),
+    }
 }
 
 // Helper function to standardize the error messages we produce on bad durations
@@ -804,12 +857,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     check_permission(&request, Some(tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let tenant = mgr::get_tenant(tenant_id, true)
-        .await
-        .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     timeline
         .freeze_and_flush()
         .await
@@ -830,12 +878,7 @@ async fn timeline_download_remote_layers_handler_post(
     let body: DownloadRemoteLayersTaskSpawnRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
-        .await
-        .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     match timeline.spawn_download_all_remote_layers(body).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
@@ -846,20 +889,27 @@ async fn timeline_download_remote_layers_handler_get(
     request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
-        .await
-        .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let info = timeline
         .get_download_all_remote_layers_task_info()
         .context("task never started since last pageserver process start")
         .map_err(ApiError::NotFound)?;
     json_response(StatusCode::OK, info)
+}
+
+async fn active_timeline_of_active_tenant(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<Arc<Timeline>, ApiError> {
+    let tenant = mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(ApiError::NotFound)?;
+    tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -957,6 +1007,18 @@ pub fn make_router(
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_delete_handler,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/layer",
+            layer_map_info_handler,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
+            layer_download_handler,
+        )
+        .delete(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
+            evict_timeline_layer_handler,
         )
         .any(handler_404))
 }

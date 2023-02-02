@@ -6,11 +6,13 @@ mod image_layer;
 mod inmemory_layer;
 mod remote_layer;
 
+use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::{Key, Value};
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
+use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,7 +23,7 @@ use utils::{
 };
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
-pub use filename::{DeltaFileName, ImageFileName, LayerFileName, PathOrConf};
+pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use remote_layer::RemoteLayer;
@@ -187,6 +189,8 @@ pub trait PersistentLayer: Layer {
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
     fn file_size(&self) -> Option<u64>;
+
+    fn info(&self) -> HistoricLayerInfo;
 }
 
 pub fn downcast_remote_layer(
@@ -245,4 +249,17 @@ impl Layer for LayerDescriptor {
     fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         todo!()
     }
+}
+
+/// Helper enum to hold a PageServerConf, or a path
+///
+/// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
+/// global config, and paths to layer files are constructed using the tenant/timeline
+/// path from the config. But in the 'pageserver_binutils' binary, we need to construct a Layer
+/// struct for a file on disk, without having a page server running, so that we have no
+/// config. In that case, we use the Path variant to hold the full path to the file on
+/// disk.
+enum PathOrConf {
+    Path(PathBuf),
+    Conf(&'static PageServerConf),
 }

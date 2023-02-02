@@ -227,6 +227,52 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LayerMapInfo {
+    pub in_memory_layers: Vec<InMemoryLayerInfo>,
+    pub historic_layers: Vec<HistoricLayerInfo>,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+pub enum InMemoryLayerInfo {
+    Open {
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+    },
+    Frozen {
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_end: Lsn,
+    },
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+pub enum HistoricLayerInfo {
+    Delta {
+        layer_file_name: String,
+        layer_file_size: Option<u64>,
+
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_end: Lsn,
+        remote: bool,
+    },
+    Image {
+        layer_file_name: String,
+        layer_file_size: Option<u64>,
+
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+        remote: bool,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadRemoteLayersTaskSpawnRequest {
     pub max_concurrent_downloads: NonZeroUsize,

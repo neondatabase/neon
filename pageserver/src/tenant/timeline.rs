@@ -10,7 +10,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-    DownloadRemoteLayersTaskState, TimelineState,
+    DownloadRemoteLayersTaskState, LayerMapInfo, TimelineState,
 };
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
@@ -69,6 +69,7 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use walreceiver::spawn_connection_manager_task;
 
+use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer};
@@ -91,7 +92,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub layers: RwLock<LayerMap<dyn PersistentLayer>>,
+    pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -663,7 +664,7 @@ impl Timeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let _layer_removal_cs = self.layer_removal_cs.lock().await;
+        let layer_removal_cs = self.layer_removal_cs.lock().await;
         // Is the timeline being deleted?
         let state = *self.state.borrow();
         if state == TimelineState::Stopping {
@@ -696,7 +697,8 @@ impl Timeline {
 
                 // 3. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(target_file_size, ctx).await?;
+                self.compact_level0(&layer_removal_cs, target_file_size, ctx)
+                    .await?;
                 timer.stop_and_record();
 
                 // If `create_image_layers' or `compact_level0` scheduled any
@@ -831,6 +833,85 @@ impl Timeline {
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
         self.state.subscribe()
+    }
+
+    pub fn layer_map_info(&self) -> LayerMapInfo {
+        let layer_map = self.layers.read().unwrap();
+        let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
+        if let Some(open_layer) = &layer_map.open_layer {
+            in_memory_layers.push(open_layer.info());
+        }
+        for frozen_layer in &layer_map.frozen_layers {
+            in_memory_layers.push(frozen_layer.info());
+        }
+
+        let mut historic_layers = Vec::new();
+        for historic_layer in layer_map.iter_historic_layers() {
+            historic_layers.push(historic_layer.info());
+        }
+
+        LayerMapInfo {
+            in_memory_layers,
+            historic_layers,
+        }
+    }
+
+    pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+        let Some(layer) = self.find_layer(layer_file_name) else { return Ok(None) };
+        let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
+        if self.remote_client.is_none() {
+            return Ok(Some(false));
+        }
+
+        self.download_remote_layer(remote_layer).await?;
+        Ok(Some(true))
+    }
+
+    pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+        let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
+        if local_layer.is_remote_layer() {
+            return Ok(Some(false));
+        }
+        let Some(remote_client) = &self.remote_client else { return Ok(Some(false)) };
+
+        // ensure the current layer is uploaded for sure
+        remote_client
+            .wait_completion()
+            .await
+            .context("wait for layer upload ops to complete")?;
+
+        let layer_metadata = LayerFileMetadata::new(
+            local_layer
+                .file_size()
+                .expect("Local layer should have a file size"),
+        );
+        let new_remote_layer = Arc::new(match local_layer.filename() {
+            LayerFileName::Image(image_name) => RemoteLayer::new_img(
+                self.tenant_id,
+                self.timeline_id,
+                &image_name,
+                &layer_metadata,
+            ),
+            LayerFileName::Delta(delta_name) => RemoteLayer::new_delta(
+                self.tenant_id,
+                self.timeline_id,
+                &delta_name,
+                &layer_metadata,
+            ),
+            #[cfg(test)]
+            LayerFileName::Test(_) => unreachable!(),
+        });
+
+        let gc_lock = self.layer_removal_cs.lock().await;
+        let mut layers = self.layers.write().unwrap();
+        let mut updates = layers.batch_update();
+        self.delete_historic_layer(&gc_lock, local_layer, &mut updates)?;
+        updates.insert_historic(new_remote_layer);
+        updates.flush();
+        drop(layers);
+        drop(gc_lock);
+
+        Ok(Some(true))
     }
 }
 
@@ -1620,6 +1701,43 @@ impl Timeline {
                 .set(new_current_size.size()),
             Err(e) => error!("Failed to compute current logical size for metrics update: {e:?}"),
         }
+    }
+
+    fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
+        for historic_layer in self.layers.read().unwrap().iter_historic_layers() {
+            let historic_layer_name = historic_layer.filename().file_name();
+            if layer_file_name == historic_layer_name {
+                return Some(historic_layer);
+            }
+        }
+
+        None
+    }
+
+    /// Removes the layer from local FS (if present) and from memory.
+    /// Remote storage is not affected by this operation.
+    fn delete_historic_layer(
+        &self,
+        // we cannot remove layers otherwise, since gc and compaction will race
+        _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
+        layer: Arc<dyn PersistentLayer>,
+        updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+    ) -> anyhow::Result<()> {
+        let layer_size = layer.file_size();
+
+        layer.delete()?;
+        if let Some(layer_size) = layer_size {
+            self.metrics.resident_physical_size_gauge.sub(layer_size);
+        }
+
+        // TODO Removing from the bottom of the layer map is expensive.
+        //      Maybe instead discard all layer map historic versions that
+        //      won't be needed for page reconstruction for this timeline,
+        //      and mark what we can't delete yet as deleted from the layer
+        //      map index without actually rebuilding the index.
+        updates.remove_historic(layer);
+
+        Ok(())
     }
 }
 
@@ -2727,6 +2845,7 @@ impl Timeline {
     ///
     async fn compact_level0(
         &self,
+        layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -2780,14 +2899,8 @@ impl Timeline {
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
-            if let Some(path) = l.local_path() {
-                self.metrics
-                    .resident_physical_size_gauge
-                    .sub(path.metadata()?.len());
-            }
             layer_names_to_delete.push(l.filename());
-            l.delete()?;
-            updates.remove_historic(l);
+            self.delete_historic_layer(layer_removal_cs, l, &mut updates)?;
         }
         updates.flush();
         drop(layers);
@@ -2907,7 +3020,7 @@ impl Timeline {
 
         fail_point!("before-timeline-gc");
 
-        let _layer_removal_cs = self.layer_removal_cs.lock().await;
+        let layer_removal_cs = self.layer_removal_cs.lock().await;
         // Is the timeline being deleted?
         let state = *self.state.borrow();
         if state == TimelineState::Stopping {
@@ -2926,7 +3039,13 @@ impl Timeline {
         let new_gc_cutoff = Lsn::min(horizon_cutoff, pitr_cutoff);
 
         let res = self
-            .gc_timeline(horizon_cutoff, pitr_cutoff, retain_lsns, new_gc_cutoff)
+            .gc_timeline(
+                &layer_removal_cs,
+                horizon_cutoff,
+                pitr_cutoff,
+                retain_lsns,
+                new_gc_cutoff,
+            )
             .instrument(
                 info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
             )
@@ -2940,6 +3059,7 @@ impl Timeline {
 
     async fn gc_timeline(
         &self,
+        layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         horizon_cutoff: Lsn,
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
@@ -3095,22 +3215,12 @@ impl Timeline {
             // (couldn't do this in the loop above, because you cannot modify a collection
             // while iterating it. BTreeMap::retain() would be another option)
             let mut layer_names_to_delete = Vec::with_capacity(layers_to_remove.len());
-            for doomed_layer in layers_to_remove {
-                if let Some(path) = doomed_layer.local_path() {
-                    self.metrics
-                        .resident_physical_size_gauge
-                        .sub(path.metadata()?.len());
+            {
+                for doomed_layer in layers_to_remove {
+                    layer_names_to_delete.push(doomed_layer.filename());
+                    self.delete_historic_layer(layer_removal_cs, doomed_layer, &mut updates)?; // FIXME: schedule succeeded deletions before returning?
+                    result.layers_removed += 1;
                 }
-                layer_names_to_delete.push(doomed_layer.filename());
-                doomed_layer.delete()?; // FIXME: schedule succeeded deletions before returning?
-
-                // TODO Removing from the bottom of the layer map is expensive.
-                //      Maybe instead discard all layer map historic versions that
-                //      won't be needed for page reconstruction for this timeline,
-                //      and mark what we can't delete yet as deleted from the layer
-                //      map index without actually rebuilding the index.
-                updates.remove_historic(doomed_layer);
-                result.layers_removed += 1;
             }
 
             if result.layers_removed != 0 {
