@@ -15,6 +15,7 @@
 !proxy/
 !safekeeper/
 !storage_broker/
+!trace/
 !vendor/postgres-v14/
 !vendor/postgres-v15/
 !workspace_hack/

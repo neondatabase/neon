@@ -313,7 +313,7 @@ pub struct TimelineGcRequest {
 }
 
 // Wrapped in libpq CopyData
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),
