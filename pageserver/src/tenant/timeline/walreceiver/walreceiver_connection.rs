@@ -435,8 +435,8 @@ fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres:
     {
         return Ok(pg_error);
     } else if let Some(db_error) = pg_error.as_db_error() {
-        if db_error.code() == &SqlState::CONNECTION_FAILURE
-            && db_error.message().contains("end streaming")
+        if db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
+            && db_error.message().contains("ending streaming")
         {
             return Ok(pg_error);
         }

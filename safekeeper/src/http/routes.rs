@@ -168,12 +168,9 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             .commit_lsn
             .segment_lsn(server_info.wal_seg_size as usize)
     });
-    tokio::task::spawn_blocking(move || {
-        GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
-    })
-    .await
-    .map_err(|e| ApiError::InternalServerError(e.into()))?
-    .map_err(ApiError::InternalServerError)?;
+    GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }

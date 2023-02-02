@@ -11,12 +11,18 @@
 
 # Not every feature is supported in macOS builds. Avoid running regular linting
 # script that checks every feature.
+#
+# manual-range-contains wants
+#   !(8..=MAX_STARTUP_PACKET_LENGTH).contains(&len)
+# instead of
+#   len < 4 || len > MAX_STARTUP_PACKET_LENGTH
+# , let's disagree.
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # no extra features to test currently, add more here when needed
-    cargo clippy --locked --all --all-targets --features testing -- -A unknown_lints -D warnings
+    cargo clippy --locked --all --all-targets --features testing -- -A unknown_lints  -A clippy::manual-range-contains -D warnings
 else
     # * `-A unknown_lints` – do not warn about unknown lint suppressions
     #                        that people with newer toolchains might use
     # * `-D warnings`      - fail on any warnings (`cargo` returns non-zero exit status)
-    cargo clippy --locked --all --all-targets --all-features -- -A unknown_lints -D warnings
+    cargo clippy --locked --all --all-targets --all-features -- -A unknown_lints -A clippy::manual-range-contains -D warnings
 fi

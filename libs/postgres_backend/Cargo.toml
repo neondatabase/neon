@@ -17,7 +17,6 @@ tokio-rustls.workspace = true
 tracing.workspace = true
 
 pq_proto.workspace = true
-utils.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]

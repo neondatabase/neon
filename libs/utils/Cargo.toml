@@ -19,8 +19,6 @@ jsonwebtoken.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 routerify.workspace = true
-rustls.workspace = true
-rustls-split.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
@@ -36,7 +34,6 @@ url.workspace = true
 uuid = { version = "1.2", features = ["v4", "serde"] }
 
 metrics.workspace = true
-pq_proto.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]
@@ -44,7 +41,6 @@ byteorder.workspace = true
 bytes.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
-rustls-pemfile.workspace = true
 tempfile.workspace = true
 
 [[bench]]

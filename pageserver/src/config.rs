@@ -21,10 +21,10 @@ use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
 
+use postgres_backend::AuthType;
 use utils::{
     id::{NodeId, TenantId, TimelineId},
     logging::LogFormat,
-    postgres_backend::AuthType,
 };
 
 use crate::tenant::config::TenantConf;

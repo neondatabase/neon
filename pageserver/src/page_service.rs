@@ -20,7 +20,7 @@ use pageserver_api::models::{
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
     PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
-use postgres_backend::{self, is_expected_io_error, PostgresBackend, QueryError};
+use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, QueryError};
 use pq_proto::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
@@ -36,7 +36,6 @@ use utils::{
     auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    postgres_backend::AuthType,
     simple_rcu::RcuReadGuard,
 };
 
@@ -68,7 +67,7 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                     Err(QueryError::Other(anyhow::anyhow!(msg)))
                 }
 
-                msg = pgb.read_message() => { msg }
+                msg = pgb.read_message() => { msg.map_err(QueryError::from)}
             };
 
             match msg {
@@ -79,14 +78,16 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::Sync => continue,
                         FeMessage::Terminate => {
                             let msg = "client terminated connection with Terminate message during COPY";
-                            let query_error_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                            pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error_error.pg_error_code())))?;
+                            let query_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                            // error can't happen here, ErrorResponse serialization should be always ok
+                            pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
                             Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                             break;
                         }
                         m => {
                             let msg = format!("unexpected message {m:?}");
-                            pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None))?;
+                            // error can't happen here, ErrorResponse serialization should be always ok
+                            pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
                             Err(io::Error::new(io::ErrorKind::Other, msg))?;
                             break;
                         }
@@ -96,8 +97,9 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 }
                 Ok(None) => {
                     let msg = "client closed connection during COPY";
-                    let query_error_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                    pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error_error.pg_error_code())))?;
+                    let query_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                    // error can't happen here, ErrorResponse serialization should be always ok
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
                     pgb.flush().await?;
                     Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                 }
@@ -105,7 +107,7 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                     Err(io_error)?;
                 }
                 Err(other) => {
-                    Err(io::Error::new(io::ErrorKind::Other, other))?;
+                    Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
                 }
             };
         }

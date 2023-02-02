@@ -51,7 +51,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     /// Receive [`FeStartupPacket`], which is a first packet sent by a client.
     pub async fn read_startup_packet(&mut self) -> io::Result<FeStartupPacket> {
         // TODO: `FeStartupPacket::read_fut` should return `FeStartupPacket`
-        let msg = FeStartupPacket::read_fut(&mut self.stream)
+        let msg = FeStartupPacket::read(&mut self.stream)
             .await
             .map_err(ConnectionError::into_io_error)?
             .ok_or_else(err_connection)?;
@@ -73,7 +73,7 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
     }
 
     async fn read_message(&mut self) -> io::Result<FeMessage> {
-        FeMessage::read_fut(&mut self.stream)
+        FeMessage::read(&mut self.stream)
             .await
             .map_err(ConnectionError::into_io_error)?
             .ok_or_else(err_connection)
