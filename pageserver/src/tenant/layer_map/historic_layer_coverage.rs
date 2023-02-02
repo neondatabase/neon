@@ -730,6 +730,12 @@ fn missing_key_is_not_inserted_with_replace() {
     };
 
     assert!(!map.replace(&key, "should not replace", |_| true));
+    assert!(map
+        .get()
+        .expect("no changes to rebuild")
+        .get_version(102)
+        .is_none());
+
     map.insert(key.clone(), "Image 1");
     map.rebuild();
 
