@@ -145,6 +145,7 @@ impl PersistentLayer for RemoteLayer {
         if self.is_delta {
             HistoricLayerInfo::Delta {
                 layer_file_name,
+                layer_file_size: self.layer_metadata.file_size(),
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
@@ -152,6 +153,7 @@ impl PersistentLayer for RemoteLayer {
         } else {
             HistoricLayerInfo::Image {
                 layer_file_name,
+                layer_file_size: self.layer_metadata.file_size(),
                 lsn_start: lsn_range.start,
                 remote: true,
             }

@@ -243,6 +243,7 @@ impl PersistentLayer for ImageLayer {
 
         HistoricLayerInfo::Image {
             layer_file_name,
+            layer_file_size: Some(self.file_size),
             lsn_start: lsn_range.start,
             remote: false,
         }

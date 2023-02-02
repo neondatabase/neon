@@ -899,7 +899,7 @@ impl Timeline {
                 &layer_metadata,
             ),
             #[cfg(test)]
-            LayerFileName::Test(_) => unimplemented!(),
+            LayerFileName::Test(_) => unreachable!(),
         });
 
         let gc_lock = self.layer_removal_cs.lock().await;
@@ -1371,7 +1371,7 @@ impl Timeline {
                     updates.insert_historic(remote_layer);
                 }
                 #[cfg(test)]
-                LayerFileName::Test(_) => unimplemented!(),
+                LayerFileName::Test(_) => unreachable!(),
             }
         }
 

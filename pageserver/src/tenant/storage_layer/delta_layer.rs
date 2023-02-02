@@ -425,6 +425,7 @@ impl PersistentLayer for DeltaLayer {
 
         HistoricLayerInfo::Delta {
             layer_file_name,
+            layer_file_size: Some(self.file_size),
             lsn_start: lsn_range.start,
             lsn_end: lsn_range.end,
             remote: false,

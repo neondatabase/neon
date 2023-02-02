@@ -255,6 +255,8 @@ pub enum InMemoryLayerInfo {
 pub enum HistoricLayerInfo {
     Delta {
         layer_file_name: String,
+        layer_file_size: Option<u64>,
+
         #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
         #[serde_as(as = "DisplayFromStr")]
@@ -263,6 +265,8 @@ pub enum HistoricLayerInfo {
     },
     Image {
         layer_file_name: String,
+        layer_file_size: Option<u64>,
+
         #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
         remote: bool,

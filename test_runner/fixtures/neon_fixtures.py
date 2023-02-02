@@ -1527,10 +1527,16 @@ class InMemoryLayerInfo:
     kind: str
     lsn_start: str
     lsn_end: Optional[str]
+    file_size: Optional[int]
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> InMemoryLayerInfo:
-        return InMemoryLayerInfo(kind=d["kind"], lsn_start=d["lsn_start"], lsn_end=d.get("lsn_end"))
+        return InMemoryLayerInfo(
+            kind=d["kind"],
+            lsn_start=d["lsn_start"],
+            lsn_end=d.get("lsn_end"),
+            file_size=d.get("file_size"),
+        )
 
 
 @dataclass
@@ -1540,6 +1546,7 @@ class HistoricLayerInfo:
     lsn_start: str
     lsn_end: Optional[str]
     remote: bool
+    file_size: Optional[int]
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
@@ -1549,6 +1556,7 @@ class HistoricLayerInfo:
             lsn_start=d["lsn_start"],
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
+            file_size=d.get("file_size"),
         )
 
 
