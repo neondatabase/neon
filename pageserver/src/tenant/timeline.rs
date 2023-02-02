@@ -3390,8 +3390,9 @@ impl Timeline {
                         match updates.replace_historic(&l, new_layer) {
                             Ok(true) => { /* expected */ }
                             Ok(false) => {
-                                // FIXME: the downloaded file should probably be removed, otherwise
-                                // it will be added to the layermap on next load?
+                                // TODO: the downloaded file should probably be removed, otherwise
+                                // it will be added to the layermap on next load? we should
+                                // probably restart any get_reconstruct_data search as well.
                                 warn!("replacing downloaded layer into layermap failed because layer was not found");
                             }
                             Err(e) => {
