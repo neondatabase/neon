@@ -20,6 +20,7 @@ pub use prometheus::{register_int_gauge_vec, IntGaugeVec};
 pub use prometheus::{Encoder, TextEncoder};
 use prometheus::{Registry, Result};
 
+pub mod launch_timestamp;
 mod wrappers;
 pub use wrappers::{CountedReader, CountedWriter};
 
@@ -31,6 +32,14 @@ macro_rules! register_uint_gauge_vec {
     ($NAME:expr, $HELP:expr, $LABELS_NAMES:expr $(,)?) => {{
         let gauge_vec = UIntGaugeVec::new($crate::opts!($NAME, $HELP), $LABELS_NAMES).unwrap();
         $crate::register(Box::new(gauge_vec.clone())).map(|_| gauge_vec)
+    }};
+}
+
+#[macro_export]
+macro_rules! register_uint_gauge {
+    ($NAME:expr, $HELP:expr $(,)?) => {{
+        let gauge = $crate::UIntGauge::new($NAME, $HELP).unwrap();
+        $crate::register(Box::new(gauge.clone())).map(|_| gauge)
     }};
 }
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
+use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
 use tokio_util::sync::CancellationToken;
@@ -921,6 +922,7 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 
 pub fn make_router(
     conf: &'static PageServerConf,
+    launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
@@ -936,6 +938,14 @@ pub fn make_router(
             }
         }))
     }
+
+    router = router.middleware(
+        endpoint::add_response_header_middleware(
+            "PAGESERVER_LAUNCH_TIMESTAMP",
+            &launch_ts.to_string(),
+        )
+        .expect("construct launch timestamp header middleware"),
+    );
 
     macro_rules! testing_api {
         ($handler_desc:literal, $handler:path $(,)?) => {{

@@ -1,7 +1,8 @@
 use crate::auth::{Claims, JwtAuth};
 use crate::http::error;
-use anyhow::anyhow;
-use hyper::header::AUTHORIZATION;
+use anyhow::{anyhow, Context};
+use hyper::header::{HeaderName, AUTHORIZATION};
+use hyper::http::HeaderValue;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
@@ -13,6 +14,7 @@ use tracing::info;
 
 use std::future::Future;
 use std::net::TcpListener;
+use std::str::FromStr;
 
 use super::error::ApiError;
 
@@ -141,6 +143,38 @@ pub fn auth_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
         }
         Ok(req)
     })
+}
+
+pub fn add_response_header_middleware<B>(
+    header: &str,
+    value: &str,
+) -> anyhow::Result<Middleware<B, ApiError>>
+where
+    B: hyper::body::HttpBody + Send + Sync + 'static,
+{
+    let name =
+        HeaderName::from_str(header).with_context(|| format!("invalid header name: {header}"))?;
+    let value =
+        HeaderValue::from_str(value).with_context(|| format!("invalid header value: {value}"))?;
+    Ok(Middleware::post_with_info(
+        move |mut response, request_info| {
+            let name = name.clone();
+            let value = value.clone();
+            async move {
+                let headers = response.headers_mut();
+                if headers.contains_key(&name) {
+                    tracing::warn!(
+                        "{} response already contains header {:?}",
+                        request_info.uri(),
+                        &name,
+                    );
+                } else {
+                    headers.insert(name, value);
+                }
+                Ok(response)
+            }
+        },
+    ))
 }
 
 pub fn check_permission_with(
