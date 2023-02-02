@@ -1,27 +1,23 @@
 //! Part of Safekeeper pretending to be Postgres, i.e. handling Postgres
 //! protocol commands.
 
+use anyhow::Context;
+use std::str;
+use tracing::{info, info_span, Instrument};
+
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
-use crate::receive_wal::ReceiveWalConn;
-
-use crate::send_wal::ReplicationConn;
 
 use crate::{GlobalTimelines, SafeKeeperConf};
-use anyhow::Context;
-
 use postgres_ffi::PG_TLI;
-use regex::Regex;
-
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
-use std::str;
-use tracing::info;
+use regex::Regex;
 use utils::auth::{Claims, Scope};
 use utils::postgres_backend_async::QueryError;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    postgres_backend::{self, PostgresBackend},
+    postgres_backend_async::{self, PostgresBackend},
 };
 
 /// Safekeeper handler of postgres commands
@@ -41,9 +37,11 @@ enum SafekeeperPostgresCommand {
     StartReplication { start_lsn: Lsn },
     IdentifySystem,
     JSONCtrl { cmd: AppendLogicalMessage },
+    Show { guc: String },
 }
 
 fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
+    let cmd_lowercase = cmd.to_ascii_lowercase();
     if cmd.starts_with("START_WAL_PUSH") {
         Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
@@ -53,7 +51,7 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         let start_lsn = caps
             .next()
             .map(|cap| cap[1].parse::<Lsn>())
-            .context("failed to parse start LSN from START_REPLICATION command")??;
+            .context("parse start LSN from START_REPLICATION command")??;
         Ok(SafekeeperPostgresCommand::StartReplication { start_lsn })
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
@@ -62,12 +60,21 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::JSONCtrl {
             cmd: serde_json::from_str(cmd)?,
         })
+    } else if cmd_lowercase.starts_with("show") {
+        let re = Regex::new(r"show ((?:[[:alpha:]]|_)+)").unwrap();
+        let mut caps = re.captures_iter(&cmd_lowercase);
+        let guc = caps
+            .next()
+            .map(|cap| cap[1].parse::<String>())
+            .context("parse guc in SHOW command")??;
+        Ok(SafekeeperPostgresCommand::Show { guc })
     } else {
         anyhow::bail!("unsupported command {cmd}");
     }
 }
 
-impl postgres_backend::Handler for SafekeeperPostgresHandler {
+#[async_trait::async_trait]
+impl postgres_backend_async::Handler for SafekeeperPostgresHandler {
     // tenant_id and timeline_id are passed in connection string params
     fn startup(
         &mut self,
@@ -137,7 +144,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         Ok(())
     }
 
-    fn process_query(
+    async fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,
         query_string: &str,
@@ -147,9 +154,11 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             .starts_with("set datestyle to ")
         {
             // important for debug because psycopg2 executes "SET datestyle TO 'ISO'" on connect
-            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            pgb.write_message_flush(&BeMessage::CommandComplete(b"SELECT 1"))
+                .await?;
             return Ok(());
         }
+
         let cmd = parse_cmd(query_string)?;
 
         info!(
@@ -161,14 +170,24 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         let timeline_id = self.timeline_id.context("timelineid is required")?;
         self.check_permission(Some(tenant_id))?;
         self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
+        let span_ttid = self.ttid; // satisfy borrow checker
 
         let res = match cmd {
-            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb).run(self),
-            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
-                ReplicationConn::new(pgb).run(self, pgb, start_lsn)
+            SafekeeperPostgresCommand::StartWalPush => {
+                self.handle_start_wal_push(pgb)
+                    .instrument(info_span!("WAL receiver", ttid = %span_ttid))
+                    .await
             }
-            SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
-            SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
+            SafekeeperPostgresCommand::StartReplication { start_lsn } => {
+                self.handle_start_replication(pgb, start_lsn)
+                    .instrument(info_span!("WAL sender", ttid = %span_ttid))
+                    .await
+            }
+            SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
+            SafekeeperPostgresCommand::Show { guc } => self.handle_show(guc, pgb).await,
+            SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
+                handle_json_ctrl(self, pgb, cmd).await
+            }
         };
 
         match res {
@@ -217,7 +236,10 @@ impl SafekeeperPostgresHandler {
     ///
     /// Handle IDENTIFY_SYSTEM replication command
     ///
-    fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<(), QueryError> {
+    async fn handle_identify_system(
+        &mut self,
+        pgb: &mut PostgresBackend,
+    ) -> Result<(), QueryError> {
         let tli = GlobalTimelines::get(self.ttid)?;
 
         let lsn = if self.is_walproposer_recovery() {
@@ -235,7 +257,7 @@ impl SafekeeperPostgresHandler {
         let tli_bytes = tli.as_bytes();
         let sysid_bytes = sysid.as_bytes();
 
-        pgb.write_message_noflush(&BeMessage::RowDescription(&[
+        pgb.write_message(&BeMessage::RowDescription(&[
             RowDescriptor {
                 name: b"systemid",
                 typoid: TEXT_OID,
@@ -261,13 +283,48 @@ impl SafekeeperPostgresHandler {
                 ..Default::default()
             },
         ]))?
-        .write_message_noflush(&BeMessage::DataRow(&[
+        .write_message(&BeMessage::DataRow(&[
             Some(sysid_bytes),
             Some(tli_bytes),
             Some(lsn_bytes),
             None,
         ]))?
-        .write_message(&BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"))?;
+        .write_message_flush(&BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"))
+        .await?;
+        Ok(())
+    }
+
+    async fn handle_show(
+        &mut self,
+        guc: String,
+        pgb: &mut PostgresBackend,
+    ) -> Result<(), QueryError> {
+        match guc.as_str() {
+            // pg_receivewal wants it
+            "data_directory_mode" => {
+                pgb.write_message(&BeMessage::RowDescription(&[RowDescriptor::int8_col(
+                    b"data_directory_mode",
+                )]))?
+                // xxx we could return real one, not just 0700
+                .write_message(&BeMessage::DataRow(&[Some(0700.to_string().as_bytes())]))?
+                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            }
+            // pg_receivewal wants it
+            "wal_segment_size" => {
+                let tli = GlobalTimelines::get(self.ttid)?;
+                let wal_seg_size = tli.get_state().1.server.wal_seg_size;
+                let wal_seg_size_mb = (wal_seg_size / 1024 / 1024).to_string() + "MB";
+
+                pgb.write_message(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+                    b"wal_segment_size",
+                )]))?
+                .write_message(&BeMessage::DataRow(&[Some(wal_seg_size_mb.as_bytes())]))?
+                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            }
+            _ => {
+                return Err(anyhow::anyhow!("SHOW of unknown setting").into());
+            }
+        }
         Ok(())
     }
 

@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use utils::{
     auth::{encode_from_key_file, Claims, Scope},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    postgres_backend::AuthType,
+    postgres_backend_async::AuthType,
 };
 
 use crate::safekeeper::SafekeeperNode;

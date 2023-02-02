@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mgmt_address: SocketAddr = args.get_one::<String>("mgmt").unwrap().parse()?;
     info!("Starting mgmt on {mgmt_address}");
-    let mgmt_listener = TcpListener::bind(mgmt_address).await?.into_std()?;
+    let mgmt_listener = TcpListener::bind(mgmt_address).await?;
 
     let proxy_address: SocketAddr = args.get_one::<String>("proxy").unwrap().parse()?;
     info!("Starting proxy on {proxy_address}");
@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
     let mut tasks = vec![
         tokio::spawn(http::server::task_main(http_listener)),
         tokio::spawn(proxy::task_main(config, proxy_listener)),
-        tokio::task::spawn_blocking(move || console::mgmt::thread_main(mgmt_listener)),
+        tokio::spawn(console::mgmt::thread_main(mgmt_listener)),
     ];
 
     if let Some(wss_address) = args.get_one::<String>("wss") {

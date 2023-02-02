@@ -518,7 +518,7 @@ impl Timeline {
 
     /// Register compute connection, starting timeline-related activity if it is
     /// not running yet.
-    pub fn on_compute_connect(&self) -> Result<()> {
+    pub async fn on_compute_connect(&self) -> Result<()> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
@@ -532,14 +532,14 @@ impl Timeline {
         // Wake up wal backup launcher, if offloading not started yet.
         if is_wal_backup_action_pending {
             // Can fail only if channel to a static thread got closed, which is not normal at all.
-            self.wal_backup_launcher_tx.blocking_send(self.ttid)?;
+            self.wal_backup_launcher_tx.send(self.ttid).await?;
         }
         Ok(())
     }
 
     /// De-register compute connection, shutting down timeline activity if
     /// pageserver doesn't need catchup.
-    pub fn on_compute_disconnect(&self) -> Result<()> {
+    pub async fn on_compute_disconnect(&self) -> Result<()> {
         let is_wal_backup_action_pending: bool;
         {
             let mut shared_state = self.write_shared_state();
@@ -549,7 +549,7 @@ impl Timeline {
         // Wake up wal backup launcher, if it is time to stop the offloading.
         if is_wal_backup_action_pending {
             // Can fail only if channel to a static thread got closed, which is not normal at all.
-            self.wal_backup_launcher_tx.blocking_send(self.ttid)?;
+            self.wal_backup_launcher_tx.send(self.ttid).await?;
         }
         Ok(())
     }

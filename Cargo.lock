@@ -2713,6 +2713,7 @@ name = "pq_proto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "byteorder",
  "bytes",
  "pin-project-lite",
  "postgres-protocol",
@@ -3239,15 +3240,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-split"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78802c9612b4689d207acff746f38132ca1b12dadb55d471aa5f10fd580f47d3"
-dependencies = [
- "rustls",
-]
-
-[[package]]
 name = "rustversion"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3280,6 +3272,7 @@ dependencies = [
  "nix",
  "once_cell",
  "parking_lot",
+ "pin-project-lite",
  "postgres",
  "postgres-protocol",
  "postgres_ffi",
@@ -4447,6 +4440,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "criterion",
+ "futures",
  "git-version",
  "heapless",
  "hex",
@@ -4461,7 +4455,6 @@ dependencies = [
  "routerify",
  "rustls",
  "rustls-pemfile",
- "rustls-split",
  "sentry",
  "serde",
  "serde_json",

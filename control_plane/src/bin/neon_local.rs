@@ -30,7 +30,7 @@ use utils::{
     auth::{Claims, Scope},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    postgres_backend::AuthType,
+    postgres_backend_async::AuthType,
     project_git_version,
 };
 

@@ -2,36 +2,54 @@
 //!   WAL service listens for client connections and
 //!   receive WAL from wal_proposer and send it to WAL receivers
 //!
+use anyhow::{Context, Result};
 use regex::Regex;
-use std::net::{TcpListener, TcpStream};
-use std::thread;
+use std::{future, thread};
+use tokio::net::TcpStream;
 use tracing::*;
 use utils::postgres_backend_async::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;
-use utils::postgres_backend::{AuthType, PostgresBackend};
+use utils::postgres_backend_async::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
-pub fn thread_main(conf: SafeKeeperConf, listener: TcpListener) -> ! {
-    loop {
-        match listener.accept() {
-            Ok((socket, peer_addr)) => {
-                debug!("accepted connection from {}", peer_addr);
-                let conf = conf.clone();
+pub fn thread_main(conf: SafeKeeperConf, pg_listener: std::net::TcpListener) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create runtime")
+        // todo catch error in main thread
+        .expect("failed to create runtime");
 
-                let _ = thread::Builder::new()
-                    .name("WAL service thread".into())
-                    .spawn(move || {
-                        if let Err(err) = handle_socket(socket, conf) {
-                            error!("connection handler exited: {}", err);
-                        }
-                    })
-                    .unwrap();
+    runtime
+        .block_on(async move {
+            // Tokio's from_std won't do this for us, per its comment.
+            pg_listener.set_nonblocking(true)?;
+            let listener = tokio::net::TcpListener::from_std(pg_listener)?;
+
+            loop {
+                match listener.accept().await {
+                    Ok((socket, peer_addr)) => {
+                        debug!("accepted connection from {}", peer_addr);
+                        let conf = conf.clone();
+
+                        let _ = thread::Builder::new()
+                            .name("WAL service thread".into())
+                            .spawn(move || {
+                                if let Err(err) = handle_socket(socket, conf) {
+                                    error!("connection handler exited: {}", err);
+                                }
+                            })
+                            .unwrap();
+                    }
+                    Err(e) => error!("Failed to accept connection: {}", e),
+                }
             }
-            Err(e) => error!("Failed to accept connection: {}", e),
-        }
-    }
+            #[allow(unreachable_code)] // hint compiler the closure return type
+            Ok::<(), anyhow::Error>(())
+        })
+        .expect("listener failed")
 }
 
 // Get unique thread id (Rust internal), with ThreadId removed for shorter printing
@@ -47,6 +65,11 @@ fn get_tid() -> u64 {
 fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryError> {
     let _enter = info_span!("", tid = ?get_tid()).entered();
 
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let local = tokio::task::LocalSet::new();
+
     socket.set_nodelay(true)?;
 
     let auth_type = match conf.auth {
@@ -54,9 +77,13 @@ fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryErr
         Some(_) => AuthType::NeonJWT,
     };
     let mut conn_handler = SafekeeperPostgresHandler::new(conf);
-    let pgbackend = PostgresBackend::new(socket, auth_type, None, false)?;
-    // libpq replication protocol between safekeeper and replicas/pagers
-    pgbackend.run(&mut conn_handler)?;
+    let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
+    // libpq protocol between safekeeper and walproposer / pageserver
+    // We don't use shutdown.
+    local.block_on(
+        &runtime,
+        pgbackend.run(&mut conn_handler, || future::pending::<()>()),
+    )?;
 
     Ok(())
 }

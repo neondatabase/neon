@@ -231,7 +231,7 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 
     let conf_cloned = conf.clone();
     let safekeeper_thread = thread::Builder::new()
-        .name("safekeeper thread".into())
+        .name("WAL service thread".into())
         .spawn(|| wal_service::thread_main(conf_cloned, pg_listener))
         .unwrap();
 

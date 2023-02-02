@@ -11,6 +11,7 @@ async-trait.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 bytes.workspace = true
+futures.workspace = true
 heapless.workspace = true
 hyper = { workspace = true, features = ["full"] }
 routerify.workspace = true
@@ -27,7 +28,6 @@ rand.workspace = true
 jsonwebtoken.workspace = true
 hex = { workspace = true, features = ["serde"] }
 rustls.workspace = true
-rustls-split.workspace = true
 git-version.workspace = true
 serde_with.workspace = true
 once_cell.workspace = true
