@@ -472,7 +472,6 @@ local_cache_pages(PG_FUNCTION_ARGS)
         HASH_SEQ_STATUS status;
 		FileCacheEntry* entry;
 		uint32 n_pages = 0;
-		uint32 i;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 
