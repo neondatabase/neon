@@ -24,7 +24,7 @@ use pageserver::{
 use utils::{
     auth::JwtAuth,
     logging,
-    postgres_backend::AuthType,
+    postgres_backend_async::AuthType,
     project_git_version,
     sentry_init::{init_sentry, release_name},
     signals::{self, Signal},

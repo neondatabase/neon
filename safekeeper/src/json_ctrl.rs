@@ -26,7 +26,7 @@ use crate::GlobalTimelines;
 use postgres_ffi::encode_logical_message;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
-use utils::{lsn::Lsn, postgres_backend::PostgresBackend};
+use utils::{lsn::Lsn, postgres_backend_async::PostgresBackend};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {
@@ -59,7 +59,7 @@ struct AppendResult {
 /// Handles command to craft logical message WAL record with given
 /// content, and then append it with specified term and lsn. This
 /// function is used to test safekeepers in different scenarios.
-pub fn handle_json_ctrl(
+pub async fn handle_json_ctrl(
     spg: &SafekeeperPostgresHandler,
     pgb: &mut PostgresBackend,
     append_request: &AppendLogicalMessage,
@@ -82,14 +82,15 @@ pub fn handle_json_ctrl(
     let response_data = serde_json::to_vec(&response)
         .with_context(|| format!("Response {response:?} is not a json array"))?;
 
-    pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor {
+    pgb.write_message(&BeMessage::RowDescription(&[RowDescriptor {
         name: b"json",
         typoid: TEXT_OID,
         typlen: -1,
         ..Default::default()
     }]))?
-    .write_message_noflush(&BeMessage::DataRow(&[Some(&response_data)]))?
-    .write_message(&BeMessage::CommandComplete(b"JSON_CTRL"))?;
+    .write_message(&BeMessage::DataRow(&[Some(&response_data)]))?
+    .write_message_flush(&BeMessage::CommandComplete(b"JSON_CTRL"))
+    .await?;
     Ok(())
 }
 

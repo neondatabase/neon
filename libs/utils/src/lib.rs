@@ -13,7 +13,7 @@ pub mod simple_rcu;
 pub mod vec_map;
 
 pub mod bin_ser;
-pub mod postgres_backend;
+// pub mod postgres_backend;
 pub mod postgres_backend_async;
 
 // helper functions for creating and fsyncing
@@ -51,6 +51,8 @@ pub mod sentry_init;
 pub mod signals;
 
 pub mod fs_ext;
+
+pub mod send_rc;
 
 /// use with fail::cfg("$name", "return(2000)")
 #[macro_export]

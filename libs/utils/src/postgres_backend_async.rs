@@ -2,29 +2,24 @@
 //! To use, create PostgresBackend and run() it, passing the Handler
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
-
-use crate::postgres_backend::AuthType;
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
-use pq_proto::{BeMessage, ConnectionError, FeMessage, FeStartupPacket, SQLSTATE_INTERNAL_ERROR};
-use std::future::Future;
-use std::io;
+use futures::stream::StreamExt;
+use futures::{pin_mut, Sink, SinkExt};
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
-use tracing::{debug, error, info, trace};
-
+use std::{fmt, io};
+use std::{future::Future, str::FromStr};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_rustls::TlsAcceptor;
+use tokio_util::codec::Framed;
+use tracing::{debug, error, info, trace};
 
-pub fn is_expected_io_error(e: &io::Error) -> bool {
-    use io::ErrorKind::*;
-    matches!(
-        e.kind(),
-        ConnectionRefused | ConnectionAborted | ConnectionReset
-    )
-}
+use pq_proto::codec::{ConnectionError, PostgresCodec};
+use pq_proto::{BeMessage, FeMessage, FeStartupPacket, SQLSTATE_INTERNAL_ERROR};
 
 /// An error, occurred during query processing:
 /// either during the connection ([`ConnectionError`]) or before/after it.
@@ -40,7 +35,7 @@ pub enum QueryError {
 
 impl From<io::Error> for QueryError {
     fn from(e: io::Error) -> Self {
-        Self::Disconnected(ConnectionError::Socket(e))
+        Self::Disconnected(ConnectionError::Io(e))
     }
 }
 
@@ -51,6 +46,14 @@ impl QueryError {
             Self::Other(_) => SQLSTATE_INTERNAL_ERROR, // internal error
         }
     }
+}
+
+pub fn is_expected_io_error(e: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        ConnectionRefused | ConnectionAborted | ConnectionReset
+    )
 }
 
 #[async_trait::async_trait]
@@ -93,6 +96,7 @@ pub trait Handler {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd)]
 pub enum ProtoState {
     Initialization,
+    // Encryption handshake is done; waiting for encrypted Startup message.
     Encrypted,
     Authentication,
     Established,
@@ -105,15 +109,14 @@ pub enum ProcessMsgResult {
     Break,
 }
 
-/// Always-writeable sock_split stream.
-/// May not be readable. See [`PostgresBackend::take_stream_in`]
-pub enum Stream {
-    Unencrypted(BufReader<tokio::net::TcpStream>),
-    Tls(Box<tokio_rustls::server::TlsStream<BufReader<tokio::net::TcpStream>>>),
-    Broken,
+/// Either plain TCP stream or encrypted one, implementing AsyncRead + AsyncWrite.
+pub enum MaybeTlsStream {
+    Unencrypted(tokio::net::TcpStream),
+    Tls(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
+    Broken, // temporary value for switch to TLS
 }
 
-impl AsyncWrite for Stream {
+impl AsyncWrite for MaybeTlsStream {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -122,14 +125,14 @@ impl AsyncWrite for Stream {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
-            Self::Broken => unreachable!(),
+            _ => unreachable!(),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_flush(cx),
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
-            Self::Broken => unreachable!(),
+            _ => unreachable!(),
         }
     }
     fn poll_shutdown(
@@ -139,11 +142,11 @@ impl AsyncWrite for Stream {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
-            Self::Broken => unreachable!(),
+            _ => unreachable!(),
         }
     }
 }
-impl AsyncRead for Stream {
+impl AsyncRead for MaybeTlsStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -152,18 +155,49 @@ impl AsyncRead for Stream {
         match self.get_mut() {
             Self::Unencrypted(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
-            Self::Broken => unreachable!(),
+            _ => unreachable!(),
         }
     }
 }
 
-pub struct PostgresBackend {
-    stream: Stream,
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+pub enum AuthType {
+    Trust,
+    // This mimics postgres's AuthenticationCleartextPassword but instead of password expects JWT
+    NeonJWT,
+}
 
-    // Output buffer. c.f. BeMessage::write why we are using BytesMut here.
-    // The data between 0 and "current position" as tracked by the bytes::Buf
-    // implementation of BytesMut, have already been written.
-    buf_out: BytesMut,
+impl FromStr for AuthType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Trust" => Ok(Self::Trust),
+            "NeonJWT" => Ok(Self::NeonJWT),
+            _ => anyhow::bail!("invalid value \"{s}\" for auth type"),
+        }
+    }
+}
+
+impl fmt::Display for AuthType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            AuthType::Trust => "Trust",
+            AuthType::NeonJWT => "NeonJWT",
+        })
+    }
+}
+
+pub struct PostgresBackend {
+    // Provides serialization/deserialization to the underlying transport backed
+    // with buffers; implements Sink consuming messages and Stream reading them.
+    //
+    // Sink::start_send only queues message to the interal buffer.
+    // SinkExt::flush flushes buffer to the stream.
+    //
+    // StreamExt::read reads next message. In case of EOF without partial
+    // message it returns None.
+    stream: Framed<MaybeTlsStream, PostgresCodec>,
 
     pub state: ProtoState,
 
@@ -196,10 +230,10 @@ impl PostgresBackend {
         tls_config: Option<Arc<rustls::ServerConfig>>,
     ) -> io::Result<Self> {
         let peer_addr = socket.peer_addr()?;
+        let stream = MaybeTlsStream::Unencrypted(socket);
 
         Ok(Self {
-            stream: Stream::Unencrypted(BufReader::new(socket)),
-            buf_out: BytesMut::with_capacity(10 * 1024),
+            stream: Framed::new(stream, PostgresCodec::new()),
             state: ProtoState::Initialization,
             auth_type,
             tls_config,
@@ -212,29 +246,60 @@ impl PostgresBackend {
     }
 
     /// Read full message or return None if connection is closed.
-    pub async fn read_message(&mut self) -> Result<Option<FeMessage>, QueryError> {
-        use ProtoState::*;
-        match self.state {
-            Initialization | Encrypted => FeStartupPacket::read_fut(&mut self.stream).await,
-            Authentication | Established => FeMessage::read_fut(&mut self.stream).await,
-            Closed => Ok(None),
+    pub async fn read_message(&mut self) -> Result<Option<FeMessage>, ConnectionError> {
+        if let ProtoState::Closed = self.state {
+            Ok(None)
+        } else {
+            let msg = self.stream.next().await;
+            // Option<Result<...>>, so swap.
+            msg.map_or(Ok(None), |res| res.map(Some))
         }
-        .map_err(QueryError::from)
+    }
+
+    /// Polling version of read_message, saves the caller need to pin.
+    pub fn poll_read_message(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<Option<FeMessage>, ConnectionError>> {
+        let read_fut = self.read_message();
+        pin_mut!(read_fut);
+        read_fut.poll(cx)
     }
 
     /// Flush output buffer into the socket.
     pub async fn flush(&mut self) -> io::Result<()> {
-        while self.buf_out.has_remaining() {
-            let bytes_written = self.stream.write(self.buf_out.chunk()).await?;
-            self.buf_out.advance(bytes_written);
-        }
-        self.buf_out.clear();
-        Ok(())
+        self.stream.flush().await.map_err(|e| match e {
+            ConnectionError::Io(e) => e,
+            // the only error we can get from flushing is IO
+            _ => unreachable!(),
+        })
     }
 
-    /// Write message into internal output buffer.
-    pub fn write_message(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self> {
-        BeMessage::write(&mut self.buf_out, message)?;
+    /// Polling version of `flush()`, saves the caller need to pin.
+    pub fn poll_flush(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let flush_fut = self.flush();
+        pin_mut!(flush_fut);
+        flush_fut.poll(cx)
+    }
+
+    /// Write message into internal output buffer. Technically error type can be
+    /// only ProtocolError here (if, unlikely, serialization fails), but callers
+    /// typically wrap it anyway.
+    pub fn write_message(&mut self, message: &BeMessage<'_>) -> Result<&mut Self, ConnectionError> {
+        Pin::new(&mut self.stream).start_send(message)?;
+        Ok(self)
+    }
+
+    /// Write message into internal output buffer and flush it to the stream.
+    pub async fn write_message_flush(
+        &mut self,
+        message: &BeMessage<'_>,
+    ) -> Result<&mut Self, ConnectionError> {
+        self.write_message(message)?;
+        self.flush().await?;
         Ok(self)
     }
 
@@ -244,28 +309,6 @@ impl PostgresBackend {
     /// The caller is responsible for sending CopyOutResponse and CopyDone messages.
     pub fn copyout_writer(&mut self) -> CopyDataWriter {
         CopyDataWriter { pgb: self }
-    }
-
-    /// A polling function that tries to write all the data from 'buf_out' to the
-    /// underlying stream.
-    fn poll_write_buf(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        while self.buf_out.has_remaining() {
-            match Pin::new(&mut self.stream).poll_write(cx, self.buf_out.chunk()) {
-                Poll::Ready(Ok(bytes_written)) => {
-                    self.buf_out.advance(bytes_written);
-                }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_flush(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.stream).poll_flush(cx)
     }
 
     // Wrapper for run_message_loop() that shuts down socket when we are done
@@ -279,7 +322,7 @@ impl PostgresBackend {
         S: Future,
     {
         let ret = self.run_message_loop(handler, shutdown_watcher).await;
-        let _ = self.stream.shutdown();
+        let _ = self.stream.get_mut().shutdown();
         ret
     }
 
@@ -359,14 +402,22 @@ impl PostgresBackend {
     }
 
     async fn start_tls(&mut self) -> anyhow::Result<()> {
-        if let Stream::Unencrypted(plain_stream) =
-            std::mem::replace(&mut self.stream, Stream::Broken)
+        if let MaybeTlsStream::Unencrypted(plain_stream) =
+            // temporary replace stream with fake broken to prepare TLS one
+            std::mem::replace(self.stream.get_mut(), MaybeTlsStream::Broken)
         {
             let acceptor = TlsAcceptor::from(self.tls_config.clone().unwrap());
-            let tls_stream = acceptor.accept(plain_stream).await?;
-
-            self.stream = Stream::Tls(Box::new(tls_stream));
-            return Ok(());
+            match acceptor.accept(plain_stream).await {
+                Ok(tls_stream) => {
+                    // push back ready TLS stream
+                    *self.stream.get_mut() = MaybeTlsStream::Tls(Box::new(tls_stream));
+                    return Ok(());
+                }
+                Err(e) => {
+                    self.state = ProtoState::Closed;
+                    return Err(e.into());
+                }
+            }
         };
         anyhow::bail!("TLS already started");
     }
@@ -380,13 +431,12 @@ impl PostgresBackend {
         let have_tls = self.tls_config.is_some();
         match msg {
             FeMessage::StartupPacket(m) => {
-                trace!("got startup message {m:?}");
-
                 match m {
                     FeStartupPacket::SslRequest => {
                         debug!("SSL requested");
 
                         self.write_message(&BeMessage::EncryptionResponse(have_tls))?;
+
                         if have_tls {
                             self.start_tls().await?;
                             self.state = ProtoState::Encrypted;
@@ -415,6 +465,7 @@ impl PostgresBackend {
                             AuthType::Trust => {
                                 self.write_message(&BeMessage::AuthenticationOk)?
                                     .write_message(&BeMessage::CLIENT_ENCODING)?
+                                    .write_message(&BeMessage::INTEGER_DATETIMES)?
                                     // The async python driver requires a valid server_version
                                     .write_message(&BeMessage::server_version("14.1"))?
                                     .write_message(&BeMessage::ReadyForQuery)?;
@@ -454,6 +505,7 @@ impl PostgresBackend {
                 }
                 self.write_message(&BeMessage::AuthenticationOk)?
                     .write_message(&BeMessage::CLIENT_ENCODING)?
+                    .write_message(&BeMessage::INTEGER_DATETIMES)?
                     .write_message(&BeMessage::ReadyForQuery)?;
                 self.state = ProtoState::Established;
             }
@@ -573,7 +625,7 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         // It's not strictly required to flush between each message, but makes it easier
         // to view in wireshark, and usually the messages that the callers write are
         // decently-sized anyway.
-        match this.pgb.poll_write_buf(cx) {
+        match this.pgb.poll_flush(cx) {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Pending => return Poll::Pending,
@@ -583,7 +635,11 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         // XXX: if the input is large, we should split it into multiple messages.
         // Not sure what the threshold should be, but the ultimate hard limit is that
         // the length cannot exceed u32.
-        this.pgb.write_message(&BeMessage::CopyData(buf))?;
+        this.pgb
+            .write_message(&BeMessage::CopyData(buf))
+            // write_message only writes to buffer, so can fail iff message is
+            // invaid, but CopyData can't be invalid.
+            .expect("failed to serialize CopyData");
 
         Poll::Ready(Ok(buf.len()))
     }
@@ -593,23 +649,14 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
-        match this.pgb.poll_write_buf(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Pending => return Poll::Pending,
-        }
         this.pgb.poll_flush(cx)
     }
+
     fn poll_shutdown(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         let this = self.get_mut();
-        match this.pgb.poll_write_buf(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Pending => return Poll::Pending,
-        }
         this.pgb.poll_flush(cx)
     }
 }
@@ -623,7 +670,7 @@ pub fn short_error(e: &QueryError) -> String {
 
 pub(super) fn log_query_error(query: &str, e: &QueryError) {
     match e {
-        QueryError::Disconnected(ConnectionError::Socket(io_error)) => {
+        QueryError::Disconnected(ConnectionError::Io(io_error)) => {
             if is_expected_io_error(io_error) {
                 info!("query handler for '{query}' failed with expected io error: {io_error}");
             } else {

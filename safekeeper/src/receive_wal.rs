@@ -26,7 +26,7 @@ use crate::safekeeper::ProposerAcceptorMessage;
 
 use crate::handler::SafekeeperPostgresHandler;
 use pq_proto::{BeMessage, FeMessage};
-use utils::{postgres_backend::PostgresBackend, sock_split::ReadStream};
+use utils::{postgres_backend_async::PostgresBackend, sock_split::ReadStream};
 
 pub struct ReceiveWalConn<'pg> {
     /// Postgres connection
@@ -59,82 +59,83 @@ impl<'pg> ReceiveWalConn<'pg> {
         // Notify the libpq client that it's allowed to send `CopyData` messages
         self.pg_backend
             .write_message(&BeMessage::CopyBothResponse)?;
-
-        let r = self
-            .pg_backend
-            .take_stream_in()
-            .ok_or_else(|| anyhow!("failed to take read stream from pgbackend"))?;
-        let mut poll_reader = ProposerPollStream::new(r)?;
+        Ok(())
+        // let r = self
+        //     .pg_backend
+        //     .take_stream_in()
+        //     .ok_or_else(|| anyhow!("failed to take read stream from pgbackend"))?;
+        // let mut poll_reader = ProposerPollStream::new(r)?;
 
         // Receive information about server
-        let next_msg = poll_reader.recv_msg()?;
-        let tli = match next_msg {
-            ProposerAcceptorMessage::Greeting(ref greeting) => {
-                info!(
-                    "start handshake with walproposer {} sysid {} timeline {}",
-                    self.peer_addr, greeting.system_id, greeting.tli,
-                );
-                let server_info = ServerInfo {
-                    pg_version: greeting.pg_version,
-                    system_id: greeting.system_id,
-                    wal_seg_size: greeting.wal_seg_size,
-                };
-                GlobalTimelines::create(spg.ttid, server_info, Lsn::INVALID, Lsn::INVALID)?
-            }
-            _ => {
-                return Err(QueryError::Other(anyhow::anyhow!(
-                    "unexpected message {next_msg:?} instead of greeting"
-                )))
-            }
-        };
+        // let next_msg = poll_reader.recv_msg()?;
+        // let tli = match next_msg {
+        //     ProposerAcceptorMessage::Greeting(ref greeting) => {
+        //         info!(
+        //             "start handshake with walproposer {} sysid {} timeline {}",
+        //             self.peer_addr, greeting.system_id, greeting.tli,
+        //         );
+        //         let server_info = ServerInfo {
+        //             pg_version: greeting.pg_version,
+        //             system_id: greeting.system_id,
+        //             wal_seg_size: greeting.wal_seg_size,
+        //         };
+        //         GlobalTimelines::create(spg.ttid, server_info, Lsn::INVALID, Lsn::INVALID)?
+        //     }
+        //     _ => {
+        //         return Err(QueryError::Other(anyhow::anyhow!(
+        //             "unexpected message {next_msg:?} instead of greeting"
+        //         )))
+        //     }
+        // };
 
-        let mut next_msg = Some(next_msg);
+        // let mut next_msg = None;
 
-        let mut first_time_through = true;
-        let mut _guard: Option<ComputeConnectionGuard> = None;
-        loop {
-            if matches!(next_msg, Some(ProposerAcceptorMessage::AppendRequest(_))) {
-                // poll AppendRequest's without blocking and write WAL to disk without flushing,
-                // while it's readily available
-                while let Some(ProposerAcceptorMessage::AppendRequest(append_request)) = next_msg {
-                    let msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
+        // let mut first_time_through = true;
+        // let mut _guard: Option<ComputeConnectionGuard> = None;
+        // loop {
+        //     if matches!(next_msg, Some(ProposerAcceptorMessage::AppendRequest(_))) {
+        //         // poll AppendRequest's without blocking and write WAL to disk without flushing,
+        //         // while it's readily available
+        //         while let Some(ProposerAcceptorMessage::AppendRequest(append_request)) = next_msg {
+        //             let msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
 
-                    let reply = tli.process_msg(&msg)?;
-                    if let Some(reply) = reply {
-                        self.write_msg(&reply)?;
-                    }
+        //             let reply = tli.process_msg(&msg)?;
+        //             if let Some(reply) = reply {
+        //                 self.write_msg(&reply)?;
+        //             }
 
-                    next_msg = poll_reader.poll_msg();
-                }
+        //             // next_msg = poll_reader.poll_msg();
+        //             next_msg = poll_reader.poll_msg();
+        //         }
 
-                // flush all written WAL to the disk
-                let reply = tli.process_msg(&ProposerAcceptorMessage::FlushWAL)?;
-                if let Some(reply) = reply {
-                    self.write_msg(&reply)?;
-                }
-            } else if let Some(msg) = next_msg.take() {
-                // process other message
-                let reply = tli.process_msg(&msg)?;
-                if let Some(reply) = reply {
-                    self.write_msg(&reply)?;
-                }
-            }
-            if first_time_through {
-                // Register the connection and defer unregister. Do that only
-                // after processing first message, as it sets wal_seg_size,
-                // wanted by many.
-                tli.on_compute_connect()?;
-                _guard = Some(ComputeConnectionGuard {
-                    timeline: Arc::clone(&tli),
-                });
-                first_time_through = false;
-            }
+        //         // flush all written WAL to the disk
+        //         let reply = tli.process_msg(&ProposerAcceptorMessage::FlushWAL)?;
+        //         if let Some(reply) = reply {
+        //             self.write_msg(&reply)?;
+        //         }
+        //     } else if let Some(msg) = next_msg.take() {
+        //         // process other message
+        //         let reply = tli.process_msg(&msg)?;
+        //         if let Some(reply) = reply {
+        //             self.write_msg(&reply)?;
+        //         }
+        //     }
+        //     if first_time_through {
+        //         // Register the connection and defer unregister. Do that only
+        //         // after processing first message, as it sets wal_seg_size,
+        //         // wanted by many.
+        //         tli.on_compute_connect()?;
+        //         _guard = Some(ComputeConnectionGuard {
+        //             timeline: Arc::clone(&tli),
+        //         });
+        //         first_time_through = false;
+        //     }
 
-            // blocking wait for the next message
-            if next_msg.is_none() {
-                next_msg = Some(poll_reader.recv_msg()?);
-            }
-        }
+        //     // blocking wait for the next message
+        //     if next_msg.is_none() {
+        //         next_msg = Some(poll_reader.recv_msg()?);
+        //     }
+        // }
     }
 }
 
@@ -144,37 +145,37 @@ struct ProposerPollStream {
 }
 
 impl ProposerPollStream {
-    fn new(mut r: ReadStream) -> anyhow::Result<Self> {
-        let (msg_tx, msg_rx) = channel();
+    // fn new(mut r: ReadStream) -> anyhow::Result<Self> {
+    //     let (msg_tx, msg_rx) = channel();
 
-        let read_thread = thread::Builder::new()
-            .name("Read WAL thread".into())
-            .spawn(move || -> Result<(), QueryError> {
-                loop {
-                    let copy_data = match FeMessage::read(&mut r)? {
-                        Some(FeMessage::CopyData(bytes)) => Ok(bytes),
-                        Some(msg) => Err(QueryError::Other(anyhow::anyhow!(
-                            "expected `CopyData` message, found {msg:?}"
-                        ))),
-                        None => Err(QueryError::from(std::io::Error::new(
-                            std::io::ErrorKind::ConnectionAborted,
-                            "walproposer closed the connection",
-                        ))),
-                    }?;
+    //     let read_thread = thread::Builder::new()
+    //         .name("Read WAL thread".into())
+    //         .spawn(move || -> Result<(), QueryError> {
+    //             loop {
+    //                 let copy_data = match FeMessage::read(&mut r)? {
+    //                     Some(FeMessage::CopyData(bytes)) => Ok(bytes),
+    //                     Some(msg) => Err(QueryError::Other(anyhow::anyhow!(
+    //                         "expected `CopyData` message, found {msg:?}"
+    //                     ))),
+    //                     None => Err(QueryError::from(std::io::Error::new(
+    //                         std::io::ErrorKind::ConnectionAborted,
+    //                         "walproposer closed the connection",
+    //                     ))),
+    //                 }?;
 
-                    let msg = ProposerAcceptorMessage::parse(copy_data)?;
-                    msg_tx
-                        .send(msg)
-                        .context("Failed to send the proposer message")?;
-                }
-                // msg_tx will be dropped here, this will also close msg_rx
-            })?;
+    //                 let msg = ProposerAcceptorMessage::parse(copy_data)?;
+    //                 msg_tx
+    //                     .send(msg)
+    //                     .context("Failed to send the proposer message")?;
+    //             }
+    //             // msg_tx will be dropped here, this will also close msg_rx
+    //         })?;
 
-        Ok(Self {
-            msg_rx,
-            read_thread: Some(read_thread),
-        })
-    }
+    //     Ok(Self {
+    //         msg_rx,
+    //         read_thread: Some(read_thread),
+    //     })
+    // }
 
     fn recv_msg(&mut self) -> Result<ProposerAcceptorMessage, QueryError> {
         self.msg_rx.recv().map_err(|_| {

@@ -346,7 +346,9 @@ impl WalBackupTask {
                         backup_lsn, commit_lsn, e
                     );
 
-                    retry_attempt = retry_attempt.saturating_add(1);
+                    if retry_attempt < u32::MAX {
+                        retry_attempt += 1;
+                    }
                 }
             }
         }
@@ -385,7 +387,7 @@ async fn backup_single_segment(
 ) -> Result<()> {
     let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = segment_file_path
-        .strip_prefix(workspace_dir)
+        .strip_prefix(&workspace_dir)
         .context("Failed to strip workspace dir prefix")
         .and_then(RemotePath::new)
         .with_context(|| {
@@ -467,7 +469,7 @@ async fn backup_object(source_file: &Path, target_file: &RemotePath, size: usize
 pub async fn read_object(
     file_path: &RemotePath,
     offset: u64,
-) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead>>> {
+) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>> {
     let storage = REMOTE_STORAGE
         .get()
         .context("Failed to get remote storage")?

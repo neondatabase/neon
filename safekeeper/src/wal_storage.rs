@@ -450,7 +450,7 @@ pub struct WalReader {
     timeline_dir: PathBuf,
     wal_seg_size: usize,
     pos: Lsn,
-    wal_segment: Option<Pin<Box<dyn AsyncRead>>>,
+    wal_segment: Option<Pin<Box<dyn AsyncRead + Send + Sync>>>,
 
     // S3 will be used to read WAL if LSN is not available locally
     enable_remote_read: bool,
@@ -491,6 +491,11 @@ impl WalReader {
         })
     }
 
+    pub async fn fake_read(&mut self) -> Result<usize> {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        Ok(self.pos.0 as usize)
+    }
+
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let mut wal_segment = match self.wal_segment.take() {
             Some(reader) => reader,
@@ -517,7 +522,7 @@ impl WalReader {
     }
 
     /// Open WAL segment at the current position of the reader.
-    async fn open_segment(&self) -> Result<Pin<Box<dyn AsyncRead>>> {
+    async fn open_segment(&self) -> Result<Pin<Box<dyn AsyncRead + Send + Sync>>> {
         let xlogoff = self.pos.segment_offset(self.wal_seg_size);
         let segno = self.pos.segment_number(self.wal_seg_size);
         let wal_file_name = XLogFileName(PG_TLI, segno, self.wal_seg_size);
