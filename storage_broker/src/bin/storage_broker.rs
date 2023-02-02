@@ -431,6 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     logging::init(LogFormat::from_config(&args.log_format)?)?;
     info!("version: {GIT_VERSION}");
+    ::metrics::set_build_info_metric(GIT_VERSION);
 
     let registry = Registry {
         shared_state: Arc::new(RwLock::new(SharedState::new(args.all_keys_chan_size))),
