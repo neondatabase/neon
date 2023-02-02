@@ -17,9 +17,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, trace};
 
-use pq_proto::framed::{Framed, FramedReader, FramedWriter};
+use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
 use pq_proto::{
-    BeMessage, ConnectionError, FeMessage, FeStartupPacket, SQLSTATE_INTERNAL_ERROR,
+    BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_INTERNAL_ERROR,
     SQLSTATE_SUCCESSFUL_COMPLETION,
 };
 
@@ -37,7 +37,7 @@ pub enum QueryError {
 
 impl From<io::Error> for QueryError {
     fn from(e: io::Error) -> Self {
-        Self::Disconnected(ConnectionError::Socket(e))
+        Self::Disconnected(ConnectionError::Io(e))
     }
 }
 
@@ -219,7 +219,7 @@ impl MaybeWriteOnly {
         }
     }
 
-    fn write_message_noflush(&mut self, msg: &BeMessage<'_>) -> Result<(), ConnectionError> {
+    fn write_message_noflush(&mut self, msg: &BeMessage<'_>) -> Result<(), ProtocolError> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.write_message(msg),
             MaybeWriteOnly::WriteOnly(framed_writer) => framed_writer.write_message_noflush(msg),
@@ -701,8 +701,7 @@ impl PostgresBackend {
             FeMessage::CopyData(_)
             | FeMessage::CopyDone
             | FeMessage::CopyFail
-            | FeMessage::PasswordMessage(_)
-            | FeMessage::StartupPacket(_) => {
+            | FeMessage::PasswordMessage(_) => {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "unexpected message type: {msg:?}",
                 )));
@@ -721,7 +720,7 @@ impl PostgresBackend {
 
         let expected_end = match &end {
             ServerInitiated(_) | CopyDone | CopyFail | Terminate | EOF => true,
-            CopyStreamHandlerEnd::Disconnected(ConnectionError::Socket(io_error))
+            CopyStreamHandlerEnd::Disconnected(ConnectionError::Io(io_error))
                 if is_expected_io_error(io_error) =>
             {
                 true
@@ -800,7 +799,7 @@ impl PostgresBackendReader {
                 FeMessage::CopyFail => Err(CopyStreamHandlerEnd::CopyFail),
                 FeMessage::Terminate => Err(CopyStreamHandlerEnd::Terminate),
                 _ => Err(CopyStreamHandlerEnd::from(ConnectionError::Protocol(
-                    format!("unexpected message in COPY stream {:?}", msg),
+                    ProtocolError::Protocol(format!("unexpected message in COPY stream {:?}", msg)),
                 ))),
             },
             None => Err(CopyStreamHandlerEnd::EOF),
@@ -871,7 +870,7 @@ pub fn short_error(e: &QueryError) -> String {
 
 fn log_query_error(query: &str, e: &QueryError) {
     match e {
-        QueryError::Disconnected(ConnectionError::Socket(io_error)) => {
+        QueryError::Disconnected(ConnectionError::Io(io_error)) => {
             if is_expected_io_error(io_error) {
                 info!("query handler for '{query}' failed with expected io error: {io_error}");
             } else {

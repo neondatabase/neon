@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 bytes.workspace = true
+byteorder.workspace = true
 pin-project-lite.workspace = true
 postgres-protocol.workspace = true
 rand.workspace = true

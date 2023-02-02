@@ -2747,7 +2747,7 @@ checksum = "5b40af805b3121feab8a3c29f04d8ad262fa8e0561883e7653e024ae4479e6de"
 name = "pq_proto"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "byteorder",
  "bytes",
  "pin-project-lite",
  "postgres-protocol",
