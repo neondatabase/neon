@@ -248,7 +248,7 @@ pub enum LayerAccessKind {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerAccessStatFullDetails {
-    pub when_millis_since_epoch: u128,
+    pub when_millis_since_epoch: u64,
     pub task_kind: &'static str,
     pub access_kind: LayerAccessKind,
 }
@@ -257,11 +257,11 @@ pub struct LayerAccessStatFullDetails {
 #[serde(tag = "kind")]
 pub enum LayerResidenceStatus {
     Resident {
-        timestamp_millis_since_epoch: u128,
+        timestamp_millis_since_epoch: u64,
         created: bool,
     },
     Evicted {
-        timestamp_millis_since_epoch: u128,
+        timestamp_millis_since_epoch: u64,
     },
 }
 
