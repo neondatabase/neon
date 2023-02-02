@@ -229,7 +229,7 @@ impl TimelineMetadata {
 }
 
 /// Save timeline metadata to file
-pub fn save_metadata(
+pub(crate) fn save_metadata(
     conf: &'static PageServerConf,
     timeline_id: TimelineId,
     tenant_id: TenantId,
@@ -264,7 +264,7 @@ pub fn save_metadata(
     Ok(())
 }
 
-pub fn load_metadata(
+pub(crate) fn load_metadata(
     conf: &'static PageServerConf,
     timeline_id: TimelineId,
     tenant_id: TenantId,

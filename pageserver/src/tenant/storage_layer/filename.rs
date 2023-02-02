@@ -279,7 +279,7 @@ impl<'de> serde::de::Visitor<'de> for LayerFileNameVisitor {
 /// struct for a file on disk, without having a page server running, so that we have no
 /// config. In that case, we use the Path variant to hold the full path to the file on
 /// disk.
-pub enum PathOrConf {
+pub(crate) enum PathOrConf {
     Path(PathBuf),
     Conf(&'static PageServerConf),
 }

@@ -31,7 +31,7 @@ async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Er
 /// in the metadata. (In the future, we might do more cross-checks, like CRC validation)
 ///
 /// Returns the size of the downloaded file.
-pub async fn download_layer_file<'a>(
+pub(crate) async fn download_layer_file<'a>(
     conf: &'static PageServerConf,
     storage: &'a GenericRemoteStorage,
     tenant_id: TenantId,
@@ -170,7 +170,7 @@ pub fn is_temp_download_file(path: &Path) -> bool {
 }
 
 /// List timelines of given tenant in remote storage
-pub async fn list_remote_timelines<'a>(
+pub(crate) async fn list_remote_timelines<'a>(
     storage: &'a GenericRemoteStorage,
     conf: &'static PageServerConf,
     tenant_id: TenantId,

@@ -373,7 +373,7 @@ impl ImageLayer {
     }
 
     /// Create an ImageLayer struct representing an existing file on disk
-    pub fn new(
+    pub(crate) fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -639,7 +639,7 @@ impl ImageLayerWriter {
     ///
     /// Start building a new image layer.
     ///
-    pub fn new(
+    pub(crate) fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,

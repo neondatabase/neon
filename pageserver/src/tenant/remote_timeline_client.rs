@@ -205,7 +205,7 @@ pub mod index;
 mod upload;
 
 // re-export these
-pub use download::{is_temp_download_file, list_remote_timelines};
+pub(crate) use download::{is_temp_download_file, list_remote_timelines};
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -293,7 +293,7 @@ impl RemoteTimelineClient {
     /// Note: the caller must initialize the upload queue before any uploads can be scheduled,
     /// by calling init_upload_queue.
     ///
-    pub fn new(
+    pub(crate) fn new(
         remote_storage: GenericRemoteStorage,
         conf: &'static PageServerConf,
         tenant_id: TenantId,

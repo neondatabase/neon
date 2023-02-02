@@ -106,7 +106,7 @@ pub mod defaults {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PageServerConf {
+pub(crate) struct PageServerConf {
     // Identifier of that particular pageserver so e g safekeepers
     // can safely distinguish different pageservers
     pub id: NodeId,

@@ -102,7 +102,7 @@ pub use timeline::{PageReconstructError, Timeline};
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
 
 // re-export for use in storage_sync.rs
-pub use crate::tenant::metadata::save_metadata;
+pub(crate) use crate::tenant::metadata::save_metadata;
 
 // re-export for use in walreceiver
 pub use crate::tenant::timeline::WalReceiverInfo;
@@ -117,7 +117,7 @@ pub const TENANT_ATTACHING_MARKER_FILENAME: &str = "attaching";
 ///
 pub struct Tenant {
     // Global pageserver config parameters
-    pub conf: &'static PageServerConf,
+    pub(crate) conf: &'static PageServerConf,
 
     state: watch::Sender<TenantState>,
 
@@ -571,7 +571,7 @@ impl Tenant {
     /// finishes. You can use wait_until_active() to wait for the task to
     /// complete.
     ///
-    pub fn spawn_attach(
+    pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         remote_storage: GenericRemoteStorage,
@@ -811,7 +811,7 @@ impl Tenant {
     }
 
     /// Create a placeholder Tenant object for a broken tenant
-    pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
+    pub(crate) fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         Arc::new(Tenant::new(
             TenantState::Broken,
@@ -835,7 +835,7 @@ impl Tenant {
     /// state.
     ///
     #[instrument(skip(conf, remote_storage, ctx), fields(tenant_id=%tenant_id))]
-    pub fn spawn_load(
+    pub(crate) fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         remote_storage: Option<GenericRemoteStorage>,

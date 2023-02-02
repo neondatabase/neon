@@ -18,7 +18,6 @@ use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{HistoricLayerInfo, Key};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,7 +27,7 @@ use utils::{
 };
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
-pub use filename::{DeltaFileName, ImageFileName, LayerFileName, PathOrConf};
+pub(crate) use filename::{DeltaFileName, ImageFileName, LayerFileName, PathOrConf};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use remote_layer::RemoteLayer;
@@ -195,8 +194,6 @@ impl LayerResidenceStatus {
     }
 }
 
-pub static LAYER_ACCESS_STATS_KILLSWITCH: AtomicBool = AtomicBool::new(false);
-
 impl LayerAccessStats {
     pub(crate) fn for_loading_layer(residence_status: LayerResidenceStatus) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
@@ -226,17 +223,11 @@ impl LayerAccessStats {
     }
 
     fn record_residence_change(&self, new_status: LayerResidenceStatus) {
-        if LAYER_ACCESS_STATS_KILLSWITCH.load(atomic::Ordering::SeqCst) {
-            return;
-        }
         let mut inner = self.0.lock().unwrap();
         inner.last_residence_changes.write(new_status);
     }
 
     fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
-        if LAYER_ACCESS_STATS_KILLSWITCH.load(atomic::Ordering::SeqCst) {
-            return;
-        }
         let mut inner = self.0.lock().unwrap();
         let this_access = LayerAccessStatFullDetails {
             when: SystemTime::now(),

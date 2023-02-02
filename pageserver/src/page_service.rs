@@ -119,7 +119,7 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
 ///
 /// Listens for connections, and launches a new handler task for each.
 ///
-pub async fn libpq_listener_main(
+pub(crate) async fn libpq_listener_main(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,

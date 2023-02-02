@@ -59,7 +59,7 @@ static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
 /// are scheduled for download and added to the tenant once download is completed.
 #[instrument(skip(conf, remote_storage))]
-pub async fn init_tenant_mgr(
+pub(crate) async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<()> {
@@ -147,7 +147,7 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
-pub fn schedule_local_tenant_processing(
+pub(crate) fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     remote_storage: Option<GenericRemoteStorage>,
@@ -261,7 +261,7 @@ pub async fn shutdown_all_tenants() {
     }
 }
 
-pub async fn create_tenant(
+pub(crate) async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
@@ -285,7 +285,7 @@ pub async fn create_tenant(
     }).await
 }
 
-pub async fn update_tenant_config(
+pub(crate) async fn update_tenant_config(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
@@ -331,7 +331,7 @@ pub async fn delete_timeline(
     Ok(())
 }
 
-pub async fn detach_tenant(
+pub(crate) async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
@@ -347,7 +347,7 @@ pub async fn detach_tenant(
     .await
 }
 
-pub async fn load_tenant(
+pub(crate) async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     remote_storage: Option<GenericRemoteStorage>,
@@ -371,7 +371,7 @@ pub async fn load_tenant(
     }).await
 }
 
-pub async fn ignore_tenant(
+pub(crate) async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
@@ -414,7 +414,7 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
 ///
 /// Downloading all the tenant data is performed in the background, this merely
 /// spawns the background task and returns quickly.
-pub async fn attach_tenant(
+pub(crate) async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     remote_storage: GenericRemoteStorage,

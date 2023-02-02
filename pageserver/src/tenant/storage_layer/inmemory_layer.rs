@@ -234,7 +234,7 @@ impl InMemoryLayer {
     ///
     /// Create a new, empty, in-memory layer
     ///
-    pub fn create(
+    pub(crate) fn create(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,

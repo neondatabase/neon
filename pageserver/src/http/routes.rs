@@ -948,7 +948,7 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     )
 }
 
-pub fn make_router(
+pub(crate) fn make_router(
     conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     remote_storage: Option<GenericRemoteStorage>,

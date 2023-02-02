@@ -86,9 +86,6 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    storage_layer::LAYER_ACCESS_STATS_KILLSWITCH
-        .store(conf.layer_access_stats_disable, atomic::Ordering::SeqCst);
-
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(
         Some(GIT_VERSION.into()),

@@ -47,7 +47,7 @@ pub struct EphemeralFile {
 }
 
 impl EphemeralFile {
-    pub fn create(
+    pub(crate) fn create(
         conf: &PageServerConf,
         tenant_id: TenantId,
         timeline_id: TimelineId,

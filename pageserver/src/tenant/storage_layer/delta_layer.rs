@@ -572,7 +572,7 @@ impl DeltaLayer {
     }
 
     /// Create a DeltaLayer struct representing an existing file on disk.
-    pub fn new(
+    pub(crate) fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -850,7 +850,7 @@ impl DeltaLayerWriter {
     ///
     /// Start building a new delta layer.
     ///
-    pub fn new(
+    pub(crate) fn new(
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
