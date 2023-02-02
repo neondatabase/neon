@@ -149,36 +149,32 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
         };
 
         // TODO: find a proper way to merge those very similar blocks.
-        let (mut node, payload) = match self {
+        let (mut node, password) = match self {
             Console(api, creds) if creds.project.is_none() => {
                 let payload = fetch_magic_payload(client).await?;
+                creds.project = Some(payload.project.into());
+                let node = api.wake_compute(extra, creds).await?;
 
-                let mut creds = creds.as_ref();
-                creds.project = Some(payload.project.as_str().into());
-                let node = api.wake_compute(extra, &creds).await?;
-
-                (node, payload)
+                (node, payload.password)
             }
             // This is a hack to allow cleartext password in secure connections (wss).
             Console(api, creds) if creds.use_cleartext_password_flow => {
                 let payload = fetch_plaintext_password(client).await?;
                 let node = api.wake_compute(extra, creds).await?;
 
-                (node, payload)
+                (node, payload.password)
             }
             Postgres(api, creds) if creds.project.is_none() => {
                 let payload = fetch_magic_payload(client).await?;
+                creds.project = Some(payload.project.into());
+                let node = api.wake_compute(extra, creds).await?;
 
-                let mut creds = creds.as_ref();
-                creds.project = Some(payload.project.as_str().into());
-                let node = api.wake_compute(extra, &creds).await?;
-
-                (node, payload)
+                (node, payload.password)
             }
             _ => return Ok(None),
         };
 
-        node.config.password(payload.password);
+        node.config.password(password);
         Ok(Some(AuthSuccess {
             reported_auth_ok: false,
             value: node,

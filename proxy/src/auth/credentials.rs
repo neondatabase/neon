@@ -48,18 +48,6 @@ impl ClientCredentials<'_> {
 }
 
 impl<'a> ClientCredentials<'a> {
-    #[inline]
-    pub fn as_ref(&'a self) -> ClientCredentials<'a> {
-        Self {
-            user: self.user,
-            dbname: self.dbname,
-            project: self.project().map(Cow::Borrowed),
-            use_cleartext_password_flow: self.use_cleartext_password_flow,
-        }
-    }
-}
-
-impl<'a> ClientCredentials<'a> {
     pub fn parse(
         params: &'a StartupMessageParams,
         sni: Option<&str>,
