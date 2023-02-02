@@ -146,11 +146,11 @@ where
     /// Returns `true` if the layer map was changed, `false` otherwise. Errors are returned for
     /// precondition failures, such as trying to replace two different kind of layers with each
     /// other, and no modification is done in the case of precondition failure.
-    pub fn replace_historic<'a>(
-        &'a mut self,
+    pub fn replace_historic(
+        &mut self,
         expected: &Arc<L>,
         new: Arc<L>,
-    ) -> anyhow::Result<Replacement<'a, Arc<L>>> {
+    ) -> anyhow::Result<Replacement<Arc<L>>> {
         self.layer_map.replace_historic_noflush(expected, new)
     }
 
@@ -308,11 +308,11 @@ where
         NUM_ONDISK_LAYERS.dec();
     }
 
-    pub(self) fn replace_historic_noflush<'a>(
-        &'a mut self,
+    pub(self) fn replace_historic_noflush(
+        &mut self,
         expected: &Arc<L>,
         new: Arc<L>,
-    ) -> anyhow::Result<Replacement<'a, Arc<L>>> {
+    ) -> anyhow::Result<Replacement<Arc<L>>> {
         let key = historic_layer_coverage::LayerKey::from(&**expected);
         let other = historic_layer_coverage::LayerKey::from(&*new);
 

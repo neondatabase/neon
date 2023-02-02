@@ -3403,10 +3403,12 @@ impl Timeline {
                                 // if the other layer would have the same pointer value as
                                 // expected, it means they differ only on vtables.
                                 //
-                                // otherwise there's no known reason for this to happen.
+                                // otherwise there's no known reason for this to happen as
+                                // compacted layers should have different covering rectangle
+                                // leading to produce Replacement::NotFound.
                                 error!(
                                     expected = ?Arc::as_ptr(&l),
-                                    other = ?Arc::as_ptr(other),
+                                    other = ?Arc::as_ptr(&other),
                                     "replacing downloaded layer into layermap failed because another layer was found instead of expected"
                                 );
                             }

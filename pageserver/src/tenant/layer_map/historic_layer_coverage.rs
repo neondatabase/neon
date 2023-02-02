@@ -437,12 +437,12 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     /// inaccessible via `PartialEq` trait.
     ///
     /// Returns `true` if a modification was made and rebuild will be needed, `false` otherwise.
-    pub fn replace<'a, F>(
-        &'a mut self,
+    pub fn replace<F>(
+        &mut self,
         layer_key: &LayerKey,
         new: Value,
         check_expected: F,
-    ) -> Replacement<'a, Value>
+    ) -> Replacement<Value>
     where
         F: FnOnce(&Value) -> bool,
     {
@@ -463,10 +463,14 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         };
 
         match slot {
-            Some(existing) if !check_expected(existing) => Replacement::Unexpected(existing),
+            Some(existing) if !check_expected(existing) => {
+                // unfortunate clone here, but otherwise the nll borrowck grows the region of
+                // 'a to cover the whole function, and we could not mutate in the other
+                // Some(existing) branch
+                Replacement::Unexpected(existing.clone())
+            }
             None => Replacement::NotFound,
             Some(_existing) => {
-                // matched, buffer the switch
                 self.insert(layer_key.to_owned(), new);
                 Replacement::Replaced { in_buffered }
             }
@@ -543,21 +547,18 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
 
 /// Outcome of the replace operation.
 #[derive(Debug)]
-pub enum Replacement<'a, Value> {
+pub enum Replacement<Value> {
     /// Previous value was replaced with the new value.
     Replaced {
         /// Replacement happened for a scheduled insert.
         in_buffered: bool,
     },
-
     /// Key was not found buffered updates or existing layers.
     NotFound,
-
     /// Key has been scheduled for removal, it was not replaced.
     RemovalBuffered,
-
     /// Previous value was rejected by the closure.
-    Unexpected(&'a Value),
+    Unexpected(Value),
 }
 
 #[test]
