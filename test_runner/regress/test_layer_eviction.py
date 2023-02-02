@@ -67,10 +67,17 @@ def test_basic_eviction(
         assert (
             not returned_layer.remote
         ), f"All created layers should be present locally, but got {returned_layer}"
-        assert any(
-            local_layer.name == returned_layer.layer_file_name
-            for local_layer in initial_local_layers
+
+        local_layers = list(
+            filter(lambda layer: layer.name == returned_layer.layer_file_name, initial_local_layers)
+        )
+        assert (
+            len(local_layers) == 1
         ), f"Did not find returned layer {returned_layer} in local layers {initial_local_layers}"
+        local_layer = local_layers[0]
+        assert (
+            returned_layer.layer_file_size == local_layer.stat().st_size
+        ), f"Returned layer {returned_layer} has a different file size than local layer {local_layer}"
 
     # Detach all layers, ensre they are not in the local FS, but are still dumped as part of the layer map
     for local_layer in initial_local_layers:
