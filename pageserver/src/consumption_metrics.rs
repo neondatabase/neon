@@ -93,7 +93,7 @@ pub async fn collect_metrics(
                     iter_num = 0;
                 }
 
-                collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx).await;
+                collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
             }
         }
     }
