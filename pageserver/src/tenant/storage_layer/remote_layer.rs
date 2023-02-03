@@ -21,7 +21,6 @@ use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
 use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
 
-#[derive(Debug)]
 pub struct RemoteLayer {
     tenantid: TenantId,
     timelineid: TimelineId,
@@ -37,6 +36,16 @@ pub struct RemoteLayer {
     is_incremental: bool,
 
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
+}
+
+impl std::fmt::Debug for RemoteLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteLayer")
+            .field("file_name", &self.file_name)
+            .field("layer_metadata", &self.layer_metadata)
+            .field("is_incremental", &self.is_incremental)
+            .finish()
+    }
 }
 
 impl Layer for RemoteLayer {

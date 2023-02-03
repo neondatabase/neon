@@ -85,7 +85,11 @@ pub enum ValueReconstructResult {
 
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
-pub trait Layer: Send + Sync {
+///
+/// All layers should implement a minimal `std::fmt::Debug` without tenant or
+/// timeline names, because those are known in the context of which the layers
+/// are used in (timeline).
+pub trait Layer: std::fmt::Debug + Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -207,7 +211,7 @@ pub fn downcast_remote_layer(
 ///
 /// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
 /// LayerDescriptor.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LayerDescriptor {
     pub key: Range<Key>,
     pub lsn: Range<Lsn>,

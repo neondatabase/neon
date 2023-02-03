@@ -188,6 +188,17 @@ pub struct DeltaLayer {
     inner: RwLock<DeltaLayerInner>,
 }
 
+impl std::fmt::Debug for DeltaLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeltaLayer")
+            .field("key_range", &self.key_range)
+            .field("lsn_range", &self.lsn_range)
+            .field("file_size", &self.file_size)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
 pub struct DeltaLayerInner {
     /// If false, the fields below have not been loaded into memory yet.
     loaded: bool,
@@ -198,6 +209,16 @@ pub struct DeltaLayerInner {
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
+}
+
+impl std::fmt::Debug for DeltaLayerInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeltaLayerInner")
+            .field("loaded", &self.loaded)
+            .field("index_start_blk", &self.index_start_blk)
+            .field("index_root_blk", &self.index_root_blk)
+            .finish()
+    }
 }
 
 impl Layer for DeltaLayer {

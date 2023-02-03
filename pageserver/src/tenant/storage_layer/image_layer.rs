@@ -95,13 +95,13 @@ impl From<&ImageLayer> for Summary {
     }
 }
 
-///
 /// ImageLayer is the in-memory data structure associated with an on-disk image
-/// file.  We keep an ImageLayer in memory for each file, in the LayerMap. If a
-/// layer is in "loaded" state, we have a copy of the index in memory, in 'inner'.
+/// file.
+///
+/// We keep an ImageLayer in memory for each file, in the LayerMap. If a layer
+/// is in "loaded" state, we have a copy of the index in memory, in 'inner'.
 /// Otherwise the struct is just a placeholder for a file that exists on disk,
 /// and it needs to be loaded before using it in queries.
-///
 pub struct ImageLayer {
     path_or_conf: PathOrConf,
     pub tenant_id: TenantId,
@@ -115,6 +115,17 @@ pub struct ImageLayer {
     inner: RwLock<ImageLayerInner>,
 }
 
+impl std::fmt::Debug for ImageLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageLayer")
+            .field("key_range", &self.key_range)
+            .field("file_size", &self.file_size)
+            .field("lsn", &self.lsn)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
 pub struct ImageLayerInner {
     /// If false, the 'index' has not been loaded into memory yet.
     loaded: bool,
@@ -125,6 +136,16 @@ pub struct ImageLayerInner {
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
+}
+
+impl std::fmt::Debug for ImageLayerInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageLayerInner")
+            .field("loaded", &self.loaded)
+            .field("index_start_blk", &self.index_start_blk)
+            .field("index_root_blk", &self.index_root_blk)
+            .finish()
+    }
 }
 
 impl Layer for ImageLayer {
