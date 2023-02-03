@@ -642,7 +642,8 @@ clean_up_xact_callback(XactEvent event, void *arg)
 	MyProc->isRemoteXact = false;
 	pg_write_barrier();
 
-	switch (event) {
+	switch (event)
+	{
 		case XACT_EVENT_ABORT:
 		case XACT_EVENT_PARALLEL_ABORT:
 		case XACT_EVENT_COMMIT:
