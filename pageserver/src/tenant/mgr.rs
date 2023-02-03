@@ -293,7 +293,6 @@ pub async fn set_new_tenant_config(
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
-    tenant.set_new_tenant_config(new_tenant_conf);
     let tenant_config_path = conf.tenant_config_path(tenant_id);
     Tenant::persist_tenant_config(
         &tenant.tenant_id(),
@@ -301,6 +300,7 @@ pub async fn set_new_tenant_config(
         new_tenant_conf,
         false,
     )?;
+    tenant.set_new_tenant_config(new_tenant_conf);
     Ok(())
 }
 
