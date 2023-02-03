@@ -736,7 +736,7 @@ async fn update_tenant_config_handler(
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let mut tenant_conf: TenantConfOpt = Default::default();
+    let mut tenant_conf = TenantConfOpt::default();
     if let Some(gc_period) = request_data.gc_period {
         tenant_conf.gc_period = Some(
             humantime::parse_duration(&gc_period)
@@ -771,12 +771,8 @@ async fn update_tenant_config_handler(
                 .map_err(ApiError::BadRequest)?,
         );
     }
-    if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
-        tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
-    }
-    if let Some(trace_read_requests) = request_data.trace_read_requests {
-        tenant_conf.trace_read_requests = Some(trace_read_requests);
-    }
+    tenant_conf.max_lsn_wal_lag = request_data.max_lsn_wal_lag;
+    tenant_conf.trace_read_requests = request_data.trace_read_requests;
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
@@ -798,7 +794,7 @@ async fn update_tenant_config_handler(
     }
 
     let state = get_state(&request);
-    mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
+    mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", tenant = ?tenant_id))
         .await
         // FIXME: `update_tenant_config` can fail because of both user and internal errors.
