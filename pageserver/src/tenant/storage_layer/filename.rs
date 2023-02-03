@@ -128,6 +128,13 @@ impl Ord for ImageFileName {
     }
 }
 
+impl ImageFileName {
+    pub fn lsn_as_range(&self) -> Range<Lsn> {
+        // Saves from having to copypaste this all over
+        self.lsn..(self.lsn + 1)
+    }
+}
+
 ///
 /// Represents the filename of an ImageLayer
 ///
