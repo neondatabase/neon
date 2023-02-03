@@ -641,11 +641,20 @@ clean_up_xact_callback(XactEvent event, void *arg)
 	 */
 	MyProc->isRemoteXact = false;
 	pg_write_barrier();
-	if (event == XACT_EVENT_ABORT ||
-		event == XACT_EVENT_PARALLEL_ABORT ||
-		event == XACT_EVENT_COMMIT ||
-		event == XACT_EVENT_PARALLEL_COMMIT)
-		rwset_collection_buffer = NULL;
+
+	switch (event) {
+		case XACT_EVENT_ABORT:
+		case XACT_EVENT_PARALLEL_ABORT:
+		case XACT_EVENT_COMMIT:
+		case XACT_EVENT_PARALLEL_COMMIT:
+		case XACT_EVENT_PREPARE:
+			rwset_collection_buffer = NULL;
+			break;
+		case XACT_EVENT_PRE_COMMIT:
+		case XACT_EVENT_PARALLEL_PRE_COMMIT:
+		case XACT_EVENT_PRE_PREPARE:
+			break;
+	}
 }
 
 static const RemoteXactHook remote_xact_hook =

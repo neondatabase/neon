@@ -35,7 +35,7 @@ static XLogRecPtr	region_lsns[MAX_REGIONS];
 void
 set_region_lsn(int region, NeonResponse *msg)
 {
-	XLogRecPtr lsn;
+	XLogRecPtr lsn = InvalidXLogRecPtr;
 
 	if (!IsMultiRegion() || !RegionIsRemote(region))
 		return;
@@ -66,12 +66,16 @@ set_region_lsn(int region, NeonResponse *msg)
 			break;
 	}
 
-	Assert(lsn != InvalidXLogRecPtr);
+	if (lsn == InvalidXLogRecPtr)
+	{
+		neon_log(WARNING, "region lsn is InvalidXLogRecPtr");
+		return;
+	}
 
 	if (region_lsns[region] == InvalidXLogRecPtr)
 		region_lsns[region] = lsn;
-	else
-		Assert(region_lsns[region] == lsn);
+
+	Assert(region_lsns[region] == lsn);
 }
 
 /*
@@ -109,7 +113,5 @@ clear_region_lsns(void)
 {
 	int i;
 	for (i = 0; i < MAX_REGIONS; i++)
-	{
 		region_lsns[i] = InvalidXLogRecPtr;
-	}
 }

@@ -2843,7 +2843,7 @@ neon_slru_read_page(SlruCtl ctl, int segno, BlockNumber blkno, XLogRecPtr lsn, c
 	NeonResponse 				*resp;
 	NeonGetSlruPageResponse 	*get_slru_page_resp;
 	NeonSlruKind	kind;
-	bool			latest;
+	bool			latest = false;
 	XLogRecPtr		request_lsn = lsn;
 	bool 			read_ok = false;
 	int				region = BlockNumberToRegion(blkno);
@@ -2855,7 +2855,7 @@ neon_slru_read_page(SlruCtl ctl, int segno, BlockNumber blkno, XLogRecPtr lsn, c
 		return false;
 	}
 
-	// IF the caller has set a lsn, then use the same for the request.
+	/* If the caller did not set a lsn, request one from neon */
 	if (lsn == InvalidXLogRecPtr) {
         request_lsn =
             neon_get_request_lsn(&latest, region, dummy_node, MAIN_FORKNUM,
