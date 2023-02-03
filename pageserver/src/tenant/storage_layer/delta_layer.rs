@@ -167,14 +167,13 @@ impl DeltaKey {
     }
 }
 
+/// DeltaLayer is the in-memory data structure associated with an on-disk delta
+/// file.
 ///
-/// DeltaLayer is the in-memory data structure associated with an
-/// on-disk delta file.  We keep a DeltaLayer in memory for each
-/// file, in the LayerMap. If a layer is in "loaded" state, we have a
-/// copy of the index in memory, in 'inner'. Otherwise the struct is
-/// just a placeholder for a file that exists on disk, and it needs to
-/// be loaded before using it in queries.
-///
+/// We keep a DeltaLayer in memory for each file, in the LayerMap. If a layer
+/// is in "loaded" state, we have a copy of the index in memory, in 'inner'.
+/// Otherwise the struct is just a placeholder for a file that exists on disk,
+/// and it needs to be loaded before using it in queries.
 pub struct DeltaLayer {
     path_or_conf: PathOrConf,
 

@@ -21,6 +21,14 @@ use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
 use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
 
+/// RemoteLayer is a not yet downloaded [`ImageLayer`] or
+/// [`crate::storage_layer::DeltaLayer`].
+///
+/// RemoteLayer might be downloaded on-demand during operations which are
+/// allowed download remote layers and during which, it gets replaced with a
+/// concrete `DeltaLayer` or `ImageLayer`.
+///
+/// See: [`crate::context::RequestContext`] for authorization to download
 pub struct RemoteLayer {
     tenantid: TenantId,
     timelineid: TimelineId,

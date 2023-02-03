@@ -152,8 +152,7 @@ pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 /// Furthermore, there are two kinds of on-disk layers: delta and image layers.
 /// A delta layer contains all modifications within a range of LSNs and keys.
 /// An image layer is a snapshot of all the data in a key-range, at a single
-/// LSN
-///
+/// LSN.
 pub trait PersistentLayer: Layer {
     fn get_tenant_id(&self) -> TenantId;
 
