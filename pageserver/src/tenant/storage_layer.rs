@@ -203,14 +203,6 @@ pub fn downcast_remote_layer(
     }
 }
 
-impl std::fmt::Debug for dyn Layer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Layer")
-            .field("short_id", &self.short_id())
-            .finish()
-    }
-}
-
 /// Holds metadata about a layer without any content. Used mostly for testing.
 ///
 /// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
