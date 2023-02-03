@@ -3412,6 +3412,7 @@ impl Timeline {
                                 error!(
                                     expected.ptr = ?Arc::as_ptr(&l),
                                     other.ptr = ?Arc::as_ptr(&other),
+                                    ?other,
                                     "replacing downloaded layer into layermap failed because another layer was found instead of expected"
                                 );
                             }
