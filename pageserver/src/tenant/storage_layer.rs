@@ -254,22 +254,25 @@ impl Layer for LayerDescriptor {
 
 impl From<DeltaFileName> for LayerDescriptor {
     fn from(value: DeltaFileName) -> Self {
+        let short_id = value.to_string();
         LayerDescriptor {
             key: value.key_range,
             lsn: value.lsn_range,
             is_incremental: true,
-            short_id: value.to_string(),
+            short_id,
         }
     }
 }
 
 impl From<ImageFileName> for LayerDescriptor {
     fn from(value: ImageFileName) -> Self {
+        let short_id = value.to_string();
+        let lsn = value.lsn_as_range();
         LayerDescriptor {
             key: value.key_range,
-            lsn: value.lsn_as_range(),
+            lsn,
             is_incremental: false,
-            short_id: value.to_string(),
+            short_id,
         }
     }
 }
