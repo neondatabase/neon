@@ -22,6 +22,7 @@ wait_lsn_timeout='111 s';
 tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
 
     env = neon_env_builder.init_start()
+    http_client = env.pageserver.http_client()
 
     # Check that we raise on misspelled configs
     invalid_conf_key = "some_invalid_setting_name_blah_blah_123"
@@ -36,12 +37,11 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
     else:
         raise AssertionError("Expected validation error")
 
-    tenant, _ = env.neon_cli.create_tenant(
-        conf={
-            "checkpoint_distance": "20000",
-            "gc_period": "30sec",
-        }
-    )
+    new_conf = {
+        "checkpoint_distance": "20000",
+        "gc_period": "30sec",
+    }
+    tenant, _ = env.neon_cli.create_tenant(conf=new_conf)
 
     env.neon_cli.create_timeline("test_tenant_conf", tenant_id=tenant)
     env.postgres.create_start(
@@ -69,7 +69,20 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "image_creation_threshold": 3,
                     "pitr_interval": 604800,  # 7 days
                 }.items()
-            )
+            ), f"Unexpected res: {res}"
+    default_tenant_config = http_client.tenant_config(tenant_id=env.initial_tenant)
+    assert (
+        not default_tenant_config.tenant_specific_overrides
+    ), "Should have no specific settings yet"
+    effective_config = default_tenant_config.effective_config
+    assert effective_config["checkpoint_distance"] == 10000
+    assert effective_config["compaction_target_size"] == 1048576
+    assert effective_config["compaction_period"] == "20s"
+    assert effective_config["compaction_threshold"] == 10
+    assert effective_config["gc_horizon"] == 67108864
+    assert effective_config["gc_period"] == "1h"
+    assert effective_config["image_creation_threshold"] == 3
+    assert effective_config["pitr_interval"] == "7days"
 
     # check the configuration of the new tenant
     with closing(env.pageserver.connect()) as psconn:
@@ -89,15 +102,37 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "image_creation_threshold": 3,
                     "pitr_interval": 604800,
                 }.items()
-            )
+            ), f"Unexpected res: {res}"
+    new_tenant_config = http_client.tenant_config(tenant_id=tenant)
+    new_specific_config = new_tenant_config.tenant_specific_overrides
+    assert new_specific_config["checkpoint_distance"] == 20000
+    assert new_specific_config["gc_period"] == "30s"
+    assert len(new_specific_config) == len(
+        new_conf
+    ), f"No more specific properties were expected, but got: {new_specific_config}"
+    new_effective_config = new_tenant_config.effective_config
+    assert (
+        new_effective_config["checkpoint_distance"] == 20000
+    ), "Specific 'checkpoint_distance' config should override the default value"
+    assert (
+        new_effective_config["gc_period"] == "30s"
+    ), "Specific 'gc_period' config should override the default value"
+    assert new_effective_config["compaction_target_size"] == 1048576
+    assert new_effective_config["compaction_period"] == "20s"
+    assert new_effective_config["compaction_threshold"] == 10
+    assert new_effective_config["gc_horizon"] == 67108864
+    assert new_effective_config["image_creation_threshold"] == 3
+    assert new_effective_config["pitr_interval"] == "7days"
 
     # update the config and ensure that it has changed
+    conf_update = {
+        "checkpoint_distance": "15000",
+        "gc_period": "80sec",
+        "compaction_period": "80sec",
+    }
     env.neon_cli.config_tenant(
         tenant_id=tenant,
-        conf={
-            "checkpoint_distance": "15000",
-            "gc_period": "80sec",
-        },
+        conf=conf_update,
     )
 
     with closing(env.pageserver.connect()) as psconn:
@@ -110,14 +145,37 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 for i in {
                     "checkpoint_distance": 15000,
                     "compaction_target_size": 1048576,
-                    "compaction_period": 20,
+                    "compaction_period": 80,
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
                     "gc_period": 80,
                     "image_creation_threshold": 3,
                     "pitr_interval": 604800,
                 }.items()
-            )
+            ), f"Unexpected res: {res}"
+    updated_tenant_config = http_client.tenant_config(tenant_id=tenant)
+    updated_specific_config = updated_tenant_config.tenant_specific_overrides
+    assert updated_specific_config["checkpoint_distance"] == 15000
+    assert updated_specific_config["gc_period"] == "1m 20s"
+    assert updated_specific_config["compaction_period"] == "1m 20s"
+    assert len(updated_specific_config) == len(
+        conf_update
+    ), f"No more specific properties were expected, but got: {updated_specific_config}"
+    updated_effective_config = updated_tenant_config.effective_config
+    assert (
+        updated_effective_config["checkpoint_distance"] == 15000
+    ), "Specific 'checkpoint_distance' config should override the default value"
+    assert (
+        updated_effective_config["gc_period"] == "1m 20s"
+    ), "Specific 'gc_period' config should override the default value"
+    assert (
+        updated_effective_config["compaction_period"] == "1m 20s"
+    ), "Specific 'compaction_period' config should override the default value"
+    assert updated_effective_config["compaction_target_size"] == 1048576
+    assert updated_effective_config["compaction_threshold"] == 10
+    assert updated_effective_config["gc_horizon"] == 67108864
+    assert updated_effective_config["image_creation_threshold"] == 3
+    assert updated_effective_config["pitr_interval"] == "7days"
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -133,22 +191,44 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 for i in {
                     "checkpoint_distance": 15000,
                     "compaction_target_size": 1048576,
-                    "compaction_period": 20,
+                    "compaction_period": 80,
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
                     "gc_period": 80,
                     "image_creation_threshold": 3,
                     "pitr_interval": 604800,
                 }.items()
-            )
+            ), f"Unexpected res: {res}"
+    restarted_tenant_config = http_client.tenant_config(tenant_id=tenant)
+    assert (
+        restarted_tenant_config == updated_tenant_config
+    ), "Updated config should not change after the restart"
 
     # update the config with very short config and make sure no trailing chars are left from previous config
+    final_conf = {
+        "pitr_interval": "1 min",
+    }
     env.neon_cli.config_tenant(
         tenant_id=tenant,
-        conf={
-            "pitr_interval": "1 min",
-        },
+        conf=final_conf,
     )
+    final_tenant_config = http_client.tenant_config(tenant_id=tenant)
+    final_specific_config = final_tenant_config.tenant_specific_overrides
+    assert final_specific_config["pitr_interval"] == "1m"
+    assert len(final_specific_config) == len(
+        final_conf
+    ), f"No more specific properties were expected, but got: {final_specific_config}"
+    final_effective_config = final_tenant_config.effective_config
+    assert (
+        final_effective_config["pitr_interval"] == "1m"
+    ), "Specific 'pitr_interval' config should override the default value"
+    assert final_effective_config["checkpoint_distance"] == 10000
+    assert final_effective_config["compaction_target_size"] == 1048576
+    assert final_effective_config["compaction_period"] == "20s"
+    assert final_effective_config["compaction_threshold"] == 10
+    assert final_effective_config["gc_horizon"] == 67108864
+    assert final_effective_config["gc_period"] == "1h"
+    assert final_effective_config["image_creation_threshold"] == 3
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -165,7 +245,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "compaction_period": 20,
                     "pitr_interval": 60,
                 }.items()
-            )
+            ), f"Unexpected res: {res}"
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):

@@ -1205,6 +1205,11 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def tenant_config(self, tenant_id: TenantId) -> TenantConfig:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/config")
+        self.verbose_error(res)
+        return TenantConfig.from_json(res.json())
+
     def tenant_size(self, tenant_id: TenantId) -> int:
         return self.tenant_size_and_modelinputs(tenant_id)[0]
 
@@ -1498,6 +1503,19 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
 
         assert res.status_code == 200
+
+
+@dataclass
+class TenantConfig:
+    tenant_specific_overrides: Dict[str, Any]
+    effective_config: Dict[str, Any]
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> TenantConfig:
+        return TenantConfig(
+            tenant_specific_overrides=d["tenant_specific_overrides"],
+            effective_config=d["effective_config"],
+        )
 
 
 @dataclass

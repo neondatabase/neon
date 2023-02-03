@@ -664,6 +664,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/tenant/{tenant_id}/config/:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: |
+        Returns tenant's config description: specific config overrides a tenant has
+        and the effective config.
+      responses:
+        "200":
+          description: Tenant config, specific and effective
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantConfig"
+        "400":
+          description: Malformed get tenanant config request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Tenand or timeline were not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   securitySchemes:
     JWT:
@@ -724,10 +773,33 @@ components:
           type: integer
         checkpoint_timeout:
           type: string
+        compaction_target_size:
+          type: integer
         compaction_period:
           type: string
         compaction_threshold:
           type: string
+        image_creation_threshold:
+          type: integer
+        walreceiver_connect_timeout:
+          type: string
+        lagging_wal_timeout:
+          type: string
+        max_lsn_wal_lag:
+          type: integer
+        trace_read_requests:
+          type: boolean
+    TenantConfig:
+      type: object
+      properties:
+        tenant_specific_overrides:
+          type: object
+          schema:
+            $ref: "#/components/schemas/TenantConfigInfo"
+        effective_config:
+          type: object
+          schema:
+            $ref: "#/components/schemas/TenantConfigInfo"
     TimelineInfo:
       type: object
       required:

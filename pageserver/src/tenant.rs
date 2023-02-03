@@ -45,6 +45,7 @@ use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use self::config::TenantConf;
 use self::metadata::TimelineMetadata;
 use self::remote_timeline_client::RemoteTimelineClient;
 use crate::config::PageServerConf;
@@ -1618,8 +1619,16 @@ fn tree_sort_timelines(
     Ok(result)
 }
 
-/// Private functions
 impl Tenant {
+    pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
+        *self.tenant_conf.read().unwrap()
+    }
+
+    pub fn effective_config(&self) -> TenantConf {
+        self.tenant_specific_overrides()
+            .merge(self.conf.default_tenant_conf)
+    }
+
     pub fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -1690,8 +1699,8 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
-    pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
-        self.tenant_conf.write().unwrap().update(&new_tenant_conf);
+    pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
+        *self.tenant_conf.write().unwrap() = new_tenant_conf;
     }
 
     fn create_timeline_data(

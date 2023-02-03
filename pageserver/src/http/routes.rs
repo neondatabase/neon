@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -698,12 +699,40 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     )
 }
 
-async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn get_tenant_config_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = mgr::get_tenant(tenant_id, false)
+        .await
+        .map_err(ApiError::NotFound)?;
+
+    let response = HashMap::from([
+        (
+            "tenant_specific_overrides",
+            serde_json::to_value(tenant.tenant_specific_overrides())
+                .context("serializing tenant specific overrides")
+                .map_err(ApiError::InternalServerError)?,
+        ),
+        (
+            "effective_config",
+            serde_json::to_value(tenant.effective_config())
+                .context("serializing effective config")
+                .map_err(ApiError::InternalServerError)?,
+        ),
+    ]);
+
+    json_response(StatusCode::OK, response)
+}
+
+async fn update_tenant_config_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let request_data: TenantConfigRequest = json_request(&mut request).await?;
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let mut tenant_conf: TenantConfOpt = Default::default();
+    let mut tenant_conf = TenantConfOpt::default();
     if let Some(gc_period) = request_data.gc_period {
         tenant_conf.gc_period = Some(
             humantime::parse_duration(&gc_period)
@@ -738,12 +767,8 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
                 .map_err(ApiError::BadRequest)?,
         );
     }
-    if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
-        tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
-    }
-    if let Some(trace_read_requests) = request_data.trace_read_requests {
-        tenant_conf.trace_read_requests = Some(trace_read_requests);
-    }
+    tenant_conf.max_lsn_wal_lag = request_data.max_lsn_wal_lag;
+    tenant_conf.trace_read_requests = request_data.trace_read_requests;
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
@@ -765,7 +790,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
 
     let state = get_state(&request);
-    mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
+    mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", tenant = ?tenant_id))
         .await
         // FIXME: `update_tenant_config` can fail because of both user and internal errors.
@@ -979,7 +1004,8 @@ pub fn make_router(
         .post("/v1/tenant", tenant_create_handler)
         .get("/v1/tenant/:tenant_id", tenant_status)
         .get("/v1/tenant/:tenant_id/size", tenant_size_handler)
-        .put("/v1/tenant/config", tenant_config_handler)
+        .put("/v1/tenant/config", update_tenant_config_handler)
+        .get("/v1/tenant/:tenant_id/config", get_tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)
