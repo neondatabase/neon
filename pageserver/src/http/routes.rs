@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -697,7 +698,40 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     )
 }
 
-async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn get_tenant_config_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = mgr::get_tenant(tenant_id, false)
+        .await
+        .map_err(ApiError::NotFound)?;
+
+    let state = get_state(&request);
+    let default_config = state.conf.default_tenant_conf;
+    let tenant_specific_config = tenant.tenant_specific_config();
+    let resulting_config = tenant_specific_config.merge(default_config);
+
+    let response = HashMap::from([
+        (
+            "tenant_specific_config",
+            serde_json::to_value(tenant_specific_config)
+                .context("serializing tenant config")
+                .map_err(ApiError::InternalServerError)?,
+        ),
+        (
+            "resulting_config",
+            serde_json::to_value(resulting_config)
+                .context("serializing resulting config")
+                .map_err(ApiError::InternalServerError)?,
+        ),
+    ]);
+
+    json_response(StatusCode::OK, response)
+}
+
+async fn update_tenant_config_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let request_data: TenantConfigRequest = json_request(&mut request).await?;
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
@@ -969,7 +1003,8 @@ pub fn make_router(
         .post("/v1/tenant", tenant_create_handler)
         .get("/v1/tenant/:tenant_id", tenant_status)
         .get("/v1/tenant/:tenant_id/size", tenant_size_handler)
-        .put("/v1/tenant/config", tenant_config_handler)
+        .put("/v1/tenant/config", update_tenant_config_handler)
+        .get("/v1/tenant/:tenant_id/config", get_tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)

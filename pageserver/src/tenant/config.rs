@@ -51,6 +51,7 @@ pub struct TenantConf {
     pub checkpoint_distance: u64,
     // Inmemory layer is also flushed at least once in checkpoint_timeout to
     // eventually upload WAL after activity is stopped.
+    #[serde(with = "humantime_serde")]
     pub checkpoint_timeout: Duration,
     // Target file size, when creating image and delta layers.
     // This parameter determines L1 layer file size.

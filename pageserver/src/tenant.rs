@@ -1618,8 +1618,11 @@ fn tree_sort_timelines(
     Ok(result)
 }
 
-/// Private functions
 impl Tenant {
+    pub fn tenant_specific_config(&self) -> TenantConfOpt {
+        *self.tenant_conf.read().unwrap()
+    }
+
     pub fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
