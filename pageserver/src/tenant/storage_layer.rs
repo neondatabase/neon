@@ -212,6 +212,10 @@ impl std::fmt::Debug for dyn Layer {
 }
 
 /// Holds metadata about a layer without any content. Used mostly for testing.
+///
+/// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
+/// LayerDescriptor.
+#[derive(Clone)]
 pub struct LayerDescriptor {
     pub key: Range<Key>,
     pub lsn: Range<Lsn>,
@@ -248,6 +252,40 @@ impl Layer for LayerDescriptor {
 
     fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         todo!()
+    }
+}
+
+impl From<DeltaFileName> for LayerDescriptor {
+    fn from(value: DeltaFileName) -> Self {
+        let short_id = value.to_string();
+        LayerDescriptor {
+            key: value.key_range,
+            lsn: value.lsn_range,
+            is_incremental: true,
+            short_id,
+        }
+    }
+}
+
+impl From<ImageFileName> for LayerDescriptor {
+    fn from(value: ImageFileName) -> Self {
+        let short_id = value.to_string();
+        let lsn = value.lsn_as_range();
+        LayerDescriptor {
+            key: value.key_range,
+            lsn,
+            is_incremental: false,
+            short_id,
+        }
+    }
+}
+
+impl From<LayerFileName> for LayerDescriptor {
+    fn from(value: LayerFileName) -> Self {
+        match value {
+            LayerFileName::Delta(d) => Self::from(d),
+            LayerFileName::Image(i) => Self::from(i),
+        }
     }
 }
 

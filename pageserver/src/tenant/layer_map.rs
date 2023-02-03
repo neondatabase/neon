@@ -59,6 +59,7 @@ use std::sync::Arc;
 use utils::lsn::Lsn;
 
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
+pub use historic_layer_coverage::Replacement;
 
 use super::storage_layer::range_eq;
 
@@ -136,6 +137,24 @@ where
     ///
     pub fn remove_historic(&mut self, layer: Arc<L>) {
         self.layer_map.remove_historic_noflush(layer)
+    }
+
+    /// Replaces existing layer iff it is the `expected`.
+    ///
+    /// If the expected layer has been removed it will not be inserted by this function.
+    ///
+    /// Returned `Replacement` describes succeeding in replacement or the reason why it could not
+    /// be done.
+    ///
+    /// TODO replacement can be done without buffering and rebuilding layer map updates.
+    ///      One way to do that is to add a layer of indirection for returned values, so
+    ///      that we can replace values only by updating a hashmap.
+    pub fn replace_historic(
+        &mut self,
+        expected: &Arc<L>,
+        new: Arc<L>,
+    ) -> anyhow::Result<Replacement<Arc<L>>> {
+        self.layer_map.replace_historic_noflush(expected, new)
     }
 
     // We will flush on drop anyway, but this method makes it
@@ -254,14 +273,8 @@ where
     /// Helper function for BatchedUpdates::insert_historic
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
-        let kr = layer.get_key_range();
-        let lr = layer.get_lsn_range();
         self.historic.insert(
-            historic_layer_coverage::LayerKey {
-                key: kr.start.to_i128()..kr.end.to_i128(),
-                lsn: lr.start.0..lr.end.0,
-                is_image: !layer.is_incremental(),
-            },
+            historic_layer_coverage::LayerKey::from(&*layer),
             Arc::clone(&layer),
         );
 
@@ -278,28 +291,70 @@ where
     /// Helper function for BatchedUpdates::remove_historic
     ///
     pub fn remove_historic_noflush(&mut self, layer: Arc<L>) {
-        let kr = layer.get_key_range();
-        let lr = layer.get_lsn_range();
-        self.historic.remove(historic_layer_coverage::LayerKey {
-            key: kr.start.to_i128()..kr.end.to_i128(),
-            lsn: lr.start.0..lr.end.0,
-            is_image: !layer.is_incremental(),
-        });
+        self.historic
+            .remove(historic_layer_coverage::LayerKey::from(&*layer));
 
         if Self::is_l0(&layer) {
             let len_before = self.l0_delta_layers.len();
-
-            // FIXME: ptr_eq might fail to return true for 'dyn'
-            // references.  Clippy complains about this. In practice it
-            // seems to work, the assertion below would be triggered
-            // otherwise but this ought to be fixed.
-            #[allow(clippy::vtable_address_comparisons)]
             self.l0_delta_layers
-                .retain(|other| !Arc::ptr_eq(other, &layer));
-            assert_eq!(self.l0_delta_layers.len(), len_before - 1);
+                .retain(|other| !Self::compare_arced_layers(other, &layer));
+            // this assertion is related to use of Arc::ptr_eq in Self::compare_arced_layers,
+            // there's a chance that the comparison fails at runtime due to it comparing (pointer,
+            // vtable) pairs.
+            assert_eq!(
+                self.l0_delta_layers.len(),
+                len_before - 1,
+                "failed to locate removed historic layer from l0_delta_layers"
+            );
         }
 
         NUM_ONDISK_LAYERS.dec();
+    }
+
+    pub(self) fn replace_historic_noflush(
+        &mut self,
+        expected: &Arc<L>,
+        new: Arc<L>,
+    ) -> anyhow::Result<Replacement<Arc<L>>> {
+        let key = historic_layer_coverage::LayerKey::from(&**expected);
+        let other = historic_layer_coverage::LayerKey::from(&*new);
+
+        let expected_l0 = Self::is_l0(expected);
+        let new_l0 = Self::is_l0(&new);
+
+        anyhow::ensure!(
+            key == other,
+            "expected and new must have equal LayerKeys: {key:?} != {other:?}"
+        );
+
+        anyhow::ensure!(
+            expected_l0 == new_l0,
+            "expected and new must both be l0 deltas or neither should be: {expected_l0} != {new_l0}"
+        );
+
+        let l0_index = if expected_l0 {
+            // find the index in case replace worked, we need to replace that as well
+            Some(
+                self.l0_delta_layers
+                    .iter()
+                    .position(|slot| Self::compare_arced_layers(slot, expected))
+                    .ok_or_else(|| anyhow::anyhow!("existing l0 delta layer was not found"))?,
+            )
+        } else {
+            None
+        };
+
+        let replaced = self.historic.replace(&key, new.clone(), |existing| {
+            Self::compare_arced_layers(existing, expected)
+        });
+
+        if let Replacement::Replaced { .. } = &replaced {
+            if let Some(index) = l0_index {
+                self.l0_delta_layers[index] = new;
+            }
+        }
+
+        Ok(replaced)
     }
 
     /// Helper function for BatchedUpdates::drop.
@@ -674,5 +729,106 @@ where
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+
+    #[inline(always)]
+    fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
+        // FIXME: ptr_eq might fail to return true for 'dyn' references because of multiple vtables
+        // can be created in compilation. Clippy complains about this. In practice it seems to
+        // work.
+        //
+        // In future rust versions this might become Arc::as_ptr(left) as *const () ==
+        // Arc::as_ptr(right) as *const (), we could change to that before.
+        #[allow(clippy::vtable_address_comparisons)]
+        Arc::ptr_eq(left, right)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LayerMap, Replacement};
+    use crate::tenant::storage_layer::{Layer, LayerDescriptor, LayerFileName};
+    use std::str::FromStr;
+    use std::sync::Arc;
+
+    mod l0_delta_layers_updated {
+
+        use super::*;
+
+        #[test]
+        fn for_full_range_delta() {
+            // l0_delta_layers are used by compaction, and should observe all buffered updates
+            l0_delta_layers_updated_scenario(
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000053423C21-0000000053424D69",
+                true
+            )
+        }
+
+        #[test]
+        fn for_non_full_range_delta() {
+            // has minimal uncovered areas compared to l0_delta_layers_updated_on_insert_replace_remove_for_full_range_delta
+            l0_delta_layers_updated_scenario(
+                "000000000000000000000000000000000001-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE__0000000053423C21-0000000053424D69",
+                // because not full range
+                false
+            )
+        }
+
+        #[test]
+        fn for_image() {
+            l0_delta_layers_updated_scenario(
+                "000000000000000000000000000000000000-000000000000000000000000000000010000__0000000053424D69",
+                // code only checks if it is a full range layer, doesn't care about images, which must
+                // mean we should in practice never have full range images
+                false
+            )
+        }
+
+        fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
+            let name = LayerFileName::from_str(layer_name).unwrap();
+            let skeleton = LayerDescriptor::from(name);
+
+            let remote: Arc<dyn Layer> = Arc::new(skeleton.clone());
+            let downloaded: Arc<dyn Layer> = Arc::new(skeleton);
+
+            let mut map = LayerMap::default();
+
+            // two disjoint Arcs in different lifecycle phases.
+            assert!(!LayerMap::compare_arced_layers(&remote, &downloaded));
+
+            let expected_in_counts = (1, usize::from(expected_l0));
+
+            map.batch_update().insert_historic(remote.clone());
+            assert_eq!(count_layer_in(&map, &remote), expected_in_counts);
+
+            let replaced = map
+                .batch_update()
+                .replace_historic(&remote, downloaded.clone())
+                .expect("name derived attributes are the same");
+            assert!(
+                matches!(replaced, Replacement::Replaced { .. }),
+                "{replaced:?}"
+            );
+            assert_eq!(count_layer_in(&map, &downloaded), expected_in_counts);
+
+            map.batch_update().remove_historic(downloaded.clone());
+            assert_eq!(count_layer_in(&map, &downloaded), (0, 0));
+        }
+
+        fn count_layer_in(map: &LayerMap<dyn Layer>, layer: &Arc<dyn Layer>) -> (usize, usize) {
+            let historic = map
+                .iter_historic_layers()
+                .filter(|x| LayerMap::compare_arced_layers(x, layer))
+                .count();
+            let l0s = map
+                .get_level0_deltas()
+                .expect("why does this return a result");
+            let l0 = l0s
+                .iter()
+                .filter(|x| LayerMap::compare_arced_layers(x, layer))
+                .count();
+
+            (historic, l0)
+        }
     }
 }
