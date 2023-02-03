@@ -743,3 +743,114 @@ where
         Arc::ptr_eq(left, right)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use utils::lsn::Lsn;
+
+    use super::{LayerMap, Replacement};
+    use crate::tenant::storage_layer::{DeltaFileName, ImageFileName, Layer, LayerDescriptor};
+    use std::sync::Arc;
+
+    mod l0_delta_layers_updated {
+        use super::*;
+
+        #[test]
+        fn for_full_range_delta() {
+            // l0_delta_layers are used by compaction, and should observe all buffered updates
+            l0_delta_layers_updated_scenario(
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000053423C21-0000000053424D69",
+                true
+            )
+        }
+
+        #[test]
+        fn for_non_full_range_delta() {
+            // has minimal uncovered areas compared to l0_delta_layers_updated_on_insert_replace_remove_for_full_range_delta
+            l0_delta_layers_updated_scenario(
+                "000000000000000000000000000000000001-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE__0000000053423C21-0000000053424D69",
+                // because not full range
+                false
+            )
+        }
+
+        #[test]
+        fn for_image() {
+            // has minimal uncovered areas compared to l0_delta_layers_updated_on_insert_replace_remove_for_full_range_delta
+            l0_delta_layers_updated_scenario(
+                "000000000000000000000000000000000000-000000000000000000000000000000010000__0000000053424D69",
+                // code only checks if it is a full range layer, doesn't care about images, which must
+                // mean we should in practice never have full range images
+                false
+            )
+        }
+
+        fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
+            let skeleton = {
+                // TODO: add from impls for LayerDescriptor
+                if let Some(name) = DeltaFileName::parse_str(layer_name) {
+                    LayerDescriptor {
+                        key: name.key_range,
+                        lsn: name.lsn_range,
+                        is_incremental: true,
+                        short_id: layer_name.to_owned(),
+                    }
+                } else if let Some(name) = ImageFileName::parse_str(layer_name) {
+                    LayerDescriptor {
+                        key: name.key_range,
+                        // TODO: having this spread around the codebase doesn't make sense
+                        lsn: name.lsn..Lsn(name.lsn.0 + 1),
+                        is_incremental: true,
+                        short_id: layer_name.to_owned(),
+                    }
+                } else {
+                    unreachable!(
+                        "failed to parse as either DeltaFileName or ImageFileName: {layer_name}"
+                    )
+                }
+            };
+
+            let remote: Arc<dyn Layer> = Arc::new(skeleton.clone());
+            let downloaded: Arc<dyn Layer> = Arc::new(skeleton);
+
+            // two disjoint Arcs in different lifecycle phases.
+            assert!(!Arc::ptr_eq(&remote, &downloaded));
+
+            let expected_in_counts = (1, if expected_l0 { 1 } else { 0 });
+
+            let mut map = LayerMap::default();
+
+            let count_layer = |map: &LayerMap<_>, l: &_| {
+                let historic = map
+                    .iter_historic_layers()
+                    .filter(|x| LayerMap::compare_arced_layers(x, l))
+                    .count();
+                let l0s = map
+                    .get_level0_deltas()
+                    .expect("why does this return a result");
+                let l0s = l0s
+                    .iter()
+                    .filter(|x| LayerMap::compare_arced_layers(x, l))
+                    .count();
+
+                (historic, l0s)
+            };
+
+            map.batch_update().insert_historic(remote.clone());
+            assert_eq!(count_layer(&map, &remote), expected_in_counts);
+
+            let replaced = map
+                .batch_update()
+                .replace_historic(&remote, downloaded.clone())
+                .expect("name derived attributes are the same");
+            assert!(
+                matches!(replaced, Replacement::Replaced { .. }),
+                "{replaced:?}"
+            );
+            assert_eq!(count_layer(&map, &downloaded), expected_in_counts);
+
+            map.batch_update().remove_historic(downloaded.clone());
+            assert_eq!(count_layer(&map, &downloaded), (0, 0));
+        }
+    }
+}

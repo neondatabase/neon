@@ -212,6 +212,7 @@ impl std::fmt::Debug for dyn Layer {
 }
 
 /// Holds metadata about a layer without any content. Used mostly for testing.
+#[derive(Clone)]
 pub struct LayerDescriptor {
     pub key: Range<Key>,
     pub lsn: Range<Lsn>,
