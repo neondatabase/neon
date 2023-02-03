@@ -3394,7 +3394,9 @@ impl Timeline {
                                 // TODO: the downloaded file should probably be removed, otherwise
                                 // it will be added to the layermap on next load? we should
                                 // probably restart any get_reconstruct_data search as well.
-                                warn!("replacing downloaded layer into layermap failed because layer was not found");
+                                //
+                                // See: https://github.com/neondatabase/neon/issues/3533
+                                error!("replacing downloaded layer into layermap failed because layer was not found");
                             }
                             Ok(Replacement::RemovalBuffered) => {
                                 unreachable!("current implementation does not remove anything")
