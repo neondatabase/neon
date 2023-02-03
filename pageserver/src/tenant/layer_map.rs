@@ -791,31 +791,15 @@ mod tests {
             let remote: Arc<dyn Layer> = Arc::new(skeleton.clone());
             let downloaded: Arc<dyn Layer> = Arc::new(skeleton);
 
-            // two disjoint Arcs in different lifecycle phases.
-            assert!(!Arc::ptr_eq(&remote, &downloaded));
-
-            let expected_in_counts = (1, if expected_l0 { 1 } else { 0 });
-
             let mut map = LayerMap::default();
 
-            let count_layer = |map: &LayerMap<_>, l: &_| {
-                let historic = map
-                    .iter_historic_layers()
-                    .filter(|x| LayerMap::compare_arced_layers(x, l))
-                    .count();
-                let l0s = map
-                    .get_level0_deltas()
-                    .expect("why does this return a result");
-                let l0s = l0s
-                    .iter()
-                    .filter(|x| LayerMap::compare_arced_layers(x, l))
-                    .count();
+            // two disjoint Arcs in different lifecycle phases.
+            assert!(!LayerMap::compare_arced_layers(&remote, &downloaded));
 
-                (historic, l0s)
-            };
+            let expected_in_counts = (1, usize::from(expected_l0));
 
             map.batch_update().insert_historic(remote.clone());
-            assert_eq!(count_layer(&map, &remote), expected_in_counts);
+            assert_eq!(count_layer_in(&map, &remote), expected_in_counts);
 
             let replaced = map
                 .batch_update()
@@ -825,10 +809,26 @@ mod tests {
                 matches!(replaced, Replacement::Replaced { .. }),
                 "{replaced:?}"
             );
-            assert_eq!(count_layer(&map, &downloaded), expected_in_counts);
+            assert_eq!(count_layer_in(&map, &downloaded), expected_in_counts);
 
             map.batch_update().remove_historic(downloaded.clone());
-            assert_eq!(count_layer(&map, &downloaded), (0, 0));
+            assert_eq!(count_layer_in(&map, &downloaded), (0, 0));
+        }
+
+        fn count_layer_in(map: &LayerMap<dyn Layer>, layer: &Arc<dyn Layer>) -> (usize, usize) {
+            let historic = map
+                .iter_historic_layers()
+                .filter(|x| LayerMap::compare_arced_layers(x, layer))
+                .count();
+            let l0s = map
+                .get_level0_deltas()
+                .expect("why does this return a result");
+            let l0 = l0s
+                .iter()
+                .filter(|x| LayerMap::compare_arced_layers(x, layer))
+                .count();
+
+            (historic, l0)
         }
     }
 }
