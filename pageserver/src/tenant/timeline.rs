@@ -3408,9 +3408,10 @@ impl Timeline {
                                 // otherwise there's no known reason for this to happen as
                                 // compacted layers should have different covering rectangle
                                 // leading to produce Replacement::NotFound.
+
                                 error!(
-                                    expected = ?Arc::as_ptr(&l),
-                                    other = ?Arc::as_ptr(&other),
+                                    expected.ptr = ?Arc::as_ptr(&l),
+                                    other.ptr = ?Arc::as_ptr(&other),
                                     "replacing downloaded layer into layermap failed because another layer was found instead of expected"
                                 );
                             }
