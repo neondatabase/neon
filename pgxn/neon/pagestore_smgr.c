@@ -49,6 +49,7 @@
 #include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "access/xlog_internal.h"
+#include "access/xlogutils.h"
 #include "access/xlogdefs.h"
 #include "catalog/pg_class.h"
 #include "common/hashfn.h"
@@ -1310,6 +1311,62 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 	SetLastWrittenLSNForBlock(lsn, reln->smgr_rnode.node, forknum, blocknum);
 }
 
+
+static bool
+replica_redo_block_filter(XLogReaderState *record, uint8 block_id)
+{
+	BufferTag	tag;
+	uint32		hash;		/* hash value for tag */
+	LWLock	   *partition_lock;	/* buffer partition lock for it */
+	int			buf_id;
+	XLogRecPtr	lsn = record->EndRecPtr;
+
+#if PG_VERSION_NUM >= 150000
+	XLogRecGetBlockTag(record, block_id,
+					   &tag.rnode, &tag.forkNum, &tag.blockNum);
+#else
+	if (!XLogRecGetBlockTag(record, block_id,
+							&tag.rnode, &tag.forkNum, &tag.blockNum))
+	{
+		/* Caller specified a bogus block_id */
+		elog(PANIC, "failed to locate backup block with ID %d", block_id);
+	}
+#endif
+
+	/* we need to set last written LSN prior to page lookup because
+	 * if some other backend will try to concurrently load this page it should use proper request LSN
+	 */
+	SetLastWrittenLSNForBlock(lsn, tag.rnode, tag.forkNum, tag.blockNum);
+
+	/* determine its hash code and partition lock ID */
+	hash = BufTableHashCode(&tag);
+	partition_lock = BufMappingPartitionLock(hash);
+
+	/* see if the block is in the buffer pool already */
+	LWLockAcquire(partition_lock, LW_SHARED);
+	buf_id = BufTableLookup(&tag, hash);
+	LWLockRelease(partition_lock);
+
+	/* If page is present in share buffers then perform redo */
+	if (buf_id >= 0)
+		return true;
+
+	/*
+	 * Also perform redo if page is present in local file cache.
+	 * Please notice that it is unsafe to skip redo with out invalidation cache entry.
+	 * There is completely no sync here. But if page was evicted from the cache just before this check,
+	 * then it is ok to skip redo, because nobody will read outdated page image.
+	 * And if some other backend concurrently request this page and even downloaded it from pageserver and
+	 * save in shared buffers and may be even in local file cache, then updating last written LSN cache
+	 * with end LSN of this records guarantee that loaded page will include with wal record and so it is safe
+	 * to skip it redo.
+	 * And if we found page in shared buffers or local file cache and then it is evicted, then it is also safe
+	 * because redo will read this page from pageserver. It may be non-optimal from performance point of view,
+	 * but safe.
+	 */
+	return lfc_cache_contains(tag.rnode, tag.forkNum, tag.blockNum);
+}
+
 /*
  *	neon_init() -- Initialize private state
  */
@@ -1324,6 +1381,9 @@ neon_init(void)
 	prfs_size = offsetof(PrefetchState, prf_buffer) + (
 		sizeof(PrefetchRequest) * readahead_buffer_size
 	);
+
+	/* Replica should try to recover only pages present in shared buffers */
+	redo_read_buffer_filter = replica_redo_block_filter;
 
 	MyPState = MemoryContextAllocZero(TopMemoryContext, prfs_size);
 	
