@@ -28,22 +28,12 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
     for fname in filenames {
         let fname = &fname.unwrap();
         if let Some(imgfilename) = ImageFileName::parse_str(fname) {
-            let layer = LayerDescriptor {
-                key: imgfilename.key_range,
-                lsn: imgfilename.lsn..(imgfilename.lsn + 1),
-                is_incremental: false,
-                short_id: fname.to_string(),
-            };
+            let layer = LayerDescriptor::from(imgfilename);
             updates.insert_historic(Arc::new(layer));
             min_lsn = min(min_lsn, imgfilename.lsn);
             max_lsn = max(max_lsn, imgfilename.lsn);
         } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
-            let layer = LayerDescriptor {
-                key: deltafilename.key_range.clone(),
-                lsn: deltafilename.lsn_range.clone(),
-                is_incremental: true,
-                short_id: fname.to_string(),
-            };
+            let layer = LayerDescriptor::from(deltafilename);
             updates.insert_historic(Arc::new(layer));
             min_lsn = min(min_lsn, deltafilename.lsn_range.start);
             max_lsn = max(max_lsn, deltafilename.lsn_range.end);

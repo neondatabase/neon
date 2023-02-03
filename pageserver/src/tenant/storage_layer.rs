@@ -252,6 +252,37 @@ impl Layer for LayerDescriptor {
     }
 }
 
+impl From<DeltaFileName> for LayerDescriptor {
+    fn from(value: DeltaFileName) -> Self {
+        LayerDescriptor {
+            key: value.key_range,
+            lsn: value.lsn_range,
+            is_incremental: true,
+            short_id: value.to_string(),
+        }
+    }
+}
+
+impl From<ImageFileName> for LayerDescriptor {
+    fn from(value: ImageFileName) -> Self {
+        LayerDescriptor {
+            key: value.key_range,
+            lsn: value.lsn_as_range(),
+            is_incremental: false,
+            short_id: value.to_string(),
+        }
+    }
+}
+
+impl From<LayerFileName> for LayerDescriptor {
+    fn from(value: LayerFileName) -> Self {
+        match value {
+            LayerFileName::Delta(d) => Self::from(d),
+            LayerFileName::Image(i) => Self::from(i),
+        }
+    }
+}
+
 /// Helper enum to hold a PageServerConf, or a path
 ///
 /// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the

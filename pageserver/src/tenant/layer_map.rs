@@ -746,8 +746,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use utils::lsn::Lsn;
-
     use super::{LayerMap, Replacement};
     use crate::tenant::storage_layer::{DeltaFileName, ImageFileName, Layer, LayerDescriptor};
     use std::sync::Arc;
@@ -776,7 +774,6 @@ mod tests {
 
         #[test]
         fn for_image() {
-            // has minimal uncovered areas compared to l0_delta_layers_updated_on_insert_replace_remove_for_full_range_delta
             l0_delta_layers_updated_scenario(
                 "000000000000000000000000000000000000-000000000000000000000000000000010000__0000000053424D69",
                 // code only checks if it is a full range layer, doesn't care about images, which must
@@ -787,22 +784,10 @@ mod tests {
 
         fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
             let skeleton = {
-                // TODO: add from impls for LayerDescriptor
                 if let Some(name) = DeltaFileName::parse_str(layer_name) {
-                    LayerDescriptor {
-                        key: name.key_range,
-                        lsn: name.lsn_range,
-                        is_incremental: true,
-                        short_id: layer_name.to_owned(),
-                    }
+                    LayerDescriptor::from(name)
                 } else if let Some(name) = ImageFileName::parse_str(layer_name) {
-                    LayerDescriptor {
-                        key: name.key_range,
-                        // TODO: having this spread around the codebase doesn't make sense
-                        lsn: name.lsn..Lsn(name.lsn.0 + 1),
-                        is_incremental: true,
-                        short_id: layer_name.to_owned(),
-                    }
+                    LayerDescriptor::from(name)
                 } else {
                     unreachable!(
                         "failed to parse as either DeltaFileName or ImageFileName: {layer_name}"
