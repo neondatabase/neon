@@ -1507,14 +1507,14 @@ class PageserverHttpClient(requests.Session):
 
 @dataclass
 class TenantConfig:
-    tenant_specific_config: Dict[str, Any]
-    resulting_config: Dict[str, Any]
+    tenant_specific_overrides: Dict[str, Any]
+    effective_config: Dict[str, Any]
 
     @classmethod
     def from_json(cls, d: Dict[str, Any]) -> TenantConfig:
         return TenantConfig(
-            tenant_specific_config=d["tenant_specific_config"],
-            resulting_config=d["resulting_config"],
+            tenant_specific_overrides=d["tenant_specific_overrides"],
+            effective_config=d["effective_config"],
         )
 
 

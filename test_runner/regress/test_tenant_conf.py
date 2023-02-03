@@ -71,16 +71,18 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 }.items()
             ), f"Unexpected res: {res}"
     default_tenant_config = http_client.tenant_config(tenant_id=env.initial_tenant)
-    assert not default_tenant_config.tenant_specific_config, "Should have no specific settings yet"
-    default_resulting_config = default_tenant_config.resulting_config
-    assert default_resulting_config["checkpoint_distance"] == 10000
-    assert default_resulting_config["compaction_target_size"] == 1048576
-    assert default_resulting_config["compaction_period"] == "20s"
-    assert default_resulting_config["compaction_threshold"] == 10
-    assert default_resulting_config["gc_horizon"] == 67108864
-    assert default_resulting_config["gc_period"] == "1h"
-    assert default_resulting_config["image_creation_threshold"] == 3
-    assert default_resulting_config["pitr_interval"] == "7days"
+    assert (
+        not default_tenant_config.tenant_specific_overrides
+    ), "Should have no specific settings yet"
+    effective_config = default_tenant_config.effective_config
+    assert effective_config["checkpoint_distance"] == 10000
+    assert effective_config["compaction_target_size"] == 1048576
+    assert effective_config["compaction_period"] == "20s"
+    assert effective_config["compaction_threshold"] == 10
+    assert effective_config["gc_horizon"] == 67108864
+    assert effective_config["gc_period"] == "1h"
+    assert effective_config["image_creation_threshold"] == 3
+    assert effective_config["pitr_interval"] == "7days"
 
     # check the configuration of the new tenant
     with closing(env.pageserver.connect()) as psconn:
@@ -102,25 +104,25 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 }.items()
             ), f"Unexpected res: {res}"
     new_tenant_config = http_client.tenant_config(tenant_id=tenant)
-    new_specific_config = new_tenant_config.tenant_specific_config
+    new_specific_config = new_tenant_config.tenant_specific_overrides
     assert new_specific_config["checkpoint_distance"] == 20000
     assert new_specific_config["gc_period"] == "30s"
     assert len(new_specific_config) == len(
         new_conf
     ), f"No more specific properties were expected, but got: {new_specific_config}"
-    new_resulting_config = new_tenant_config.resulting_config
+    new_effective_config = new_tenant_config.effective_config
     assert (
-        new_resulting_config["checkpoint_distance"] == 20000
+        new_effective_config["checkpoint_distance"] == 20000
     ), "Specific 'checkpoint_distance' config should override the default value"
     assert (
-        new_resulting_config["gc_period"] == "30s"
+        new_effective_config["gc_period"] == "30s"
     ), "Specific 'gc_period' config should override the default value"
-    assert new_resulting_config["compaction_target_size"] == 1048576
-    assert new_resulting_config["compaction_period"] == "20s"
-    assert new_resulting_config["compaction_threshold"] == 10
-    assert new_resulting_config["gc_horizon"] == 67108864
-    assert new_resulting_config["image_creation_threshold"] == 3
-    assert new_resulting_config["pitr_interval"] == "7days"
+    assert new_effective_config["compaction_target_size"] == 1048576
+    assert new_effective_config["compaction_period"] == "20s"
+    assert new_effective_config["compaction_threshold"] == 10
+    assert new_effective_config["gc_horizon"] == 67108864
+    assert new_effective_config["image_creation_threshold"] == 3
+    assert new_effective_config["pitr_interval"] == "7days"
 
     # update the config and ensure that it has changed
     conf_update = {
@@ -152,28 +154,28 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                 }.items()
             ), f"Unexpected res: {res}"
     updated_tenant_config = http_client.tenant_config(tenant_id=tenant)
-    updated_specific_config = updated_tenant_config.tenant_specific_config
+    updated_specific_config = updated_tenant_config.tenant_specific_overrides
     assert updated_specific_config["checkpoint_distance"] == 15000
     assert updated_specific_config["gc_period"] == "1m 20s"
     assert updated_specific_config["compaction_period"] == "1m 20s"
     assert len(updated_specific_config) == len(
         conf_update
     ), f"No more specific properties were expected, but got: {updated_specific_config}"
-    updated_resulting_config = updated_tenant_config.resulting_config
+    updated_effective_config = updated_tenant_config.effective_config
     assert (
-        updated_resulting_config["checkpoint_distance"] == 15000
+        updated_effective_config["checkpoint_distance"] == 15000
     ), "Specific 'checkpoint_distance' config should override the default value"
     assert (
-        updated_resulting_config["gc_period"] == "1m 20s"
+        updated_effective_config["gc_period"] == "1m 20s"
     ), "Specific 'gc_period' config should override the default value"
     assert (
-        updated_resulting_config["compaction_period"] == "1m 20s"
+        updated_effective_config["compaction_period"] == "1m 20s"
     ), "Specific 'compaction_period' config should override the default value"
-    assert updated_resulting_config["compaction_target_size"] == 1048576
-    assert updated_resulting_config["compaction_threshold"] == 10
-    assert updated_resulting_config["gc_horizon"] == 67108864
-    assert updated_resulting_config["image_creation_threshold"] == 3
-    assert updated_resulting_config["pitr_interval"] == "7days"
+    assert updated_effective_config["compaction_target_size"] == 1048576
+    assert updated_effective_config["compaction_threshold"] == 10
+    assert updated_effective_config["gc_horizon"] == 67108864
+    assert updated_effective_config["image_creation_threshold"] == 3
+    assert updated_effective_config["pitr_interval"] == "7days"
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -211,22 +213,22 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
         conf=final_conf,
     )
     final_tenant_config = http_client.tenant_config(tenant_id=tenant)
-    final_specific_config = final_tenant_config.tenant_specific_config
+    final_specific_config = final_tenant_config.tenant_specific_overrides
     assert final_specific_config["pitr_interval"] == "1m"
     assert len(final_specific_config) == len(
         final_conf
     ), f"No more specific properties were expected, but got: {final_specific_config}"
-    final_resulting_config = final_tenant_config.resulting_config
+    final_effective_config = final_tenant_config.effective_config
     assert (
-        final_resulting_config["pitr_interval"] == "1m"
+        final_effective_config["pitr_interval"] == "1m"
     ), "Specific 'pitr_interval' config should override the default value"
-    assert final_resulting_config["checkpoint_distance"] == 10000
-    assert final_resulting_config["compaction_target_size"] == 1048576
-    assert final_resulting_config["compaction_period"] == "20s"
-    assert final_resulting_config["compaction_threshold"] == 10
-    assert final_resulting_config["gc_horizon"] == 67108864
-    assert final_resulting_config["gc_period"] == "1h"
-    assert final_resulting_config["image_creation_threshold"] == 3
+    assert final_effective_config["checkpoint_distance"] == 10000
+    assert final_effective_config["compaction_target_size"] == 1048576
+    assert final_effective_config["compaction_period"] == "20s"
+    assert final_effective_config["compaction_threshold"] == 10
+    assert final_effective_config["gc_horizon"] == 67108864
+    assert final_effective_config["gc_period"] == "1h"
+    assert final_effective_config["image_creation_threshold"] == 3
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()

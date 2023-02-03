@@ -792,11 +792,11 @@ components:
     TenantConfig:
       type: object
       properties:
-        tenant_specific_config:
+        tenant_specific_overrides:
           type: object
           schema:
             $ref: "#/components/schemas/TenantConfigInfo"
-        resulting_config:
+        effective_config:
           type: object
           schema:
             $ref: "#/components/schemas/TenantConfigInfo"

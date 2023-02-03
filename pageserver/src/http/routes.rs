@@ -706,22 +706,17 @@ async fn get_tenant_config_handler(request: Request<Body>) -> Result<Response<Bo
         .await
         .map_err(ApiError::NotFound)?;
 
-    let state = get_state(&request);
-    let default_config = state.conf.default_tenant_conf;
-    let tenant_specific_config = tenant.tenant_specific_config();
-    let resulting_config = tenant_specific_config.merge(default_config);
-
     let response = HashMap::from([
         (
-            "tenant_specific_config",
-            serde_json::to_value(tenant_specific_config)
-                .context("serializing tenant config")
+            "tenant_specific_overrides",
+            serde_json::to_value(tenant.tenant_specific_overrides())
+                .context("serializing tenant specific overrides")
                 .map_err(ApiError::InternalServerError)?,
         ),
         (
-            "resulting_config",
-            serde_json::to_value(resulting_config)
-                .context("serializing resulting config")
+            "effective_config",
+            serde_json::to_value(tenant.effective_config())
+                .context("serializing effective config")
                 .map_err(ApiError::InternalServerError)?,
         ),
     ]);
