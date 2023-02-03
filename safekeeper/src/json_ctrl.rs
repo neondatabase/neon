@@ -31,21 +31,21 @@ use utils::{lsn::Lsn, postgres_backend_async::PostgresBackend};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {
     // prefix and message to build LogicalMessage
-    lm_prefix: String,
-    lm_message: String,
+    pub lm_prefix: String,
+    pub lm_message: String,
 
     // if true, commit_lsn will match flush_lsn after append
-    set_commit_lsn: bool,
+    pub set_commit_lsn: bool,
 
     // if true, ProposerElected will be sent before append
-    send_proposer_elected: bool,
+    pub send_proposer_elected: bool,
 
     // fields from AppendRequestHeader
-    term: Term,
-    epoch_start_lsn: Lsn,
-    begin_lsn: Lsn,
-    truncate_lsn: Lsn,
-    pg_version: u32,
+    pub term: Term,
+    pub epoch_start_lsn: Lsn,
+    pub begin_lsn: Lsn,
+    pub truncate_lsn: Lsn,
+    pub pg_version: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -129,15 +129,15 @@ fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> anyhow::R
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct InsertedWAL {
+pub struct InsertedWAL {
     begin_lsn: Lsn,
-    end_lsn: Lsn,
+    pub end_lsn: Lsn,
     append_response: AppendResponse,
 }
 
 /// Extend local WAL with new LogicalMessage record. To do that,
 /// create AppendRequest with new WAL and pass it to safekeeper.
-fn append_logical_message(
+pub fn append_logical_message(
     tli: &Arc<Timeline>,
     msg: &AppendLogicalMessage,
 ) -> anyhow::Result<InsertedWAL> {

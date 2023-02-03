@@ -138,7 +138,7 @@ impl SafekeeperPostgresHandler {
             send_buf: RefCell::new([0; MAX_SEND_SIZE]),
         });
 
-        let c = ReplicationContext {
+        let mut c = ReplicationContext {
             tli,
             replica_id,
             appname,
@@ -151,7 +151,10 @@ impl SafekeeperPostgresHandler {
         };
 
         let _phantom_wf = c.wait_wal_fut();
+        let real_end_pos = c.end_pos;
+        c.end_pos = c.start_pos + 1; // to well form read_wal future
         let _phantom_rf = c.read_wal_fut();
+        c.end_pos = real_end_pos;
 
         ReplicationHandler {
             c,
@@ -163,8 +166,8 @@ impl SafekeeperPostgresHandler {
     }
 }
 
-/// START_REPLICATION stream driver: sends WAL and receives feedback.
 pin_project! {
+    /// START_REPLICATION stream driver: sends WAL and receives feedback.
     struct ReplicationHandler<'a, WF, RF>
     where
         WF: Future<Output = anyhow::Result<Option<Lsn>>>,
@@ -222,8 +225,6 @@ pin_project! {
         WF: Future<Output = anyhow::Result<Option<Lsn>>>,
         RF: Future<Output = anyhow::Result<usize>>,
     {
-        // TODO: see if we can remove boxing here; with anon type of async fn this
-        // is untrivial (+ needs fiddling with pinning, pin_project and replace).
         WaitWal{ #[pin] fut: WF},
         ReadWal{ #[pin] fut: RF},
         FlushWal,
@@ -294,10 +295,7 @@ where
                             .context("failed to deserialize StandbyReply")?;
                         // This must be a regular postgres replica,
                         // because pageserver doesn't send this type of messages to safekeeper.
-                        // Currently this is not implemented, so this message is ignored.
-
-                        warn!("unexpected StandbyReply. Read-only postgres replicas are not supported in safekeepers yet.");
-                        // timeline.update_replica_state(replica_id, Some(state));
+                        // Currently we just ignore this, tracking progress for them is not supported.
                     }
                     Some(NEON_STATUS_UPDATE_TAG_BYTE) => {
                         // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
@@ -379,17 +377,19 @@ where
                     let mut this = self.as_mut().project();
                     let write_ctx_clone = this.c.write_ctx.clone();
                     let send_buf = &write_ctx_clone.send_buf.borrow()[..read_len];
-                    let (start_pos, end_pos) = (this.c.start_pos.0, this.c.end_pos.0);
+                    let chunk_end = this.c.start_pos + read_len as u64;
                     // write data to the output buffer
                     this.c
                         .pgb
                         .write_message(&BeMessage::XLogData(XLogDataBody {
-                            wal_start: start_pos,
-                            wal_end: end_pos,
+                            wal_start: this.c.start_pos.0,
+                            wal_end: chunk_end.0,
                             timestamp: get_current_timestamp(),
                             data: send_buf,
                         }))
                         .context("Failed to write XLogData")?;
+                    trace!("wrote a chunk of wal {}-{}", this.c.start_pos, chunk_end);
+                    this.c.start_pos = chunk_end;
                     // and flush it
                     this.write_state.set(WriteState::FlushWal);
                 }
@@ -427,11 +427,12 @@ where
         let fut = self.c.wait_wal_fut();
         self.project().write_state.set(WriteState::WaitWal {
             fut: {
-                // SAFETY: this function is the only way to assign futures to
+                // SAFETY: this function is the only way to assign WaitWal to
                 // write_state. We just workaround impossibility of specifying
                 // async fn type, which is anonymous.
                 // transmute_copy is used as transmute refuses generic param:
                 // https://users.rust-lang.org/t/transmute-doesnt-work-on-generic-types/87272
+                assert_eq!(std::mem::size_of::<WF>(), std::mem::size_of_val(&fut));
                 let t = unsafe { std::mem::transmute_copy(&fut) };
                 std::mem::forget(fut);
                 t
@@ -444,11 +445,12 @@ where
         let fut = self.c.read_wal_fut();
         self.project().write_state.set(WriteState::ReadWal {
             fut: {
-                // SAFETY: this function is the only way to assign futures to
+                // SAFETY: this function is the only way to assign ReadWal to
                 // write_state. We just workaround impossibility of specifying
                 // async fn type, which is anonymous.
                 // transmute_copy is used as transmute refuses generic param:
                 // https://users.rust-lang.org/t/transmute-doesnt-work-on-generic-types/87272
+                assert_eq!(std::mem::size_of::<RF>(), std::mem::size_of_val(&fut));
                 let t = unsafe { std::mem::transmute_copy(&fut) };
                 std::mem::forget(fut);
                 t
@@ -467,7 +469,11 @@ impl ReplicationContext<'_> {
 
     // Create future reading WAL.
     fn read_wal_fut(&self) -> impl Future<Output = anyhow::Result<usize>> {
-        let mut send_size = self.end_pos.checked_sub(self.start_pos).unwrap().0 as usize;
+        let mut send_size = self
+            .end_pos
+            .checked_sub(self.start_pos)
+            .expect("reading wal without waiting for it first")
+            .0 as usize;
         send_size = min(send_size, self.write_ctx.send_buf.borrow().len());
         let write_ctx_fut = self.write_ctx.clone();
         async move {
