@@ -212,6 +212,9 @@ impl std::fmt::Debug for dyn Layer {
 }
 
 /// Holds metadata about a layer without any content. Used mostly for testing.
+///
+/// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
+/// LayerDescriptor.
 #[derive(Clone)]
 pub struct LayerDescriptor {
     pub key: Range<Key>,

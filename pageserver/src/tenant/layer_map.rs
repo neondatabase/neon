@@ -747,10 +747,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{LayerMap, Replacement};
-    use crate::tenant::storage_layer::{DeltaFileName, ImageFileName, Layer, LayerDescriptor};
+    use crate::tenant::storage_layer::{Layer, LayerDescriptor, LayerFileName};
+    use std::str::FromStr;
     use std::sync::Arc;
 
     mod l0_delta_layers_updated {
+
         use super::*;
 
         #[test]
@@ -783,17 +785,8 @@ mod tests {
         }
 
         fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
-            let skeleton = {
-                if let Some(name) = DeltaFileName::parse_str(layer_name) {
-                    LayerDescriptor::from(name)
-                } else if let Some(name) = ImageFileName::parse_str(layer_name) {
-                    LayerDescriptor::from(name)
-                } else {
-                    unreachable!(
-                        "failed to parse as either DeltaFileName or ImageFileName: {layer_name}"
-                    )
-                }
-            };
+            let name = LayerFileName::from_str(layer_name).unwrap();
+            let skeleton = LayerDescriptor::from(name);
 
             let remote: Arc<dyn Layer> = Arc::new(skeleton.clone());
             let downloaded: Arc<dyn Layer> = Arc::new(skeleton);
