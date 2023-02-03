@@ -193,7 +193,6 @@ RUN apt-get update && \
     apt-get install -y curl libclang-dev && \
     useradd -ms /bin/bash nonroot -b /home
 
-SHELL ["/bin/bash", "-c"]
 ENV HOME=/home/nonroot
 ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
 USER nonroot
@@ -203,7 +202,7 @@ ARG PG_VERSION
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable && \
     cargo install --git https://github.com/vadim2404/pgx --branch neon_abi --locked cargo-pgx && \
-    cargo pgx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config && \
+    /bin/bash -c 'cargo pgx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config' && \
     git clone --branch neon_abi https://github.com/vadim2404/pg_jsonschema/
 
 USER root
