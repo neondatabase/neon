@@ -107,9 +107,7 @@ class NeonCompare(PgCompare):
         self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
 
         # Start pg
-        self._pg = self.env.postgres.create_start(
-            branch_name, "main", self.tenant, config_lines=["shared_buffers=2GB"]
-        )
+        self._pg = self.env.postgres.create_start(branch_name, "main", self.tenant)
 
     @property
     def pg(self) -> PgProtocol:
