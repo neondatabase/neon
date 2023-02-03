@@ -172,7 +172,7 @@ impl RemoteLayer {
             tenantid,
             timelineid,
             key_range: fname.key_range.clone(),
-            lsn_range: fname.lsn..(fname.lsn + 1),
+            lsn_range: fname.lsn_as_range(),
             is_delta: false,
             is_incremental: false,
             file_name: fname.to_owned().into(),
