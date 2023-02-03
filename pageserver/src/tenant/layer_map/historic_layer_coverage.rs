@@ -436,7 +436,8 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     /// against some expectation. This allows to use `Arc::ptr_eq` or similar which would be
     /// inaccessible via `PartialEq` trait.
     ///
-    /// Returns `true` if a modification was made and rebuild will be needed, `false` otherwise.
+    /// Returns a `Replacement` value describing the outcome; only the case of
+    /// `Replacement::Replaced` modifies the map and requires a rebuild.
     pub fn replace<F>(
         &mut self,
         layer_key: &LayerKey,

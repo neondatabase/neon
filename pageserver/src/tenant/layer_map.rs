@@ -143,9 +143,8 @@ where
     ///
     /// If the expected layer has been removed it will not be inserted by this function.
     ///
-    /// Returns `true` if the layer map was changed, `false` otherwise. Errors are returned for
-    /// precondition failures, such as trying to replace two different kind of layers with each
-    /// other, and no modification is done in the case of precondition failure.
+    /// Returned `Replacement` describes succeeding in replacement or the reason why it could not
+    /// be done.
     ///
     /// TODO replacement can be done without buffering and rebuilding layer map updates.
     ///      One way to do that is to add a layer of indirection for returned values, so
