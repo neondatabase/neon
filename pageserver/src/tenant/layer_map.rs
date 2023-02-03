@@ -146,6 +146,10 @@ where
     /// Returns `true` if the layer map was changed, `false` otherwise. Errors are returned for
     /// precondition failures, such as trying to replace two different kind of layers with each
     /// other, and no modification is done in the case of precondition failure.
+    ///
+    /// TODO replacement can be done without buffering and rebuilding layer map updates.
+    ///      One way to do that is to add a layer of indirection for returned values, so
+    ///      that we can replace values only by updating a hashmap.
     pub fn replace_historic(
         &mut self,
         expected: &Arc<L>,
