@@ -83,10 +83,7 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
-                if let Err(err) = collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx).await
-                {
-                    error!("metrics collection failed: {err:?}");
-                }
+                collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx).await;
             }
         }
     }
@@ -97,17 +94,18 @@ pub async fn collect_metrics(
 /// Gather per-tenant and per-timeline metrics and send them to the `metric_collection_endpoint`.
 /// Cache metrics to avoid sending the same metrics multiple times.
 ///
+/// This function handles all errors internally
+/// and doesn't break iteration if just one tenant fails.
+///
 /// TODO
 /// - refactor this function (chunking+sending part) to reuse it in proxy module;
-/// - improve error handling. Now if one tenant fails to collect metrics,
-/// the whole iteration fails and metrics for other tenants are not collected.
 pub async fn collect_metrics_iteration(
     client: &reqwest::Client,
     cached_metrics: &mut HashMap<PageserverConsumptionMetricsKey, u64>,
     metric_collection_endpoint: &reqwest::Url,
     node_id: NodeId,
     ctx: &RequestContext,
-) -> anyhow::Result<()> {
+) {
     let mut current_metrics: Vec<(PageserverConsumptionMetricsKey, u64)> = Vec::new();
     trace!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
@@ -115,7 +113,13 @@ pub async fn collect_metrics_iteration(
     );
 
     // get list of tenants
-    let tenants = mgr::list_tenants().await?;
+    let tenants = match mgr::list_tenants().await {
+        Ok(tenants) => tenants,
+        Err(err) => {
+            error!("failed to list tenants: {:?}", err);
+            return;
+        }
+    };
 
     // iterate through list of Active tenants and collect metrics
     for (tenant_id, tenant_state) in tenants {
@@ -123,7 +127,15 @@ pub async fn collect_metrics_iteration(
             continue;
         }
 
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = match mgr::get_tenant(tenant_id, true).await {
+            Ok(tenant) => tenant,
+            Err(err) => {
+                // It is possible that tenant was deleted between
+                // `list_tenants` and `get_tenant`, so just warn about it.
+                warn!("failed to get tenant {tenant_id:?}: {err:?}");
+                continue;
+            }
+        };
 
         let mut tenant_resident_size = 0;
 
@@ -142,29 +154,51 @@ pub async fn collect_metrics_iteration(
                     timeline_written_size,
                 ));
 
-                let (timeline_logical_size, is_exact) = timeline.get_current_logical_size(ctx)?;
-                // Only send timeline logical size when it is fully calculated.
-                if is_exact {
-                    current_metrics.push((
-                        PageserverConsumptionMetricsKey {
-                            tenant_id,
-                            timeline_id: Some(timeline.timeline_id),
-                            metric: TIMELINE_LOGICAL_SIZE,
-                        },
-                        timeline_logical_size,
-                    ));
-                }
+                match timeline.get_current_logical_size(ctx) {
+                    // Only send timeline logical size when it is fully calculated.
+                    Ok((size, is_exact)) if is_exact => {
+                        current_metrics.push((
+                            PageserverConsumptionMetricsKey {
+                                tenant_id,
+                                timeline_id: Some(timeline.timeline_id),
+                                metric: TIMELINE_LOGICAL_SIZE,
+                            },
+                            size,
+                        ));
+                    }
+                    Ok((_, _)) => {}
+                    Err(err) => {
+                        error!(
+                            "failed to get current logical size for timeline {}: {err:?}",
+                            timeline.timeline_id
+                        );
+                        continue;
+                    }
+                };
             }
 
             let timeline_resident_size = timeline.get_resident_physical_size();
             tenant_resident_size += timeline_resident_size;
         }
 
-        let tenant_remote_size = tenant.get_remote_size().await?;
-        debug!(
-            "collected current metrics for tenant: {}: state={:?} resident_size={} remote_size={}",
-            tenant_id, tenant_state, tenant_resident_size, tenant_remote_size
-        );
+        match tenant.get_remote_size().await {
+            Ok(tenant_remote_size) => {
+                current_metrics.push((
+                    PageserverConsumptionMetricsKey {
+                        tenant_id,
+                        timeline_id: None,
+                        metric: REMOTE_STORAGE_SIZE,
+                    },
+                    tenant_remote_size,
+                ));
+            }
+            Err(err) => {
+                error!(
+                    "failed to get remote size for tenant {}: {err:?}",
+                    tenant_id
+                );
+            }
+        }
 
         current_metrics.push((
             PageserverConsumptionMetricsKey {
@@ -173,15 +207,6 @@ pub async fn collect_metrics_iteration(
                 metric: RESIDENT_SIZE,
             },
             tenant_resident_size,
-        ));
-
-        current_metrics.push((
-            PageserverConsumptionMetricsKey {
-                tenant_id,
-                timeline_id: None,
-                metric: REMOTE_STORAGE_SIZE,
-            },
-            tenant_remote_size,
         ));
 
         // Note that this metric is calculated in a separate bgworker
@@ -205,7 +230,7 @@ pub async fn collect_metrics_iteration(
 
     if current_metrics.is_empty() {
         trace!("no new metrics to send");
-        return Ok(());
+        return;
     }
 
     // Send metrics.
@@ -256,8 +281,6 @@ pub async fn collect_metrics_iteration(
             }
         }
     }
-
-    Ok(())
 }
 
 /// Caclculate synthetic size for each active tenant
