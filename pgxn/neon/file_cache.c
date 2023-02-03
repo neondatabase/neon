@@ -132,7 +132,7 @@ lfc_shmem_request(void)
 	RequestNamedLWLockTranche("lfc_lock", 1);
 }
 
-bool
+static bool
 lfc_check_limit_hook(int *newval, void **extra, GucSource source)
 {
 	if (*newval > lfc_max_size)
@@ -143,7 +143,7 @@ lfc_check_limit_hook(int *newval, void **extra, GucSource source)
 	return true;
 }
 
-void
+static void
 lfc_change_limit_hook(int newval, void *extra)
 {
 	uint32 new_size = SIZE_MB_TO_CHUNKS(newval);
@@ -213,7 +213,7 @@ lfc_init(void)
 							INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MB,
-							NULL,
+							lfc_check_limit_hook,
 							lfc_change_limit_hook,
 							NULL);
 
@@ -472,7 +472,6 @@ local_cache_pages(PG_FUNCTION_ARGS)
         HASH_SEQ_STATUS status;
 		FileCacheEntry* entry;
 		uint32 n_pages = 0;
-		uint32 i;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 
