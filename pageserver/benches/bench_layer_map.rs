@@ -18,6 +18,7 @@ use utils::lsn::Lsn;
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
+    let ctx = RequestContext::new(TaskKind::Benchmark, DownloadBehavior::Error);
     let mut layer_map = LayerMap::<LayerDescriptor>::default();
 
     let mut min_lsn = Lsn(u64::MAX);
@@ -35,7 +36,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
         min_lsn = min(min_lsn, lsn_range.start);
         max_lsn = max(max_lsn, Lsn(lsn_range.end.0 - 1));
 
-        updates.insert_historic(Arc::new(layer));
+        updates.insert_historic(Arc::new(layer), &ctx).unwrap();
     }
 
     println!("min: {min_lsn}, max: {max_lsn}");
@@ -108,7 +109,6 @@ fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, _lsn: Lsn) ->
 // a project where we have run pgbench many timmes. The pgbench database was initialized
 // between each test run.
 fn bench_from_captest_env(c: &mut Criterion) {
-    let ctx = RequestContext::new(TaskKind::Benchmark, DownloadBehavior::Error);
     // TODO consider compressing this file
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
@@ -116,7 +116,7 @@ fn bench_from_captest_env(c: &mut Criterion) {
     c.bench_function("captest_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1, &ctx);
+                layer_map.search(q.0, q.1);
             }
         });
     });
@@ -128,7 +128,6 @@ fn bench_from_captest_env(c: &mut Criterion) {
                 Key::from_hex("000000067F00008000000000000000000001").unwrap(),
                 // This LSN is higher than any of the LSNs in the tree
                 Lsn::from_str("D0/80208AE1").unwrap(),
-                &ctx,
             );
             result.unwrap();
         });
@@ -188,7 +187,7 @@ fn bench_from_real_project(c: &mut Criterion) {
     group.bench_function("uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1, &ctx);
+                layer_map.search(q.0, q.1);
             }
         });
     });
@@ -221,7 +220,7 @@ fn bench_sequential(c: &mut Criterion) {
             is_incremental: false,
             short_id: format!("Layer {}", i),
         };
-        updates.insert_historic(Arc::new(layer));
+        updates.insert_historic(Arc::new(layer), &ctx).unwrap();
     }
     updates.flush();
     println!("Finished layer map init in {:?}", now.elapsed());
@@ -238,7 +237,7 @@ fn bench_sequential(c: &mut Criterion) {
     group.bench_function("uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1, &ctx);
+                layer_map.search(q.0, q.1);
             }
         });
     });

@@ -363,8 +363,8 @@ where
             "expected and new must both be l0 deltas or neither should be: {expected_l0} != {new_l0}"
         );
 
-        if self.historic_layers.remove(&LayerRef(expected.clone())) {
-            let lr = expected.get_lsn_range();
+        let lr = expected.get_lsn_range();
+        let replaced = if self.historic_layers.remove(&LayerRef(expected.clone())) {
             for kr in expected.get_occupied_ranges(ctx)? {
                 match self.historic.replace(
                     &historic_layer_coverage::LayerKey {
@@ -406,12 +406,26 @@ where
                     self.l0_delta_layers.remove(&LayerRef(expected.clone())),
                     "existing l0 delta layer was not found"
                 );
-                self.l0_delta_layers.insert(LayerRef(expected.clone()));
             }
-            Ok(true)
+            true
         } else {
-            Ok(false)
+            for kr in new.get_occupied_ranges(ctx)? {
+                self.historic.insert(
+                    historic_layer_coverage::LayerKey {
+                        key: kr.start.to_i128()..kr.end.to_i128(),
+                        lsn: lr.start.0..lr.end.0,
+                        is_image: !new.is_incremental(),
+                    },
+                    Arc::clone(&new),
+                );
+            }
+            false
+        };
+        if expected_l0 {
+            self.l0_delta_layers.insert(LayerRef(new.clone()));
         }
+        self.historic_layers.insert(LayerRef(new));
+        Ok(replaced)
     }
 
     /// Helper function for BatchedUpdates::drop.
@@ -833,7 +847,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{LayerMap, Replacement};
+    use super::LayerMap;
+    use crate::context::{DownloadBehavior, RequestContext};
+    use crate::task_mgr::TaskKind;
     use crate::tenant::storage_layer::{Layer, LayerDescriptor, LayerFileName};
     use std::str::FromStr;
     use std::sync::Arc;
@@ -872,6 +888,7 @@ mod tests {
         }
 
         fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
+            let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
             let name = LayerFileName::from_str(layer_name).unwrap();
             let skeleton = LayerDescriptor::from(name);
 
@@ -885,16 +902,20 @@ mod tests {
 
             let expected_in_counts = (1, usize::from(expected_l0));
 
-            map.batch_update().insert_historic(remote.clone());
+            map.batch_update()
+                .insert_historic(remote.clone(), &ctx)
+                .expect("historic layer is inserted");
             assert_eq!(count_layer_in(&map, &remote), expected_in_counts);
 
             assert!(map
                 .batch_update()
-                .replace_historic(&remote, downloaded.clone())
+                .replace_historic(&remote, downloaded.clone(), &ctx)
                 .expect("name derived attributes are the same"));
             assert_eq!(count_layer_in(&map, &downloaded), expected_in_counts);
 
-            map.batch_update().remove_historic(downloaded.clone());
+            map.batch_update()
+                .remove_historic(downloaded.clone(), &ctx)
+                .expect("downloaded layer is found");
             assert_eq!(count_layer_in(&map, &downloaded), (0, 0));
         }
 

@@ -398,6 +398,8 @@ pub struct LayerDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hole(Range<Key>);
 
+// Alter default serde serialization for Key class to reduce size of index_part.json file.
+// Instead of dumping Key as json object with six field? we just store hex string representing key (as in file name)
 impl Serialize for Hole {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

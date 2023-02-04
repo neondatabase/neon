@@ -963,7 +963,7 @@ impl Timeline {
             local_layer
                 .file_size()
                 .expect("Local layer should have a file size"),
-			local_layer.get_holes(ctx)?,
+            local_layer.get_holes(ctx)?,
         );
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
@@ -1822,7 +1822,7 @@ impl Timeline {
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
-		ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let layer_size = layer.file_size();
 
