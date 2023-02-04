@@ -112,6 +112,7 @@ fn bench_from_captest_env(c: &mut Criterion) {
     // TODO consider compressing this file
     let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
+
     // Test with uniform query pattern
     c.bench_function("captest_uniform_queries", |b| {
         b.iter(|| {

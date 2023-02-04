@@ -364,7 +364,8 @@ where
         );
 
         let lr = expected.get_lsn_range();
-        let replaced = if self.historic_layers.remove(&LayerRef(expected.clone())) {
+        let replaced = self.historic_layers.remove(&LayerRef(expected.clone()));
+        if relaced {
             for kr in expected.get_occupied_ranges(ctx)? {
                 match self.historic.replace(
                     &historic_layer_coverage::LayerKey {
@@ -407,7 +408,6 @@ where
                     "existing l0 delta layer was not found"
                 );
             }
-            true
         } else {
             for kr in new.get_occupied_ranges(ctx)? {
                 self.historic.insert(
@@ -419,8 +419,7 @@ where
                     Arc::clone(&new),
                 );
             }
-            false
-        };
+        }
         if expected_l0 {
             self.l0_delta_layers.insert(LayerRef(new.clone()));
         }
