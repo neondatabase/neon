@@ -365,7 +365,7 @@ where
 
         let lr = expected.get_lsn_range();
         let replaced = self.historic_layers.remove(&LayerRef(expected.clone()));
-        if relaced {
+        if replaced {
             for kr in expected.get_occupied_ranges(ctx)? {
                 match self.historic.replace(
                     &historic_layer_coverage::LayerKey {
