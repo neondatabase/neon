@@ -869,7 +869,7 @@ impl Timeline {
 
     /// Like [`evict_layer_batch`], but for just one layer.
     /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
-    pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+    pub async fn evict_layer(&self, layer_file_name: &str, ctx: &RequestContext) -> anyhow::Result<Option<bool>> {
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         let remote_client = self
             .remote_client
@@ -963,6 +963,7 @@ impl Timeline {
             local_layer
                 .file_size()
                 .expect("Local layer should have a file size"),
+			local_layer.get_holes(ctx)?,
         );
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
@@ -985,37 +986,20 @@ impl Timeline {
             ),
         });
 
-        let replaced = match batch_updates.replace_historic(local_layer, new_remote_layer)? {
-            Replacement::Replaced { .. } => {
-                let layer_size = local_layer.file_size();
+        let replaced = match batch_updates.replace_historic(local_layer, new_remote_layer, &ctx)?;
+		if replaced {
+            let layer_size = local_layer.file_size();
 
-                if let Err(e) = local_layer.delete() {
-                    error!("failed to remove layer file on evict after replacement: {e:#?}");
-                }
+            if let Err(e) = local_layer.delete() {
+                error!("failed to remove layer file on evict after replacement: {e:#?}");
+            }
 
-                if let Some(layer_size) = layer_size {
-                    self.metrics.resident_physical_size_gauge.sub(layer_size);
-                }
-
-                true
+            if let Some(layer_size) = layer_size {
+                self.metrics.resident_physical_size_gauge.sub(layer_size);
             }
-            Replacement::NotFound => {
-                debug!(evicted=?local_layer, "layer was no longer in layer map");
-                false
-            }
-            Replacement::RemovalBuffered => {
-                unreachable!("not doing anything else in this batch")
-            }
-            Replacement::Unexpected(other) => {
-                error!(
-                    local_layer.ptr=?Arc::as_ptr(local_layer),
-                    other.ptr=?Arc::as_ptr(&other),
-                    ?other,
-                    "failed to replace");
-                false
-            }
-        };
-
+		} else {
+            debug!(evicted=?local_layer, "layer was no longer in layer map");
+        }
         Ok(replaced)
     }
 }
@@ -1838,6 +1822,7 @@ impl Timeline {
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+		ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let layer_size = layer.file_size();
 
@@ -1851,7 +1836,7 @@ impl Timeline {
         //      won't be needed for page reconstruction for this timeline,
         //      and mark what we can't delete yet as deleted from the layer
         //      map index without actually rebuilding the index.
-        updates.remove_historic(layer);
+        updates.remove_historic(layer, ctx)?;
 
         Ok(())
     }
@@ -3172,7 +3157,7 @@ impl Timeline {
                 pitr_cutoff,
                 retain_lsns,
                 new_gc_cutoff,
-				ctx,
+                ctx,
             )
             .instrument(
                 info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
@@ -3349,7 +3334,7 @@ impl Timeline {
             {
                 for doomed_layer in layers_to_remove {
                     layer_names_to_delete.push(doomed_layer.filename());
-                    self.delete_historic_layer(layer_removal_cs, doomed_layer, &mut updates)?; // FIXME: schedule succeeded deletions before returning?
+                    self.delete_historic_layer(layer_removal_cs, doomed_layer, &mut updates, ctx)?; // FIXME: schedule succeeded deletions before returning?
                     result.layers_removed += 1;
                 }
             }

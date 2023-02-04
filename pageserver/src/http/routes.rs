@@ -570,6 +570,7 @@ async fn layer_download_handler(request: Request<Body>) -> Result<Response<Body>
 }
 
 async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -577,7 +578,7 @@ async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response
 
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let evicted = timeline
-        .evict_layer(layer_file_name)
+        .evict_layer(layer_file_name, &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 

@@ -155,8 +155,8 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-<<<<<<< HEAD
-    pub fn remove_historic(&mut self, layer: Arc<L>, ctx: &RequestContext) {
+
+    pub fn remove_historic(&mut self, layer: Arc<L>, ctx: &RequestContext) -> Result<()> {
         self.layer_map.remove_historic_noflush(layer, ctx)
     }
 
@@ -174,13 +174,9 @@ where
         &mut self,
         expected: &Arc<L>,
         new: Arc<L>,
-		ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
         self.layer_map.replace_historic_noflush(expected, new, ctx)
-=======
-    pub fn remove_historic(&mut self, layer: Arc<L>, ctx: &RequestContext) -> Result<()> {
-        self.layer_map.remove_historic_noflush(layer, ctx)
->>>>>>> 2b84898d (Remove all occupied segments in layer map)
     }
 
     // We will flush on drop anyway, but this method makes it
@@ -349,7 +345,7 @@ where
         &mut self,
         expected: &Arc<L>,
         new: Arc<L>,
-		ctx:  &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
         let key = historic_layer_coverage::LayerKey::from(&**expected);
         let other = historic_layer_coverage::LayerKey::from(&*new);
@@ -367,16 +363,18 @@ where
             "expected and new must both be l0 deltas or neither should be: {expected_l0} != {new_l0}"
         );
 
-		if self.histori_layers.remove(&LayerRef(expected.clone())) {
-			let lr = layer.get_lsn_range();
-			for kr in layer.get_occupied_ranges(ctx)? {
-				match self.historic.replace(&historic_layer_coverage::LayerKey {
-                    key: kr.start.to_i128()..kr.end.to_i128(),
-                    lsn: lr.start.0..lr.end.0,
-                    is_image: !layer.is_incremental(),
-                }, key, new.clone(), |existing| {
-					Self::compare_arced_layers(existing, expected)
-				})? => {
+        if self.historic_layers.remove(&LayerRef(expected.clone())) {
+            let lr = expected.get_lsn_range();
+            for kr in expected.get_occupied_ranges(ctx)? {
+                match self.historic.replace(
+                    &historic_layer_coverage::LayerKey {
+                        key: kr.start.to_i128()..kr.end.to_i128(),
+                        lsn: lr.start.0..lr.end.0,
+                        is_image: !expected.is_incremental(),
+                    },
+                    new.clone(),
+                    |existing| Self::compare_arced_layers(existing, expected),
+                ) {
                     Replacement::Replaced { .. } => { /* expected */ }
                     Replacement::NotFound => {
                         // TODO: the downloaded file should probably be removed, otherwise
@@ -384,12 +382,12 @@ where
                         // probably restart any get_reconstruct_data search as well.
                         //
                         // See: https://github.com/neondatabase/neon/issues/3533
-                        error!("replacing downloaded layer into layermap failed because layer was not found");
+                        anyhow::bail!("replacing downloaded layer into layermap failed because layer was not found");
                     }
                     Replacement::RemovalBuffered => {
                         unreachable!("current implementation does not remove anything")
                     }
-                    Replacement::Unexpected(other) => {
+                    Replacement::Unexpected(_other) => {
                         // if the other layer would have the same pointer value as
                         // expected, it means they differ only on vtables.
                         //
@@ -397,23 +395,23 @@ where
                         // compacted layers should have different covering rectangle
                         // leading to produce Replacement::NotFound.
 
-                        error!(
-                            expected.ptr = ?Arc::as_ptr(&l),
-                            other.ptr = ?Arc::as_ptr(&other),
+                        anyhow::bail!(
                             "replacing downloaded layer into layermap failed because another layer was found instead of expected"
                         );
                     }
-				};
-			}
-			if expected_l0 {
-				anyhow::ensure!(self.l0_delta_layers.remove(&LayerRef(expected.clone())),
-								"existing l0 delta layer was not found");
-				self.l0_delta_layers.insert(&LayerRed(expected));
-			}
-			Ok(true)
-		} else {
-			Ok(false)
-		}
+                };
+            }
+            if expected_l0 {
+                anyhow::ensure!(
+                    self.l0_delta_layers.remove(&LayerRef(expected.clone())),
+                    "existing l0 delta layer was not found"
+                );
+                self.l0_delta_layers.insert(LayerRef(expected.clone()));
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Helper function for BatchedUpdates::drop.
