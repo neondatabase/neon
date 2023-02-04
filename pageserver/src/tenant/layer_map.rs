@@ -155,6 +155,7 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
+<<<<<<< HEAD
     pub fn remove_historic(&mut self, layer: Arc<L>, ctx: &RequestContext) {
         self.layer_map.remove_historic_noflush(layer, ctx)
     }
@@ -176,6 +177,10 @@ where
 		ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
         self.layer_map.replace_historic_noflush(expected, new, ctx)
+=======
+    pub fn remove_historic(&mut self, layer: Arc<L>, ctx: &RequestContext) -> Result<()> {
+        self.layer_map.remove_historic_noflush(layer, ctx)
+>>>>>>> 2b84898d (Remove all occupied segments in layer map)
     }
 
     // We will flush on drop anyway, but this method makes it
@@ -246,7 +251,7 @@ where
         let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
 
-        match (latest_delta, latest_image.clone()) {
+        match (latest_delta, latest_image) {
             (None, None) => None,
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
@@ -322,23 +327,22 @@ where
     ///
     /// Helper function for BatchedUpdates::remove_historic
     ///
-    pub fn remove_historic_noflush(&mut self, layer: Arc<L>, ctx: &RequestContext) {
+    pub fn remove_historic_noflush(&mut self, layer: Arc<L>, ctx: &RequestContext) -> Result<()> {
         let lr = layer.get_lsn_range();
         for kr in layer.get_occupied_ranges(ctx)? {
-            assert!(self.historic.remove(
-                historic_layer_coverage::LayerKey {
-                    key: kr.start.to_i128()..kr.end.to_i128(),
-                    lsn: lr.start.0..lr.end.0,
-                    is_image: !layer.is_incremental(),
-                },
-                Arc::clone(&layer),
-			});
-		}
+            self.historic.remove(historic_layer_coverage::LayerKey {
+                key: kr.start.to_i128()..kr.end.to_i128(),
+                lsn: lr.start.0..lr.end.0,
+                is_image: !layer.is_incremental(),
+            });
+        }
+
         if Self::is_l0(&layer) {
             assert!(self.l0_delta_layers.remove(&LayerRef(layer.clone())));
         }
         assert!(self.historic_layers.remove(&LayerRef(layer)));
         NUM_ONDISK_LAYERS.dec();
+        Ok(())
     }
 
     pub(self) fn replace_historic_noflush(
