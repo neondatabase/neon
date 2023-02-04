@@ -1531,11 +1531,13 @@ class LayerMapInfo:
         assert isinstance(json_in_memory_layers, List)
         for json_in_memory_layer in json_in_memory_layers:
             info.in_memory_layers.append(InMemoryLayerInfo.from_json(json_in_memory_layer))
+        info.in_memory_layers.sort()
 
         json_historic_layers = d["historic_layers"]
         assert isinstance(json_historic_layers, List)
         for json_historic_layer in json_historic_layers:
             info.historic_layers.append(HistoricLayerInfo.from_json(json_historic_layer))
+        info.historic_layers.sort()
 
         return info
 
