@@ -1416,7 +1416,7 @@ impl Timeline {
                             anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                         } else {
                             self.metrics.resident_physical_size_gauge.sub(local_size);
-                            updates.remove_historic(local_layer);
+                            updates.remove_historic(local_layer, ctx)?;
                             // fall-through to adding the remote layer
                         }
                     } else {
@@ -3027,7 +3027,7 @@ impl Timeline {
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
             layer_names_to_delete.push(l.filename());
-            self.delete_historic_layer(layer_removal_cs, l, &mut updates)?;
+            self.delete_historic_layer(layer_removal_cs, l, &mut updates, ctx)?;
         }
         updates.flush();
         drop(layers);
