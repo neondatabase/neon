@@ -338,20 +338,20 @@ impl Layer for DeltaLayer {
     }
 
     fn get_occupied_ranges(&self, ctx: &RequestContext) -> Result<Vec<Range<Key>>> {
-        let inner = self.load(ctx)?;
-        if let Some(holes) = &inner.holes {
-            let mut occ = Vec::with_capacity(holes.len() + 1);
-            let key_range = self.get_key_range();
-            let mut prev = key_range.start;
-            for hole in holes {
-                occ.push(prev..hole.0.start);
-                prev = hole.0.end;
-            }
-            occ.push(prev..key_range.end);
-            Ok(occ)
-        } else {
-            Ok(vec![self.get_key_range()])
-        }
+        if let Ok(inner) = self.load(ctx) {
+			if let Some(holes) = &inner.holes {
+				let mut occ = Vec::with_capacity(holes.len() + 1);
+				let key_range = self.get_key_range();
+				let mut prev = key_range.start;
+				for hole in holes {
+					occ.push(prev..hole.0.start);
+					prev = hole.0.end;
+				}
+				occ.push(prev..key_range.end);
+				return Ok(occ);
+			}
+		}
+        Ok(vec![self.get_key_range()])
     }
 
     fn get_holes(&self, ctx: &RequestContext) -> Result<Option<Vec<Hole>>> {
