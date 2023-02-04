@@ -176,9 +176,9 @@ impl UninitializedTimeline<'_> {
     ///
     /// The new timeline is initialized in Active state, and its background jobs are
     /// started
-    pub fn initialize(self, _ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
+    pub fn initialize(self, ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(&mut timelines, true, true)
+        self.initialize_with_lock(&mut timelines, true, true, ctx)
     }
 
     /// Like `initialize`, but the caller is already holding lock on Tenant::timelines.
@@ -191,6 +191,7 @@ impl UninitializedTimeline<'_> {
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
         load_layer_map: bool,
         activate: bool,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
@@ -211,7 +212,7 @@ impl UninitializedTimeline<'_> {
             Entry::Vacant(v) => {
                 if load_layer_map {
                     new_timeline
-                        .load_layer_map(new_disk_consistent_lsn)
+                        .load_layer_map(new_disk_consistent_lsn, ctx)
                         .with_context(|| {
                             format!(
                                 "Failed to load layermap for timeline {tenant_id}/{timeline_id}"
@@ -494,7 +495,7 @@ impl Tenant {
             // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
             // will ingest data which may require looking at the layers which are not yet available locally
-            match timeline.initialize_with_lock(&mut timelines_accessor, true, false) {
+            match timeline.initialize_with_lock(&mut timelines_accessor, true, false, ctx) {
                 Ok(new_timeline) => new_timeline,
                 Err(e) => {
                     error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
@@ -2079,7 +2080,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let src_id = src_timeline.timeline_id;
 
@@ -2172,7 +2173,7 @@ impl Tenant {
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
-            .initialize_with_lock(&mut timelines, true, true)?;
+            .initialize_with_lock(&mut timelines, true, true, ctx)?;
         drop(timelines);
         info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
 
@@ -2273,7 +2274,7 @@ impl Tenant {
 
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
-            raw_timeline.initialize_with_lock(&mut timelines, false, true)?
+            raw_timeline.initialize_with_lock(&mut timelines, false, true, ctx)?
         };
 
         info!(

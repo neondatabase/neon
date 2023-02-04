@@ -1240,7 +1240,11 @@ impl Timeline {
     /// Scan the timeline directory to populate the layer map.
     /// Returns all timeline-related files that were found and loaded.
     ///
-    pub(super) fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+    pub(super) fn load_layer_map(
+        &self,
+        disk_consistent_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         let mut layers = self.layers.write().unwrap();
         let mut updates = layers.batch_update();
         let mut num_layers = 0;
@@ -1284,7 +1288,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(Arc::new(layer));
+                updates.insert_historic(Arc::new(layer), ctx)?;
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1317,7 +1321,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(Arc::new(layer));
+                updates.insert_historic(Arc::new(layer), ctx)?;
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1364,6 +1368,7 @@ impl Timeline {
         index_part: &IndexPart,
         local_layers: HashMap<LayerFileName, Arc<dyn PersistentLayer>>,
         up_to_date_disk_consistent_lsn: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<HashMap<LayerFileName, Arc<dyn PersistentLayer>>> {
         // Are we missing some files that are present in remote storage?
         // Create RemoteLayer instances for them.
@@ -1454,7 +1459,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    updates.insert_historic(remote_layer);
+                    updates.insert_historic(remote_layer, ctx)?;
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1478,7 +1483,7 @@ impl Timeline {
                         LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted),
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    updates.insert_historic(remote_layer);
+                    updates.insert_historic(remote_layer, ctx)?;
                 }
             }
         }
@@ -1533,7 +1538,7 @@ impl Timeline {
                     index_part.timeline_layers.len()
                 );
                 remote_client.init_upload_queue(index_part)?;
-                self.create_remote_layers(index_part, local_layers, disk_consistent_lsn)
+                self.create_remote_layers(index_part, local_layers, disk_consistent_lsn, ctx)
                     .await?
             }
             None => {
@@ -2040,9 +2045,7 @@ impl Timeline {
                         }
                     }
 
-                    if let Some(SearchResult { lsn_floor, layer }) =
-                        layers.search(key, cont_lsn, ctx)
-                    {
+                    if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
                         // If it's a remote layer, download it and retry.
                         if let Some(remote_layer) =
                             super::storage_layer::downcast_remote_layer(&layer)
@@ -2498,7 +2501,7 @@ impl Timeline {
             .write()
             .unwrap()
             .batch_update()
-            .insert_historic(Arc::new(new_delta));
+            .insert_historic(Arc::new(new_delta), ctx)?;
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
@@ -2686,7 +2689,7 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            updates.insert_historic(Arc::new(l));
+            updates.insert_historic(Arc::new(l), ctx)?;
         }
         updates.flush();
         drop(layers);
@@ -3016,7 +3019,7 @@ impl Timeline {
                 LayerFileMetadata::new(metadata.len(), l.get_holes(ctx)?),
             );
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            updates.insert_historic(x);
+            updates.insert_historic(x, ctx)?;
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -3541,41 +3544,10 @@ impl Timeline {
                     let mut layers = self_clone.layers.write().unwrap();
                     let mut updates = layers.batch_update();
                     {
-                        use crate::tenant::layer_map::Replacement;
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        match updates.replace_historic(&l, new_layer) {
-                            Ok(Replacement::Replaced { .. }) => { /* expected */ }
-                            Ok(Replacement::NotFound) => {
-                                // TODO: the downloaded file should probably be removed, otherwise
-                                // it will be added to the layermap on next load? we should
-                                // probably restart any get_reconstruct_data search as well.
-                                //
-                                // See: https://github.com/neondatabase/neon/issues/3533
-                                error!("replacing downloaded layer into layermap failed because layer was not found");
-                            }
-                            Ok(Replacement::RemovalBuffered) => {
-                                unreachable!("current implementation does not remove anything")
-                            }
-                            Ok(Replacement::Unexpected(other)) => {
-                                // if the other layer would have the same pointer value as
-                                // expected, it means they differ only on vtables.
-                                //
-                                // otherwise there's no known reason for this to happen as
-                                // compacted layers should have different covering rectangle
-                                // leading to produce Replacement::NotFound.
-
-                                error!(
-                                    expected.ptr = ?Arc::as_ptr(&l),
-                                    other.ptr = ?Arc::as_ptr(&other),
-                                    ?other,
-                                    "replacing downloaded layer into layermap failed because another layer was found instead of expected"
-                                );
-                            }
-                            Err(e) => {
-                                // this is a precondition failure, the layer filename derived
-                                // attributes didn't match up, which doesn't seem likely.
-                                error!("replacing downloaded layer into layermap failed: {e:#?}")
-                            }
+                        if !updates.replace_historic(&l, new_layer, &ctx)? {
+                            // See: https://github.com/neondatabase/neon/issues/3533
+                            error!("replacing downloaded layer into layermap failed because layer was not found");
                         }
                     }
                     updates.flush();

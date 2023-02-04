@@ -49,11 +49,12 @@ mod layer_coverage;
 use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
 use crate::metrics::NUM_ONDISK_LAYERS;
-use crate::repository::{singleton_range, Key};
+use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use anyhow::Result;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 use utils::lsn::Lsn;
@@ -62,6 +63,22 @@ use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::Replacement;
 
 use super::storage_layer::range_eq;
+
+struct LayerRef<L: ?Sized>(Arc<L>);
+
+impl<L: ?Sized> PartialEq for LayerRef<L> {
+    fn eq(&self, other: &LayerRef<L>) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<L: ?Sized> Eq for LayerRef<L> {}
+
+impl<L: ?Sized> Hash for LayerRef<L> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::into_raw(Arc::clone(&self.0)).hash(state)
+    }
+}
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -89,9 +106,11 @@ pub struct LayerMap<L: ?Sized> {
     /// Index of the historic layers optimized for search
     historic: BufferedHistoricLayerCoverage<Arc<L>>,
 
-    /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
-    /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<Arc<L>>,
+    /// L0 layers are kept in separate set because we need fast way to iterate through L0 layers in compaction
+    l0_delta_layers: HashSet<LayerRef<L>>,
+
+    /// `historic` tree may contain maultuple reference to one layer, so lets maintain separate set instead of eliminating duplicates
+    historic_layers: HashSet<LayerRef<L>>,
 }
 
 impl<L: ?Sized> Default for LayerMap<L> {
@@ -100,8 +119,9 @@ impl<L: ?Sized> Default for LayerMap<L> {
             open_layer: None,
             next_open_layer_at: None,
             frozen_layers: VecDeque::default(),
-            l0_delta_layers: Vec::default(),
             historic: BufferedHistoricLayerCoverage::default(),
+            l0_delta_layers: HashSet::default(),
+            historic_layers: HashSet::default(),
         }
     }
 }
@@ -126,8 +146,8 @@ where
     ///
     /// Insert an on-disk layer.
     ///
-    pub fn insert_historic(&mut self, layer: Arc<L>) {
-        self.layer_map.insert_historic_noflush(layer)
+    pub fn insert_historic(&mut self, layer: Arc<L>, ctx: &RequestContext) -> Result<()> {
+        self.layer_map.insert_historic_noflush(layer, ctx)
     }
 
     ///
@@ -135,8 +155,8 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer: Arc<L>) {
-        self.layer_map.remove_historic_noflush(layer)
+    pub fn remove_historic(&mut self, layer: Arc<L>, ctx: &RequestContext) {
+        self.layer_map.remove_historic_noflush(layer, ctx)
     }
 
     /// Replaces existing layer iff it is the `expected`.
@@ -153,8 +173,9 @@ where
         &mut self,
         expected: &Arc<L>,
         new: Arc<L>,
-    ) -> anyhow::Result<Replacement<Arc<L>>> {
-        self.layer_map.replace_historic_noflush(expected, new)
+		ctx: &RequestContext,
+    ) -> anyhow::Result<bool> {
+        self.layer_map.replace_historic_noflush(expected, new, ctx)
     }
 
     // We will flush on drop anyway, but this method makes it
@@ -220,67 +241,45 @@ where
     /// NOTE: This only searches the 'historic' layers, *not* the
     /// 'open' and 'frozen' layers!
     ///
-    pub fn search(&self, key: Key, end_lsn: Lsn, ctx: &RequestContext) -> Option<SearchResult<L>> {
-        let mut version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
-        let mut latest_delta = version.delta_coverage.query(key.to_i128());
+    pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult<L>> {
+        let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
+        let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
 
-        loop {
-            return match (latest_delta, latest_image.clone()) {
-                (None, None) => None,
-                (None, Some(image)) => {
-                    let lsn_floor = image.get_lsn_range().start;
+        match (latest_delta, latest_image.clone()) {
+            (None, None) => None,
+            (None, Some(image)) => {
+                let lsn_floor = image.get_lsn_range().start;
+                Some(SearchResult {
+                    layer: image,
+                    lsn_floor,
+                })
+            }
+            (Some(delta), None) => {
+                let lsn_floor = delta.get_lsn_range().start;
+                Some(SearchResult {
+                    layer: delta,
+                    lsn_floor,
+                })
+            }
+            (Some(delta), Some(image)) => {
+                let img_lsn = image.get_lsn_range().start;
+                let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
+                let image_exact_match = img_lsn + 1 == end_lsn;
+                if image_is_newer || image_exact_match {
                     Some(SearchResult {
                         layer: image,
-                        lsn_floor,
+                        lsn_floor: img_lsn,
                     })
-                }
-                (Some(delta), None) => {
-                    let lsn_floor = delta.get_lsn_range().start;
-                    if let Ok(contains) = delta.overlaps(&singleton_range(key), ctx) {
-                        if !contains {
-                            version = self.historic.get().unwrap().get_version(lsn_floor.0 - 1)?;
-                            latest_delta = version.delta_coverage.query(key.to_i128());
-                            continue;
-                        }
-                    }
+                } else {
+                    let lsn_floor =
+                        std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
                     Some(SearchResult {
                         layer: delta,
                         lsn_floor,
                     })
                 }
-                (Some(delta), Some(image)) => {
-                    let img_lsn = image.get_lsn_range().start;
-                    let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
-                    let image_exact_match = img_lsn + 1 == end_lsn;
-                    if image_is_newer || image_exact_match {
-                        Some(SearchResult {
-                            layer: image,
-                            lsn_floor: img_lsn,
-                        })
-                    } else {
-                        if let Ok(contains) = delta.overlaps(&singleton_range(key), ctx) {
-                            if !contains {
-                                version = self
-                                    .historic
-                                    .get()
-                                    .unwrap()
-                                    .get_version(delta.get_lsn_range().start.0 - 1)?;
-                                latest_delta = version.delta_coverage.query(key.to_i128());
-                                continue;
-                            }
-                        }
-                        let lsn_floor = std::cmp::max(
-                            delta.get_lsn_range().start,
-                            image.get_lsn_range().start + 1,
-                        );
-                        Some(SearchResult {
-                            layer: delta,
-                            lsn_floor,
-                        })
-                    }
-                }
-            };
+            }
         }
     }
 
@@ -294,17 +293,28 @@ where
     ///
     /// Helper function for BatchedUpdates::insert_historic
     ///
-    pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
-        self.historic.insert(
-            historic_layer_coverage::LayerKey::from(&*layer),
-            Arc::clone(&layer),
-        );
-
-        if Self::is_l0(&layer) {
-            self.l0_delta_layers.push(layer);
+    pub(self) fn insert_historic_noflush(
+        &mut self,
+        layer: Arc<L>,
+        ctx: &RequestContext,
+    ) -> Result<()> {
+        let lr = layer.get_lsn_range();
+        for kr in layer.get_occupied_ranges(ctx)? {
+            self.historic.insert(
+                historic_layer_coverage::LayerKey {
+                    key: kr.start.to_i128()..kr.end.to_i128(),
+                    lsn: lr.start.0..lr.end.0,
+                    is_image: !layer.is_incremental(),
+                },
+                Arc::clone(&layer),
+            );
         }
-
+        if Self::is_l0(&layer) {
+            self.l0_delta_layers.insert(LayerRef(layer.clone()));
+        }
+        self.historic_layers.insert(LayerRef(layer));
         NUM_ONDISK_LAYERS.inc();
+        Ok(())
     }
 
     ///
@@ -312,24 +322,22 @@ where
     ///
     /// Helper function for BatchedUpdates::remove_historic
     ///
-    pub fn remove_historic_noflush(&mut self, layer: Arc<L>) {
-        self.historic
-            .remove(historic_layer_coverage::LayerKey::from(&*layer));
-
+    pub fn remove_historic_noflush(&mut self, layer: Arc<L>, ctx: &RequestContext) {
+        let lr = layer.get_lsn_range();
+        for kr in layer.get_occupied_ranges(ctx)? {
+            assert!(self.historic.remove(
+                historic_layer_coverage::LayerKey {
+                    key: kr.start.to_i128()..kr.end.to_i128(),
+                    lsn: lr.start.0..lr.end.0,
+                    is_image: !layer.is_incremental(),
+                },
+                Arc::clone(&layer),
+			});
+		}
         if Self::is_l0(&layer) {
-            let len_before = self.l0_delta_layers.len();
-            self.l0_delta_layers
-                .retain(|other| !Self::compare_arced_layers(other, &layer));
-            // this assertion is related to use of Arc::ptr_eq in Self::compare_arced_layers,
-            // there's a chance that the comparison fails at runtime due to it comparing (pointer,
-            // vtable) pairs.
-            assert_eq!(
-                self.l0_delta_layers.len(),
-                len_before - 1,
-                "failed to locate removed historic layer from l0_delta_layers"
-            );
+            assert!(self.l0_delta_layers.remove(&LayerRef(layer.clone())));
         }
-
+        assert!(self.historic_layers.remove(&LayerRef(layer)));
         NUM_ONDISK_LAYERS.dec();
     }
 
@@ -337,7 +345,8 @@ where
         &mut self,
         expected: &Arc<L>,
         new: Arc<L>,
-    ) -> anyhow::Result<Replacement<Arc<L>>> {
+		ctx:  &RequestContext,
+    ) -> anyhow::Result<bool> {
         let key = historic_layer_coverage::LayerKey::from(&**expected);
         let other = historic_layer_coverage::LayerKey::from(&*new);
 
@@ -354,29 +363,53 @@ where
             "expected and new must both be l0 deltas or neither should be: {expected_l0} != {new_l0}"
         );
 
-        let l0_index = if expected_l0 {
-            // find the index in case replace worked, we need to replace that as well
-            Some(
-                self.l0_delta_layers
-                    .iter()
-                    .position(|slot| Self::compare_arced_layers(slot, expected))
-                    .ok_or_else(|| anyhow::anyhow!("existing l0 delta layer was not found"))?,
-            )
-        } else {
-            None
-        };
+		if self.histori_layers.remove(&LayerRef(expected.clone())) {
+			let lr = layer.get_lsn_range();
+			for kr in layer.get_occupied_ranges(ctx)? {
+				match self.historic.replace(&historic_layer_coverage::LayerKey {
+                    key: kr.start.to_i128()..kr.end.to_i128(),
+                    lsn: lr.start.0..lr.end.0,
+                    is_image: !layer.is_incremental(),
+                }, key, new.clone(), |existing| {
+					Self::compare_arced_layers(existing, expected)
+				})? => {
+                    Replacement::Replaced { .. } => { /* expected */ }
+                    Replacement::NotFound => {
+                        // TODO: the downloaded file should probably be removed, otherwise
+                        // it will be added to the layermap on next load? we should
+                        // probably restart any get_reconstruct_data search as well.
+                        //
+                        // See: https://github.com/neondatabase/neon/issues/3533
+                        error!("replacing downloaded layer into layermap failed because layer was not found");
+                    }
+                    Replacement::RemovalBuffered => {
+                        unreachable!("current implementation does not remove anything")
+                    }
+                    Replacement::Unexpected(other) => {
+                        // if the other layer would have the same pointer value as
+                        // expected, it means they differ only on vtables.
+                        //
+                        // otherwise there's no known reason for this to happen as
+                        // compacted layers should have different covering rectangle
+                        // leading to produce Replacement::NotFound.
 
-        let replaced = self.historic.replace(&key, new.clone(), |existing| {
-            Self::compare_arced_layers(existing, expected)
-        });
-
-        if let Replacement::Replaced { .. } = &replaced {
-            if let Some(index) = l0_index {
-                self.l0_delta_layers[index] = new;
-            }
-        }
-
-        Ok(replaced)
+                        error!(
+                            expected.ptr = ?Arc::as_ptr(&l),
+                            other.ptr = ?Arc::as_ptr(&other),
+                            "replacing downloaded layer into layermap failed because another layer was found instead of expected"
+                        );
+                    }
+				};
+			}
+			if expected_l0 {
+				anyhow::ensure!(self.l0_delta_layers.remove(&LayerRef(expected.clone())),
+								"existing l0 delta layer was not found");
+				self.l0_delta_layers.insert(&LayerRed(expected));
+			}
+			Ok(true)
+		} else {
+			Ok(false)
+		}
     }
 
     /// Helper function for BatchedUpdates::drop.
@@ -425,7 +458,7 @@ where
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
-        self.historic.iter()
+        self.historic_layers.iter().map(|r| r.0.clone())
     }
 
     ///
@@ -610,7 +643,7 @@ where
         partition_range: &Range<Key>,
         ctx: &RequestContext,
     ) -> usize {
-        match self.search(key, lsn, ctx) {
+        match self.search(key, lsn) {
             Some(search_result) => {
                 if search_result.layer.is_incremental() {
                     (Self::is_reimage_worthy(&search_result.layer, partition_range, ctx).unwrap()
@@ -746,7 +779,7 @@ where
 
     /// Return all L0 delta layers
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<L>>> {
-        Ok(self.l0_delta_layers.clone())
+        Ok(self.l0_delta_layers.iter().map(|r| r.0.clone()).collect())
     }
 
     /// debugging function to print out the contents of the layer map
@@ -853,14 +886,10 @@ mod tests {
             map.batch_update().insert_historic(remote.clone());
             assert_eq!(count_layer_in(&map, &remote), expected_in_counts);
 
-            let replaced = map
+            assert!(map
                 .batch_update()
                 .replace_historic(&remote, downloaded.clone())
-                .expect("name derived attributes are the same");
-            assert!(
-                matches!(replaced, Replacement::Replaced { .. }),
-                "{replaced:?}"
-            );
+                .expect("name derived attributes are the same"));
             assert_eq!(count_layer_in(&map, &downloaded), expected_in_counts);
 
             map.batch_update().remove_historic(downloaded.clone());
