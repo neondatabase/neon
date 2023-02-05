@@ -2441,6 +2441,14 @@ impl Tenant {
     pub async fn calculate_synthetic_size(&self, ctx: &RequestContext) -> anyhow::Result<u64> {
         let inputs = self.gather_size_inputs(ctx).await?;
 
+        self.calc_and_update_cached_synthetic_size(&inputs)
+    }
+
+    /// Calculate synthetic size , cache it and set metric value
+    pub fn calc_and_update_cached_synthetic_size(
+        &self,
+        inputs: &size::ModelInputs,
+    ) -> anyhow::Result<u64> {
         let size = inputs.calculate()?;
 
         self.cached_synthetic_tenant_size
@@ -2453,6 +2461,7 @@ impl Tenant {
 
         Ok(size)
     }
+
     pub fn get_cached_synthetic_size(&self) -> u64 {
         self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
     }

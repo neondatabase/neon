@@ -2,6 +2,7 @@ from typing import Any, List, Tuple
 
 import pytest
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
 
@@ -367,6 +368,17 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     prev = collected_responses[-1][1]
 
     assert size_after == prev, "size after restarting pageserver should not have changed"
+
+    ps_metrics = parse_metrics(http_client.get_metrics(), "pageserver")
+    tenant_metric_filter = {
+        "tenant_id": str(tenant_id),
+    }
+
+    tenant_size_metric = int(
+        ps_metrics.query_one("pageserver_tenant_synthetic_size", filter=tenant_metric_filter).value
+    )
+
+    assert tenant_size_metric == size_after, "API size value should be equal to metric size value"
 
 
 def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
