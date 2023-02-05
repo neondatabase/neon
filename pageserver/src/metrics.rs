@@ -150,6 +150,15 @@ pub static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .expect("Failed to register pageserver_tenant_states_count metric")
 });
 
+pub static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "pageserver_tenant_synthetic_size",
+        "Synthetic size of each tenant",
+        &["tenant_id"]
+    )
+    .expect("Failed to register pageserver_tenant_synthetic_size metric")
+});
+
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
 // or in testing they estimate how much we would upload if we did.
 static NUM_PERSISTENT_FILES_CREATED: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -593,6 +602,7 @@ impl Drop for TimelineMetrics {
 
 pub fn remove_tenant_metrics(tenant_id: &TenantId) {
     let tid = tenant_id.to_string();
+    let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     for state in TENANT_STATE_OPTIONS {
         let _ = TENANT_STATE_METRIC.remove_label_values(&[&tid, state]);
     }

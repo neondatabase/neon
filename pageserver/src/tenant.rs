@@ -52,7 +52,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC};
+use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
@@ -2445,6 +2445,11 @@ impl Tenant {
 
         self.cached_synthetic_tenant_size
             .store(size, Ordering::Relaxed);
+
+        TENANT_SYNTHETIC_SIZE_METRIC
+            .get_metric_with_label_values(&[&self.tenant_id.to_string()])
+            .unwrap()
+            .set(size);
 
         Ok(size)
     }
