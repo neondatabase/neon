@@ -155,6 +155,11 @@ pub struct TenantConfigRequest {
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub trace_read_requests: Option<bool>,
+    // We defer the parsing of the eviction_policy field to the request handler.
+    // Otherwise we'd have to move the types for eviction policy into this package.
+    // We might do that once the eviction feature has stabilizied.
+    // For now, this field is not even documented in the openapi_spec.yml.
+    pub eviction_policy: Option<serde_json::Value>,
 }
 
 impl TenantConfigRequest {
@@ -174,6 +179,7 @@ impl TenantConfigRequest {
             lagging_wal_timeout: None,
             max_lsn_wal_lag: None,
             trace_read_requests: None,
+            eviction_policy: None,
         }
     }
 }
@@ -263,11 +269,11 @@ pub struct LayerResidenceEvent {
     ///
     #[serde(rename = "timestamp_millis_since_epoch")]
     #[serde_as(as = "serde_with::TimestampMilliSeconds")]
-    timestamp: SystemTime,
+    pub timestamp: SystemTime,
     /// The new residence status of the layer.
-    status: LayerResidenceStatus,
+    pub status: LayerResidenceStatus,
     /// The reason why we had to record this event.
-    reason: LayerResidenceEventReason,
+    pub reason: LayerResidenceEventReason,
 }
 
 /// The reason for recording a given [`ResidenceEvent`].

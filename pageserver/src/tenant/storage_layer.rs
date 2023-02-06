@@ -13,6 +13,7 @@ use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
+use either::Either;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use pageserver_api::models::LayerAccessKind;
@@ -92,7 +93,23 @@ pub enum ValueReconstructResult {
 }
 
 #[derive(Debug)]
-pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
+pub struct LayerAccessStats(Mutex<LayerAccessStatsLocked>);
+
+/// This struct holds two instances of [`LayerAccessStatsInner`].
+/// Accesses are recorded to both instances.
+/// The `for_scraping_api`instance can be reset from the management API via [`LayerAccessStatsReset`].
+/// The `for_eviction_policy` is never reset.
+#[derive(Debug, Default, Clone)]
+struct LayerAccessStatsLocked {
+    for_scraping_api: LayerAccessStatsInner,
+    for_eviction_policy: LayerAccessStatsInner,
+}
+
+impl LayerAccessStatsLocked {
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut LayerAccessStatsInner> {
+        [&mut self.for_scraping_api, &mut self.for_eviction_policy].into_iter()
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 struct LayerAccessStatsInner {
@@ -104,10 +121,10 @@ struct LayerAccessStatsInner {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LayerAccessStatFullDetails {
-    when: SystemTime,
-    task_kind: TaskKind,
-    access_kind: LayerAccessKind,
+pub(super) struct LayerAccessStatFullDetails {
+    pub(super) when: SystemTime,
+    pub(super) task_kind: TaskKind,
+    pub(super) access_kind: LayerAccessKind,
 }
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
@@ -142,13 +159,13 @@ impl LayerAccessStatFullDetails {
 
 impl LayerAccessStats {
     pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
-        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
         new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
         new
     }
 
     pub(crate) fn for_new_layer_file() -> Self {
-        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
         new.record_residence_event(
             LayerResidenceStatus::Resident,
             LayerResidenceEventReason::LayerCreate,
@@ -176,37 +193,43 @@ impl LayerAccessStats {
         status: LayerResidenceStatus,
         reason: LayerResidenceEventReason,
     ) {
-        let mut inner = self.0.lock().unwrap();
-        inner
-            .last_residence_changes
-            .write(LayerResidenceEvent::new(status, reason));
+        let mut locked = self.0.lock().unwrap();
+        locked.iter_mut().for_each(|inner| {
+            inner
+                .last_residence_changes
+                .write(LayerResidenceEvent::new(status, reason))
+        });
     }
 
     fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
-        let mut inner = self.0.lock().unwrap();
         let this_access = LayerAccessStatFullDetails {
             when: SystemTime::now(),
             task_kind,
             access_kind,
         };
-        inner.first_access.get_or_insert(this_access);
-        inner.count_by_access_kind[access_kind] += 1;
-        inner.task_kind_flag |= task_kind;
-        inner.last_accesses.write(this_access);
+
+        let mut locked = self.0.lock().unwrap();
+        locked.iter_mut().for_each(|inner| {
+            inner.first_access.get_or_insert(this_access);
+            inner.count_by_access_kind[access_kind] += 1;
+            inner.task_kind_flag |= task_kind;
+            inner.last_accesses.write(this_access);
+        })
     }
 
     fn as_api_model(
         &self,
         reset: LayerAccessStatsReset,
     ) -> pageserver_api::models::LayerAccessStats {
-        let mut inner = self.0.lock().unwrap();
+        let mut locked = self.0.lock().unwrap();
+        let inner = &mut locked.for_scraping_api;
         let LayerAccessStatsInner {
             first_access,
             count_by_access_kind,
             task_kind_flag,
             last_accesses,
             last_residence_changes,
-        } = &*inner;
+        } = inner;
         let ret = pageserver_api::models::LayerAccessStats {
             access_count_by_access_kind: count_by_access_kind
                 .iter()
@@ -230,6 +253,20 @@ impl LayerAccessStats {
             }
         }
         ret
+    }
+
+    pub(super) fn most_recent_access_or_residence_event(
+        &self,
+    ) -> Either<LayerAccessStatFullDetails, LayerResidenceEvent> {
+        let locked = self.0.lock().unwrap();
+        let inner = &locked.for_eviction_policy;
+        match inner.last_accesses.recent() {
+            Some(a) => Either::Left(*a),
+            None => match inner.last_residence_changes.recent() {
+                Some(e) => Either::Right(e.clone()),
+                None => unreachable!("constructors for LayerAccessStats ensure that there's always a residence change event"),
+            }
+        }
     }
 }
 
