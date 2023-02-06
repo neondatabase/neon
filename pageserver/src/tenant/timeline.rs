@@ -871,7 +871,9 @@ impl Timeline {
     ///
     /// Returns:
     /// - `Ok(Some(true))` when the layer was replaced
-    /// - `Ok(Some(false))` when the layer was found, but is not downloaded
+    /// - `Ok(Some(false))` when the layer was found, but no changes were made
+    ///    - evictee was not yet downloaded
+    ///    - layermap replacement failed
     /// - `Ok(None)` when the layer is not found
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
@@ -910,13 +912,43 @@ impl Timeline {
         let gc_lock = self.layer_removal_cs.lock().await;
         let mut layers = self.layers.write().unwrap();
         let mut updates = layers.batch_update();
-        self.delete_historic_layer(&gc_lock, local_layer, &mut updates)?;
-        updates.insert_historic(new_remote_layer);
+
+        let replaced = match updates.replace_historic(&local_layer, new_remote_layer)? {
+            super::layer_map::Replacement::Replaced { .. } => {
+                let layer_size = local_layer.file_size();
+
+                if let Err(e) = local_layer.delete() {
+                    error!("failed to remove layer file on evict after replacement: {e:#?}");
+                }
+
+                if let Some(layer_size) = layer_size {
+                    self.metrics.resident_physical_size_gauge.sub(layer_size);
+                }
+
+                true
+            }
+            super::layer_map::Replacement::NotFound => {
+                debug!(evicted=?local_layer, "lost the race to evict layer");
+                false
+            }
+            super::layer_map::Replacement::RemovalBuffered => {
+                unreachable!("not doing anything else in this batch")
+            }
+            super::layer_map::Replacement::Unexpected(other) => {
+                error!(
+                    local_layer.ptr=?Arc::as_ptr(&local_layer),
+                    other.ptr=?Arc::as_ptr(&other),
+                    ?other,
+                    "failed to replace");
+                false
+            }
+        };
+
         updates.flush();
         drop(layers);
         drop(gc_lock);
 
-        Ok(Some(true))
+        Ok(Some(replaced))
     }
 }
 
