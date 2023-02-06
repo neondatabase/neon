@@ -115,7 +115,7 @@ pub(super) struct LayerAccessStatFullDetails {
 pub enum LayerAccessStatsReset {
     NoReset,
     JustTaskKindFlags,
-    AllStats,
+    AllButResidenceChanges,
 }
 
 fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u64 {
@@ -208,7 +208,7 @@ impl LayerAccessStats {
             task_kind_flag,
             last_accesses,
             last_residence_changes,
-        } = &*inner;
+        } = &mut *inner;
         let ret = pageserver_api::models::LayerAccessStats {
             access_count_by_access_kind: count_by_access_kind
                 .iter()
@@ -227,8 +227,11 @@ impl LayerAccessStats {
             LayerAccessStatsReset::JustTaskKindFlags => {
                 inner.task_kind_flag.clear();
             }
-            LayerAccessStatsReset::AllStats => {
-                *inner = LayerAccessStatsInner::default();
+            LayerAccessStatsReset::AllButResidenceChanges => {
+                *first_access = None;
+                count_by_access_kind.clear();
+                task_kind_flag.clear();
+                last_accesses.clear();
             }
         }
         ret

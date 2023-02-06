@@ -28,6 +28,10 @@ impl<T, const L: usize> HistoryBufferWithDropCounter<T, L> {
             drop_count: self.drop_count,
         }
     }
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+        self.drop_count = 0;
+    }
 }
 
 impl<T, const L: usize> Default for HistoryBufferWithDropCounter<T, L> {
