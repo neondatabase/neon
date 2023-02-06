@@ -496,7 +496,11 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
         .map_err(ApiError::InternalServerError)?;
 
     let size = if !inputs_only.unwrap_or(false) {
-        Some(inputs.calculate().map_err(ApiError::InternalServerError)?)
+        Some(
+            tenant
+                .calc_and_update_cached_synthetic_size(&inputs)
+                .map_err(ApiError::InternalServerError)?,
+        )
     } else {
         None
     };

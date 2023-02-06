@@ -52,7 +52,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC};
+use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
@@ -2441,13 +2441,27 @@ impl Tenant {
     pub async fn calculate_synthetic_size(&self, ctx: &RequestContext) -> anyhow::Result<u64> {
         let inputs = self.gather_size_inputs(ctx).await?;
 
+        self.calc_and_update_cached_synthetic_size(&inputs)
+    }
+
+    /// Calculate synthetic size , cache it and set metric value
+    pub fn calc_and_update_cached_synthetic_size(
+        &self,
+        inputs: &size::ModelInputs,
+    ) -> anyhow::Result<u64> {
         let size = inputs.calculate()?;
 
         self.cached_synthetic_tenant_size
             .store(size, Ordering::Relaxed);
 
+        TENANT_SYNTHETIC_SIZE_METRIC
+            .get_metric_with_label_values(&[&self.tenant_id.to_string()])
+            .unwrap()
+            .set(size);
+
         Ok(size)
     }
+
     pub fn get_cached_synthetic_size(&self) -> u64 {
         self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
     }
