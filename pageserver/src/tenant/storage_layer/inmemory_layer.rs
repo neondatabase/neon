@@ -53,6 +53,15 @@ pub struct InMemoryLayer {
     inner: RwLock<InMemoryLayerInner>,
 }
 
+impl std::fmt::Debug for InMemoryLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryLayer")
+            .field("start_lsn", &self.start_lsn)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
 pub struct InMemoryLayerInner {
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is None
@@ -69,6 +78,14 @@ pub struct InMemoryLayerInner {
     /// Each serialized Value is preceded by a 'u32' length field.
     /// PerSeg::page_versions map stores offsets into this file.
     file: EphemeralFile,
+}
+
+impl std::fmt::Debug for InMemoryLayerInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryLayerInner")
+            .field("end_lsn", &self.end_lsn)
+            .finish()
+    }
 }
 
 impl InMemoryLayerInner {

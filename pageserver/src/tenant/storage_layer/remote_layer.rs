@@ -21,7 +21,14 @@ use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
 use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
 
-#[derive(Debug)]
+/// RemoteLayer is a not yet downloaded [`ImageLayer`] or
+/// [`crate::storage_layer::DeltaLayer`].
+///
+/// RemoteLayer might be downloaded on-demand during operations which are
+/// allowed download remote layers and during which, it gets replaced with a
+/// concrete `DeltaLayer` or `ImageLayer`.
+///
+/// See: [`crate::context::RequestContext`] for authorization to download
 pub struct RemoteLayer {
     tenantid: TenantId,
     timelineid: TimelineId,
@@ -37,6 +44,16 @@ pub struct RemoteLayer {
     is_incremental: bool,
 
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
+}
+
+impl std::fmt::Debug for RemoteLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteLayer")
+            .field("file_name", &self.file_name)
+            .field("layer_metadata", &self.layer_metadata)
+            .field("is_incremental", &self.is_incremental)
+            .finish()
+    }
 }
 
 impl Layer for RemoteLayer {
