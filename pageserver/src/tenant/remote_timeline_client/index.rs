@@ -214,7 +214,7 @@ impl IndexPart {
     /// used to understand later versions.
     ///
     /// Version is currently informative only.
-    const LATEST_VERSION: usize = 1;
+    const LATEST_VERSION: usize = 2;
     pub const FILE_NAME: &'static str = "index_part.json";
 
     pub fn new(
@@ -264,6 +264,7 @@ impl From<&'_ LayerFileMetadata> for IndexLayerMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repository::Key;
 
     #[test]
     fn v0_indexpart_is_parsed() {
@@ -287,13 +288,22 @@ mod tests {
     }
 
     #[test]
-    fn v1_indexpart_is_parsed() {
+    fn v2_indexpart_is_parsed() {
         let example = r#"{
-            "version":1,
+            "version": 2,
             "timeline_layers":["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"],
             "layer_metadata":{
-                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": { "file_size": 25600000 },
-                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": { "file_size": 9007199254741001 }
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9": {
+                    "file_size": 25600000,
+                    "holes": [{"start": "000000000000000000000000000000000000", "end": "010000000000000000000000000000000000"}]
+                },
+                "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51": {
+                     "file_size": 9007199254741001,
+                     "holes": [
+                          {"start": "010000000000000000000000000000000000", "end": "020000000000000000000000000000000001"},
+                          {"start": "030000000000000000000000000000000000", "end": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"}
+                      ]
+                }
             },
             "disk_consistent_lsn":"0/16960E8",
             "metadata_bytes":[113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
@@ -301,18 +311,20 @@ mod tests {
 
         let expected = IndexPart {
             // note this is not verified, could be anything, but exists for humans debugging.. could be the git version instead?
-            version: 1,
+            version: 2,
             timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
                     file_size: Some(25600000),
-                    holes: None,
+					holes: Some(vec![Hole(Key::from_hex("000000000000000000000000000000000000").unwrap()..Key::from_hex("010000000000000000000000000000000000").unwrap())]),
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
                     file_size: Some(9007199254741001),
-                    holes: None,
+					holes: Some(vec![Hole(Key::from_hex("010000000000000000000000000000000000").unwrap()..Key::from_hex("020000000000000000000000000000000001").unwrap()),
+									Hole(Key::from_hex("030000000000000000000000000000000000").unwrap()..Key::from_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap()),
+					]),
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),

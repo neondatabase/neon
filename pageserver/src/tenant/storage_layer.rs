@@ -396,7 +396,7 @@ pub struct LayerDescriptor {
 
 /// Wrapper for key range to provide reverse ordering by range length (for BinaryHeap)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Hole(Range<Key>);
+pub struct Hole(pub Range<Key>);
 
 // Alter default serde serialization for Key class to reduce size of index_part.json file.
 // Instead of dumping Key as json object with six field? we just store hex string representing key (as in file name)
