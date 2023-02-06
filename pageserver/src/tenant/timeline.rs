@@ -871,19 +871,18 @@ impl Timeline {
     ///
     /// Returns:
     /// - `Ok(Some(true))` when the layer was replaced
-    /// - `Ok(Some(false))` when
-    ///     - the layer was not found
-    ///     - or remote storage is not configured (TODO: make error)
+    /// - `Ok(Some(false))` when the layer was found, but is not downloaded
     /// - `Ok(None)` when the layer is not found
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         if local_layer.is_remote_layer() {
             return Ok(Some(false));
         }
-        let Some(remote_client) = &self.remote_client else { return Ok(Some(false)) };
 
         // ensure the current layer is uploaded for sure
-        remote_client
+        self.remote_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?
             .wait_completion()
             .await
             .context("wait for layer upload ops to complete")?;
