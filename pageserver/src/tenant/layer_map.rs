@@ -76,7 +76,7 @@ impl<L: ?Sized> Eq for LayerRef<L> {}
 
 impl<L: ?Sized> Hash for LayerRef<L> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Arc::into_raw(Arc::clone(&self.0)).hash(state)
+        Arc::as_ptr(&self.0).hash(state)
     }
 }
 
