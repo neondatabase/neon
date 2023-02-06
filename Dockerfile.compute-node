@@ -228,7 +228,9 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     mkdir /var/db/postgres/compute && mkdir /var/db/postgres/specs && \
     chown -R postgres:postgres /var/db/postgres && \
     chmod 0750 /var/db/postgres/compute && \
-    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig
+    echo '/usr/local/lib' >> /etc/ld.so.conf && /sbin/ldconfig && \
+    # create folder for file cache
+    mkdir -p -m 777 /neon/cache
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
