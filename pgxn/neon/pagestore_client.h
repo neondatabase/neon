@@ -32,6 +32,7 @@ typedef enum
 	T_NeonNblocksRequest,
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
+	T_NeonFcntlRequest,
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -39,6 +40,7 @@ typedef enum
 	T_NeonGetPageResponse,
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
+	T_NeonFcntlResponse,
 }			NeonMessageTag;
 
 /* base struct for c-style inheritance */
@@ -96,6 +98,15 @@ typedef struct
 	BlockNumber blkno;
 }			NeonGetPageRequest;
 
+typedef struct
+{
+	NeonRequest req;
+	int cmd;
+	int arg;
+	int size;
+	char data[FLEXIBLE_ARRAY_MEMBER];
+}			NeonFcntlRequest;
+
 /* supertype of all the Neon*Response structs below */
 typedef struct
 {
@@ -119,6 +130,13 @@ typedef struct
 	NeonMessageTag tag;
 	char		page[FLEXIBLE_ARRAY_MEMBER];
 }			NeonGetPageResponse;
+
+typedef struct
+{
+	NeonMessageTag tag;
+	int         size;
+	char		data[FLEXIBLE_ARRAY_MEMBER];
+}			NeonFcntlResponse;
 
 #define PS_GETPAGERESPONSE_SIZE (MAXALIGN(offsetof(NeonGetPageResponse, page) + BLCKSZ))
 

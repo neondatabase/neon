@@ -242,3 +242,7 @@ pub const PGDATA_SPECIAL_FILES: [&str; 3] =
     ["pg_hba.conf", "pg_ident.conf", "postgresql.auto.conf"];
 
 pub static PG_HBA: &str = include_str!("../samples/pg_hba.conf");
+
+pub const SMGR_FCNTL_READ_TEMP_FILE: u32 = 2;
+pub const SMGR_FCNTL_WRITE_TEMP_FILE: u32 = 3;
+pub const SMGR_FCNTL_CLOSE_TEMP_FILE: u32 = 4;

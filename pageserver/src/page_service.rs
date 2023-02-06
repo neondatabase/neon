@@ -17,13 +17,14 @@ use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
-    PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
-    PagestreamNblocksRequest, PagestreamNblocksResponse,
+    PagestreamFcntlRequest, PagestreamFcntlResponse, PagestreamFeMessage, PagestreamGetPageRequest,
+    PagestreamGetPageResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
 use pq_proto::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::io;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::str;
 use std::str::FromStr;
@@ -51,8 +52,9 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::mgr;
 use crate::tenant::{Tenant, Timeline};
 use crate::trace::Tracer;
+use crate::virtual_file::VirtualFile;
 
-use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
+use postgres_ffi::pg_constants::{self, DEFAULTTABLESPACE_OID};
 use postgres_ffi::BLCKSZ;
 
 fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + '_ {
@@ -258,7 +260,7 @@ impl PageRequestMetrics {
 }
 
 struct PageServerHandler {
-    _conf: &'static PageServerConf,
+    conf: &'static PageServerConf,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 
@@ -276,7 +278,7 @@ impl PageServerHandler {
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {
-            _conf: conf,
+            conf,
             auth,
             claims: None,
             connection_ctx,
@@ -368,6 +370,13 @@ impl PageServerHandler {
                 PagestreamFeMessage::DbSize(req) => {
                     let _timer = metrics.get_db_size.start_timer();
                     self.handle_db_size_request(&timeline, &req, &ctx).await
+                }
+                PagestreamFeMessage::Fcntl(req) => {
+                    match self.handle_fcntl_request(&timeline, &req, &ctx).await {
+                        Ok(None) => continue,
+                        Ok(Some(response)) => Ok(response),
+                        Err(err) => Err(err),
+                    }
                 }
             };
 
@@ -560,6 +569,50 @@ impl PageServerHandler {
             lsn, **latest_gc_cutoff_lsn
         );
         Ok(lsn)
+    }
+
+    async fn handle_fcntl_request(
+        &self,
+        timeline: &Timeline,
+        req: &PagestreamFcntlRequest,
+        _ctx: &RequestContext,
+    ) -> anyhow::Result<Option<PagestreamBeMessage>> {
+        let path = self
+            .conf
+            .timeline_path(&timeline.timeline_id, &timeline.tenant_id)
+            .join(format!("__temp_file.{}", req.arg));
+        match req.cmd {
+            pg_constants::SMGR_FCNTL_WRITE_TEMP_FILE => {
+                let mut file = VirtualFile::open_with_options(
+                    &path,
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .create(true),
+                )?;
+                file.write_all(&req.data)?;
+                drop(file);
+                // We do not need files oe we have send them to compute
+                std::fs::remove_file(&path)?;
+                Ok(None)
+            }
+            pg_constants::SMGR_FCNTL_READ_TEMP_FILE => {
+                let mut file = VirtualFile::open(&path)?;
+                let mut data = Vec::new();
+                file.read_to_end(&mut data)?;
+                Ok(Some(PagestreamBeMessage::Fcntl(PagestreamFcntlResponse {
+                    data: Bytes::copy_from_slice(&data),
+                })))
+            }
+            pg_constants::SMGR_FCNTL_CLOSE_TEMP_FILE => {
+                std::fs::remove_file(&path)?;
+                Ok(None)
+            }
+            _ => {
+                warn!("Fcntl request {} is not supported", req.cmd);
+                Ok(None)
+            }
+        }
     }
 
     #[instrument(skip(self, timeline, req, ctx), fields(rel = %req.rel, req_lsn = %req.lsn))]

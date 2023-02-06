@@ -318,6 +318,7 @@ pub enum PagestreamFeMessage {
     Nblocks(PagestreamNblocksRequest),
     GetPage(PagestreamGetPageRequest),
     DbSize(PagestreamDbSizeRequest),
+    Fcntl(PagestreamFcntlRequest),
 }
 
 // Wrapped in libpq CopyData
@@ -327,6 +328,7 @@ pub enum PagestreamBeMessage {
     GetPage(PagestreamGetPageResponse),
     Error(PagestreamErrorResponse),
     DbSize(PagestreamDbSizeResponse),
+    Fcntl(PagestreamFcntlResponse),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -358,6 +360,18 @@ pub struct PagestreamDbSizeRequest {
     pub dbnode: u32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct PagestreamFcntlRequest {
+    pub cmd: u32,
+    pub arg: u32,
+    pub data: Bytes,
+}
+
+#[derive(Debug)]
+pub struct PagestreamFcntlResponse {
+    pub data: Bytes,
+}
+
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
     pub exists: bool,
@@ -381,6 +395,18 @@ pub struct PagestreamErrorResponse {
 #[derive(Debug)]
 pub struct PagestreamDbSizeResponse {
     pub db_size: i64,
+}
+
+fn read_bytes<R: std::io::Read>(body: &mut R) -> anyhow::Result<Bytes> {
+    let size = body.read_u32::<BigEndian>()?;
+    let mut data = vec![0u8; size as usize];
+    body.read_exact(&mut data)?;
+    Ok(Bytes::copy_from_slice(&data))
+}
+
+fn put_bytes(dst: &mut BytesMut, body: &Bytes) {
+    dst.put_u32(body.len() as u32);
+    dst.put(&body[..]);
 }
 
 impl PagestreamFeMessage {
@@ -424,6 +450,13 @@ impl PagestreamFeMessage {
                 bytes.put_u8(u8::from(req.latest));
                 bytes.put_u64(req.lsn.0);
                 bytes.put_u32(req.dbnode);
+            }
+
+            Self::Fcntl(req) => {
+                bytes.put_u8(4);
+                bytes.put_u32(req.cmd);
+                bytes.put_u32(req.arg);
+                put_bytes(&mut bytes, &req.data);
             }
         }
 
@@ -475,6 +508,11 @@ impl PagestreamFeMessage {
                 lsn: Lsn::from(body.read_u64::<BigEndian>()?),
                 dbnode: body.read_u32::<BigEndian>()?,
             })),
+            4 => Ok(PagestreamFeMessage::Fcntl(PagestreamFcntlRequest {
+                cmd: body.read_u32::<BigEndian>()?,
+                arg: body.read_u32::<BigEndian>()?,
+                data: read_bytes(body)?,
+            })),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
         }
     }
@@ -508,6 +546,10 @@ impl PagestreamBeMessage {
             Self::DbSize(resp) => {
                 bytes.put_u8(104); /* tag from pagestore_client.h */
                 bytes.put_i64(resp.db_size);
+            }
+            Self::Fcntl(resp) => {
+                bytes.put_u8(105); /* tag from pagestore_client.h */
+                put_bytes(&mut bytes, &resp.data);
             }
         }
 
@@ -560,6 +602,11 @@ mod tests {
                 latest: true,
                 lsn: Lsn(4),
                 dbnode: 7,
+            }),
+            PagestreamFeMessage::Fcntl(PagestreamFcntlRequest {
+                cmd: 1,
+				arg: 2,
+                data: Bytes::copy_from_slice(&[1, 2, 3, 4, 5]),
             }),
         ];
         for msg in messages {

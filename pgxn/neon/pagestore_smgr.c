@@ -888,6 +888,16 @@ nm_pack_request(NeonRequest * msg)
 	switch (messageTag(msg))
 	{
 			/* pagestore_client -> pagestore */
+		case T_NeonFcntlRequest:
+			{
+				NeonFcntlRequest *msg_req = (NeonFcntlRequest *) msg;
+				pq_sendint32(&s, msg_req->cmd);
+				pq_sendint32(&s, msg_req->arg);
+				pq_sendint32(&s, msg_req->size);
+				pq_sendbytes(&s, msg_req->data, msg_req->size);
+
+				break;
+			}
 		case T_NeonExistsRequest:
 			{
 				NeonExistsRequest *msg_req = (NeonExistsRequest *) msg;
@@ -945,6 +955,7 @@ nm_pack_request(NeonRequest * msg)
 		case T_NeonGetPageResponse:
 		case T_NeonErrorResponse:
 		case T_NeonDbSizeResponse:
+		case T_NeonFcntlResponse:
 		default:
 			elog(ERROR, "unexpected neon message tag 0x%02x", msg->tag);
 			break;
@@ -994,7 +1005,7 @@ nm_unpack_response(StringInfo s)
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
-				
+
 				Assert(msg_resp->tag == T_NeonGetPageResponse);
 
 				resp = (NeonResponse *) msg_resp;
@@ -1025,6 +1036,21 @@ nm_unpack_response(StringInfo s)
 				msg_resp = palloc0(sizeof(NeonErrorResponse) + msglen + 1);
 				msg_resp->tag = tag;
 				memcpy(msg_resp->message, msgtext, msglen + 1);
+				pq_getmsgend(s);
+
+				resp = (NeonResponse *) msg_resp;
+				break;
+			}
+
+		case T_NeonFcntlResponse:
+			{
+				NeonFcntlResponse *msg_resp;
+				int data_size = pq_getmsgint(s, 4);
+
+				msg_resp = MemoryContextAllocZero(MyPState->bufctx, sizeof(NeonFcntlResponse) + data_size);
+				msg_resp->tag = tag;
+				msg_resp->size = data_size;
+				memcpy(msg_resp->data, pq_getmsgbytes(s, data_size), data_size);
 				pq_getmsgend(s);
 
 				resp = (NeonResponse *) msg_resp;
@@ -2547,6 +2573,57 @@ AtEOXact_neon(XactEvent event, void *arg)
 						 (errmsg("unlogged index build was not properly finished"))));
 			}
 			break;
+	}
+}
+
+void
+neon_fcntl(SMgrRelation reln, int cmd, int arg, void* data, size_t size)
+{
+	if (cmd == SMGR_FCNTL_READ_TEMP_FILE)
+	{
+		NeonFcntlRequest req;
+		NeonResponse *resp;
+		req.req.tag = T_NeonFcntlRequest;
+		req.cmd = cmd;
+		req.arg = arg;
+		req.size = 0;
+		resp = page_server_request(&req);
+		switch (resp->tag)
+		{
+			case T_NeonFcntlResponse:
+			{
+				NeonFcntlResponse* fcntl_resp = (NeonFcntlResponse*) resp;
+				if (fcntl_resp->size != size)
+					ereport(ERROR,
+							(errcode(ERRCODE_IO_ERROR),
+							 errmsg("mismatched fcntl response size %u vs. %u",
+									(int)fcntl_resp->size, (int)size)));
+				memcpy(data, fcntl_resp->data, fcntl_resp->size);
+			}
+			break;
+
+			case T_NeonErrorResponse:
+				ereport(ERROR,
+						(errcode(ERRCODE_IO_ERROR),
+						 errmsg("could not receive temp file %u from page server",
+								reln->smgr_rnode.node.relNode)));
+				break;
+
+			default:
+				elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
+		}
+	}
+	else /* no response is expected */
+	{
+		NeonFcntlRequest* req = (NeonFcntlRequest *)palloc(sizeof(NeonFcntlRequest) + size);
+		req->req.tag = T_NeonFcntlRequest;
+		req->cmd = cmd;
+		req->arg = arg;
+		req->size = (int)size;
+		memcpy(req->data, data, size);
+		page_server->send((NeonRequest*) req);
+		page_server->flush();
+		pfree(req);
 	}
 }
 
