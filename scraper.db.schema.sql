@@ -1,55 +1,51 @@
-
-CREATE TABLE layer_map (
+CREATE TABLE scrapes (
     scrape_ts timestamp with time zone,
     pageserver_id text,
-    launch_id text,
+    pageserver_launch_timestamp timestamp with time zone,
     tenant_id text,
     timeline_id text,
-    layer_map jsonb
+    layer_map_dump jsonb
 );
 
-CREATE VIEW last_access_ts AS
- SELECT layer_map.scrape_ts,
-    layer_map.tenant_id,
-    layer_map.timeline_id,
-    layer_info.remote,
-    layer_info.layer_file_name,
-    layer_info.layer_file_size,
-    to_timestamp(((max(most_recent_rec.when_millis_since_epoch) / (1000)::numeric))::double precision) AS last_access
-   FROM layer_map,
-    LATERAL jsonb_to_recordset(layer_map.layer_map['historic_layers'::text]) layer_info(kind text, remote boolean, layer_file_name text, layer_file_size numeric, access_stats jsonb),
-    LATERAL jsonb_to_record(layer_info.access_stats) access_stats_rec(most_recent jsonb),
-    LATERAL jsonb_to_recordset(
-        CASE
-            WHEN (jsonb_array_length(access_stats_rec.most_recent) > 0) THEN access_stats_rec.most_recent
-            ELSE '[{"when_millis_since_epoch": 0}]'::jsonb
-        END) most_recent_rec(when_millis_since_epoch numeric)
-  GROUP BY layer_map.scrape_ts, layer_map.tenant_id, layer_map.timeline_id, layer_info.layer_file_name, layer_info.remote, layer_info.layer_file_size;
+--- what follows are example queries ---
 
+--- how many layer accesses did we have per layers/timeline/tenant in the last 30 seconds
+with flattened_to_access_count as (
+    select *
+    from scrapes as scrapes
+             cross join jsonb_to_recordset(scrapes.layer_map_dump -> 'historic_layers') historic_layer(layer_file_name text, access_stats jsonb)
+             cross join jsonb_to_record(historic_layer.access_stats) access_stats(access_count_by_access_kind jsonb)
+             cross join LATERAL (select key as access_kind, value::numeric as access_count from jsonb_each(access_count_by_access_kind)) access_count
+)
+select tenant_id, timeline_id, layer_file_name, access_kind, SUM(access_count) access_count_sum
+from flattened_to_access_count
+where scrape_ts > (clock_timestamp() - '30 second'::interval)
+group by rollup(tenant_id, timeline_id, layer_file_name, access_kind)
+having SUM(access_count) > 0
+order by access_count_sum desc, tenant_id desc, timeline_id desc, layer_file_name, access_kind;
 
-CREATE VIEW last_access AS
- SELECT last_access_ts.tenant_id,
-    last_access_ts.timeline_id,
-    last_access_ts.layer_file_name,
-    max(last_access_ts.last_access) AS last_access,
-    max(last_access_ts.layer_file_size) AS layer_file_size
-   FROM last_access_ts
-  GROUP BY last_access_ts.tenant_id, last_access_ts.timeline_id, last_access_ts.layer_file_name;
-
-
-CREATE VIEW layer_files AS
- SELECT DISTINCT last_access_ts.tenant_id,
-    last_access_ts.timeline_id,
-    last_access_ts.layer_file_name
-   FROM last_access_ts;
-
-
-
-CREATE VIEW most_recent_scrape AS
- SELECT last_access_ts.tenant_id,
-    last_access_ts.timeline_id,
-    last_access_ts.layer_file_name,
-    max(last_access_ts.scrape_ts) AS most_recent_scrape_ts
-   FROM last_access_ts
-  GROUP BY last_access_ts.tenant_id, last_access_ts.timeline_id, last_access_ts.layer_file_name;
-
+--- residence change events in the last 30 minutes
+-- (precise, unless more residence changes happen between scrapes than layer access stats buffer)
+with flattened_to_residence_changes as (select *
+    from scrapes as scrapes
+             cross join jsonb_to_recordset(scrapes.layer_map_dump -> 'historic_layers') historic_layer(layer_file_name text, access_stats jsonb)
+             cross join jsonb_to_record(historic_layer.access_stats) access_stats(residence_events_history jsonb)
+            cross join jsonb_to_record(access_stats.residence_events_history) residence_events_history(buffer jsonb, drop_count numeric)
+            cross join jsonb_to_recordset(residence_events_history.buffer) residence_events_buffer(status text, reason text, timestamp_millis_since_epoch numeric)
+        )
+, renamed as (
+    select
+        scrape_ts,
+        pageserver_launch_timestamp,
+        layer_file_name,
+        tenant_id,
+        timeline_id,
+        to_timestamp(timestamp_millis_since_epoch/1000) as residence_change_ts,
+        status,
+        reason
+    from flattened_to_residence_changes
+)
+select distinct residence_change_ts, status, reason, tenant_id, timeline_id, layer_file_name
+from renamed
+where residence_change_ts > (clock_timestamp() - '30 min'::interval)
+order by residence_change_ts desc, layer_file_name;

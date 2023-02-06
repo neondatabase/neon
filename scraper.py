@@ -14,6 +14,7 @@ import datetime
 
 import aiohttp
 import asyncpg
+import dateutil.parser
 
 
 class ClientException(Exception):
@@ -61,21 +62,24 @@ class Client:
             raise ClientException("expecting list")
         return [t["timeline_id"] for t in body]
 
-    async def get_layer_map(self, tenant_id, timeline_id, reset) -> Tuple[Optional[str], Any]:
+    async def get_layer_map(
+        self, tenant_id, timeline_id, reset
+    ) -> Tuple[Optional[datetime.datetime], Any]:
         resp = await self.sess.get(
             f"{self.endpoint}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer",
             params={"reset": reset},
         )
         if not resp.ok:
             raise ClientException(f"{resp}")
-        launch_ts = resp.headers.get("PAGESERVER_LAUNCH_TIMESTAMP", None)
+        launch_ts_str = resp.headers["PAGESERVER_LAUNCH_TIMESTAMP"]
+        launch_ts = dateutil.parser.parse(launch_ts_str)
         body = await resp.json()
         return (launch_ts, body)
 
 
 async def scrape_timeline(ps_id: str, ps_client: Client, db: asyncpg.Pool, tenant_id, timeline_id):
-    now = datetime.datetime.utcnow()
-    launch_ts, layer_map = await ps_client.get_layer_map(
+    now = datetime.datetime.now()
+    launch_ts, layer_map_dump = await ps_client.get_layer_map(
         tenant_id,
         timeline_id,
         # Reset the stats on every access to get max resolution on the task kind bitmap.
@@ -87,14 +91,14 @@ async def scrape_timeline(ps_id: str, ps_client: Client, db: asyncpg.Pool, tenan
     )
     await db.execute(
         """
-            insert into layer_map (scrape_ts, pageserver_id, launch_id, tenant_id, timeline_id, layer_map)
+            insert into scrapes (scrape_ts, pageserver_id, pageserver_launch_timestamp, tenant_id, timeline_id, layer_map_dump)
             values ($1, $2, $3, $4, $5, $6::jsonb);""",
         now,
         ps_id,
         launch_ts,
         tenant_id,
         timeline_id,
-        json.dumps(layer_map),
+        json.dumps(layer_map_dump),
     )
 
 
