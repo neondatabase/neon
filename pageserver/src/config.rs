@@ -27,8 +27,8 @@ use utils::{
     postgres_backend::AuthType,
 };
 
-use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
+use crate::tenant::config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold, TenantConf};
 use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
 use crate::{
     IGNORED_TENANT_FILE_NAME, METADATA_FILE_NAME, TENANT_CONFIG_NAME, TIMELINE_UNINIT_MARK_SUFFIX,
@@ -729,6 +729,45 @@ impl PageServerConf {
                 Some(trace_read_requests.as_bool().with_context(|| {
                     "configure option trace_read_requests is not a bool".to_string()
                 })?);
+        }
+
+        if let Some(eviction_policy) = item.get("eviction_policy") {
+            t_conf.eviction_policy = Some({
+                let table_like = eviction_policy
+                    .as_table_like()
+                    .ok_or_else(|| anyhow::anyhow!("eviction_policy must be a table-like"))?;
+                let mut kind = None;
+                let mut period = None;
+                let mut threshold = None;
+                for (key, value) in table_like.iter() {
+                    match key {
+                        "kind" => kind = Some(parse_toml_string("eviction_policy.kind", value)?),
+                        "period" => {
+                            period = Some(parse_toml_duration("eviction_policy.period", value)?)
+                        }
+                        "threshold" => {
+                            threshold =
+                                Some(parse_toml_duration("eviction_policy.threshold", value)?)
+                        }
+                        x => anyhow::bail!("unrecognized key eviction_policy.{x:?}"),
+                    }
+                }
+                match kind.as_ref().map(|s| s.as_str()) {
+                    None => anyhow::bail!("missing field eviction_policy.kind"),
+                    Some("NoEviction") => EvictionPolicy::NoEviction,
+                    Some("LayerAccessThreshold") => {
+                        EvictionPolicy::LayerAccessThreshold(EvictionPolicyLayerAccessThreshold {
+                            period: period
+                                .take()
+                                .context("missing field 'period' for eviction_policy")?,
+                            threshold: threshold
+                                .take()
+                                .context("missing field 'threshold' for eviction_policy")?,
+                        })
+                    }
+                    Some(x) => anyhow::bail!("unknown eviction_policy.kind {x:?}"),
+                }
+            });
         }
 
         Ok(t_conf)

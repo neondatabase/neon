@@ -1183,7 +1183,10 @@ impl Timeline {
             let sleep_until = match policy {
                 EvictionPolicy::NoEviction => {
                     // check again in 10 seconds; XXX config watch mechanism
-                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+                        _ = task_mgr::shutdown_watcher() => {},
+                    }
                     continue;
                 }
                 EvictionPolicy::LayerAccessThreshold(p) => {
@@ -1203,7 +1206,8 @@ impl Timeline {
             tokio::select! {
                 // XXX replace with context cancellation once that's done
                 _ = task_mgr::shutdown_watcher() => {
-                    info!("shutting down")
+                    info!("shutting down");
+                    return;
                 }
                 _ = tokio::time::sleep_until(sleep_until.into()) => { }
             }
@@ -1216,7 +1220,10 @@ impl Timeline {
             None => {
                 error!("no remote storage configured but eviction requires that");
                 // check again in 1 hour; XXX config watch mechanism
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(3600)) => {},
+                    _ = task_mgr::shutdown_watcher() => {},
+                }
                 return;
             }
             Some(c) => c,
@@ -1249,7 +1256,7 @@ impl Timeline {
                     Either::Left(mra) => mra.when,
                     Either::Right(re) => re.timestamp,
                 };
-                let no_activity_for = match last_activity_ts.duration_since(now) {
+                let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
                     Err(_e) => {
                         // NB: don't log the error. If there are many layers and the system clock
@@ -1266,6 +1273,17 @@ impl Timeline {
         };
         stats.candidates = candidates.len();
         for l in candidates {
+            // XXX would be good to batch the evictions.
+            // The way it is now, we have to rebuild the layer map after every eviction.
+            // Idea for this:
+            // - a layer should have an 'evicting' state. We set it here.
+            // - If GC / Compaction find such a layer, they skip it or otherwise
+            //   guarantee to not remove it from the layer map until 'evicting' state is over.
+            // - We finish eviction, remove the layer from the layer map, transition layer into state
+            //   'removed from layer map'.
+            // - GC / Compaction observe 'removed from layer map' state and don't touch the layer again.
+            //
+            // Also buzzword: PersistentLayerMap to deal with all of this lifecycle stuff, to keep layer_map module pure & simple.
             match self.evict_layer_impl(Arc::clone(&l), remote_client).await {
                 Ok(true) => {
                     debug!("evicted layer {}", l.short_id());
@@ -1288,7 +1306,12 @@ impl Timeline {
                 break;
             }
         }
-        info!(stats=?stats, "eviction iteration complete");
+        if stats.not_considered_due_to_clock_skew > 0 || stats.errors > 0 || stats.not_evictable > 0
+        {
+            warn!(stats=?stats, "eviction iteration complete");
+        } else {
+            info!(stats=?stats, "eviction iteration complete");
+        }
     }
 
     ///
