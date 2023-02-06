@@ -374,8 +374,8 @@ where
         let start = key.start.to_i128();
         let end = key.end.to_i128();
 
-        let layer_covers = |key: Option<LayerKey>| match key {
-            Some(key) => self.mapping.get(&key).unwrap().get_lsn_range().start >= lsn.start,
+        let layer_covers = |key: Option<&LayerKey>| match key {
+            Some(key) => self.mapping.get(key).unwrap().get_lsn_range().start >= lsn.start,
             None => false,
         };
 

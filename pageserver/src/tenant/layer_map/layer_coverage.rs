@@ -101,24 +101,24 @@ impl<Value: Clone> LayerCoverage<Value> {
     /// Get the latest (by lsn.end) layer at a given key
     ///
     /// Complexity: O(log N)
-    pub fn query(&self, key: i128) -> Option<Value> {
+    pub fn query(&self, key: i128) -> Option<&Value> {
         self.nodes
             .range(..=key)
             .rev()
             .next()?
             .1
             .as_ref()
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v)
     }
 
     /// Iterate the changes in layer coverage in a given range. You will likely
     /// want to start with self.query(key.start), and then follow up with self.range
     ///
     /// Complexity: O(log N + result_size)
-    pub fn range(&self, key: Range<i128>) -> impl '_ + Iterator<Item = (i128, Option<Value>)> {
+    pub fn range(&self, key: Range<i128>) -> impl '_ + Iterator<Item = (i128, Option<&Value>)> {
         self.nodes
             .range(key)
-            .map(|(k, v)| (*k, v.as_ref().map(|x| x.1.clone())))
+            .map(|(k, v)| (*k, v.as_ref().map(|x| &x.1)))
     }
 
     /// O(1) clone
