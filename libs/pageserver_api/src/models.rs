@@ -263,11 +263,11 @@ pub struct LayerResidenceEvent {
     ///
     #[serde(rename = "timestamp_millis_since_epoch")]
     #[serde_as(as = "serde_with::TimestampMilliSeconds")]
-    timestamp: SystemTime,
+    pub timestamp: SystemTime,
     /// The new residence status of the layer.
-    status: LayerResidenceStatus,
+    pub status: LayerResidenceStatus,
     /// The reason why we had to record this event.
-    reason: LayerResidenceEventReason,
+    pub reason: LayerResidenceEventReason,
 }
 
 /// The reason for recording a given [`ResidenceEvent`].

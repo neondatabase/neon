@@ -231,6 +231,9 @@ pub enum TaskKind {
     // Compaction. One per tenant.
     Compaction,
 
+    // Eviction. One per timeline.
+    Eviction,
+
     // Initial logical size calculation
     InitialLogicalSizeCalculation,
 

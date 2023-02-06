@@ -4,6 +4,7 @@ mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
+use either::Either;
 use fail::fail_point;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -47,7 +48,7 @@ use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
-use crate::tenant::config::TenantConfOpt;
+use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
 use pageserver_api::reltag::RelTag;
 
 use postgres_connection::PgConnectionConfig;
@@ -62,13 +63,14 @@ use utils::{
 use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
-use crate::task_mgr::TaskKind;
+use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::walredo::WalRedoManager;
 use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use walreceiver::spawn_connection_manager_task;
 
+use super::config::EvictionPolicyLayerAccessThreshold;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -801,6 +803,7 @@ impl Timeline {
     pub fn activate(self: &Arc<Self>) {
         self.set_state(TimelineState::Active);
         self.launch_wal_receiver();
+        self.launch_eviction_task();
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -869,10 +872,23 @@ impl Timeline {
 
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
-        if local_layer.is_remote_layer() {
-            return Ok(Some(false));
-        }
         let Some(remote_client) = &self.remote_client else { return Ok(Some(false)) };
+        self.evict_layer_impl(local_layer, remote_client)
+            .await
+            .map(|res| Some(res))
+    }
+
+    // The `remote_client` should be this timeline's `self.remote_client`.
+    // We make the caller provide it so that they are responsible for handling the case
+    // where someone wants to evict the layer but no remote storage is configured.
+    async fn evict_layer_impl(
+        &self,
+        local_layer: Arc<dyn PersistentLayer>,
+        remote_client: &Arc<RemoteTimelineClient>,
+    ) -> anyhow::Result<bool> {
+        if local_layer.is_remote_layer() {
+            return Ok(false);
+        }
 
         // ensure the current layer is uploaded for sure
         remote_client
@@ -915,7 +931,7 @@ impl Timeline {
         drop(layers);
         drop(gc_lock);
 
-        Ok(Some(true))
+        Ok(true)
     }
 }
 
@@ -954,6 +970,13 @@ impl Timeline {
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
+    }
+
+    fn get_eviction_policy(&self) -> EvictionPolicy {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .eviction_policy
+            .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
 
     /// Open a Timeline handle.
@@ -1133,6 +1156,139 @@ impl Timeline {
             crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
             background_ctx,
         );
+    }
+
+    fn launch_eviction_task(self: &Arc<Self>) {
+        let ctx = RequestContext::todo_child(TaskKind::Eviction, DownloadBehavior::Error);
+        let self_clone = Arc::clone(self);
+        task_mgr::spawn(
+            BACKGROUND_RUNTIME.handle(),
+            TaskKind::Eviction,
+            Some(self.tenant_id),
+            Some(self.timeline_id),
+            &format!("eviction for {}/{}", self.tenant_id, self.timeline_id),
+            false,
+            async move {
+                self_clone.eviction_task(&ctx).await;
+                Ok(())
+            },
+        );
+    }
+
+    #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
+    async fn eviction_task(self: Arc<Self>, _ctx: &RequestContext) {
+        loop {
+            let policy = self.get_eviction_policy();
+            debug!("eviction policy is {policy:?}");
+            let sleep_until = match policy {
+                EvictionPolicy::NoEviction => {
+                    // check again in 10 seconds; XXX config watch mechanism
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    continue;
+                }
+                EvictionPolicy::LayerAccessThreshold(p) => {
+                    let start = Instant::now();
+                    self.eviction_iteration_threshold(p).await;
+                    let elapsed = start.elapsed();
+                    if elapsed > p.period {
+                        warn!(
+                            configured_period = %humantime::format_duration(p.period),
+                            last_period = %humantime::format_duration(elapsed),
+                            "this eviction period took longer than the configured period"
+                        );
+                    }
+                    start + p.period
+                }
+            };
+            tokio::select! {
+                // XXX replace with context cancellation once that's done
+                _ = task_mgr::shutdown_watcher() => {
+                    info!("shutting down")
+                }
+                _ = tokio::time::sleep_until(sleep_until.into()) => { }
+            }
+        }
+    }
+
+    async fn eviction_iteration_threshold(self: &Arc<Self>, p: EvictionPolicyLayerAccessThreshold) {
+        let now = SystemTime::now();
+        let remote_client = match self.remote_client.as_ref() {
+            None => {
+                error!("no remote storage configured but eviction requires that");
+                // check again in 1 hour; XXX config watch mechanism
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                return;
+            }
+            Some(c) => c,
+        };
+        #[allow(dead_code)]
+        #[derive(Debug, Default)]
+        struct EvictionStats {
+            not_considered_due_to_clock_skew: usize,
+            candidates: usize,
+            evicted: usize,
+            errors: usize,
+            not_evictable: usize,
+        }
+        let mut stats = EvictionStats::default();
+        // Gather layers for eviction.
+        // NB: all the checks can be invalidated as soon as we release the layer map lock.
+        // We don't want to hold the layer map lock during eviction.
+        // So, we just need to deal with this.
+        let candidates: Vec<Arc<dyn PersistentLayer>> = {
+            let layers = self.layers.read().unwrap();
+            let mut candidates = Vec::new();
+            for hist_layer in layers.iter_historic_layers() {
+                if hist_layer.is_remote_layer() {
+                    continue;
+                }
+                let last_activity_ts = match hist_layer
+                    .access_stats()
+                    .most_recent_access_or_residence_event()
+                {
+                    Either::Left(mra) => mra.when,
+                    Either::Right(re) => re.timestamp,
+                };
+                let no_activity_for = match last_activity_ts.duration_since(now) {
+                    Ok(d) => d,
+                    Err(_e) => {
+                        // NB: don't log the error. If there are many layers and the system clock
+                        // is skewed, we'd be flooding the log.
+                        stats.not_considered_due_to_clock_skew += 1;
+                        continue;
+                    }
+                };
+                if no_activity_for > p.threshold {
+                    candidates.push(hist_layer)
+                }
+            }
+            candidates
+        };
+        stats.candidates = candidates.len();
+        for l in candidates {
+            match self.evict_layer_impl(Arc::clone(&l), remote_client).await {
+                Ok(true) => {
+                    debug!("evicted layer {}", l.short_id());
+                    stats.evicted += 1;
+                }
+                Ok(false) => {
+                    debug!("layer is not evictable: {}", l.short_id());
+                    stats.not_evictable += 1;
+                }
+                Err(e) => {
+                    // TODO: do we want to log more info about the layer here?
+                    // It is possible to run into this case if the layer is deleted
+                    // inbetween us getting it earlier, and the eviction attempt.
+                    warn!("failed to evict layer {}: {:?}", l.short_id(), e);
+                    stats.errors += 1;
+                }
+            }
+            if task_mgr::is_shutdown_requested() {
+                debug!("bailing out early because shutdown requested");
+                break;
+            }
+        }
+        info!(stats=?stats, "eviction iteration complete");
     }
 
     ///

@@ -13,6 +13,7 @@ use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
+use either::Either;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use pageserver_api::models::LayerAccessKind;
@@ -104,10 +105,10 @@ struct LayerAccessStatsInner {
 }
 
 #[derive(Debug, Clone)]
-struct LayerAccessStatFullDetails {
-    when: SystemTime,
-    task_kind: TaskKind,
-    access_kind: LayerAccessKind,
+pub(super) struct LayerAccessStatFullDetails {
+    pub(super) when: SystemTime,
+    pub(super) task_kind: TaskKind,
+    pub(super) access_kind: LayerAccessKind,
 }
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
@@ -231,6 +232,19 @@ impl LayerAccessStats {
             }
         }
         ret
+    }
+
+    pub(super) fn most_recent_access_or_residence_event(
+        &self,
+    ) -> Either<LayerAccessStatFullDetails, LayerResidenceEvent> {
+        let inner = self.0.lock().unwrap();
+        match inner.last_accesses.recent() {
+            Some(a) => Either::Left(a.clone()),
+            None => match inner.last_residence_changes.recent() {
+                Some(e) => Either::Right(e.clone()),
+                None => unreachable!("constructors for LayerAccessStats ensure that there's always a residence change event"),
+            }
+        }
     }
 }
 

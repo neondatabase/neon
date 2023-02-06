@@ -23,6 +23,7 @@ const_format.workspace = true
 consumption_metrics.workspace = true
 crc32c.workspace = true
 crossbeam-utils.workspace = true
+either.workspace = true
 fail.workspace = true
 futures.workspace = true
 git-version.workspace = true
