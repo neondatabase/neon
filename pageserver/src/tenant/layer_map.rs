@@ -53,6 +53,7 @@ use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
@@ -60,6 +61,8 @@ use utils::lsn::Lsn;
 
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::Replacement;
+
+use self::historic_layer_coverage::LayerKey;
 
 use super::storage_layer::range_eq;
 
@@ -87,11 +90,18 @@ pub struct LayerMap<L: ?Sized> {
     pub frozen_layers: VecDeque<Arc<InMemoryLayer>>,
 
     /// Index of the historic layers optimized for search
-    historic: BufferedHistoricLayerCoverage<Arc<L>>,
+    historic: BufferedHistoricLayerCoverage<LayerKey>,
+
+    /// All layers accessible by key. Useful for:
+    /// 1. Iterating all layers
+    /// 2. Dereferencing a self.historic search result
+    /// 3. Replacing a layer with a remote/local version without
+    ///    rebuilding the self.historic index.
+    mapping: HashMap<LayerKey, Arc<L>>,
 
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
-    l0_delta_layers: Vec<Arc<L>>,
+    l0_delta_layers: HashMap<LayerKey, Arc<L>>,
 }
 
 impl<L: ?Sized> Default for LayerMap<L> {
@@ -100,8 +110,9 @@ impl<L: ?Sized> Default for LayerMap<L> {
             open_layer: None,
             next_open_layer_at: None,
             frozen_layers: VecDeque::default(),
-            l0_delta_layers: Vec::default(),
+            l0_delta_layers: HashMap::default(),
             historic: BufferedHistoricLayerCoverage::default(),
+            mapping: HashMap::default(),
         }
     }
 }
@@ -137,24 +148,6 @@ where
     ///
     pub fn remove_historic(&mut self, layer: Arc<L>) {
         self.layer_map.remove_historic_noflush(layer)
-    }
-
-    /// Replaces existing layer iff it is the `expected`.
-    ///
-    /// If the expected layer has been removed it will not be inserted by this function.
-    ///
-    /// Returned `Replacement` describes succeeding in replacement or the reason why it could not
-    /// be done.
-    ///
-    /// TODO replacement can be done without buffering and rebuilding layer map updates.
-    ///      One way to do that is to add a layer of indirection for returned values, so
-    ///      that we can replace values only by updating a hashmap.
-    pub fn replace_historic(
-        &mut self,
-        expected: &Arc<L>,
-        new: Arc<L>,
-    ) -> anyhow::Result<Replacement<Arc<L>>> {
-        self.layer_map.replace_historic_noflush(expected, new)
     }
 
     // We will flush on drop anyway, but this method makes it
@@ -228,33 +221,38 @@ where
         match (latest_delta, latest_image) {
             (None, None) => None,
             (None, Some(image)) => {
+                let image = self.mapping.get(&image).unwrap();
                 let lsn_floor = image.get_lsn_range().start;
                 Some(SearchResult {
-                    layer: image,
+                    layer: image.clone(),
                     lsn_floor,
                 })
             }
             (Some(delta), None) => {
+                let delta = self.mapping.get(&delta).unwrap();
                 let lsn_floor = delta.get_lsn_range().start;
                 Some(SearchResult {
-                    layer: delta,
+                    layer: delta.clone(),
                     lsn_floor,
                 })
             }
             (Some(delta), Some(image)) => {
+                let image = self.mapping.get(&image).unwrap();
+                let delta = self.mapping.get(&delta).unwrap();
+
                 let img_lsn = image.get_lsn_range().start;
                 let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
                 let image_exact_match = img_lsn + 1 == end_lsn;
                 if image_is_newer || image_exact_match {
                     Some(SearchResult {
-                        layer: image,
+                        layer: image.clone(),
                         lsn_floor: img_lsn,
                     })
                 } else {
                     let lsn_floor =
                         std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
                     Some(SearchResult {
-                        layer: delta,
+                        layer: delta.clone(),
                         lsn_floor,
                     })
                 }
@@ -273,13 +271,12 @@ where
     /// Helper function for BatchedUpdates::insert_historic
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
-        self.historic.insert(
-            historic_layer_coverage::LayerKey::from(&*layer),
-            Arc::clone(&layer),
-        );
+        let key = LayerKey::from(&*layer);
+        self.historic.insert(key.clone(), key.clone());
+        self.mapping.insert(key.clone(), layer.clone());
 
         if Self::is_l0(&layer) {
-            self.l0_delta_layers.push(layer);
+            self.l0_delta_layers.insert(key, layer.clone());
         }
 
         NUM_ONDISK_LAYERS.inc();
@@ -291,27 +288,28 @@ where
     /// Helper function for BatchedUpdates::remove_historic
     ///
     pub fn remove_historic_noflush(&mut self, layer: Arc<L>) {
-        self.historic
-            .remove(historic_layer_coverage::LayerKey::from(&*layer));
+        let key = historic_layer_coverage::LayerKey::from(&*layer);
+        self.historic.remove(key.clone());
+        self.mapping.remove(&key.clone());
 
         if Self::is_l0(&layer) {
-            let len_before = self.l0_delta_layers.len();
-            self.l0_delta_layers
-                .retain(|other| !Self::compare_arced_layers(other, &layer));
-            // this assertion is related to use of Arc::ptr_eq in Self::compare_arced_layers,
-            // there's a chance that the comparison fails at runtime due to it comparing (pointer,
-            // vtable) pairs.
-            assert_eq!(
-                self.l0_delta_layers.len(),
-                len_before - 1,
-                "failed to locate removed historic layer from l0_delta_layers"
-            );
+            self.l0_delta_layers.remove(&key);
         }
 
         NUM_ONDISK_LAYERS.dec();
     }
 
-    pub(self) fn replace_historic_noflush(
+    /// Replaces existing layer iff it is the `expected`.
+    ///
+    /// If the expected layer has been removed it will not be inserted by this function.
+    ///
+    /// Returned `Replacement` describes succeeding in replacement or the reason why it could not
+    /// be done.
+    ///
+    /// TODO replacement can be done without buffering and rebuilding layer map updates.
+    ///      One way to do that is to add a layer of indirection for returned values, so
+    ///      that we can replace values only by updating a hashmap.
+    pub fn replace_historic(
         &mut self,
         expected: &Arc<L>,
         new: Arc<L>,
@@ -332,29 +330,23 @@ where
             "expected and new must both be l0 deltas or neither should be: {expected_l0} != {new_l0}"
         );
 
-        let l0_index = if expected_l0 {
-            // find the index in case replace worked, we need to replace that as well
-            Some(
-                self.l0_delta_layers
-                    .iter()
-                    .position(|slot| Self::compare_arced_layers(slot, expected))
-                    .ok_or_else(|| anyhow::anyhow!("existing l0 delta layer was not found"))?,
-            )
-        } else {
-            None
+        use std::collections::hash_map::Entry;
+
+        if expected_l0 {
+            match self.mapping.entry(key.clone()) {
+                Entry::Occupied(mut entry) => entry.insert(new.clone()),
+                Entry::Vacant(_) => anyhow::bail!("layer doesn't exist"),
+            };
         };
 
-        let replaced = self.historic.replace(&key, new.clone(), |existing| {
-            Self::compare_arced_layers(existing, expected)
-        });
+        match self.mapping.entry(key.clone()) {
+            Entry::Occupied(mut entry) => entry.insert(new.clone()),
+            Entry::Vacant(_) => anyhow::bail!("layer doesn't exist"),
+        };
 
-        if let Replacement::Replaced { .. } = &replaced {
-            if let Some(index) = l0_index {
-                self.l0_delta_layers[index] = new;
-            }
-        }
-
-        Ok(replaced)
+        Ok(Replacement::Replaced {
+            in_buffered: false,
+        })
     }
 
     /// Helper function for BatchedUpdates::drop.
@@ -382,8 +374,8 @@ where
         let start = key.start.to_i128();
         let end = key.end.to_i128();
 
-        let layer_covers = |layer: Option<Arc<L>>| match layer {
-            Some(layer) => layer.get_lsn_range().start >= lsn.start,
+        let layer_covers = |key: Option<LayerKey>| match key {
+            Some(key) => self.mapping.get(&key).unwrap().get_lsn_range().start >= lsn.start,
             None => false,
         };
 
@@ -403,7 +395,7 @@ where
     }
 
     pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<L>> {
-        self.historic.iter()
+        self.mapping.values().cloned()
     }
 
     ///
@@ -430,10 +422,13 @@ where
         // Initialize loop variables
         let mut coverage: Vec<(Range<Key>, Option<Arc<L>>)> = vec![];
         let mut current_key = start;
-        let mut current_val = version.image_coverage.query(start);
+        let mut current_val = version.image_coverage.query(start)
+            .map(|key| self.mapping.get(&key).unwrap().clone());
 
         // Loop through the change events and push intervals
         for (change_key, change_val) in version.image_coverage.range(start..end) {
+            let change_val = change_val.map(|key| self.mapping.get(&key).unwrap().clone());
+
             let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
             coverage.push((kr, current_val.take()));
             current_key = change_key;
@@ -527,6 +522,7 @@ where
         for (change_key, change_val) in version.delta_coverage.range(start..end) {
             // If there's a relevant delta in this part, add 1 and recurse down
             if let Some(val) = current_val {
+                let val = self.mapping.get(&val).unwrap().clone();
                 if val.get_lsn_range().end > lsn.start {
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
@@ -549,6 +545,7 @@ where
 
         // Consider the last part
         if let Some(val) = current_val {
+            let val = self.mapping.get(&val).unwrap().clone();
             if val.get_lsn_range().end > lsn.start {
                 let kr = Key::from_i128(current_key)..Key::from_i128(end);
                 let lr = lsn.start..val.get_lsn_range().start;
@@ -705,7 +702,7 @@ where
 
     /// Return all L0 delta layers
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<L>>> {
-        Ok(self.l0_delta_layers.clone())
+        Ok(self.l0_delta_layers.values().cloned().collect())
     }
 
     /// debugging function to print out the contents of the layer map
@@ -729,18 +726,6 @@ where
         }
         println!("End dump LayerMap");
         Ok(())
-    }
-
-    #[inline(always)]
-    fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
-        // FIXME: ptr_eq might fail to return true for 'dyn' references because of multiple vtables
-        // can be created in compilation. Clippy complains about this. In practice it seems to
-        // work.
-        //
-        // In future rust versions this might become Arc::as_ptr(left) as *const () ==
-        // Arc::as_ptr(right) as *const (), we could change to that before.
-        #[allow(clippy::vtable_address_comparisons)]
-        Arc::ptr_eq(left, right)
     }
 }
 
@@ -802,7 +787,6 @@ mod tests {
             assert_eq!(count_layer_in(&map, &remote), expected_in_counts);
 
             let replaced = map
-                .batch_update()
                 .replace_historic(&remote, downloaded.clone())
                 .expect("name derived attributes are the same");
             assert!(

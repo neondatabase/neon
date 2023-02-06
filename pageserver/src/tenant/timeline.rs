@@ -3394,11 +3394,10 @@ impl Timeline {
                     // Delta- or ImageLayer in the layer map.
                     let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     let mut layers = self_clone.layers.write().unwrap();
-                    let mut updates = layers.batch_update();
                     {
                         use crate::tenant::layer_map::Replacement;
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        match updates.replace_historic(&l, new_layer) {
+                        match layers.replace_historic(&l, new_layer) {
                             Ok(Replacement::Replaced { .. }) => { /* expected */ }
                             Ok(Replacement::NotFound) => {
                                 // TODO: the downloaded file should probably be removed, otherwise
@@ -3432,7 +3431,6 @@ impl Timeline {
                             }
                         }
                     }
-                    updates.flush();
                     drop(layers);
 
                     // Now that we've inserted the download into the layer map,
