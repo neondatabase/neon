@@ -1,5 +1,6 @@
 //!
 
+mod eviction_task;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -47,7 +48,7 @@ use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
-use crate::tenant::config::TenantConfOpt;
+use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
 use pageserver_api::reltag::RelTag;
 
 use postgres_connection::PgConnectionConfig;
@@ -801,6 +802,7 @@ impl Timeline {
     pub fn activate(self: &Arc<Self>) {
         self.set_state(TimelineState::Active);
         self.launch_wal_receiver();
+        self.launch_eviction_task();
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -889,7 +891,10 @@ impl Timeline {
         }
     }
 
+    /// Evict multiple layers at once, continuing through errors.
+    ///
     /// Try to evict the given `layers_to_evict` by
+    ///
     /// 1. Replacing the given layer object in the layer map with a corresponding [`RemoteLayer`] object.
     /// 2. Deleting the now unreferenced layer file from disk.
     ///
@@ -1055,6 +1060,13 @@ impl Timeline {
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
+    }
+
+    fn get_eviction_policy(&self) -> EvictionPolicy {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .eviction_policy
+            .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
 
     /// Open a Timeline handle.

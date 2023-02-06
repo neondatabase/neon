@@ -797,6 +797,14 @@ async fn update_tenant_config_handler(
         );
     }
 
+    if let Some(eviction_policy) = request_data.eviction_policy {
+        tenant_conf.eviction_policy = Some(
+            serde_json::from_value(eviction_policy)
+                .context("parse field `eviction_policy`")
+                .map_err(ApiError::BadRequest)?,
+        );
+    }
+
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", tenant = ?tenant_id))
