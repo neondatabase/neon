@@ -867,6 +867,14 @@ impl Timeline {
         Ok(Some(true))
     }
 
+    /// Evicts one layer as in replaces a downloaded layer with a remote layer
+    ///
+    /// Returns:
+    /// - `Ok(Some(true))` when the layer was replaced
+    /// - `Ok(Some(false))` when
+    ///     - the layer was not found
+    ///     - or remote storage is not configured (TODO: make error)
+    /// - `Ok(None)` when the layer is not found
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         if local_layer.is_remote_layer() {
