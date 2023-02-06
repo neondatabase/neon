@@ -52,8 +52,6 @@ pub async fn collect_metrics(
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(metric_collection_interval);
-    let send_cached_every_iter =
-        cached_metric_collection_interval.as_secs() / metric_collection_interval.as_secs();
     info!("starting collect_metrics");
 
     // spin up background worker that caclulates tenant sizes
@@ -77,7 +75,7 @@ pub async fn collect_metrics(
     // define client here to reuse it for all requests
     let client = reqwest::Client::new();
     let mut cached_metrics: HashMap<PageserverConsumptionMetricsKey, u64> = HashMap::new();
-    let mut iter_num: u64 = 0;
+    let mut prev_iteration_time: Option<std::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -86,12 +84,13 @@ pub async fn collect_metrics(
                 return Ok(());
             },
             _ = ticker.tick() => {
-                // send cached metrics every send_cached_every_iter iterations
-                iter_num += 1;
-                let send_cached = iter_num >= send_cached_every_iter;
-                if send_cached {
-                    iter_num = 0;
-                }
+
+                // send cached metrics every cached_metric_collection_interval
+                let send_cached = prev_iteration_time
+                .map(|x| x.elapsed() >= cached_metric_collection_interval)
+                .unwrap_or(false);
+
+                prev_iteration_time = Some(std::time::Instant::now());
 
                 collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
             }
@@ -234,6 +233,7 @@ pub async fn collect_metrics_iteration(
     }
 
     // Filter metrics, unless we want to send all metrics, including cached ones.
+    // See: https://github.com/neondatabase/neon/issues/3485
     if !send_cached {
         current_metrics.retain(|(curr_key, curr_val)| match cached_metrics.get(curr_key) {
             Some(val) => val != curr_val,
