@@ -125,6 +125,11 @@ async def timeline_task(
 async def resolve_what(what: List[str], client: Client):
     """
     Resolve the list of "what" arguments on the command line to (tenant,timeline) tuples.
+    Format of a `what` argument: ALL | $tenant_id $tenant_id:$timeline_id
+    Examples:
+    - `ALL`: all timelines present on the pageserver
+    - `3ff96c2a04c3490285cba2019e69fb51`: all timelines of tenant `3ff96c2a04c3490285cba2019e69fb51` on the pageserver
+    - `3ff96c2a04c3490285cba2019e69fb51:604094d9de4bda14dfc8da3c1a73e0e4`: timeline `604094d9de4bda14dfc8da3c1a73e0e4` of tenant `3ff96c2a04c3490285cba2019e69fb51` on the pageserver
     """
     tenant_and_timline_ids: Set[Tuple[str, str]] = set()
     # fill  tenant_and_timline_ids based on spec
@@ -226,7 +231,7 @@ if __name__ == "__main__":
     )
     envarg("--endpoint", "SCRAPE_ENDPOINT", help="where to write report output (default: stdout)")
     envarg("--environment", "SCRAPE_ENVIRONMENT", help="environment of the pageserver")
-    envarg("--interval", "SCRAPE_INTERVAL", type=int)
+    envarg("--interval", "SCRAPE_INTERVAL_SECS", type=int)
     envarg("--pg-host", "PGHOST")
     envarg("--pg-user", "PGUSER")
     envarg("--pg-password", "PGPASSWORD")
