@@ -876,6 +876,8 @@ impl Timeline {
     ///    - layermap replacement failed
     /// - `Ok(None)` when the layer is not found
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+        use super::layer_map::Replacement;
+
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         if local_layer.is_remote_layer() {
             return Ok(Some(false));
@@ -914,7 +916,7 @@ impl Timeline {
         let mut updates = layers.batch_update();
 
         let replaced = match updates.replace_historic(&local_layer, new_remote_layer)? {
-            super::layer_map::Replacement::Replaced { .. } => {
+            Replacement::Replaced { .. } => {
                 let layer_size = local_layer.file_size();
 
                 if let Err(e) = local_layer.delete() {
@@ -927,14 +929,14 @@ impl Timeline {
 
                 true
             }
-            super::layer_map::Replacement::NotFound => {
+            Replacement::NotFound => {
                 debug!(evicted=?local_layer, "lost the race to evict layer");
                 false
             }
-            super::layer_map::Replacement::RemovalBuffered => {
+            Replacement::RemovalBuffered => {
                 unreachable!("not doing anything else in this batch")
             }
-            super::layer_map::Replacement::Unexpected(other) => {
+            Replacement::Unexpected(other) => {
                 error!(
                     local_layer.ptr=?Arc::as_ptr(&local_layer),
                     other.ptr=?Arc::as_ptr(&other),
