@@ -1,12 +1,15 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
+use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
@@ -17,6 +20,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::mgr::TenantMapInsertError;
+use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
@@ -235,8 +239,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    let include_non_incremental_logical_size =
-        query_param_present(&request, "include-non-incremental-logical-size");
+    let include_non_incremental_logical_size: Option<bool> =
+        parse_query_param(&request, "include-non-incremental-logical-size")?;
     check_permission(&request, Some(tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -249,13 +253,14 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
-            let timeline_info =
-                build_timeline_info(&timeline, include_non_incremental_logical_size, &ctx)
-                    .await
-                    .context(
-                        "Failed to convert tenant timeline {timeline_id} into the local one: {e:?}",
-                    )
-                    .map_err(ApiError::InternalServerError)?;
+            let timeline_info = build_timeline_info(
+                &timeline,
+                include_non_incremental_logical_size.unwrap_or(false),
+                &ctx,
+            )
+            .await
+            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
+            .map_err(ApiError::InternalServerError)?;
 
             response_data.push(timeline_info);
         }
@@ -267,36 +272,11 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, response_data)
 }
 
-/// Checks if a query param is present in the request's URL
-fn query_param_present(request: &Request<Body>, param: &str) -> bool {
-    request
-        .uri()
-        .query()
-        .map(|v| url::form_urlencoded::parse(v.as_bytes()).any(|(p, _)| p == param))
-        .unwrap_or(false)
-}
-
-fn get_query_param(request: &Request<Body>, param_name: &str) -> Result<String, ApiError> {
-    request.uri().query().map_or(
-        Err(ApiError::BadRequest(anyhow!("empty query in request"))),
-        |v| {
-            url::form_urlencoded::parse(v.as_bytes())
-                .find(|(k, _)| k == param_name)
-                .map_or(
-                    Err(ApiError::BadRequest(anyhow!(
-                        "no {param_name} specified in query parameters"
-                    ))),
-                    |(_, v)| Ok(v.into_owned()),
-                )
-        },
-    )
-}
-
 async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    let include_non_incremental_logical_size =
-        query_param_present(&request, "include-non-incremental-logical-size");
+    let include_non_incremental_logical_size: Option<bool> =
+        parse_query_param(&request, "include-non-incremental-logical-size")?;
     check_permission(&request, Some(tenant_id))?;
 
     // Logical size calculation needs downloading.
@@ -311,11 +291,14 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             .get_timeline(timeline_id, false)
             .map_err(ApiError::NotFound)?;
 
-        let timeline_info =
-            build_timeline_info(&timeline, include_non_incremental_logical_size, &ctx)
-                .await
-                .context("get local timeline info")
-                .map_err(ApiError::InternalServerError)?;
+        let timeline_info = build_timeline_info(
+            &timeline,
+            include_non_incremental_logical_size.unwrap_or(false),
+            &ctx,
+        )
+        .await
+        .context("get local timeline info")
+        .map_err(ApiError::InternalServerError)?;
 
         Ok::<_, ApiError>(timeline_info)
     }
@@ -330,17 +313,14 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     check_permission(&request, Some(tenant_id))?;
 
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    let timestamp_raw = get_query_param(&request, "timestamp")?;
-    let timestamp = humantime::parse_rfc3339(timestamp_raw.as_str())
+    let timestamp_raw = must_get_query_param(&request, "timestamp")?;
+    let timestamp = humantime::parse_rfc3339(&timestamp_raw)
         .with_context(|| format!("Invalid time: {:?}", timestamp_raw))
         .map_err(ApiError::BadRequest)?;
     let timestamp_pg = postgres_ffi::to_pg_timestamp(timestamp);
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let timeline = mgr::get_tenant(tenant_id, true)
-        .await
-        .and_then(|tenant| tenant.get_timeline(timeline_id, true))
-        .map_err(ApiError::NotFound)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &ctx)
         .await
@@ -503,13 +483,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let inputs_only = if query_param_present(&request, "inputs_only") {
-        get_query_param(&request, "inputs_only")?
-            .parse()
-            .map_err(|_| ApiError::BadRequest(anyhow!("failed to parse inputs_only")))?
-    } else {
-        false
-    };
+    let inputs_only: Option<bool> = parse_query_param(&request, "inputs_only")?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let tenant = mgr::get_tenant(tenant_id, true)
@@ -522,8 +496,12 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    let size = if !inputs_only {
-        Some(inputs.calculate().map_err(ApiError::InternalServerError)?)
+    let size = if !inputs_only.unwrap_or(false) {
+        Some(
+            tenant
+                .calc_and_update_cached_synthetic_size(&inputs)
+                .map_err(ApiError::InternalServerError)?,
+        )
     } else {
         None
     };
@@ -552,6 +530,65 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
             inputs,
         },
     )
+}
+
+async fn layer_map_info_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let reset: LayerAccessStatsReset =
+        parse_query_param(&request, "reset")?.unwrap_or(LayerAccessStatsReset::NoReset);
+
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let layer_map_info = timeline.layer_map_info(reset);
+
+    json_response(StatusCode::OK, layer_map_info)
+}
+
+async fn layer_download_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let layer_file_name = get_request_param(&request, "layer_file_name")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let downloaded = timeline
+        .download_layer(layer_file_name)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    match downloaded {
+        Some(true) => json_response(StatusCode::OK, ()),
+        Some(false) => json_response(StatusCode::NOT_MODIFIED, ()),
+        None => json_response(
+            StatusCode::BAD_REQUEST,
+            format!("Layer {tenant_id}/{timeline_id}/{layer_file_name} not found"),
+        ),
+    }
+}
+
+async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let layer_file_name = get_request_param(&request, "layer_file_name")?;
+
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+    let evicted = timeline
+        .evict_layer(layer_file_name)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    match evicted {
+        Some(true) => json_response(StatusCode::OK, ()),
+        Some(false) => json_response(StatusCode::NOT_MODIFIED, ()),
+        None => json_response(
+            StatusCode::BAD_REQUEST,
+            format!("Layer {tenant_id}/{timeline_id}/{layer_file_name} not found"),
+        ),
+    }
 }
 
 // Helper function to standardize the error messages we produce on bad durations
@@ -670,12 +707,40 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     )
 }
 
-async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn get_tenant_config_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    check_permission(&request, Some(tenant_id))?;
+
+    let tenant = mgr::get_tenant(tenant_id, false)
+        .await
+        .map_err(ApiError::NotFound)?;
+
+    let response = HashMap::from([
+        (
+            "tenant_specific_overrides",
+            serde_json::to_value(tenant.tenant_specific_overrides())
+                .context("serializing tenant specific overrides")
+                .map_err(ApiError::InternalServerError)?,
+        ),
+        (
+            "effective_config",
+            serde_json::to_value(tenant.effective_config())
+                .context("serializing effective config")
+                .map_err(ApiError::InternalServerError)?,
+        ),
+    ]);
+
+    json_response(StatusCode::OK, response)
+}
+
+async fn update_tenant_config_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
     let request_data: TenantConfigRequest = json_request(&mut request).await?;
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let mut tenant_conf: TenantConfOpt = Default::default();
+    let mut tenant_conf = TenantConfOpt::default();
     if let Some(gc_period) = request_data.gc_period {
         tenant_conf.gc_period = Some(
             humantime::parse_duration(&gc_period)
@@ -710,12 +775,8 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
                 .map_err(ApiError::BadRequest)?,
         );
     }
-    if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
-        tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
-    }
-    if let Some(trace_read_requests) = request_data.trace_read_requests {
-        tenant_conf.trace_read_requests = Some(trace_read_requests);
-    }
+    tenant_conf.max_lsn_wal_lag = request_data.max_lsn_wal_lag;
+    tenant_conf.trace_read_requests = request_data.trace_read_requests;
 
     tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
     if let Some(checkpoint_timeout) = request_data.checkpoint_timeout {
@@ -737,7 +798,7 @@ async fn tenant_config_handler(mut request: Request<Body>) -> Result<Response<Bo
     }
 
     let state = get_state(&request);
-    mgr::update_tenant_config(state.conf, tenant_conf, tenant_id)
+    mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", tenant = ?tenant_id))
         .await
         // FIXME: `update_tenant_config` can fail because of both user and internal errors.
@@ -830,12 +891,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     check_permission(&request, Some(tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let tenant = mgr::get_tenant(tenant_id, true)
-        .await
-        .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     timeline
         .freeze_and_flush()
         .await
@@ -856,12 +912,7 @@ async fn timeline_download_remote_layers_handler_post(
     let body: DownloadRemoteLayersTaskSpawnRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
-        .await
-        .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     match timeline.spawn_download_all_remote_layers(body).await {
         Ok(st) => json_response(StatusCode::ACCEPTED, st),
         Err(st) => json_response(StatusCode::CONFLICT, st),
@@ -872,20 +923,27 @@ async fn timeline_download_remote_layers_handler_get(
     request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
-    let tenant = mgr::get_tenant(tenant_id, true)
-        .await
-        .map_err(ApiError::NotFound)?;
-    let timeline = tenant
-        .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let info = timeline
         .get_download_all_remote_layers_task_info()
         .context("task never started since last pageserver process start")
         .map_err(ApiError::NotFound)?;
     json_response(StatusCode::OK, info)
+}
+
+async fn active_timeline_of_active_tenant(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+) -> Result<Arc<Timeline>, ApiError> {
+    let tenant = mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(ApiError::NotFound)?;
+    tenant
+        .get_timeline(timeline_id, true)
+        .map_err(ApiError::NotFound)
 }
 
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -897,6 +955,7 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 
 pub fn make_router(
     conf: &'static PageServerConf,
+    launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
@@ -912,6 +971,14 @@ pub fn make_router(
             }
         }))
     }
+
+    router = router.middleware(
+        endpoint::add_response_header_middleware(
+            "PAGESERVER_LAUNCH_TIMESTAMP",
+            &launch_ts.to_string(),
+        )
+        .expect("construct launch timestamp header middleware"),
+    );
 
     macro_rules! testing_api {
         ($handler_desc:literal, $handler:path $(,)?) => {{
@@ -945,7 +1012,8 @@ pub fn make_router(
         .post("/v1/tenant", tenant_create_handler)
         .get("/v1/tenant/:tenant_id", tenant_status)
         .get("/v1/tenant/:tenant_id/size", tenant_size_handler)
-        .put("/v1/tenant/config", tenant_config_handler)
+        .put("/v1/tenant/config", update_tenant_config_handler)
+        .get("/v1/tenant/:tenant_id/config", get_tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
         .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
         .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)
@@ -983,6 +1051,18 @@ pub fn make_router(
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_delete_handler,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/layer",
+            layer_map_info_handler,
+        )
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
+            layer_download_handler,
+        )
+        .delete(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
+            evict_timeline_layer_handler,
         )
         .any(handler_404))
 }

@@ -1,18 +1,29 @@
 //! Common traits and structs for layers
 
-mod delta_layer;
+pub mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
 mod remote_layer;
 
+use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::repository::{Key, Value};
+use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
+use enum_map::EnumMap;
+use enumset::EnumSet;
+use pageserver_api::models::LayerAccessKind;
+use pageserver_api::models::{
+    HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
+};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use utils::history_buffer::HistoryBufferWithDropCounter;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -20,7 +31,7 @@ use utils::{
 };
 
 pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
-pub use filename::{DeltaFileName, ImageFileName, LayerFileName, PathOrConf};
+pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use remote_layer::RemoteLayer;
@@ -80,9 +91,156 @@ pub enum ValueReconstructResult {
     Missing,
 }
 
+#[derive(Debug)]
+pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
+
+#[derive(Debug, Default, Clone)]
+struct LayerAccessStatsInner {
+    first_access: Option<LayerAccessStatFullDetails>,
+    count_by_access_kind: EnumMap<LayerAccessKind, u64>,
+    task_kind_flag: EnumSet<TaskKind>,
+    last_accesses: HistoryBufferWithDropCounter<LayerAccessStatFullDetails, 16>,
+    last_residence_changes: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
+}
+
+#[derive(Debug, Clone)]
+struct LayerAccessStatFullDetails {
+    when: SystemTime,
+    task_kind: TaskKind,
+    access_kind: LayerAccessKind,
+}
+
+#[derive(Clone, Copy, strum_macros::EnumString)]
+pub enum LayerAccessStatsReset {
+    NoReset,
+    JustTaskKindFlags,
+    AllStats,
+}
+
+fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u64 {
+    ts.duration_since(UNIX_EPOCH)
+        .expect("better to die in this unlikely case than report false stats")
+        .as_millis()
+        .try_into()
+        .expect("64 bits is enough for few more years")
+}
+
+impl LayerAccessStatFullDetails {
+    fn to_api_model(&self) -> pageserver_api::models::LayerAccessStatFullDetails {
+        let Self {
+            when,
+            task_kind,
+            access_kind,
+        } = self;
+        pageserver_api::models::LayerAccessStatFullDetails {
+            when_millis_since_epoch: system_time_to_millis_since_epoch(when),
+            task_kind: task_kind.into(), // into static str, powered by strum_macros
+            access_kind: *access_kind,
+        }
+    }
+}
+
+impl LayerAccessStats {
+    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
+        new
+    }
+
+    pub(crate) fn for_new_layer_file() -> Self {
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+        new.record_residence_event(
+            LayerResidenceStatus::Resident,
+            LayerResidenceEventReason::LayerCreate,
+        );
+        new
+    }
+
+    /// Creates a clone of `self` and records `new_status` in the clone.
+    /// The `new_status` is not recorded in `self`
+    pub(crate) fn clone_for_residence_change(
+        &self,
+        new_status: LayerResidenceStatus,
+    ) -> LayerAccessStats {
+        let clone = {
+            let inner = self.0.lock().unwrap();
+            inner.clone()
+        };
+        let new = LayerAccessStats(Mutex::new(clone));
+        new.record_residence_event(new_status, LayerResidenceEventReason::ResidenceChange);
+        new
+    }
+
+    fn record_residence_event(
+        &self,
+        status: LayerResidenceStatus,
+        reason: LayerResidenceEventReason,
+    ) {
+        let mut inner = self.0.lock().unwrap();
+        inner
+            .last_residence_changes
+            .write(LayerResidenceEvent::new(status, reason));
+    }
+
+    fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
+        let mut inner = self.0.lock().unwrap();
+        let this_access = LayerAccessStatFullDetails {
+            when: SystemTime::now(),
+            task_kind,
+            access_kind,
+        };
+        inner
+            .first_access
+            .get_or_insert_with(|| this_access.clone());
+        inner.count_by_access_kind[access_kind] += 1;
+        inner.task_kind_flag |= task_kind;
+        inner.last_accesses.write(this_access);
+    }
+    fn to_api_model(
+        &self,
+        reset: LayerAccessStatsReset,
+    ) -> pageserver_api::models::LayerAccessStats {
+        let mut inner = self.0.lock().unwrap();
+        let LayerAccessStatsInner {
+            first_access,
+            count_by_access_kind,
+            task_kind_flag,
+            last_accesses,
+            last_residence_changes,
+        } = &*inner;
+        let ret = pageserver_api::models::LayerAccessStats {
+            access_count_by_access_kind: count_by_access_kind
+                .iter()
+                .map(|(kind, count)| (kind, *count))
+                .collect(),
+            task_kind_access_flag: task_kind_flag
+                .iter()
+                .map(|task_kind| task_kind.into()) // into static str, powered by strum_macros
+                .collect(),
+            first: first_access.as_ref().map(|a| a.to_api_model()),
+            accesses_history: last_accesses.map(|m| m.to_api_model()),
+            residence_events_history: last_residence_changes.clone(),
+        };
+        match reset {
+            LayerAccessStatsReset::NoReset => (),
+            LayerAccessStatsReset::JustTaskKindFlags => {
+                inner.task_kind_flag.clear();
+            }
+            LayerAccessStatsReset::AllStats => {
+                *inner = LayerAccessStatsInner::default();
+            }
+        }
+        ret
+    }
+}
+
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
-pub trait Layer: Send + Sync {
+///
+/// All layers should implement a minimal `std::fmt::Debug` without tenant or
+/// timeline names, because those are known in the context of which the layers
+/// are used in (timeline).
+pub trait Layer: std::fmt::Debug + Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -117,13 +275,14 @@ pub trait Layer: Send + Sync {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> Result<ValueReconstructResult>;
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
     fn short_id(&self) -> String;
 
     /// Dump summary of the contents of the layer to stdout
-    fn dump(&self, verbose: bool) -> Result<()>;
+    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()>;
 }
 
 /// Returned by [`Layer::iter`]
@@ -144,8 +303,7 @@ pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 /// Furthermore, there are two kinds of on-disk layers: delta and image layers.
 /// A delta layer contains all modifications within a range of LSNs and keys.
 /// An image layer is a snapshot of all the data in a key-range, at a single
-/// LSN
-///
+/// LSN.
 pub trait PersistentLayer: Layer {
     fn get_tenant_id(&self) -> TenantId;
 
@@ -161,11 +319,11 @@ pub trait PersistentLayer: Layer {
     fn local_path(&self) -> Option<PathBuf>;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(&self) -> Result<LayerIter<'_>>;
+    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>>;
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
+    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
         panic!("Not implemented")
     }
 
@@ -185,6 +343,10 @@ pub trait PersistentLayer: Layer {
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
     fn file_size(&self) -> Option<u64>;
+
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
+
+    fn access_stats(&self) -> &LayerAccessStats;
 }
 
 pub fn downcast_remote_layer(
@@ -197,15 +359,11 @@ pub fn downcast_remote_layer(
     }
 }
 
-impl std::fmt::Debug for dyn Layer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Layer")
-            .field("short_id", &self.short_id())
-            .finish()
-    }
-}
-
 /// Holds metadata about a layer without any content. Used mostly for testing.
+///
+/// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
+/// LayerDescriptor.
+#[derive(Clone, Debug)]
 pub struct LayerDescriptor {
     pub key: Range<Key>,
     pub lsn: Range<Lsn>,
@@ -231,6 +389,7 @@ impl Layer for LayerDescriptor {
         _key: Key,
         _lsn_range: Range<Lsn>,
         _reconstruct_data: &mut ValueReconstructState,
+        _ctx: &RequestContext,
     ) -> Result<ValueReconstructResult> {
         todo!("This method shouldn't be part of the Layer trait")
     }
@@ -239,7 +398,54 @@ impl Layer for LayerDescriptor {
         self.short_id.clone()
     }
 
-    fn dump(&self, _verbose: bool) -> Result<()> {
+    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         todo!()
     }
+}
+
+impl From<DeltaFileName> for LayerDescriptor {
+    fn from(value: DeltaFileName) -> Self {
+        let short_id = value.to_string();
+        LayerDescriptor {
+            key: value.key_range,
+            lsn: value.lsn_range,
+            is_incremental: true,
+            short_id,
+        }
+    }
+}
+
+impl From<ImageFileName> for LayerDescriptor {
+    fn from(value: ImageFileName) -> Self {
+        let short_id = value.to_string();
+        let lsn = value.lsn_as_range();
+        LayerDescriptor {
+            key: value.key_range,
+            lsn,
+            is_incremental: false,
+            short_id,
+        }
+    }
+}
+
+impl From<LayerFileName> for LayerDescriptor {
+    fn from(value: LayerFileName) -> Self {
+        match value {
+            LayerFileName::Delta(d) => Self::from(d),
+            LayerFileName::Image(i) => Self::from(i),
+        }
+    }
+}
+
+/// Helper enum to hold a PageServerConf, or a path
+///
+/// This is used by DeltaLayer and ImageLayer. Normally, this holds a reference to the
+/// global config, and paths to layer files are constructed using the tenant/timeline
+/// path from the config. But in the 'pageserver_binutils' binary, we need to construct a Layer
+/// struct for a file on disk, without having a page server running, so that we have no
+/// config. In that case, we use the Path variant to hold the full path to the file on
+/// disk.
+enum PathOrConf {
+    Path(PathBuf),
+    Conf(&'static PageServerConf),
 }

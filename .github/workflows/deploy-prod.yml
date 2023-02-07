@@ -11,7 +11,7 @@ on:
         description: 'Branch or commit used for deploy scripts and configs'
         required: true
         type: string
-        default: 'main'
+        default: 'release'
       deployStorage:
         description: 'Deploy storage'
         required: true
@@ -27,6 +27,11 @@ on:
         required: true
         type: boolean
         default: true
+      disclamerAcknowledged:
+        description: 'I confirm that there is an emergency and I can not use regular release workflow'
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-prod
@@ -36,7 +41,7 @@ jobs:
   deploy-prod-new:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    if: inputs.deployStorage
+    if: inputs.deployStorage && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -67,7 +72,7 @@ jobs:
   deploy-proxy-prod-new:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    if: inputs.deployProxy
+    if: inputs.deployProxy && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -125,7 +130,7 @@ jobs:
   deploy-storage-broker-prod-new:
     runs-on: prod
     container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    if: inputs.deployStorageBroker
+    if: inputs.deployStorageBroker && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -162,9 +167,9 @@ jobs:
   # Deploy to old account below          
 
   deploy:
-    runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    if: inputs.deployStorage
+    runs-on: prod
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    if: inputs.deployStorage && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash
@@ -183,14 +188,7 @@ jobs:
           export DOCKER_TAG=${{ inputs.dockerTag }}
           cd "$(pwd)/.github/ansible"
 
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            ./get_binaries.sh
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            RELEASE=true ./get_binaries.sh
-          else
-            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
-            exit 1
-          fi
+          ./get_binaries.sh
 
           eval $(ssh-agent)
           echo "${{ secrets.TELEPORT_SSH_KEY }}"  | tr -d '\n'| base64 --decode >ssh-key
@@ -206,46 +204,11 @@ jobs:
       - name: Cleanup ansible folder
         run: rm -rf ~/.ansible
 
-  deploy-proxy:
-    runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    if: inputs.deployProxy
-    defaults:
-      run:
-        shell: bash
-    environment:
-      name: prod-old
-    env:
-      KUBECONFIG: .kubeconfig
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
-          ref: ${{ inputs.branch }}
-
-      - name: Store kubeconfig file
-        run: |
-          echo "${{ secrets.PRODUCTION_KUBECONFIG_DATA }}" | base64 --decode > ${KUBECONFIG}
-          chmod 0600 ${KUBECONFIG}
-
-      - name: Add neon helm chart
-        run: helm repo add neondatabase https://neondatabase.github.io/helm-charts
-
-      - name: Re-deploy proxy
-        run: |
-          DOCKER_TAG=${{ inputs.dockerTag }}
-          helm upgrade neon-proxy-scram neondatabase/neon-proxy --namespace neon-proxy --install --atomic -f .github/helm-values/production.proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
-
-      - name: Cleanup helm folder
-        run: rm -rf ~/.cache
-
   deploy-storage-broker:
     name: deploy storage broker on old staging and old prod
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    if: inputs.deployStorageBroker
+    if: inputs.deployStorageBroker && inputs.disclamerAcknowledged
     defaults:
       run:
         shell: bash

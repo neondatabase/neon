@@ -8,5 +8,6 @@ license.workspace = true
 prometheus.workspace = true
 libc.workspace = true
 once_cell.workspace = true
+chrono.workspace = true
 
 workspace_hack.workspace = true

@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context};
 use hashbrown::HashMap;
-use parking_lot::Mutex;
 use pq_proto::CancelKeyData;
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
@@ -9,14 +8,15 @@ use tracing::info;
 
 /// Enables serving `CancelRequest`s.
 #[derive(Default)]
-pub struct CancelMap(Mutex<HashMap<CancelKeyData, Option<CancelClosure>>>);
+pub struct CancelMap(parking_lot::RwLock<HashMap<CancelKeyData, Option<CancelClosure>>>);
 
 impl CancelMap {
     /// Cancel a running query for the corresponding connection.
     pub async fn cancel_session(&self, key: CancelKeyData) -> anyhow::Result<()> {
+        // NB: we should immediately release the lock after cloning the token.
         let cancel_closure = self
             .0
-            .lock()
+            .read()
             .get(&key)
             .and_then(|x| x.clone())
             .with_context(|| format!("query cancellation key not found: {key}"))?;
@@ -41,14 +41,14 @@ impl CancelMap {
         // Random key collisions are unlikely to happen here, but they're still possible,
         // which is why we have to take care not to rewrite an existing key.
         self.0
-            .lock()
+            .write()
             .try_insert(key, None)
             .map_err(|_| anyhow!("query cancellation key already exists: {key}"))?;
 
         // This will guarantee that the session gets dropped
         // as soon as the future is finished.
         scopeguard::defer! {
-            self.0.lock().remove(&key);
+            self.0.write().remove(&key);
             info!("dropped query cancellation key {key}");
         }
 
@@ -59,12 +59,12 @@ impl CancelMap {
 
     #[cfg(test)]
     fn contains(&self, session: &Session) -> bool {
-        self.0.lock().contains_key(&session.key)
+        self.0.read().contains_key(&session.key)
     }
 
     #[cfg(test)]
     fn is_empty(&self) -> bool {
-        self.0.lock().is_empty()
+        self.0.read().is_empty()
     }
 }
 
@@ -115,7 +115,7 @@ impl Session<'_> {
         info!("enabling query cancellation for this session");
         self.cancel_map
             .0
-            .lock()
+            .write()
             .insert(self.key, Some(cancel_closure));
 
         self.key

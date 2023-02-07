@@ -1,8 +1,7 @@
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::Layer;
-use pageserver::tenant::storage_layer::{DeltaFileName, ImageFileName, LayerDescriptor};
+use pageserver::tenant::storage_layer::{Layer, LayerDescriptor, LayerFileName};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
@@ -26,30 +25,15 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
 
     let mut updates = layer_map.batch_update();
     for fname in filenames {
-        let fname = &fname.unwrap();
-        if let Some(imgfilename) = ImageFileName::parse_str(fname) {
-            let layer = LayerDescriptor {
-                key: imgfilename.key_range,
-                lsn: imgfilename.lsn..(imgfilename.lsn + 1),
-                is_incremental: false,
-                short_id: fname.to_string(),
-            };
-            updates.insert_historic(Arc::new(layer));
-            min_lsn = min(min_lsn, imgfilename.lsn);
-            max_lsn = max(max_lsn, imgfilename.lsn);
-        } else if let Some(deltafilename) = DeltaFileName::parse_str(fname) {
-            let layer = LayerDescriptor {
-                key: deltafilename.key_range.clone(),
-                lsn: deltafilename.lsn_range.clone(),
-                is_incremental: true,
-                short_id: fname.to_string(),
-            };
-            updates.insert_historic(Arc::new(layer));
-            min_lsn = min(min_lsn, deltafilename.lsn_range.start);
-            max_lsn = max(max_lsn, deltafilename.lsn_range.end);
-        } else {
-            panic!("unexpected filename {fname}");
-        }
+        let fname = fname.unwrap();
+        let fname = LayerFileName::from_str(&fname).unwrap();
+        let layer = LayerDescriptor::from(fname);
+
+        let lsn_range = layer.get_lsn_range();
+        min_lsn = min(min_lsn, lsn_range.start);
+        max_lsn = max(max_lsn, Lsn(lsn_range.end.0 - 1));
+
+        updates.insert_historic(Arc::new(layer));
     }
 
     println!("min: {min_lsn}, max: {max_lsn}");

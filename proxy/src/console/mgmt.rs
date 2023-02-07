@@ -1,8 +1,9 @@
 use crate::{
-    auth,
     console::messages::{DatabaseInfo, KickSession},
+    waiters::{self, Waiter, Waiters},
 };
 use anyhow::Context;
+use once_cell::sync::Lazy;
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::{
     net::{TcpListener, TcpStream},
@@ -13,6 +14,25 @@ use utils::{
     postgres_backend::{self, AuthType, PostgresBackend},
     postgres_backend_async::QueryError,
 };
+
+static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
+
+/// Give caller an opportunity to wait for the cloud's reply.
+pub async fn with_waiter<R, T, E>(
+    psql_session_id: impl Into<String>,
+    action: impl FnOnce(Waiter<'static, ComputeReady>) -> R,
+) -> Result<T, E>
+where
+    R: std::future::Future<Output = Result<T, E>>,
+    E: From<waiters::RegisterError>,
+{
+    let waiter = CPLANE_WAITERS.register(psql_session_id.into())?;
+    action(waiter).await
+}
+
+pub fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), waiters::NotifyError> {
+    CPLANE_WAITERS.notify(psql_session_id, msg)
+}
 
 /// Console management API listener thread.
 /// It spawns console response handlers needed for the link auth.
@@ -76,7 +96,7 @@ fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), Query
     let _enter = span.enter();
     info!("got response: {:?}", resp.result);
 
-    match auth::backend::notify(resp.session_id, Ok(resp.result)) {
+    match notify(resp.session_id, Ok(resp.result)) {
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?

@@ -9,8 +9,7 @@ async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
 }
 
 fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
-    let router = endpoint::make_router();
-    router.get("/v1/status", status_handler)
+    endpoint::make_router().get("/v1/status", status_handler)
 }
 
 pub async fn task_main(http_listener: TcpListener) -> anyhow::Result<()> {

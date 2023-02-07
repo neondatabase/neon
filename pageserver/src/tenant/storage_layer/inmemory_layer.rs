@@ -5,6 +5,7 @@
 //! its position in the file, is kept in memory, though.
 //!
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::repository::{Key, Value};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter};
 use crate::tenant::block_io::BlockReader;
@@ -12,6 +13,7 @@ use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
 use anyhow::{ensure, Result};
+use pageserver_api::models::InMemoryLayerInfo;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use tracing::*;
@@ -51,6 +53,15 @@ pub struct InMemoryLayer {
     inner: RwLock<InMemoryLayerInner>,
 }
 
+impl std::fmt::Debug for InMemoryLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryLayer")
+            .field("start_lsn", &self.start_lsn)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
 pub struct InMemoryLayerInner {
     /// Frozen layers have an exclusive end LSN.
     /// Writes are only allowed when this is None
@@ -69,6 +80,14 @@ pub struct InMemoryLayerInner {
     file: EphemeralFile,
 }
 
+impl std::fmt::Debug for InMemoryLayerInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryLayerInner")
+            .field("end_lsn", &self.end_lsn)
+            .finish()
+    }
+}
+
 impl InMemoryLayerInner {
     fn assert_writeable(&self) {
         assert!(self.end_lsn.is_none());
@@ -78,6 +97,16 @@ impl InMemoryLayerInner {
 impl InMemoryLayer {
     pub fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
+    }
+
+    pub fn info(&self) -> InMemoryLayerInfo {
+        let lsn_start = self.start_lsn;
+        let lsn_end = self.inner.read().unwrap().end_lsn;
+
+        match lsn_end {
+            Some(lsn_end) => InMemoryLayerInfo::Frozen { lsn_start, lsn_end },
+            None => InMemoryLayerInfo::Open { lsn_start },
+        }
     }
 }
 
@@ -110,7 +139,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool) -> Result<()> {
+    fn dump(&self, verbose: bool, _ctx: &RequestContext) -> Result<()> {
         let inner = self.inner.read().unwrap();
 
         let end_str = inner
@@ -166,6 +195,7 @@ impl Layer for InMemoryLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;

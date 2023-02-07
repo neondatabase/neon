@@ -1,21 +1,14 @@
-//! Local mock of Cloud API V2.
+//! Mock console backend which relies on a user-provided postgres instance.
 
 use super::{
-    console::{self, AuthInfo, GetAuthInfoError, WakeComputeError},
-    AuthSuccess, NodeInfo,
+    errors::{ApiError, GetAuthInfoError, WakeComputeError},
+    AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{
-    auth::{self, ClientCredentials},
-    compute,
-    error::io_error,
-    scram,
-    stream::PqStream,
-    url::ApiUrl,
-};
+use crate::{auth::ClientCredentials, compute, error::io_error, scram, url::ApiUrl};
+use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, info_span, warn, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Debug, Error)]
 enum MockApiError {
@@ -23,49 +16,36 @@ enum MockApiError {
     PasswordNotSet(tokio_postgres::Error),
 }
 
-impl From<MockApiError> for console::ApiError {
+impl From<MockApiError> for ApiError {
     fn from(e: MockApiError) -> Self {
         io_error(e).into()
     }
 }
 
-impl From<tokio_postgres::Error> for console::ApiError {
+impl From<tokio_postgres::Error> for ApiError {
     fn from(e: tokio_postgres::Error) -> Self {
         io_error(e).into()
     }
 }
 
-#[must_use]
-pub(super) struct Api<'a> {
-    endpoint: &'a ApiUrl,
-    creds: &'a ClientCredentials<'a>,
+#[derive(Clone)]
+pub struct Api {
+    endpoint: ApiUrl,
 }
 
-impl<'a> AsRef<ClientCredentials<'a>> for Api<'a> {
-    fn as_ref(&self) -> &ClientCredentials<'a> {
-        self.creds
-    }
-}
-
-impl<'a> Api<'a> {
-    /// Construct an API object containing the auth parameters.
-    pub(super) fn new(endpoint: &'a ApiUrl, creds: &'a ClientCredentials) -> Self {
-        Self { endpoint, creds }
+impl Api {
+    pub fn new(endpoint: ApiUrl) -> Self {
+        Self { endpoint }
     }
 
-    /// Authenticate the existing user or throw an error.
-    pub(super) async fn handle_user(
-        &'a self,
-        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
-    ) -> auth::Result<AuthSuccess<NodeInfo>> {
-        // We reuse user handling logic from a production module.
-        console::handle_user(client, self, Self::get_auth_info, Self::wake_compute).await
+    pub fn url(&self) -> &str {
+        self.endpoint.as_str()
     }
-}
 
-impl Api<'_> {
-    /// This implementation fetches the auth info from a local postgres instance.
-    async fn get_auth_info(&self) -> Result<Option<AuthInfo>, GetAuthInfoError> {
+    async fn do_get_auth_info(
+        &self,
+        creds: &ClientCredentials<'_>,
+    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
         async {
             // Perhaps we could persist this connection, but then we'd have to
             // write more code for reopening it if it got closed, which doesn't
@@ -75,7 +55,7 @@ impl Api<'_> {
 
             tokio::spawn(connection);
             let query = "select rolpassword from pg_catalog.pg_authid where rolname = $1";
-            let rows = client.query(query, &[&self.creds.user]).await?;
+            let rows = client.query(query, &[&creds.user]).await?;
 
             // We can get at most one row, because `rolname` is unique.
             let row = match rows.get(0) {
@@ -84,7 +64,7 @@ impl Api<'_> {
                 // However, this is still a *valid* outcome which is very similar
                 // to getting `404 Not found` from the Neon console.
                 None => {
-                    warn!("user '{}' does not exist", self.creds.user);
+                    warn!("user '{}' does not exist", creds.user);
                     return Ok(None);
                 }
             };
@@ -98,23 +78,50 @@ impl Api<'_> {
             Ok(secret.or_else(|| parse_md5(entry).map(AuthInfo::Md5)))
         }
         .map_err(crate::error::log_error)
-        .instrument(info_span!("get_auth_info", mock = self.endpoint.as_str()))
+        .instrument(info_span!("postgres", url = self.endpoint.as_str()))
         .await
     }
 
-    /// We don't need to wake anything locally, so we just return the connection info.
-    pub async fn wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
+    async fn do_wake_compute(
+        &self,
+        creds: &ClientCredentials<'_>,
+    ) -> Result<NodeInfo, WakeComputeError> {
         let mut config = compute::ConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
             .port(self.endpoint.port().unwrap_or(5432))
-            .dbname(self.creds.dbname)
-            .user(self.creds.user);
+            .dbname(creds.dbname)
+            .user(creds.user);
 
-        Ok(NodeInfo {
+        let node = NodeInfo {
             config,
             aux: Default::default(),
-        })
+        };
+
+        Ok(node)
+    }
+}
+
+#[async_trait]
+impl super::Api for Api {
+    #[tracing::instrument(skip_all)]
+    async fn get_auth_info(
+        &self,
+        _extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials<'_>,
+    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
+        self.do_get_auth_info(creds).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn wake_compute(
+        &self,
+        _extra: &ConsoleReqExtra<'_>,
+        creds: &ClientCredentials<'_>,
+    ) -> Result<CachedNodeInfo, WakeComputeError> {
+        self.do_wake_compute(creds)
+            .map_ok(CachedNodeInfo::new_uncached)
+            .await
     }
 }
 

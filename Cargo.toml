@@ -7,6 +7,7 @@ members = [
     "safekeeper",
     "storage_broker",
     "workspace_hack",
+    "trace",
     "libs/*",
 ]
 
@@ -31,12 +32,14 @@ bstr = "1.0"
 byteorder = "1.4"
 bytes = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clap = "4.0"
+clap = { version = "4.0", features = ["derive"] }
 close_fds = "0.3.2"
 comfy-table = "6.1"
 const_format = "0.2"
 crc32c = "0.6"
 crossbeam-utils = "0.8.5"
+enum-map = "2.4.2"
+enumset = "1.0.12"
 fail = "0.5.0"
 fs2 = "0.4.3"
 futures = "0.3"
@@ -44,6 +47,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 git-version = "0.3"
 hashbrown = "0.13"
+hashlink = "0.8.1"
 hex = "0.4"
 hex-literal = "0.3"
 hmac = "0.12.1"
@@ -117,6 +121,9 @@ postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git",
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 tokio-tar = { git = "https://github.com/neondatabase/tokio-tar.git", rev="404df61437de0feef49ba2ccdbdd94eb8ad6e142" }
+
+## Other git libraries
+heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
 
 ## Local libraries
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }

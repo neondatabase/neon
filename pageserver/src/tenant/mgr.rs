@@ -285,17 +285,22 @@ pub async fn create_tenant(
     }).await
 }
 
-pub async fn update_tenant_config(
+pub async fn set_new_tenant_config(
     conf: &'static PageServerConf,
-    tenant_conf: TenantConfOpt,
+    new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
 ) -> anyhow::Result<()> {
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
-    tenant.update_tenant_config(tenant_conf);
     let tenant_config_path = conf.tenant_config_path(tenant_id);
-    Tenant::persist_tenant_config(&tenant.tenant_id(), &tenant_config_path, tenant_conf, false)?;
+    Tenant::persist_tenant_config(
+        &tenant.tenant_id(),
+        &tenant_config_path,
+        new_tenant_conf,
+        false,
+    )?;
+    tenant.set_new_tenant_config(new_tenant_conf);
     Ok(())
 }
 

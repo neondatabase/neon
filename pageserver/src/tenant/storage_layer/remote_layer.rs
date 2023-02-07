@@ -2,10 +2,12 @@
 //! in remote storage.
 //!
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::repository::Key;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
+use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,9 +19,19 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
 use super::image_layer::ImageLayer;
-use super::{DeltaLayer, LayerIter, LayerKeyIter, PersistentLayer};
+use super::{
+    DeltaLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
+    LayerResidenceStatus, PersistentLayer,
+};
 
-#[derive(Debug)]
+/// RemoteLayer is a not yet downloaded [`ImageLayer`] or
+/// [`crate::storage_layer::DeltaLayer`].
+///
+/// RemoteLayer might be downloaded on-demand during operations which are
+/// allowed download remote layers and during which, it gets replaced with a
+/// concrete `DeltaLayer` or `ImageLayer`.
+///
+/// See: [`crate::context::RequestContext`] for authorization to download
 pub struct RemoteLayer {
     tenantid: TenantId,
     timelineid: TimelineId,
@@ -34,7 +46,19 @@ pub struct RemoteLayer {
 
     is_incremental: bool,
 
+    access_stats: LayerAccessStats,
+
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
+}
+
+impl std::fmt::Debug for RemoteLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteLayer")
+            .field("file_name", &self.file_name)
+            .field("layer_metadata", &self.layer_metadata)
+            .field("is_incremental", &self.is_incremental)
+            .finish()
+    }
 }
 
 impl Layer for RemoteLayer {
@@ -51,6 +75,7 @@ impl Layer for RemoteLayer {
         _key: Key,
         _lsn_range: Range<Lsn>,
         _reconstruct_state: &mut ValueReconstructState,
+        _ctx: &RequestContext,
     ) -> Result<ValueReconstructResult> {
         bail!(
             "layer {} needs to be downloaded",
@@ -63,7 +88,7 @@ impl Layer for RemoteLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, _verbose: bool) -> Result<()> {
+    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         println!(
             "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
             self.tenantid,
@@ -111,11 +136,11 @@ impl PersistentLayer for RemoteLayer {
         None
     }
 
-    fn iter(&self) -> Result<LayerIter<'_>> {
+    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
         bail!("cannot iterate a remote layer");
     }
 
-    fn key_iter(&self) -> Result<LayerKeyIter<'_>> {
+    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
         bail!("cannot iterate a remote layer");
     }
 
@@ -134,6 +159,34 @@ impl PersistentLayer for RemoteLayer {
     fn file_size(&self) -> Option<u64> {
         self.layer_metadata.file_size()
     }
+
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        let layer_file_name = self.filename().file_name();
+        let lsn_range = self.get_lsn_range();
+
+        if self.is_delta {
+            HistoricLayerInfo::Delta {
+                layer_file_name,
+                layer_file_size: self.layer_metadata.file_size(),
+                lsn_start: lsn_range.start,
+                lsn_end: lsn_range.end,
+                remote: true,
+                access_stats: self.access_stats.to_api_model(reset),
+            }
+        } else {
+            HistoricLayerInfo::Image {
+                layer_file_name,
+                layer_file_size: self.layer_metadata.file_size(),
+                lsn_start: lsn_range.start,
+                remote: true,
+                access_stats: self.access_stats.to_api_model(reset),
+            }
+        }
+    }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        &self.access_stats
+    }
 }
 
 impl RemoteLayer {
@@ -142,17 +195,19 @@ impl RemoteLayer {
         timelineid: TimelineId,
         fname: &ImageFileName,
         layer_metadata: &LayerFileMetadata,
+        access_stats: LayerAccessStats,
     ) -> RemoteLayer {
         RemoteLayer {
             tenantid,
             timelineid,
             key_range: fname.key_range.clone(),
-            lsn_range: fname.lsn..(fname.lsn + 1),
+            lsn_range: fname.lsn_as_range(),
             is_delta: false,
             is_incremental: false,
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            access_stats,
         }
     }
 
@@ -161,6 +216,7 @@ impl RemoteLayer {
         timelineid: TimelineId,
         fname: &DeltaFileName,
         layer_metadata: &LayerFileMetadata,
+        access_stats: LayerAccessStats,
     ) -> RemoteLayer {
         RemoteLayer {
             tenantid,
@@ -172,6 +228,7 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            access_stats,
         }
     }
 
@@ -192,6 +249,8 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::Resident),
             ))
         } else {
             let fname = ImageFileName {
@@ -204,6 +263,8 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::Resident),
             ))
         }
     }

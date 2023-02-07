@@ -1,5 +1,11 @@
-use super::{AuthSuccess, NodeInfo};
-use crate::{auth, compute, error::UserFacingError, stream::PqStream, waiters};
+use super::AuthSuccess;
+use crate::{
+    auth, compute,
+    console::{self, provider::NodeInfo},
+    error::UserFacingError,
+    stream::PqStream,
+    waiters,
+};
 use pq_proto::BeMessage as Be;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -47,7 +53,7 @@ pub fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
 }
 
-pub async fn handle_user(
+pub(super) async fn handle_user(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<AuthSuccess<NodeInfo>> {
@@ -55,7 +61,7 @@ pub async fn handle_user(
     let span = info_span!("link", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
 
-    let db_info = super::with_waiter(psql_session_id, |waiter| async {
+    let db_info = console::mgmt::with_waiter(psql_session_id, |waiter| async {
         // Give user a URL to spawn a new database.
         info!(parent: &span, "sending the auth URL to the user");
         client
@@ -80,14 +86,14 @@ pub async fn handle_user(
         .user(&db_info.user);
 
     if let Some(password) = db_info.password {
-        config.password(password);
+        config.password(password.as_ref());
     }
 
     Ok(AuthSuccess {
         reported_auth_ok: true,
         value: NodeInfo {
             config,
-            aux: db_info.aux,
+            aux: db_info.aux.into(),
         },
     })
 }

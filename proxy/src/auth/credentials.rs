@@ -33,6 +33,7 @@ impl UserFacingError for ClientCredsParseError {}
 pub struct ClientCredentials<'a> {
     pub user: &'a str,
     pub dbname: &'a str,
+    // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<Cow<'a, str>>,
     /// If `True`, we'll use the old cleartext password flow. This is used for
     /// websocket connections, which want to minimize the number of round trips.
@@ -43,18 +44,6 @@ impl ClientCredentials<'_> {
     #[inline]
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
-    }
-}
-
-impl<'a> ClientCredentials<'a> {
-    #[inline]
-    pub fn as_ref(&'a self) -> ClientCredentials<'a> {
-        Self {
-            user: self.user,
-            dbname: self.dbname,
-            project: self.project().map(Cow::Borrowed),
-            use_cleartext_password_flow: self.use_cleartext_password_flow,
-        }
     }
 }
 

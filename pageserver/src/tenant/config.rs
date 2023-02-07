@@ -51,6 +51,7 @@ pub struct TenantConf {
     pub checkpoint_distance: u64,
     // Inmemory layer is also flushed at least once in checkpoint_timeout to
     // eventually upload WAL after activity is stopped.
+    #[serde(with = "humantime_serde")]
     pub checkpoint_timeout: Duration,
     // Target file size, when creating image and delta layers.
     // This parameter determines L1 layer file size.
@@ -96,23 +97,61 @@ pub struct TenantConf {
 /// which parameters are set and which are not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TenantConfOpt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub checkpoint_distance: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub checkpoint_timeout: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub compaction_target_size: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub compaction_period: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub compaction_threshold: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub gc_horizon: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub gc_period: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub image_creation_threshold: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub pitr_interval: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub walreceiver_connect_timeout: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
+    #[serde(default)]
     pub lagging_wal_timeout: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub trace_read_requests: Option<bool>,
 }
 
@@ -223,5 +262,26 @@ impl Default for TenantConf {
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
             trace_read_requests: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn de_serializing_pageserver_config_omits_empty_values() {
+        let small_conf = TenantConfOpt {
+            gc_horizon: Some(42),
+            ..TenantConfOpt::default()
+        };
+
+        let toml_form = toml_edit::easy::to_string(&small_conf).unwrap();
+        assert_eq!(toml_form, "gc_horizon = 42\n");
+        assert_eq!(small_conf, toml_edit::easy::from_str(&toml_form).unwrap());
+
+        let json_form = serde_json::to_string(&small_conf).unwrap();
+        assert_eq!(json_form, "{\"gc_horizon\":42}");
+        assert_eq!(small_conf, serde_json::from_str(&json_form).unwrap());
     }
 }

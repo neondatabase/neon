@@ -1,9 +1,14 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    collections::HashMap,
+    num::{NonZeroU64, NonZeroUsize},
+    time::SystemTime,
+};
 
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::{
+    history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
     lsn::Lsn,
 };
@@ -137,7 +142,6 @@ pub struct TenantConfigRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
@@ -227,6 +231,130 @@ pub struct TimelineInfo {
     pub state: TimelineState,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LayerMapInfo {
+    pub in_memory_layers: Vec<InMemoryLayerInfo>,
+    pub historic_layers: Vec<HistoricLayerInfo>,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, enum_map::Enum)]
+#[repr(usize)]
+pub enum LayerAccessKind {
+    GetValueReconstructData,
+    Iter,
+    KeyIter,
+    Dump,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerAccessStatFullDetails {
+    pub when_millis_since_epoch: u64,
+    pub task_kind: &'static str,
+    pub access_kind: LayerAccessKind,
+}
+
+/// An event that impacts the layer's residence status.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerResidenceEvent {
+    /// The time when the event occurred.
+    /// NB: this timestamp is captured while the residence status changes.
+    /// So, it might be behind/ahead of the actual residence change by a short amount of time.
+    ///
+    #[serde(rename = "timestamp_millis_since_epoch")]
+    #[serde_as(as = "serde_with::TimestampMilliSeconds")]
+    timestamp: SystemTime,
+    /// The new residence status of the layer.
+    status: LayerResidenceStatus,
+    /// The reason why we had to record this event.
+    reason: LayerResidenceEventReason,
+}
+
+/// The reason for recording a given [`ResidenceEvent`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum LayerResidenceEventReason {
+    /// The layer map is being populated, e.g. during timeline load or attach.
+    /// This includes [`RemoteLayer`] objects created in [`reconcile_with_remote`].
+    /// We need to record such events because there is no persistent storage for the events.
+    LayerLoad,
+    /// We just created the layer (e.g., freeze_and_flush or compaction).
+    /// Such layers are always [`LayerResidenceStatus::Resident`].
+    LayerCreate,
+    /// We on-demand downloaded or evicted the given layer.
+    ResidenceChange,
+}
+
+/// The residence status of the layer, after the given [`LayerResidenceEvent`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum LayerResidenceStatus {
+    /// Residence status for a layer file that exists locally.
+    /// It may also exist on the remote, we don't care here.
+    Resident,
+    /// Residence status for a layer file that only exists on the remote.
+    Evicted,
+}
+
+impl LayerResidenceEvent {
+    pub fn new(status: LayerResidenceStatus, reason: LayerResidenceEventReason) -> Self {
+        Self {
+            status,
+            reason,
+            timestamp: SystemTime::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LayerAccessStats {
+    pub access_count_by_access_kind: HashMap<LayerAccessKind, u64>,
+    pub task_kind_access_flag: Vec<&'static str>,
+    pub first: Option<LayerAccessStatFullDetails>,
+    pub accesses_history: HistoryBufferWithDropCounter<LayerAccessStatFullDetails, 16>,
+    pub residence_events_history: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+pub enum InMemoryLayerInfo {
+    Open {
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+    },
+    Frozen {
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_end: Lsn,
+    },
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+pub enum HistoricLayerInfo {
+    Delta {
+        layer_file_name: String,
+        layer_file_size: Option<u64>,
+
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_end: Lsn,
+        remote: bool,
+        access_stats: LayerAccessStats,
+    },
+    Image {
+        layer_file_name: String,
+        layer_file_size: Option<u64>,
+
+        #[serde_as(as = "DisplayFromStr")]
+        lsn_start: Lsn,
+        remote: bool,
+        access_stats: LayerAccessStats,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadRemoteLayersTaskSpawnRequest {
     pub max_concurrent_downloads: NonZeroUsize,
@@ -267,7 +395,7 @@ pub struct TimelineGcRequest {
 }
 
 // Wrapped in libpq CopyData
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum PagestreamFeMessage {
     Exists(PagestreamExistsRequest),
     Nblocks(PagestreamNblocksRequest),

@@ -1,6 +1,6 @@
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
-use hyper::server::accept::{self};
+use hyper::server::accept;
 use hyper::server::conn::AddrIncoming;
 use hyper::upgrade::Upgraded;
 use hyper::{Body, Request, Response, StatusCode};
@@ -161,7 +161,7 @@ impl AsyncBufRead for WebSocketRW {
 
 async fn serve_websocket(
     websocket: HyperWebsocket,
-    config: &ProxyConfig,
+    config: &'static ProxyConfig,
     cancel_map: &CancelMap,
     session_id: uuid::Uuid,
     hostname: Option<String>,

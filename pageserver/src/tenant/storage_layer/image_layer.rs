@@ -20,19 +20,21 @@
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
 use crate::config::PageServerConf;
+use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::repository::{Key, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
 use crate::tenant::storage_layer::{
-    PersistentLayer, ValueReconstructResult, ValueReconstructState,
+    LayerAccessStats, PersistentLayer, ValueReconstructResult, ValueReconstructState,
 };
 use crate::virtual_file::VirtualFile;
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
 use hex;
+use pageserver_api::models::{HistoricLayerInfo, LayerAccessKind};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -50,8 +52,8 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::{ImageFileName, LayerFileName, PathOrConf};
-use super::{Layer, LayerIter};
+use super::filename::{ImageFileName, LayerFileName};
+use super::{Layer, LayerAccessStatsReset, LayerIter, LayerResidenceStatus, PathOrConf};
 
 ///
 /// Header stored in the beginning of the file
@@ -93,13 +95,13 @@ impl From<&ImageLayer> for Summary {
     }
 }
 
-///
 /// ImageLayer is the in-memory data structure associated with an on-disk image
-/// file.  We keep an ImageLayer in memory for each file, in the LayerMap. If a
-/// layer is in "loaded" state, we have a copy of the index in memory, in 'inner'.
+/// file.
+///
+/// We keep an ImageLayer in memory for each file, in the LayerMap. If a layer
+/// is in "loaded" state, we have a copy of the index in memory, in 'inner'.
 /// Otherwise the struct is just a placeholder for a file that exists on disk,
 /// and it needs to be loaded before using it in queries.
-///
 pub struct ImageLayer {
     path_or_conf: PathOrConf,
     pub tenant_id: TenantId,
@@ -110,7 +112,20 @@ pub struct ImageLayer {
     // This entry contains an image of all pages as of this LSN
     pub lsn: Lsn,
 
+    access_stats: LayerAccessStats,
+
     inner: RwLock<ImageLayerInner>,
+}
+
+impl std::fmt::Debug for ImageLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageLayer")
+            .field("key_range", &self.key_range)
+            .field("file_size", &self.file_size)
+            .field("lsn", &self.lsn)
+            .field("inner", &self.inner)
+            .finish()
+    }
 }
 
 pub struct ImageLayerInner {
@@ -123,6 +138,16 @@ pub struct ImageLayerInner {
 
     /// Reader object for reading blocks from the file. (None if not loaded yet)
     file: Option<FileBlockReader<VirtualFile>>,
+}
+
+impl std::fmt::Debug for ImageLayerInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageLayerInner")
+            .field("loaded", &self.loaded)
+            .field("index_start_blk", &self.index_start_blk)
+            .field("index_root_blk", &self.index_root_blk)
+            .finish()
+    }
 }
 
 impl Layer for ImageLayer {
@@ -143,7 +168,7 @@ impl Layer for ImageLayer {
     }
 
     /// debugging function to print out the contents of the layer
-    fn dump(&self, verbose: bool) -> Result<()> {
+    fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} ----",
             self.tenant_id, self.timeline_id, self.key_range.start, self.key_range.end, self.lsn
@@ -153,7 +178,7 @@ impl Layer for ImageLayer {
             return Ok(());
         }
 
-        let inner = self.load()?;
+        let inner = self.load(LayerAccessKind::Dump, ctx)?;
         let file = inner.file.as_ref().unwrap();
         let tree_reader =
             DiskBtreeReader::<_, KEY_SIZE>::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -174,12 +199,13 @@ impl Layer for ImageLayer {
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
         assert!(self.key_range.contains(&key));
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load()?;
+        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
 
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -220,7 +246,7 @@ impl PersistentLayer for ImageLayer {
     fn get_timeline_id(&self) -> TimelineId {
         self.timeline_id
     }
-    fn iter(&self) -> Result<LayerIter<'_>> {
+    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
         unimplemented!();
     }
 
@@ -232,6 +258,23 @@ impl PersistentLayer for ImageLayer {
 
     fn file_size(&self) -> Option<u64> {
         Some(self.file_size)
+    }
+
+    fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
+        let layer_file_name = self.filename().file_name();
+        let lsn_range = self.get_lsn_range();
+
+        HistoricLayerInfo::Image {
+            layer_file_name,
+            layer_file_size: Some(self.file_size),
+            lsn_start: lsn_range.start,
+            remote: false,
+            access_stats: self.access_stats.to_api_model(reset),
+        }
+    }
+
+    fn access_stats(&self) -> &LayerAccessStats {
+        &self.access_stats
     }
 }
 
@@ -270,7 +313,13 @@ impl ImageLayer {
     /// Open the underlying file and read the metadata into memory, if it's
     /// not loaded already.
     ///
-    fn load(&self) -> Result<RwLockReadGuard<ImageLayerInner>> {
+    fn load(
+        &self,
+        access_kind: LayerAccessKind,
+        ctx: &RequestContext,
+    ) -> Result<RwLockReadGuard<ImageLayerInner>> {
+        self.access_stats
+            .record_access(access_kind, ctx.task_kind());
         loop {
             // Quick exit if already loaded
             let inner = self.inner.read().unwrap();
@@ -350,6 +399,7 @@ impl ImageLayer {
         tenant_id: TenantId,
         filename: &ImageFileName,
         file_size: u64,
+        access_stats: LayerAccessStats,
     ) -> ImageLayer {
         ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
@@ -358,6 +408,7 @@ impl ImageLayer {
             key_range: filename.key_range.clone(),
             lsn: filename.lsn,
             file_size,
+            access_stats,
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,
@@ -385,6 +436,7 @@ impl ImageLayer {
             key_range: summary.key_range,
             lsn: summary.lsn,
             file_size: metadata.len(),
+            access_stats: LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
                 loaded: false,
@@ -544,6 +596,7 @@ impl ImageLayerWriterInner {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             file_size: metadata.len(),
+            access_stats: LayerAccessStats::for_new_layer_file(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,

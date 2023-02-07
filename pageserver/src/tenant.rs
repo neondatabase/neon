@@ -45,13 +45,14 @@ use std::sync::MutexGuard;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use self::config::TenantConf;
 use self::metadata::TimelineMetadata;
 use self::remote_timeline_client::RemoteTimelineClient;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
 use crate::is_uninit_mark;
-use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC};
+use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
@@ -77,7 +78,7 @@ use utils::{
 
 mod blob_io;
 pub mod block_io;
-mod disk_btree;
+pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
 
@@ -1618,8 +1619,16 @@ fn tree_sort_timelines(
     Ok(result)
 }
 
-/// Private functions
 impl Tenant {
+    pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
+        *self.tenant_conf.read().unwrap()
+    }
+
+    pub fn effective_config(&self) -> TenantConf {
+        self.tenant_specific_overrides()
+            .merge(self.conf.default_tenant_conf)
+    }
+
     pub fn get_checkpoint_distance(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
@@ -1690,8 +1699,8 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
-    pub fn update_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
-        self.tenant_conf.write().unwrap().update(&new_tenant_conf);
+    pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
+        *self.tenant_conf.write().unwrap() = new_tenant_conf;
     }
 
     fn create_timeline_data(
@@ -2432,13 +2441,27 @@ impl Tenant {
     pub async fn calculate_synthetic_size(&self, ctx: &RequestContext) -> anyhow::Result<u64> {
         let inputs = self.gather_size_inputs(ctx).await?;
 
+        self.calc_and_update_cached_synthetic_size(&inputs)
+    }
+
+    /// Calculate synthetic size , cache it and set metric value
+    pub fn calc_and_update_cached_synthetic_size(
+        &self,
+        inputs: &size::ModelInputs,
+    ) -> anyhow::Result<u64> {
         let size = inputs.calculate()?;
 
         self.cached_synthetic_tenant_size
             .store(size, Ordering::Relaxed);
 
+        TENANT_SYNTHETIC_SIZE_METRIC
+            .get_metric_with_label_values(&[&self.tenant_id.to_string()])
+            .unwrap()
+            .set(size);
+
         Ok(size)
     }
+
     pub fn get_cached_synthetic_size(&self) -> u64 {
         self.cached_synthetic_tenant_size.load(Ordering::Relaxed)
     }
@@ -2643,7 +2666,11 @@ impl Drop for Tenant {
     }
 }
 /// Dump contents of a layer file to stdout.
-pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> anyhow::Result<()> {
+pub fn dump_layerfile_from_path(
+    path: &Path,
+    verbose: bool,
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
     use std::os::unix::fs::FileExt;
 
     // All layer files start with a two-byte "magic" value, to identify the kind of
@@ -2653,8 +2680,8 @@ pub fn dump_layerfile_from_path(path: &Path, verbose: bool) -> anyhow::Result<()
     file.read_exact_at(&mut header_buf, 0)?;
 
     match u16::from_be_bytes(header_buf) {
-        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose)?,
-        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose)?,
+        crate::IMAGE_FILE_MAGIC => ImageLayer::new_for_path(path, file)?.dump(verbose, ctx)?,
+        crate::DELTA_FILE_MAGIC => DeltaLayer::new_for_path(path, file)?.dump(verbose, ctx)?,
         magic => bail!("unrecognized magic identifier: {:?}", magic),
     }
 

@@ -41,6 +41,18 @@ impl Ord for LayerKey {
     }
 }
 
+impl<'a, L: crate::tenant::storage_layer::Layer + ?Sized> From<&'a L> for LayerKey {
+    fn from(layer: &'a L) -> Self {
+        let kr = layer.get_key_range();
+        let lr = layer.get_lsn_range();
+        LayerKey {
+            key: kr.start.to_i128()..kr.end.to_i128(),
+            lsn: lr.start.0..lr.end.0,
+            is_image: !layer.is_incremental(),
+        }
+    }
+}
+
 /// Efficiently queryable layer coverage for each LSN.
 ///
 /// Allows answering layer map queries very efficiently,
@@ -82,15 +94,13 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         }
 
         // Insert into data structure
-        if layer_key.is_image {
-            self.head
-                .image_coverage
-                .insert(layer_key.key, layer_key.lsn.clone(), value);
+        let target = if layer_key.is_image {
+            &mut self.head.image_coverage
         } else {
-            self.head
-                .delta_coverage
-                .insert(layer_key.key, layer_key.lsn.clone(), value);
-        }
+            &mut self.head.delta_coverage
+        };
+
+        target.insert(layer_key.key, layer_key.lsn.clone(), value);
 
         // Remember history. Clone is O(1)
         self.historic.insert(layer_key.lsn.start, self.head.clone());
@@ -415,6 +425,59 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.buffer.insert(layer_key, None);
     }
 
+    /// Replaces a previous layer with a new layer value.
+    ///
+    /// The replacement is conditional on:
+    /// - there is an existing `LayerKey` record
+    /// - there is no buffered removal for the given `LayerKey`
+    /// - the given closure returns true for the current `Value`
+    ///
+    /// The closure is used to compare the latest value (buffered insert, or existing layer)
+    /// against some expectation. This allows to use `Arc::ptr_eq` or similar which would be
+    /// inaccessible via `PartialEq` trait.
+    ///
+    /// Returns a `Replacement` value describing the outcome; only the case of
+    /// `Replacement::Replaced` modifies the map and requires a rebuild.
+    pub fn replace<F>(
+        &mut self,
+        layer_key: &LayerKey,
+        new: Value,
+        check_expected: F,
+    ) -> Replacement<Value>
+    where
+        F: FnOnce(&Value) -> bool,
+    {
+        let (slot, in_buffered) = match self.buffer.get(layer_key) {
+            Some(inner @ Some(_)) => {
+                // we compare against the buffered version, because there will be a later
+                // rebuild before querying
+                (inner.as_ref(), true)
+            }
+            Some(None) => {
+                // buffer has removal for this key; it will not be equivalent by any check_expected.
+                return Replacement::RemovalBuffered;
+            }
+            None => {
+                // no pending modification for the key, check layers
+                (self.layers.get(layer_key), false)
+            }
+        };
+
+        match slot {
+            Some(existing) if !check_expected(existing) => {
+                // unfortunate clone here, but otherwise the nll borrowck grows the region of
+                // 'a to cover the whole function, and we could not mutate in the other
+                // Some(existing) branch
+                Replacement::Unexpected(existing.clone())
+            }
+            None => Replacement::NotFound,
+            Some(_existing) => {
+                self.insert(layer_key.to_owned(), new);
+                Replacement::Replaced { in_buffered }
+            }
+        }
+    }
+
     pub fn rebuild(&mut self) {
         // Find the first LSN that needs to be rebuilt
         let rebuild_since: u64 = match self.buffer.iter().next() {
@@ -483,6 +546,22 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     }
 }
 
+/// Outcome of the replace operation.
+#[derive(Debug)]
+pub enum Replacement<Value> {
+    /// Previous value was replaced with the new value.
+    Replaced {
+        /// Replacement happened for a scheduled insert.
+        in_buffered: bool,
+    },
+    /// Key was not found buffered updates or existing layers.
+    NotFound,
+    /// Key has been scheduled for removal, it was not replaced.
+    RemovalBuffered,
+    /// Previous value was rejected by the closure.
+    Unexpected(Value),
+}
+
 #[test]
 fn test_retroactive_regression_1() {
     let mut map = BufferedHistoricLayerCoverage::new();
@@ -548,7 +627,7 @@ fn test_retroactive_simple() {
         LayerKey {
             key: 2..5,
             lsn: 105..106,
-            is_image: true,
+            is_image: false,
         },
         "Delta 1".to_string(),
     );
@@ -556,17 +635,24 @@ fn test_retroactive_simple() {
     // Rebuild so we can start querying
     map.rebuild();
 
-    // Query key 4
-    let version = map.get().unwrap().get_version(90);
-    assert!(version.is_none());
-    let version = map.get().unwrap().get_version(102).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
-    let version = map.get().unwrap().get_version(107).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Delta 1".to_string()));
-    let version = map.get().unwrap().get_version(115).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
-    let version = map.get().unwrap().get_version(125).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 3".to_string()));
+    {
+        let map = map.get().expect("rebuilt");
+
+        let version = map.get_version(90);
+        assert!(version.is_none());
+        let version = map.get_version(102).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
+
+        let version = map.get_version(107).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 1".to_string()));
+        assert_eq!(version.delta_coverage.query(4), Some("Delta 1".to_string()));
+
+        let version = map.get_version(115).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
+
+        let version = map.get_version(125).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 3".to_string()));
+    }
 
     // Remove Image 3
     map.remove(LayerKey {
@@ -576,8 +662,147 @@ fn test_retroactive_simple() {
     });
     map.rebuild();
 
-    // Check deletion worked
-    let version = map.get().unwrap().get_version(125).unwrap();
-    assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
-    assert_eq!(version.image_coverage.query(8), Some("Image 4".to_string()));
+    {
+        // Check deletion worked
+        let map = map.get().expect("rebuilt");
+        let version = map.get_version(125).unwrap();
+        assert_eq!(version.image_coverage.query(4), Some("Image 2".to_string()));
+        assert_eq!(version.image_coverage.query(8), Some("Image 4".to_string()));
+    }
+}
+
+#[test]
+fn test_retroactive_replacement() {
+    let mut map = BufferedHistoricLayerCoverage::new();
+
+    let keys = [
+        LayerKey {
+            key: 0..5,
+            lsn: 100..101,
+            is_image: true,
+        },
+        LayerKey {
+            key: 3..9,
+            lsn: 110..111,
+            is_image: true,
+        },
+        LayerKey {
+            key: 4..6,
+            lsn: 120..121,
+            is_image: true,
+        },
+    ];
+
+    let layers = [
+        "Image 1".to_string(),
+        "Image 2".to_string(),
+        "Image 3".to_string(),
+    ];
+
+    for (key, layer) in keys.iter().zip(layers.iter()) {
+        map.insert(key.to_owned(), layer.to_owned());
+    }
+
+    // rebuild is not necessary here, because replace works for both buffered updates and existing
+    // layers.
+
+    for (key, orig_layer) in keys.iter().zip(layers.iter()) {
+        let replacement = format!("Remote {orig_layer}");
+
+        // evict
+        let ret = map.replace(key, replacement.clone(), |l| l == orig_layer);
+        assert!(
+            matches!(ret, Replacement::Replaced { .. }),
+            "replace {orig_layer}: {ret:?}"
+        );
+        map.rebuild();
+
+        let at = key.lsn.end + 1;
+
+        let version = map.get().expect("rebuilt").get_version(at).unwrap();
+        assert_eq!(
+            version.image_coverage.query(4).as_deref(),
+            Some(replacement.as_str()),
+            "query for 4 at version {at} after eviction",
+        );
+
+        // download
+        let ret = map.replace(key, orig_layer.clone(), |l| l == &replacement);
+        assert!(
+            matches!(ret, Replacement::Replaced { .. }),
+            "replace {orig_layer} back: {ret:?}"
+        );
+        map.rebuild();
+        let version = map.get().expect("rebuilt").get_version(at).unwrap();
+        assert_eq!(
+            version.image_coverage.query(4).as_deref(),
+            Some(orig_layer.as_str()),
+            "query for 4 at version {at} after download",
+        );
+    }
+}
+
+#[test]
+fn missing_key_is_not_inserted_with_replace() {
+    let mut map = BufferedHistoricLayerCoverage::new();
+    let key = LayerKey {
+        key: 0..5,
+        lsn: 100..101,
+        is_image: true,
+    };
+
+    let ret = map.replace(&key, "should not replace", |_| true);
+    assert!(matches!(ret, Replacement::NotFound), "{ret:?}");
+    map.rebuild();
+    assert!(map
+        .get()
+        .expect("no changes to rebuild")
+        .get_version(102)
+        .is_none());
+}
+
+#[test]
+fn replacing_buffered_insert_and_remove() {
+    let mut map = BufferedHistoricLayerCoverage::new();
+    let key = LayerKey {
+        key: 0..5,
+        lsn: 100..101,
+        is_image: true,
+    };
+
+    map.insert(key.clone(), "Image 1");
+    let ret = map.replace(&key, "Remote Image 1", |&l| l == "Image 1");
+    assert!(
+        matches!(ret, Replacement::Replaced { in_buffered: true }),
+        "{ret:?}"
+    );
+    map.rebuild();
+
+    assert_eq!(
+        map.get()
+            .expect("rebuilt")
+            .get_version(102)
+            .unwrap()
+            .image_coverage
+            .query(4),
+        Some("Remote Image 1")
+    );
+
+    map.remove(key.clone());
+    let ret = map.replace(&key, "should not replace", |_| true);
+    assert!(
+        matches!(ret, Replacement::RemovalBuffered),
+        "cannot replace after scheduled remove: {ret:?}"
+    );
+
+    map.rebuild();
+
+    let ret = map.replace(&key, "should not replace", |_| true);
+    assert!(
+        matches!(ret, Replacement::NotFound),
+        "cannot replace after remove + rebuild: {ret:?}"
+    );
+
+    let at_version = map.get().expect("rebuilt").get_version(102);
+    assert!(at_version.is_none());
 }

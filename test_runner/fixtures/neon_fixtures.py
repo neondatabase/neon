@@ -1205,6 +1205,11 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def tenant_config(self, tenant_id: TenantId) -> TenantConfig:
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/config")
+        self.verbose_error(res)
+        return TenantConfig.from_json(res.json())
+
     def tenant_size(self, tenant_id: TenantId) -> int:
         return self.tenant_size_and_modelinputs(tenant_id)[0]
 
@@ -1232,9 +1237,9 @@ class PageserverHttpClient(requests.Session):
 
         params = {}
         if include_non_incremental_logical_size:
-            params["include-non-incremental-logical-size"] = "yes"
+            params["include-non-incremental-logical-size"] = "true"
         if include_timeline_dir_layer_file_size_sum:
-            params["include-timeline-dir-layer-file-size-sum"] = "yes"
+            params["include-timeline-dir-layer-file-size-sum"] = "true"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", params=params
@@ -1276,9 +1281,9 @@ class PageserverHttpClient(requests.Session):
     ) -> Dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
-            params["include-non-incremental-logical-size"] = "yes"
+            params["include-non-incremental-logical-size"] = "true"
         if include_timeline_dir_layer_file_size_sum:
-            params["include-timeline-dir-layer-file-size-sum"] = "yes"
+            params["include-timeline-dir-layer-file-size-sum"] = "true"
 
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
@@ -1471,6 +1476,104 @@ class PageserverHttpClient(requests.Session):
             return None
         assert len(relevant) == 1
         return relevant[0].lstrip(name).strip()
+
+    def layer_map_info(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> LayerMapInfo:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/",
+        )
+        self.verbose_error(res)
+        return LayerMapInfo.from_json(res.json())
+
+    def download_layer(self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: str):
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}",
+        )
+        self.verbose_error(res)
+
+        assert res.status_code == 200
+
+    def evict_layer(self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: str):
+        res = self.delete(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}",
+        )
+        self.verbose_error(res)
+
+        assert res.status_code == 200
+
+
+@dataclass
+class TenantConfig:
+    tenant_specific_overrides: Dict[str, Any]
+    effective_config: Dict[str, Any]
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> TenantConfig:
+        return TenantConfig(
+            tenant_specific_overrides=d["tenant_specific_overrides"],
+            effective_config=d["effective_config"],
+        )
+
+
+@dataclass
+class LayerMapInfo:
+    in_memory_layers: List[InMemoryLayerInfo]
+    historic_layers: List[HistoricLayerInfo]
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> LayerMapInfo:
+        info = LayerMapInfo(in_memory_layers=[], historic_layers=[])
+
+        json_in_memory_layers = d["in_memory_layers"]
+        assert isinstance(json_in_memory_layers, List)
+        for json_in_memory_layer in json_in_memory_layers:
+            info.in_memory_layers.append(InMemoryLayerInfo.from_json(json_in_memory_layer))
+
+        json_historic_layers = d["historic_layers"]
+        assert isinstance(json_historic_layers, List)
+        for json_historic_layer in json_historic_layers:
+            info.historic_layers.append(HistoricLayerInfo.from_json(json_historic_layer))
+
+        return info
+
+
+@dataclass
+class InMemoryLayerInfo:
+    kind: str
+    lsn_start: str
+    lsn_end: Optional[str]
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> InMemoryLayerInfo:
+        return InMemoryLayerInfo(
+            kind=d["kind"],
+            lsn_start=d["lsn_start"],
+            lsn_end=d.get("lsn_end"),
+        )
+
+
+@dataclass
+class HistoricLayerInfo:
+    kind: str
+    layer_file_name: str
+    layer_file_size: Optional[int]
+    lsn_start: str
+    lsn_end: Optional[str]
+    remote: bool
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
+        return HistoricLayerInfo(
+            kind=d["kind"],
+            layer_file_name=d["layer_file_name"],
+            layer_file_size=d.get("layer_file_size"),
+            lsn_start=d["lsn_start"],
+            lsn_end=d.get("lsn_end"),
+            remote=d["remote"],
+        )
 
 
 @dataclass

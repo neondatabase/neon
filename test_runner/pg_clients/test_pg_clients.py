@@ -19,6 +19,7 @@ from fixtures.utils import subprocess_capture
             "swift/PostgresClientKitExample",  # See https://github.com/neondatabase/neon/pull/2008#discussion_r911896592
             marks=pytest.mark.xfail(reason="Neither SNI nor parameters is supported"),
         ),
+        "swift/PostgresNIOExample",
         "typescript/postgresql-client",
     ],
 )
