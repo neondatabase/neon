@@ -751,8 +751,6 @@ where
         let left = Arc::as_ptr(left) as *const ();
         let right = Arc::as_ptr(right) as *const ();
 
-        // In future rust versions this might become Arc::as_ptr(left) as *const () ==
-        // Arc::as_ptr(right) as *const (), we could change to that before.
         left == right
     }
 }
