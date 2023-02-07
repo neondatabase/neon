@@ -867,15 +867,26 @@ impl Timeline {
         Ok(Some(true))
     }
 
+    /// Evicts one layer as in replaces a downloaded layer with a remote layer
+    ///
+    /// Returns:
+    /// - `Ok(Some(true))` when the layer was replaced
+    /// - `Ok(Some(false))` when the layer was found, but no changes were made
+    ///    - evictee was not yet downloaded
+    ///    - layermap replacement failed
+    /// - `Ok(None)` when the layer is not found
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
+        use super::layer_map::Replacement;
+
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         if local_layer.is_remote_layer() {
             return Ok(Some(false));
         }
-        let Some(remote_client) = &self.remote_client else { return Ok(Some(false)) };
 
         // ensure the current layer is uploaded for sure
-        remote_client
+        self.remote_client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?
             .wait_completion()
             .await
             .context("wait for layer upload ops to complete")?;
@@ -909,13 +920,43 @@ impl Timeline {
         let gc_lock = self.layer_removal_cs.lock().await;
         let mut layers = self.layers.write().unwrap();
         let mut updates = layers.batch_update();
-        self.delete_historic_layer(&gc_lock, local_layer, &mut updates)?;
-        updates.insert_historic(new_remote_layer);
+
+        let replaced = match updates.replace_historic(&local_layer, new_remote_layer)? {
+            Replacement::Replaced { .. } => {
+                let layer_size = local_layer.file_size();
+
+                if let Err(e) = local_layer.delete() {
+                    error!("failed to remove layer file on evict after replacement: {e:#?}");
+                }
+
+                if let Some(layer_size) = layer_size {
+                    self.metrics.resident_physical_size_gauge.sub(layer_size);
+                }
+
+                true
+            }
+            Replacement::NotFound => {
+                debug!(evicted=?local_layer, "layer was no longer in layer map");
+                false
+            }
+            Replacement::RemovalBuffered => {
+                unreachable!("not doing anything else in this batch")
+            }
+            Replacement::Unexpected(other) => {
+                error!(
+                    local_layer.ptr=?Arc::as_ptr(&local_layer),
+                    other.ptr=?Arc::as_ptr(&other),
+                    ?other,
+                    "failed to replace");
+                false
+            }
+        };
+
         updates.flush();
         drop(layers);
         drop(gc_lock);
 
-        Ok(Some(true))
+        Ok(Some(replaced))
     }
 }
 
@@ -3422,6 +3463,7 @@ impl Timeline {
                                 error!(
                                     expected.ptr = ?Arc::as_ptr(&l),
                                     other.ptr = ?Arc::as_ptr(&other),
+                                    ?other,
                                     "replacing downloaded layer into layermap failed because another layer was found instead of expected"
                                 );
                             }
