@@ -3,14 +3,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
+use crate::compute::ComputeNode;
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use serde_json;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
-
-use crate::compute::ComputeNode;
 
 // Service function to handle all available routes.
 async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
