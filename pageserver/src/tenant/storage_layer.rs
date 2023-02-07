@@ -15,11 +15,10 @@ use anyhow::Result;
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
-use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{
-    HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
+    HistoricLayerInfo, LayerAccessKind, LayerResidenceEvent, LayerResidenceEventReason,
+    LayerResidenceStatus,
 };
-use pageserver_api::models::HistoricLayerInfo;
 use serde::ser::SerializeMap;
 use serde::{de::MapAccess, de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;

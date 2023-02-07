@@ -293,7 +293,6 @@ impl RemoteLayer {
                 file_size,
                 self.access_stats
                     .clone_for_residence_change(LayerResidenceStatus::Resident),
-                self.get_holes().unwrap(),
                 self.get_holes(ctx).unwrap(),
             ))
         } else {

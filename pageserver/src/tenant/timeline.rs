@@ -867,9 +867,25 @@ impl Timeline {
         Ok(Some(true))
     }
 
+<<<<<<< HEAD
     /// Like [`evict_layer_batch`], but for just one layer.
     /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str, ctx: &RequestContext) -> anyhow::Result<Option<bool>> {
+=======
+    /// Evicts one layer as in replaces a downloaded layer with a remote layer
+    ///
+    /// Returns:
+    /// - `Ok(Some(true))` when the layer was replaced
+    /// - `Ok(Some(false))` when the layer was found, but no changes were made
+    ///    - evictee was not yet downloaded
+    ///    - layermap replacement failed
+    /// - `Ok(None)` when the layer is not found
+    pub async fn evict_layer(
+        &self,
+        layer_file_name: &str,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Option<bool>> {
+>>>>>>> da3955c6 (Merge with main)
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         let remote_client = self
             .remote_client
@@ -997,7 +1013,7 @@ impl Timeline {
             if let Some(layer_size) = layer_size {
                 self.metrics.resident_physical_size_gauge.sub(layer_size);
             }
-		} else {
+        } else {
             debug!(evicted=?local_layer, "layer was no longer in layer map");
         }
         Ok(replaced)

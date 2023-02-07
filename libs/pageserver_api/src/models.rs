@@ -241,6 +241,7 @@ pub struct LayerMapInfo {
 #[repr(usize)]
 pub enum LayerAccessKind {
     GetValueReconstructData,
+    ExtractHoles,
     Iter,
     KeyIter,
     Dump,

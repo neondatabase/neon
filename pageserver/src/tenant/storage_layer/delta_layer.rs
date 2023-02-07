@@ -338,7 +338,7 @@ impl Layer for DeltaLayer {
     }
 
     fn get_occupied_ranges(&self, ctx: &RequestContext) -> Result<Vec<Range<Key>>> {
-        if let Ok(inner) = self.load(ctx) {
+        if let Ok(inner) = self.load(LayerAccessKind::ExtractHoles, ctx) {
             if let Some(holes) = &inner.holes {
                 let mut occ = Vec::with_capacity(holes.len() + 1);
                 let key_range = self.get_key_range();
@@ -355,7 +355,7 @@ impl Layer for DeltaLayer {
     }
 
     fn get_holes(&self, ctx: &RequestContext) -> Result<Option<Vec<Hole>>> {
-        let inner = self.load(ctx)?;
+        let inner = self.load(LayerAccessKind::ExtractHoles, ctx)?;
         Ok(inner.holes.clone())
     }
 
@@ -363,7 +363,7 @@ impl Layer for DeltaLayer {
         if !range_overlaps(&self.key_range, key_range) {
             Ok(false)
         } else {
-            let inner = self.load(ctx)?;
+            let inner = self.load(LayerAccessKind::ExtractHoles, ctx)?;
             if let Some(holes) = &inner.holes {
                 let start = match holes.binary_search_by_key(&key_range.start, |hole| hole.0.start)
                 {
