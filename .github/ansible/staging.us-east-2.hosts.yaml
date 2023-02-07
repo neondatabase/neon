@@ -31,6 +31,8 @@ storage:
           ansible_host: i-01e31cdf7e970586a
         pageserver-3.us-east-2.aws.neon.build:
           ansible_host: i-0602a0291365ef7cc
+        pageserver-99.us-east-2.aws.neon.build:
+          ansible_host: i-0c39491109bb88824
 
     safekeepers:
       hosts:
@@ -40,3 +42,5 @@ storage:
           ansible_host: i-0171efc3604a7b907
         safekeeper-2.us-east-2.aws.neon.build:
           ansible_host: i-0de0b03a51676a6ce
+        safekeeper-99.us-east-2.aws.neon.build:
+          ansible_host: i-0d61b6a2ea32028d5
