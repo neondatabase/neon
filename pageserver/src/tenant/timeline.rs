@@ -873,28 +873,58 @@ impl Timeline {
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         let Some(remote_client) = &self.remote_client else { return Ok(Some(false)) };
-        self.evict_layer_impl(local_layer, remote_client)
-            .await
-            .map(|res| Some(res))
+        let results = self
+            .evict_layer_batch(remote_client, &[local_layer])
+            .await?;
+        assert_eq!(results.len(), 1);
+        let result: Option<anyhow::Result<bool>> = results.into_iter().next().unwrap();
+        match result {
+            None => anyhow::bail!("task_mgr shutdown requested"),
+            Some(Ok(b)) => Ok(Some(b)),
+            Some(Err(e)) => Err(e),
+        }
     }
 
     // The `remote_client` should be this timeline's `self.remote_client`.
     // We make the caller provide it so that they are responsible for handling the case
     // where someone wants to evict the layer but no remote storage is configured.
-    async fn evict_layer_impl(
+    async fn evict_layer_batch(
         &self,
-        local_layer: Arc<dyn PersistentLayer>,
         remote_client: &Arc<RemoteTimelineClient>,
-    ) -> anyhow::Result<bool> {
-        if local_layer.is_remote_layer() {
-            return Ok(false);
-        }
-
-        // ensure the current layer is uploaded for sure
+        layers: &[Arc<dyn PersistentLayer>],
+    ) -> anyhow::Result<Vec<Option<anyhow::Result<bool>>>> {
+        // ensure that the layers have finished uploading
+        // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
         remote_client
             .wait_completion()
             .await
             .context("wait for layer upload ops to complete")?;
+
+        // now lock out layer removal (compaction, gc, timeline deletion)
+        let layer_removal_guard = self.layer_removal_cs.lock().await;
+
+        let mut results = Vec::with_capacity(layers.len());
+
+        for l in layers.iter() {
+            let res = if task_mgr::is_shutdown_requested() {
+                None
+            } else {
+                Some(self.evict_layer_batch_impl(&layer_removal_guard, l).await)
+            };
+            results.push(res);
+        }
+
+        Ok(results)
+    }
+
+    async fn evict_layer_batch_impl(
+        &self,
+        layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
+        local_layer: &Arc<dyn PersistentLayer>,
+    ) -> anyhow::Result<bool> {
+        if local_layer.is_remote_layer() {
+            return Ok(false);
+        }
 
         let layer_metadata = LayerFileMetadata::new(
             local_layer
@@ -922,14 +952,12 @@ impl Timeline {
             ),
         });
 
-        let gc_lock = self.layer_removal_cs.lock().await;
         let mut layers = self.layers.write().unwrap();
         let mut updates = layers.batch_update();
-        self.delete_historic_layer(&gc_lock, local_layer, &mut updates)?;
+        self.delete_historic_layer(layer_removal_cs, Arc::clone(local_layer), &mut updates)?;
         updates.insert_historic(new_remote_layer);
         updates.flush();
         drop(layers);
-        drop(gc_lock);
 
         Ok(true)
     }
@@ -1236,6 +1264,7 @@ impl Timeline {
             evicted: usize,
             errors: usize,
             not_evictable: usize,
+            skipped_for_shutdown: usize,
         }
         let mut stats = EvictionStats::default();
         // Gather layers for eviction.
@@ -1272,38 +1301,35 @@ impl Timeline {
             candidates
         };
         stats.candidates = candidates.len();
-        for l in candidates {
-            // XXX would be good to batch the evictions.
-            // The way it is now, we have to rebuild the layer map after every eviction.
-            // Idea for this:
-            // - a layer should have an 'evicting' state. We set it here.
-            // - If GC / Compaction find such a layer, they skip it or otherwise
-            //   guarantee to not remove it from the layer map until 'evicting' state is over.
-            // - We finish eviction, remove the layer from the layer map, transition layer into state
-            //   'removed from layer map'.
-            // - GC / Compaction observe 'removed from layer map' state and don't touch the layer again.
-            //
-            // Also buzzword: PersistentLayerMap to deal with all of this lifecycle stuff, to keep layer_map module pure & simple.
-            match self.evict_layer_impl(Arc::clone(&l), remote_client).await {
-                Ok(true) => {
+        let results = match self.evict_layer_batch(remote_client, &candidates[..]).await {
+            Err(pre_err) => {
+                stats.errors += candidates.len();
+                error!("could not do any evictions: {pre_err:#}");
+                return;
+            }
+            Ok(results) => results,
+        };
+        assert_eq!(results.len(), candidates.len());
+        for (l, result) in candidates.iter().zip(results) {
+            match result {
+                None => {
+                    stats.skipped_for_shutdown += 1;
+                }
+                Some(Ok(true)) => {
                     debug!("evicted layer {}", l.short_id());
                     stats.evicted += 1;
                 }
-                Ok(false) => {
+                Some(Ok(false)) => {
                     debug!("layer is not evictable: {}", l.short_id());
                     stats.not_evictable += 1;
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     // TODO: do we want to log more info about the layer here?
                     // It is possible to run into this case if the layer is deleted
                     // inbetween us getting it earlier, and the eviction attempt.
                     warn!("failed to evict layer {}: {:?}", l.short_id(), e);
                     stats.errors += 1;
                 }
-            }
-            if task_mgr::is_shutdown_requested() {
-                debug!("bailing out early because shutdown requested");
-                break;
             }
         }
         if stats.not_considered_due_to_clock_skew > 0 || stats.errors > 0 || stats.not_evictable > 0
