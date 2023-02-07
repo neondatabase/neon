@@ -114,6 +114,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
         &'a mut self,
         extra: &'a ConsoleReqExtra<'a>,
         client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+        use_cleartext_password_flow: bool,
     ) -> auth::Result<Option<AuthSuccess<CachedNodeInfo>>> {
         use BackendType::*;
 
@@ -158,7 +159,7 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
                 (node, payload.password)
             }
             // This is a hack to allow cleartext password in secure connections (wss).
-            Console(api, creds) if creds.use_cleartext_password_flow => {
+            Console(api, creds) if use_cleartext_password_flow => {
                 let payload = fetch_plaintext_password(client).await?;
                 let node = api.wake_compute(extra, creds).await?;
 
@@ -182,16 +183,25 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
     }
 
     /// Authenticate the client via the requested backend, possibly using credentials.
+    ///
+    /// If `use_cleartext_password_flow` is true, we use the old cleartext password
+    /// flow. It is used for websocket connections, which want to minimize the number
+    /// of round trips. (Plaintext password authentication requires only one round-trip,
+    /// where SCRAM requires two.)
     pub async fn authenticate<'a>(
         &mut self,
         extra: &'a ConsoleReqExtra<'a>,
         client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+        use_cleartext_password_flow: bool,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         use BackendType::*;
 
         // Handle cases when `project` is missing in `creds`.
         // TODO: type safety: return `creds` with irrefutable `project`.
-        if let Some(res) = self.try_password_hack(extra, client).await? {
+        if let Some(res) = self
+            .try_password_hack(extra, client, use_cleartext_password_flow)
+            .await?
+        {
             info!("user successfully authenticated (using the password hack)");
             return Ok(res);
         }
