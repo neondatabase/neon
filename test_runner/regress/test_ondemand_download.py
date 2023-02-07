@@ -190,11 +190,6 @@ def test_ondemand_download_timetravel(
         # run checkpoint manually to be sure that data landed in remote storage
         client.timeline_checkpoint(tenant_id, timeline_id)
 
-    # wait until pageserver successfully uploaded a checkpoint to remote storage
-    wait_for_upload(client, tenant_id, timeline_id, current_lsn)
-    log.info("uploads have finished")
-
-
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()
 
@@ -217,6 +212,9 @@ def test_ondemand_download_timetravel(
     filled_size = get_resident_physical_size()
     log.info(filled_size)
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
+
+    # Wait until generated image layers are uploaded to S3
+    time.sleep(3)
 
     env.pageserver.stop()
 
