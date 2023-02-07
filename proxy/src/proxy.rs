@@ -127,7 +127,7 @@ pub async fn handle_ws_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name, true))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
@@ -135,7 +135,7 @@ pub async fn handle_ws_client(
 
     let client = Client::new(stream, creds, &params, session_id);
     cancel_map
-        .with_session(|session| client.connect_to_db(session))
+        .with_session(|session| client.connect_to_db(session, true))
         .await
 }
 
@@ -165,7 +165,7 @@ async fn handle_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name, false))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
@@ -173,7 +173,7 @@ async fn handle_client(
 
     let client = Client::new(stream, creds, &params, session_id);
     cancel_map
-        .with_session(|session| client.connect_to_db(session))
+        .with_session(|session| client.connect_to_db(session, false))
         .await
 }
 
@@ -401,7 +401,11 @@ impl<'a, S> Client<'a, S> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
-    async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
+    async fn connect_to_db(
+        self,
+        session: cancellation::Session<'_>,
+        use_cleartext_password_flow: bool,
+    ) -> anyhow::Result<()> {
         let Self {
             mut stream,
             mut creds,
@@ -416,7 +420,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         let auth_result = async {
             // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds.authenticate(&extra, &mut stream).await;
+            let res = creds
+                .authenticate(&extra, &mut stream, use_cleartext_password_flow)
+                .await;
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
         .instrument(info_span!("auth"))
