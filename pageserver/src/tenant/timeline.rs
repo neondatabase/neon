@@ -930,7 +930,7 @@ impl Timeline {
                 true
             }
             Replacement::NotFound => {
-                debug!(evicted=?local_layer, "lost the race to evict layer");
+                debug!(evicted=?local_layer, "layer was no longer in layer map");
                 false
             }
             Replacement::RemovalBuffered => {
