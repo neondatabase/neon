@@ -605,7 +605,7 @@ mod tests {
             }),
             PagestreamFeMessage::Fcntl(PagestreamFcntlRequest {
                 cmd: 1,
-				arg: 2,
+                arg: 2,
                 data: Bytes::copy_from_slice(&[1, 2, 3, 4, 5]),
             }),
         ];

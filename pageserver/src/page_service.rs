@@ -591,15 +591,17 @@ impl PageServerHandler {
                         .create(true),
                 )?;
                 file.write_all(&req.data)?;
-                drop(file);
-                // We do not need files oe we have send them to compute
-                std::fs::remove_file(&path)?;
                 Ok(None)
             }
             pg_constants::SMGR_FCNTL_READ_TEMP_FILE => {
                 let mut file = VirtualFile::open(&path)?;
                 let mut data = Vec::new();
                 file.read_to_end(&mut data)?;
+                drop(file);
+
+                // We do not need file once we have sent it to compute
+                std::fs::remove_file(&path)?;
+
                 Ok(Some(PagestreamBeMessage::Fcntl(PagestreamFcntlResponse {
                     data: Bytes::copy_from_slice(&data),
                 })))
