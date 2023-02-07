@@ -140,6 +140,9 @@ init_rwset_collection_buffer(Oid dbid)
 static void
 rwset_add_region(int region)
 {
+	// Do not collect rwset from main region.
+	if (region == GLOBAL_REGION)
+		return;
 	Assert(RegionIsValid(region));
 	Assert(rwset_collection_buffer != NULL);
 
@@ -167,7 +170,12 @@ static void
 rx_collect_relation(int region, Oid dbid, Oid relid, char relkind)
 {
 	CollectedRelation *relation;
-	RemoteRelkind rrelkind = get_remote_relkind(relkind);
+	RemoteRelkind rrelkind;
+
+	// Do not collect rwset from main region.
+	if (region == GLOBAL_REGION)
+		return;
+	rrelkind = get_remote_relkind(relkind);
 
 	Assert(rrelkind != REMOTE_RELKIND_INVALID);
 
@@ -186,7 +194,12 @@ rx_collect_page(int region, Oid dbid, Oid relid, BlockNumber blkno, char relkind
 {
 	CollectedRelation *relation;
 	StringInfo	buf = NULL;
-	RemoteRelkind rrelkind = get_remote_relkind(relkind);
+	RemoteRelkind rrelkind;
+	
+	// Do not collect rwset from main region.
+	if (region == GLOBAL_REGION)
+		return;
+	rrelkind = get_remote_relkind(relkind);
 
 	Assert(rrelkind != REMOTE_RELKIND_INVALID);
 
@@ -212,6 +225,9 @@ rx_collect_tuple(int region, Oid dbid, Oid relid, BlockNumber blkno, OffsetNumbe
 	CollectedRelation *relation;
 	StringInfo	buf = NULL;
 
+	// Do not collect rwset from main region.
+	if (region == GLOBAL_REGION)
+		return;
 	Assert(get_remote_relkind(relkind) == REMOTE_RELKIND_TABLE);
 
 	init_rwset_collection_buffer(dbid);
@@ -255,6 +271,13 @@ rx_collect_insert(Relation relation, HeapTuple newtuple)
 {
 	StringInfo	buf = NULL;
 	int region = RelationGetRegion(relation);
+
+	if (region == GLOBAL_REGION && current_region != GLOBAL_REGION)
+	{
+		ereport(ERROR, errmsg("[remotexact] attempting to write to a read-only region."));
+		return;
+	}
+
 #if PG_VERSION_NUM >= 150000
 	TupleTableSlot *newslot;
 #endif
@@ -298,6 +321,12 @@ rx_collect_update(Relation relation, HeapTuple oldtuple, HeapTuple newtuple)
 
 	char		relreplident = relation->rd_rel->relreplident;
 	int			region = RelationGetRegion(relation);
+
+	if (region == GLOBAL_REGION && current_region != GLOBAL_REGION)
+	{
+		ereport(ERROR, errmsg("[remotexact] attempting to update to a read-only region."));
+		return;
+	}
 
 	init_rwset_collection_buffer(relation->rd_node.dbNode);
 
@@ -352,6 +381,12 @@ rx_collect_delete(Relation relation, HeapTuple oldtuple)
 
 	char		relreplident = relation->rd_rel->relreplident;
 	int			region = RelationGetRegion(relation);
+
+	if (region == GLOBAL_REGION && current_region != GLOBAL_REGION)
+	{
+		ereport(ERROR, errmsg("[remotexact] attempting to delete from a read-only region."));
+		return;
+	}
 
 	init_rwset_collection_buffer(relation->rd_node.dbNode);
 
