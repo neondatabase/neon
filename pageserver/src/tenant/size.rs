@@ -198,7 +198,7 @@ pub(super) async fn gather_inputs(
         //
         // next_gc_cutoff in parent branch are not of interest (right now at least), nor do we
         // want to query any logical size before initdb_lsn.
-        let cutoff_minimum = cmp::max(ancestor_lsn, timeline.initdb_lsn);
+        let branch_start_lsn = cmp::max(ancestor_lsn, timeline.initdb_lsn);
 
         // Build "interesting LSNs" on this timeline
         let mut lsns: Vec<(Lsn, LsnKind)> = gc_info
@@ -229,10 +229,9 @@ pub(super) async fn gather_inputs(
         }
 
         // Add a point for the GC cutoff
-        if next_gc_cutoff > cutoff_minimum {
+        let branch_start_needed = next_gc_cutoff <= branch_start_lsn;
+        if !branch_start_needed {
             lsns.push((next_gc_cutoff, LsnKind::GcCutOff));
-        } else {
-            // keep all of this timeline
         }
 
         lsns.sort_unstable();
@@ -249,13 +248,12 @@ pub(super) async fn gather_inputs(
             None
         };
         branchstart_segments.push((timeline_id, segments.len(), ancestor));
-        let start_lsn = cmp::max(ancestor_lsn, timeline.initdb_lsn);
         segments.push(SegmentMeta {
             segment: Segment {
                 parent: None, // filled in later
-                lsn: start_lsn.0,
+                lsn: branch_start_lsn.0,
                 size: None, // filled in later
-                needed: start_lsn > next_gc_cutoff,
+                needed: branch_start_needed,
             },
             timeline_id: timeline.timeline_id,
             kind: LsnKind::BranchStart,
