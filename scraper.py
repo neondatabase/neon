@@ -53,9 +53,20 @@ class Client:
             raise ClientException("expecting list")
         return [t["id"] for t in body]
 
+    async def get_tenant(self, tenant_id):
+        resp = await self.sess.get(f"{self.endpoint}/v1/tenant/{tenant_id}")
+        body = await resp.json()
+        if resp.status == 404:
+            return None
+        if not resp.ok:
+            raise ClientException(f"{resp}")
+        return body
+
     async def get_timeline_ids(self, tenant_id):
         resp = await self.sess.get(f"{self.endpoint}/v1/tenant/{tenant_id}/timeline")
         body = await resp.json()
+        if resp.status == 404:
+            return None
         if not resp.ok:
             raise ClientException(f"{resp}")
         if not isinstance(body, list):
@@ -137,10 +148,14 @@ async def resolve_what(what: List[str], client: Client):
         comps = spec.split(":")
         if comps == ["ALL"]:
             tenant_ids = await client.get_tenant_ids()
-            get_timeline_id_coros = [client.get_timeline_ids(tenant_id) for tenant_id in tenant_ids]
-            gathered = await asyncio.gather(*get_timeline_id_coros, return_exceptions=True)
-            assert len(tenant_ids) == len(gathered)
-            for tid, tlids in zip(tenant_ids, gathered):
+            tenant_infos = await asyncio.gather(*[client.get_tenant(tenant_id) for tenant_id in tenant_ids])
+            id_and_info = [ (tid, info) for tid, info in zip(tenant_ids, tenant_infos) if info is not None and info["state"] == "Active" ]
+            async def wrapper(tid):
+                return (tid, await client.get_timeline_ids(tid))
+            gathered = await asyncio.gather(*[wrapper(tid) for tid, _ in id_and_info ])
+            for tid, tlids in gathered:
+                if tlids == None:
+                    continue
                 for tlid in tlids:
                     tenant_and_timline_ids.add((tid, tlid))
         elif len(comps) == 1:
@@ -185,7 +200,9 @@ async def main_impl(args, db: asyncpg.Pool, client: Client):
                 logging.info(f"launching scrape task for timeline {tenant_id}/{timeline_id}")
                 stop_var = asyncio.Event()
 
-                async def task_wrapper():
+                assert active_tasks.get((tenant_id, timeline_id)) is None
+                active_tasks[(tenant_id, timeline_id)] = stop_var
+                async def task_wrapper(tenant_id, timeline_id, stop_var):
                     try:
                         await timeline_task(
                             args, scrapedb_ps_id, tenant_id, timeline_id, client, db, stop_var
@@ -194,9 +211,7 @@ async def main_impl(args, db: asyncpg.Pool, client: Client):
                         async with active_tasks_lock:
                             del active_tasks[(tenant_id, timeline_id)]
 
-                assert active_tasks.get((tenant_id, timeline_id)) is None
-                active_tasks[(tenant_id, timeline_id)] = stop_var
-                asyncio.create_task(task_wrapper())
+                asyncio.create_task(task_wrapper(tenant_id, timeline_id, stop_var))
 
             # signal tasks that aren't needed anymore to stop
             tasks_to_stop = active_task_keys - desired_tasks
