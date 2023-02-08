@@ -737,9 +737,9 @@ where
         // - pointer to the object
         // - pointer to the vtable
         //
-        // rust does not provide a guarantee that these vtable's are unique, but however
-        // `Arc::ptr_eq` in 1.66.1 uses a comparison where both the pointer and the vtable need to
-        // be equal.
+        // rust does not provide a guarantee that these vtables are unique, but however
+        // `Arc::ptr_eq` as of writing (at least up to 1.67) uses a comparison where both the
+        // pointer and the vtable need to be equal.
         //
         // See: https://github.com/rust-lang/rust/issues/103763
         //
