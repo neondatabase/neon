@@ -7,6 +7,11 @@ CREATE TABLE scrapes (
     layer_map_dump jsonb
 );
 
+create index scrapes_tenant_id_idx on scrapes (tenant_id);
+create index scrapes_timeline_id_idx on scrapes (timeline_id);
+create index scrapes_scrape_ts_idx on scrapes (scrape_ts);
+create index scrapes_tenant_timeline_id_idx on scrapes (tenant_id, timeline_id);
+
 --- what follows are example queries ---
 
 --- how many layer accesses did we have per layers/timeline/tenant in the last 30 seconds
