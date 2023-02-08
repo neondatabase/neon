@@ -705,6 +705,14 @@ fn investigation_test() {
 
     println!("calculated synthetic size: {}", res);
 
+    use utils::lsn::Lsn;
+    let latest_gc_cutoff_lsn: Lsn = "47/240A5860".parse().unwrap();
+    let last_lsn: Lsn = "47/280A5860".parse().unwrap();
+    println!(
+        "latest_gc_cutoff lsn 47/240A5860 is {}, last_lsn lsn 47/280A5860 is {}",
+        u64::from(latest_gc_cutoff_lsn),
+        u64::from(last_lsn)
+    );
     assert_eq!(res, 220054675456);
 }
 
