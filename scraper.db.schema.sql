@@ -73,3 +73,22 @@ select ts, layer_file_names,
        array((select unnest(layer_file_names) except  select unnest(prev))) as diff_previous_scrape,
        array((select unnest(prev) except  select unnest(layer_file_names))) as diff_next_scrape
 from layer_map_changes_with_prev;
+
+--- downsampling pattern. This query here picks the earliest scrape in 20 minute buckets
+---- XXX: buckets keep moving because clock_timestamp(), better divide up the calendar into fixed buckets
+with points(point) as (
+    select generate_series(clock_timestamp() - '24 hours'::interval, clock_timestamp(), '20 minute'::interval)
+), ranges(lower, upper) as (
+    select point, lead(point) over (order by point) from points
+), data as (
+    (select * from scrapes
+    where tenant_id = '8c9520708d8cce74f072a867f141c1b9' and timeline_id = 'f15ae0cf21cce2ba27e4d80c6709a6cd')
+), first_scrape_ts_in_range(lower, upper, scrape_ts) as (
+    select lower, upper, min(scrape_ts) from ranges
+        LEFT JOIN data on
+            scrape_ts >= lower and scrape_ts < upper
+    group by  lower, upper
+), downsampled_data as (
+    select data.* from first_scrape_ts_in_range LEFT JOIN data using (scrape_ts) order by lower
+)
+select scrape_ts, jsonb_array_length(layer_map_dump->'historic_layers') num_layers from downsampled_data;
