@@ -646,3 +646,71 @@ fn verify_size_for_multiple_branches() {
 
     assert_eq!(inputs.calculate().unwrap(), 37_851_408);
 }
+
+#[test]
+fn investigation_test() {
+    let doc = r#"
+{
+  "segments": [
+    {
+      "segment": {
+        "parent": null,
+        "lsn": 0,
+        "size": null,
+        "needed": false
+      },
+      "timeline_id": "f15ae0cf21cce2ba27e4d80c6709a6cd",
+      "kind": "BranchStart"
+    },
+    {
+      "segment": {
+        "parent": 0,
+        "lsn": 305547335776,
+        "size": 220054675456,
+        "needed": false
+      },
+      "timeline_id": "f15ae0cf21cce2ba27e4d80c6709a6cd",
+      "kind": "GcCutOff"
+    },
+    {
+      "segment": {
+        "parent": 1,
+        "lsn": 305614444640,
+        "size": null,
+        "needed": true
+      },
+      "timeline_id": "f15ae0cf21cce2ba27e4d80c6709a6cd",
+      "kind": "BranchEnd"
+    }
+  ],
+  "timeline_inputs": [
+    {
+      "timeline_id": "f15ae0cf21cce2ba27e4d80c6709a6cd",
+      "ancestor_lsn": "0/0",
+      "last_record": "47/280A5860",
+      "latest_gc_cutoff": "47/240A5860",
+      "horizon_cutoff": "47/240A5860",
+      "pitr_cutoff": "47/240A5860",
+      "next_gc_cutoff": "47/240A5860",
+      "retention_param_cutoff": "0/0"
+    }
+  ]
+}"#;
+
+    let model: ModelInputs = serde_json::from_str(doc).unwrap();
+
+    let res = model.calculate_model().unwrap().calculate();
+
+    println!("calculated synthetic size: {}", res.total_size);
+    println!("result: {:?}", serde_json::to_string(&res.segments));
+
+    use utils::lsn::Lsn;
+    let latest_gc_cutoff_lsn: Lsn = "47/240A5860".parse().unwrap();
+    let last_lsn: Lsn = "47/280A5860".parse().unwrap();
+    println!(
+        "latest_gc_cutoff lsn 47/240A5860 is {}, last_lsn lsn 47/280A5860 is {}",
+        u64::from(latest_gc_cutoff_lsn),
+        u64::from(last_lsn)
+    );
+    assert_eq!(res.total_size, 220054675456);
+}
