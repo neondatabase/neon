@@ -34,13 +34,14 @@ The synthetic size is designed to:
 
 - Be independent of any implementation details of the storage, like
   garbage collection, remote storage, or compression.
-  
+
 ## Terms & assumptions
 
 - logical size is the size of a database *at a given point in
   time*. It's the total size of all tables in all databases, as you
   see with "\l+" in psql for example, plus the Postgres SLRUs and some
-  small amount of metadata.
+  small amount of metadata. NOTE that currently, Neon does not include
+  the SLRUs and metadata in the logical size. See comment to `get_current_logical_size_non_incremental()`.
 
 - a "point in time" is defined as an LSN value. You can convert a
   timestamp to an LSN, but the storage internally works with LSNs.
@@ -135,7 +136,7 @@ Let's start again with a database that contains 10 GB of data. Then,
 you DELETE 5 GB of the data, and run VACUUM to free up the space, so
 that the logical size of the database is now only 5 GB.
 
-Let's assume that the WAL for the deletions and the vacuum take up 
+Let's assume that the WAL for the deletions and the vacuum take up
 100 MB of space. In that case, the synthetic size of the project is:
 
 > 10 GB (snapshot) + 100 MB (WAL) = 10.1 GB
