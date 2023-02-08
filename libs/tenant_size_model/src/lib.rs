@@ -149,6 +149,11 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         let newseg_id = self.segments.len();
         let lastseg = &mut self.segments[lastseg_id];
 
+        eprintln!(
+            "insert_point: lastseg_id {} , newseg_id {}",
+            lastseg_id, newseg_id
+        );
+
         assert!(lsn > lastseg.end_lsn);
 
         let Some(start_size) = lastseg.end_size else { anyhow::bail!("no end_size on latest segment for {branch:?}") };
@@ -163,9 +168,13 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             children_after: Vec::new(),
             needed: false,
         };
+
         lastseg.children_after.push(newseg_id);
 
+        eprintln!("insert_point: lastseg {:?} , newseg {:?}", lastseg, newseg);
+
         self.segments.push(newseg);
+
         *self.branches.get_mut(branch).expect("read already") = newseg_id;
 
         Ok(())
@@ -187,6 +196,11 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         let newseg_id = self.segments.len();
         let lastseg = &mut self.segments[lastseg_id];
 
+        eprintln!(
+            "modify_branch: lastseg_id {} , newseg_id {}",
+            lastseg_id, newseg_id
+        );
+
         let Some(last_end_size) = lastseg.end_size else { anyhow::bail!("no end_size on latest segment for {branch:?}") };
 
         let newseg = Segment {
@@ -200,6 +214,8 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             needed: false,
         };
         lastseg.children_after.push(newseg_id);
+
+        eprintln!("modify_branch: lastseg {:?} , newseg {:?}", lastseg, newseg);
 
         self.segments.push(newseg);
         *self.branches.get_mut(branch).expect("read already") = newseg_id;
@@ -254,17 +270,34 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
         // Phase 1: Mark all the segments that need to be retained
         for (_branch, &last_seg_id) in self.branches.iter() {
             let last_seg = &self.segments[last_seg_id];
+
+            eprintln!("calculate loop");
+            eprintln!(
+                "last_seg_id {} last_seg: {:?} retention_period {}",
+                last_seg_id, last_seg, retention_period
+            );
+
             let cutoff_lsn = last_seg.start_lsn.saturating_sub(retention_period);
+
+            eprintln!("cutoff_lsn: {:?}", cutoff_lsn);
             let mut seg_id = last_seg_id;
             loop {
                 let seg = &mut self.segments[seg_id];
+                eprintln!("seg: {:?}", seg);
                 if seg.end_lsn < cutoff_lsn {
+                    eprintln!(
+                        "breaking because seg.end_lsn {} < cutoff_lsn {}",
+                        seg.end_lsn, cutoff_lsn
+                    );
                     break;
                 }
                 seg.needed = true;
+                eprintln!("seg.needed = true");
                 if let Some(prev_seg_id) = seg.parent {
+                    eprintln!("prev_seg_id = {}", prev_seg_id);
                     seg_id = prev_seg_id;
                 } else {
+                    eprintln!("breaking because no parent");
                     break;
                 }
             }
@@ -320,7 +353,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
 
         let seg = &self.segments[seg_id];
         eprintln!(
-            "snap: seg{}: {} needed: {}",
+            "size_from_snapshot_later: seg{}: {} needed: {}",
             seg_id,
             seg.children_after.len(),
             seg.needed
@@ -333,25 +366,35 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
                 let child = &self.segments[child_id];
                 let p1 = self.size_from_wal(child_id)?;
 
-                eprintln!(
-                    "snap: seg{}: size_from_wal({}) = {}",
-                    seg_id, child_id, p1.this_size
-                );
-
                 let p = if !child.needed {
                     let p2 = self.size_from_snapshot_later(child_id)?;
                     if p1.total() < p2.total() {
+                        eprintln!(
+                        "size_from_snapshot_later: !child.needed use p1 children loop child_id {}: size_from_wal(child_id = {}) = {}",
+                        child_id, child_id, p1.this_size
+                    );
                         p1
                     } else {
+                        eprintln!(
+                            "size_from_snapshot_later: use p2 children loop child_id {}: size_from_snapshot_later(child_id = {}) = {}",
+                            child_id, child_id, p2.this_size
+                        );
                         p2
                     }
                 } else {
+                    eprintln!(
+                        "size_from_snapshot_later: child.needed use p1 children loop child_id {}: size_from_wal(child_id = {}) = {}",
+                        child_id, child_id, p1.this_size
+                    );
                     p1
                 };
                 children.push(p);
             }
 
-            eprintln!("snap: seg{}: seg.start_size {}", seg_id, seg.start_size);
+            eprintln!(
+                "size_from_snapshot_later: WalNeeded seg_id {}: seg.start_size {}",
+                seg_id, seg.start_size
+            );
             Ok(SegmentSize {
                 seg_id,
                 method: WalNeeded,
@@ -359,6 +402,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
                 children,
             })
         } else {
+            eprintln!("size_from_snapshot_later !seg.needed");
             // If any of the direct children are "needed", need to be able to reconstruct here
             let mut children_needed = false;
             for &child in seg.children_after.iter() {
