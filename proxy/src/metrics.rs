@@ -82,7 +82,7 @@ pub fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
                         .find(|l| l.get_name() == "endpoint_id")
                         .unwrap()
                         .get_value();
-                    let value = ms.get_counter().get_value() as u64;
+                    let value = ms.get_counter().get_value().round() as u64;
 
                     debug!("endpoint_id:val - {}: {}", endpoint_id, value);
                     current_metrics.push((
