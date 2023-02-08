@@ -49,3 +49,27 @@ select distinct residence_change_ts, status, reason, tenant_id, timeline_id, lay
 from renamed
 where residence_change_ts > (clock_timestamp() - '30 min'::interval)
 order by residence_change_ts desc, layer_file_name;
+
+--- layer map changes in the last hour, for a given tenant and timeline
+with layer_file_names_ts as (
+    select scrape_ts, array_agg(layer_file_name ORDER BY layer_file_name) as layer_file_names from scrapes
+             cross join jsonb_to_recordset(layer_map_dump->'historic_layers') historic_layers(layer_file_name text)
+    where tenant_id = '8c9520708d8cce74f072a867f141c1b9' and timeline_id = 'f15ae0cf21cce2ba27e4d80c6709a6cd'
+    and scrape_ts > (clock_timestamp() - '1 hour'::interval)
+    group by scrape_ts
+), layer_map_changes as (
+    select MIN(scrape_ts) as ts, layer_file_names from layer_file_names_ts  group by layer_file_names
+    order by ts
+)
+, layer_map_changes_with_prev as (
+    select ts,
+        layer_file_names,
+        lag(layer_file_names) over (order by ts)  as prev
+    from layer_map_changes
+)
+-- select * from layer_file_names_ts limit 10;
+-- select * from layer_map_changes;
+select ts, layer_file_names,
+       array((select unnest(layer_file_names) except  select unnest(prev))) as diff_previous_scrape,
+       array((select unnest(prev) except  select unnest(layer_file_names))) as diff_next_scrape
+from layer_map_changes_with_prev;
