@@ -7,6 +7,7 @@ pub mod config;
 pub mod http;
 #[macro_use]
 pub mod logger;
+pub mod cgroup;
 pub mod compute;
 pub mod informant;
 pub mod monitor;

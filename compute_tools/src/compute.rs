@@ -27,6 +27,7 @@ use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
 use tracing::{info, instrument, warn};
 
+use crate::cgroup::CgroupMode;
 use crate::checker::create_writability_check_data;
 use crate::config;
 use crate::pg_helpers::*;
@@ -233,11 +234,12 @@ impl ComputeNode {
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
     #[instrument(skip(self))]
-    pub fn start_postgres(&self) -> Result<std::process::Child> {
+    pub fn start_postgres(&self, cgroup_mode: &CgroupMode) -> Result<std::process::Child> {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
-        let mut pg = Command::new(&self.pgbin)
+        let mut pg = cgroup_mode
+            .command(&self.pgbin)
             .args(["-D", &self.pgdata])
             .spawn()
             .expect("cannot start postgres process");
@@ -297,7 +299,7 @@ impl ComputeNode {
     }
 
     #[instrument(skip(self))]
-    pub fn start_compute(&self) -> Result<std::process::Child> {
+    pub fn start_compute(&self, cgroup_mode: &CgroupMode) -> Result<std::process::Child> {
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
             self.spec.cluster.cluster_id,
@@ -310,7 +312,7 @@ impl ComputeNode {
 
         let start_time = Utc::now();
 
-        let pg = self.start_postgres()?;
+        let pg = self.start_postgres(cgroup_mode)?;
 
         self.apply_config()?;
 

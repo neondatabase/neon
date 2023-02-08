@@ -611,7 +611,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_INFORMANT_VERSION: 0.1.1
+      VM_INFORMANT_VERSION: v0.1.4
 
     steps:
       - name: Downloading latest vm-builder
