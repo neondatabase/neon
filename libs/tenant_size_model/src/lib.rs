@@ -88,10 +88,16 @@ impl SegmentSize {
     }
 
     pub fn total_children(&self) -> u64 {
+        let ch = self.children.iter().fold(0, |acc, x| acc + x.total());
+        eprintln!(
+            "method {:?} {}:t this_size={} , ch={}",
+            self.method, self.seg_id, self.this_size, ch
+        );
+
         if self.method == SnapshotAfter {
-            self.this_size + self.children.iter().fold(0, |acc, x| acc + x.total())
+            self.this_size + ch
         } else {
-            self.children.iter().fold(0, |acc, x| acc + x.total())
+            ch
         }
     }
 }
@@ -274,6 +280,11 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
 
         let this_size = seg.end_lsn - seg.start_lsn;
 
+        eprintln!(
+            "size_from_wal: seg_id {}: this_size {} = {} - {}",
+            seg_id, this_size, seg.end_lsn, seg.start_lsn
+        );
+
         let mut children = Vec::new();
 
         // try both ways
@@ -294,6 +305,7 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
             };
             children.push(p);
         }
+
         Ok(SegmentSize {
             seg_id,
             method: if seg.needed { WalNeeded } else { Wal },
@@ -305,8 +317,14 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
     fn size_from_snapshot_later(&self, seg_id: usize) -> anyhow::Result<SegmentSize> {
         // If this is needed, then it's time to do the snapshot and continue
         // with wal method.
+
         let seg = &self.segments[seg_id];
-        //eprintln!("snap: seg{}: {} needed: {}", seg_id, seg.children_after.len(), seg.needed);
+        eprintln!(
+            "snap: seg{}: {} needed: {}",
+            seg_id,
+            seg.children_after.len(),
+            seg.needed
+        );
         if seg.needed {
             let mut children = Vec::new();
 
@@ -314,6 +332,11 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
                 // try each child both ways
                 let child = &self.segments[child_id];
                 let p1 = self.size_from_wal(child_id)?;
+
+                eprintln!(
+                    "snap: seg{}: size_from_wal({}) = {}",
+                    seg_id, child_id, p1.this_size
+                );
 
                 let p = if !child.needed {
                     let p2 = self.size_from_snapshot_later(child_id)?;
@@ -327,6 +350,8 @@ impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
                 };
                 children.push(p);
             }
+
+            eprintln!("snap: seg{}: seg.start_size {}", seg_id, seg.start_size);
             Ok(SegmentSize {
                 seg_id,
                 method: WalNeeded,

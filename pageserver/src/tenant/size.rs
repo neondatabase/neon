@@ -696,6 +696,19 @@ fn verify_size_for_multiple_branches() {
 }
 
 #[test]
+fn investigation_test() {
+    let doc = r#"{"updates":[{"lsn":"0/0","command":{"branch_from":null},"timeline_id":"f15ae0cf21cce2ba27e4d80c6709a6cd"},{"lsn":"47/240A5860","command":{"update":220054675456},"timeline_id":"f15ae0cf21cce2ba27e4d80c6709a6cd"},{"lsn":"47/280A5860","command":"end_of_branch","timeline_id":"f15ae0cf21cce2ba27e4d80c6709a6cd"}],"retention_period":67108864}"#;
+
+    let inputs: ModelInputs = serde_json::from_str(doc).unwrap();
+
+    let res = inputs.calculate().unwrap();
+
+    println!("calculated synthetic size: {}", res);
+
+    assert_eq!(res, 220054675456);
+}
+
+#[test]
 fn updates_sort_with_branches_at_same_lsn() {
     use std::str::FromStr;
     use Command::{BranchFrom, EndOfBranch};
