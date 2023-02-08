@@ -361,13 +361,10 @@ def test_single_branch_get_tenant_size_grows(
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size, inputs, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+            size, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
 
             size_debug = http_client.tenant_size_debug(tenant_id)
             size_debug_file.write(size_debug)
-
-            log.info(f"INSERT_{i}: {json.dumps(inputs, indent=2)}")
-            log.info(f"INSERT_{i}: {json.dumps(sizes, indent=2)}")
 
             if len(collected_responses) > 0:
                 prev = collected_responses[-1][1]
@@ -393,13 +390,11 @@ def test_single_branch_get_tenant_size_grows(
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size, inputs, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+            size, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
 
             size_debug = http_client.tenant_size_debug(tenant_id)
             size_debug_file.write(size_debug)
 
-            log.info(f"UPDATE: {json.dumps(inputs, indent=2)}")
-            log.info(f"UPDATE: {json.dumps(sizes, indent=2)}")
             prev = collected_responses[-1][1]
             assert size > prev, "tenant_size should grow with updates"
             collected_responses.append((current_lsn, size))

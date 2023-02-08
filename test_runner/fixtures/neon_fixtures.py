@@ -1230,7 +1230,7 @@ class PageserverHttpClient(requests.Session):
 
     def tenant_size_debug(self, tenant_id: TenantId) -> str:
         """
-        FIXME Returns the tenant size, together with the model inputs as the second tuple item.
+        Returns the tenant size debug info, as an HTML string
         """
         res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/size_debug")
         return res.text
