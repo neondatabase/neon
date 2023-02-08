@@ -1,4 +1,5 @@
+mod log_reload;
 pub mod routes;
-pub use routes::make_router;
 
 pub use pageserver_api::models;
+pub use routes::make_router;

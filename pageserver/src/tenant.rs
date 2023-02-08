@@ -2789,7 +2789,7 @@ pub mod harness {
             };
 
             LOG_HANDLE.get_or_init(|| {
-                logging::init(logging::LogFormat::Test).expect("Failed to init test logging")
+                let _ = logging::init(logging::LogFormat::Test);
             });
 
             let repo_dir = PageServerConf::test_repo_dir(test_name);

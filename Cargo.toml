@@ -154,6 +154,12 @@ tonic-build = "0.8"
 [patch.crates-io]
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
 
+# Make tracing fork to use common base crates.
+# See fork version usages for more info why this fork is needed.
+[patch.'https://github.com/neondatabase/tracing.git']
+tracing = "0.1.37"
+tracing-core = "0.1.30"
+
 ################# Binary contents sections
 
 [profile.release]

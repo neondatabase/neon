@@ -19,8 +19,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["json"] }
 nix.workspace = true
 signal-hook.workspace = true
 rand.workspace = true
@@ -33,9 +31,34 @@ serde_with.workspace = true
 once_cell.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
-
 metrics.workspace = true
 pq_proto.workspace = true
+
+tracing.workspace = true
+
+# On every log event like `test_event` below
+# ```rust
+# let _entered = info_span!("timeline_detail", tenant = %tenant_id, timeline = %timeline_id).entered();
+# info!("test_event");
+# ```
+# there are static values: `info` log level, `timeline_detail` span name, etc.
+# and dynamic values: field names (`tenant`, `timeline`) and their values.
+#
+# Tracing allows the later to change during runtime, and generally cannot statically understand what's behind `%timeline_id` format call.
+# Due to that, env filters like `error,[{tenant=98d670ab7bee6f0051494306a1ab888f}]=debug` are split into two categories.
+# Static, `error` (another example could be `timeline_detail=error`) one that filters based on static event values,
+# and dynamic, `[{tenant=98d670ab7bee6f0051494306a1ab888f}]=debug`, that would require tracing to resolve the filter on every span
+# that might fit to the filter: some span with `tenant` field name and a dynamic value to resolve.
+#
+# Current tracing optimizes the span resolution, and filters out all `[{tenant=98d670ab7bee6f0051494306a1ab888f}]=debug` events because
+# there's a static filter with stricter log level: the global `error` one.
+# Patched version forces tracing to consider such dynamic filters as potential exceptions and check more potentially matching events
+# against it.
+# There's a patch to upstream, that makes that, but does not cover the performance implication in detail, hence not reviewed yet.
+# Use a fork with the patch merged to enable the dynamic log reloading feature.
+#
+# TODO upstream dynamic filter change, see https://github.com/tokio-rs/tracing/issues/1388 for more details.
+tracing-subscriber = { version = "0.3", git = "https://github.com/neondatabase/tracing.git", branch = "kb/dynamic-filter-may-override-static", features = ["env-filter", "json"] }
 
 workspace_hack.workspace = true
 url.workspace = true
