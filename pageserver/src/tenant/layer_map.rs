@@ -794,7 +794,7 @@ where
 
     /// Return all L0 delta layers
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<L>>> {
-        Ok(self.l0_delta_layers.iter().map(|r| r.0.clone()).collect())
+        Ok(self.l0_delta_layers.keys().cloned().collect())
     }
 
     /// debugging function to print out the contents of the layer map
