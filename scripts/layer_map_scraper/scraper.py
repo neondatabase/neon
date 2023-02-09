@@ -259,7 +259,7 @@ async def pageserver_loop(ps_config, db: asyncpg.Pool, client: Client):
 
 
 async def pageserver_process_async(ps_config, dsn):
-    async with asyncpg.create_pool(dsn) as db:
+    async with asyncpg.create_pool(dsn, min_size=2, max_size=5) as db:
         async with Client(ps_config["endpoint"]) as client:
             return await pageserver_loop(ps_config, db, client)
 
