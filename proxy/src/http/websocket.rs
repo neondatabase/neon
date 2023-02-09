@@ -110,11 +110,13 @@ impl AsyncBufRead for WebSocketRw {
                     Message::Pong(_) => {}
                     Message::Text(text) => {
                         // We expect to see only binary messages.
-                        warn!("unexpected text: {text}");
+                        let error = "unexpected text message in the websocket";
+                        warn!(length = text.len(), error);
+                        return Poll::Ready(Err(io_error(error)));
                     }
                     Message::Frame(_) => {
                         // This case is impossible according to Frame's doc.
-                        panic!("unexpected raw frame");
+                        panic!("unexpected raw frame in the websocket");
                     }
                     Message::Binary(chunk) => {
                         assert!(this.bytes.is_empty());
