@@ -450,7 +450,7 @@ impl PersistentLayer for DeltaLayer {
         let layer_file_name = self.filename().file_name();
         let lsn_range = self.get_lsn_range();
 
-        let access_stats = self.access_stats.to_api_model(reset);
+        let access_stats = self.access_stats.as_api_model(reset);
 
         HistoricLayerInfo::Delta {
             layer_file_name,

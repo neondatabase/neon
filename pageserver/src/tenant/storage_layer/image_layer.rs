@@ -269,7 +269,7 @@ impl PersistentLayer for ImageLayer {
             layer_file_size: Some(self.file_size),
             lsn_start: lsn_range.start,
             remote: false,
-            access_stats: self.access_stats.to_api_model(reset),
+            access_stats: self.access_stats.as_api_model(reset),
         }
     }
 
