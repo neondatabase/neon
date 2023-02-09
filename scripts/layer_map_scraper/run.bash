@@ -9,4 +9,4 @@ shift
 self="${BASH_SOURCE[0]}"
 dir="$(dirname "$self")"
 scraper="$dir/scraper.py"
-exec python "$scraper" "$@"
+exec python "$scraper" "$@" 1>run.log 2>&1

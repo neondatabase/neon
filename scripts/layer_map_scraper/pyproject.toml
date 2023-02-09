@@ -14,6 +14,7 @@ python-dateutil = "^2.8.2"
 mypy = "^1.0.0"
 asyncpg-stubs = "^0.27.0"
 black = "^23.1.0"
+toml = "^0.10.2"
 
 [tool.poetry.group.dev.dependencies]
 mypy1989 = "^0.0.2"
