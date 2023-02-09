@@ -61,12 +61,12 @@
     - name: Run an async task
       shell:
         chdir: "{{ script_dir }}"
-        cmd: "cat tenants.txt | python3 script.py --trash-dir {{ trash_dir }} --safekeeper-id $(cat /storage/safekeeper/data/safekeeper.id) --safekeeper-host $HOSTNAME --dry-run |& cat > {{ script_dir }}/run-`date +%Y-%m-%d-%H.%M.%S`.log"
+        cmd: "cat tenants.txt | python3 script.py --trash-dir {{ trash_dir }} --safekeeper-id $(cat /storage/safekeeper/data/safekeeper.id) --safekeeper-host $HOSTNAME |& cat > {{ script_dir }}/run-`date +%Y-%m-%d-%H.%M.%S`.log"
       args:
         executable: /bin/bash
       environment:
         CONSOLE_API_TOKEN: "{{ api_token }}"
-      async: 10000
+      async: 30000
       poll: 0
       register: bg_async_task
 
@@ -76,5 +76,5 @@
       become: true
       register: job_result
       until: job_result.finished
-      retries: 1000
+      retries: 3000
       delay: 10
