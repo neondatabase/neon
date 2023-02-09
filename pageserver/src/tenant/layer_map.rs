@@ -732,7 +732,7 @@ where
     }
 
     #[inline(always)]
-    fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
+    pub fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
         // "dyn Trait" objects are "fat pointers" in that they have two components:
         // - pointer to the object
         // - pointer to the vtable
