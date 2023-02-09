@@ -89,7 +89,9 @@ class Client:
         return (launch_ts, body)
 
 
-async def scrape_timeline(ps_id: str, ps_client: Client, db: asyncpg.Pool, tenant_id, timeline_id):
+async def scrape_timeline(
+    ps_id: str, ps_client: Client, db: asyncpg.Pool, tenant_id, timeline_id
+):
     now = datetime.datetime.now()
     launch_ts, layer_map_dump = await ps_client.get_layer_map(
         tenant_id,
@@ -214,8 +216,10 @@ async def pageserver_loop(ps_config, db: asyncpg.Pool, client: Client):
 
             # launch new tasks
             new_tasks = desired_tasks - active_task_keys
-            for (tenant_id, timeline_id) in new_tasks:
-                logging.info(f"launching scrape task for timeline {tenant_id}/{timeline_id}")
+            for tenant_id, timeline_id in new_tasks:
+                logging.info(
+                    f"launching scrape task for timeline {tenant_id}/{timeline_id}"
+                )
                 stop_var = asyncio.Event()
 
                 assert active_tasks.get((tenant_id, timeline_id)) is None
@@ -240,8 +244,10 @@ async def pageserver_loop(ps_config, db: asyncpg.Pool, client: Client):
 
             # signal tasks that aren't needed anymore to stop
             tasks_to_stop = active_task_keys - desired_tasks
-            for (tenant_id, timeline_id) in tasks_to_stop:
-                logging.info(f"stopping scrape task for timeline {tenant_id}/{timeline_id}")
+            for tenant_id, timeline_id in tasks_to_stop:
+                logging.info(
+                    f"stopping scrape task for timeline {tenant_id}/{timeline_id}"
+                )
                 stop_var = active_tasks[(tenant_id, timeline_id)]
                 stop_var.set()
                 # the task will remove itself
@@ -259,7 +265,7 @@ async def main(args):
     scrape_config = toml.load(args.config)
     ps_configs: List[Dict[Any, Any]] = scrape_config["pageservers"]
     # global attributes inherit one level downard
-    for (i, ps_conf) in enumerate(ps_configs):
+    for i, ps_conf in enumerate(ps_configs):
         ps_configs[i] = scrape_config | ps_conf
 
     # postgres connection pool is global
@@ -277,7 +283,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     def envarg(flag, envvar, **kwargs):
-        parser.add_argument(flag, default=getenv(envvar), required=not getenv(envvar), **kwargs)
+        parser.add_argument(
+            flag, default=getenv(envvar), required=not getenv(envvar), **kwargs
+        )
 
     parser.add_argument(
         "--verbose",
@@ -289,7 +297,9 @@ if __name__ == "__main__":
     envarg("--pg-password", "PGPASSWORD")
     envarg("--pg-database", "PGDATABASE")
     parser.add_argument(
-        "config", type=argparse.FileType(), help="the toml config that defines what to scrape"
+        "config",
+        type=argparse.FileType(),
+        help="the toml config that defines what to scrape",
     )
     args = parser.parse_args()
 

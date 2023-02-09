@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "layer-map-scraper"
+version = "0.1.0"
+description = ""
+authors = ["None"]
+readme = "README.md"
+packages = []
+
+[tool.poetry.dependencies]
+python = "^3.9"
+aiohttp = "^3.8.3"
+asyncpg-opentracing = "^0.1.0"
+python-dateutil = "^2.8.2"
+mypy = "^1.0.0"
+asyncpg-stubs = "^0.27.0"
+black = "^23.1.0"
+
+[tool.poetry.group.dev.dependencies]
+mypy1989 = "^0.0.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
