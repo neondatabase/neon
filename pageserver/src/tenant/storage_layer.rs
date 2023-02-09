@@ -103,7 +103,7 @@ struct LayerAccessStatsInner {
     last_residence_changes: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct LayerAccessStatFullDetails {
     when: SystemTime,
     task_kind: TaskKind,
@@ -126,7 +126,7 @@ fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u64 {
 }
 
 impl LayerAccessStatFullDetails {
-    fn to_api_model(&self) -> pageserver_api::models::LayerAccessStatFullDetails {
+    fn as_api_model(&self) -> pageserver_api::models::LayerAccessStatFullDetails {
         let Self {
             when,
             task_kind,
@@ -189,14 +189,13 @@ impl LayerAccessStats {
             task_kind,
             access_kind,
         };
-        inner
-            .first_access
-            .get_or_insert_with(|| this_access.clone());
+        inner.first_access.get_or_insert(this_access);
         inner.count_by_access_kind[access_kind] += 1;
         inner.task_kind_flag |= task_kind;
         inner.last_accesses.write(this_access);
     }
-    fn to_api_model(
+
+    fn as_api_model(
         &self,
         reset: LayerAccessStatsReset,
     ) -> pageserver_api::models::LayerAccessStats {
@@ -217,8 +216,8 @@ impl LayerAccessStats {
                 .iter()
                 .map(|task_kind| task_kind.into()) // into static str, powered by strum_macros
                 .collect(),
-            first: first_access.as_ref().map(|a| a.to_api_model()),
-            accesses_history: last_accesses.map(|m| m.to_api_model()),
+            first: first_access.as_ref().map(|a| a.as_api_model()),
+            accesses_history: last_accesses.map(|m| m.as_api_model()),
             residence_events_history: last_residence_changes.clone(),
         };
         match reset {
