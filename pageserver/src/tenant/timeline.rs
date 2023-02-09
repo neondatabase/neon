@@ -2374,7 +2374,7 @@ impl Timeline {
             // Only one thread may call this function at a time (for this
             // timeline). If two threads tried to flush the same frozen
             // layer to disk at the same time, that would not work.
-            assert!(Arc::ptr_eq(&l.unwrap(), &frozen_layer));
+            assert!(LayerMap::compare_arced_layers(&l.unwrap(), &frozen_layer));
 
             // release lock on 'layers'
         }

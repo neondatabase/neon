@@ -731,8 +731,11 @@ where
         Ok(())
     }
 
+    /// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
+    ///
+    /// Returns `true` if the two `Arc` point to the same layer, false otherwise.
     #[inline(always)]
-    fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
+    pub fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
         // "dyn Trait" objects are "fat pointers" in that they have two components:
         // - pointer to the object
         // - pointer to the vtable
