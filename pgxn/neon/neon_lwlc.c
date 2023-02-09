@@ -53,10 +53,12 @@ typedef struct LwLsnCacheEntryData {
 	LwLsnCacheEntryKeyData key;
 	XLogRecPtr	lsn;
 	dlist_node	node;
+	pairingheap_node pnode;
 } LwLsnCacheEntryData;
 
 typedef struct LwLsnCacheData {
 	dlist_head	cache_head;
+	pairingheap	pheap;
 	bool		initialized;
 	int			n_cached_entries;
 	volatile XLogRecPtr	highWaterMark;
@@ -203,13 +205,13 @@ lwlc_setup_shmem(void)
 
 
 	dlist_init(&LwLsnCache->cache_head);
-//	/*
-//	 * XXX: Manual modification of these fields, because no shared allocation
-//	 * method exists for pheap.
-//	 */
-//	LwLsnCache->pheap.ph_compare = &lwlc_pheap_comparefunc;
-//	LwLsnCache->pheap.ph_arg = NULL;
-//	LwLsnCache->pheap.ph_root = NULL;
+	/*
+	 * XXX: Manual modification of these fields, because no shared allocation
+	 * method exists for pheap.
+	 */
+	LwLsnCache->pheap.ph_compare = &lwlc_pheap_comparefunc;
+	LwLsnCache->pheap.ph_arg = NULL;
+	LwLsnCache->pheap.ph_root = NULL;
 	LwLsnCache->n_cached_entries = 0;
 
 	/*
@@ -244,20 +246,21 @@ lwlc_pre_recovery_start_hook(const ControlFileData* controlFile)
 	LWLockRelease(LwLsnMetadataLock);
 }
 
-//int lwlc_pheap_comparefunc(const pairingheap_node *a, const pairingheap_node *b, void *arg) {
-//	const LwLsnCacheEntryData *a_entry;
-//	const LwLsnCacheEntryData *b_entry;
-//
-//	a_entry = pairingheap_const_container(LwLsnCacheEntryData, pheapnode, a);
-//	b_entry = pairingheap_const_container(LwLsnCacheEntryData, pheapnode, b);
-//
-//	if (a_entry->lsn < b_entry->lsn)
-//		return -1;
-//	else if (a_entry->lsn > b_entry->lsn)
-//		return 1;
-//	else
-//		return 0;
-//}
+static int
+lwlc_pheap_comparefunc(const pairingheap_node *a, const pairingheap_node *b, void *arg) {
+	const LwLsnCacheEntryData *a_entry;
+	const LwLsnCacheEntryData *b_entry;
+
+	a_entry = pairingheap_const_container(LwLsnCacheEntryData, pnode, a);
+	b_entry = pairingheap_const_container(LwLsnCacheEntryData, pnode, b);
+
+	if (a_entry->lsn < b_entry->lsn)
+		return -1;
+	else if (a_entry->lsn > b_entry->lsn)
+		return 1;
+	else
+		return 0;
+}
 
 XLogRecPtr
 lwlc_get_max_evicted(void)
@@ -393,7 +396,7 @@ lwlc_lookup_last_lsn(LwLsnCacheRequest lookup_type, RelFileNode node,
 		 * would be in the cache. Thus, it was modified before lowWaterMark,
 		 * which means lowWaterMark should be sufficient here.
 		 */
-		lsn = LwLsnCache->highWaterMark;
+		lsn = LwLsnCache->lowWaterMark;
 	}
 	LWLockRelease(LwLsnMetadataLock);
 
@@ -408,7 +411,7 @@ lwlc_should_insert(XLogRecPtr lsn)
 {
 	if (lsn_cache_size <= 0)
 		return false;
-	return LwLsnCache->lowWaterMark < lsn;
+	return lsn > LwLsnCache->lowWaterMark;
 }
 
 static void
@@ -432,7 +435,11 @@ lwlc_insert_last_lsn(XLogRecPtr lsn,
 	if (n_blocks == 0)
 		return;
 
-	/* don't put in effort if we wouldn't insert the entries anyway */
+	/*
+	 * Don't put in effort if we wouldn't need to insert the entries for correct
+	 * behaviour: any page with LSN < lowWaterMark will request with a
+	 * lastWrittenLsn >= lowWaterMark.
+	 */
 	if (lsn <= LwLsnCache->lowWaterMark)
 		return;
 
@@ -461,12 +468,21 @@ lwlc_insert_last_lsn(XLogRecPtr lsn,
 
 		if (found)
 		{
-			dlist_delete(&entry->node);
+			/* entry is moved to end of queue */
+			dlist_move_tail(&LwLsnCache->cache_head, &entry->node);
 
 			if (lsn > entry->lsn)
+			{
+				pairingheap_remove(&LwLsnCache->pheap, &entry->pnode);
 				entry->lsn = lsn;
+				pairingheap_add(&LwLsnCache->pheap, &entry->pnode);
+			}
 
-			dlist_push_tail(&LwLsnCache->cache_head, &entry->node);
+			/* if the cache is nearly "full", update lowWaterMark */
+			if (LwLsnCache->n_cached_entries >= lsn_cache_size - 2)
+				LwLsnCache->lowWaterMark =
+					pairingheap_container(LwLsnCacheEntryData, pnode,
+										  pairingheap_first(&LwLsnCache->pheap))->lsn;
 		}
 		else
 		{
@@ -475,44 +491,37 @@ lwlc_insert_last_lsn(XLogRecPtr lsn,
 
 			/* add it to the pairingheap */
 			dlist_push_tail(&LwLsnCache->cache_head, &entry->node);
+			pairingheap_add(&LwLsnCache->pheap, &entry->pnode);
 
-			/* if we are about to have too many entries in the pheap, try shrinking it */
-			if (LwLsnCache->n_cached_entries >= lsn_cache_size)
+			/* if we are about to have too many entries in the cache, shrink it */
+			if (LwLsnCache->n_cached_entries + 1 >= lsn_cache_size)
 			{
-				XLogRecPtr evicted_lsn;
+				XLogRecPtr	evicted_lsn;
 				LwLsnCacheEntryKeyData evicted_key;
 
-				entry = dlist_container(LwLsnCacheEntryData,
-										node,
+				entry = dlist_container(LwLsnCacheEntryData, node,
 										dlist_pop_head_node(&LwLsnCache->cache_head));
+				pairingheap_remove(&LwLsnCache->pheap, &entry->pnode);
+
 				evicted_key = entry->key;
 				evicted_lsn = entry->lsn;
 
-				if (LwLsnCache->lowWaterMark > entry->lsn)
-					elog(FATAL, "LwLsn cache corruption - evicted lsn is smaller "
-								"than highest eviction");
-				/*
-				 * lowWaterMark is the lowest LSN that *could* still be in the
-				 * cache. So, if we evict LSN > lowWatermark, that becomes the
-				 * next low watermark.
-				 */
-				if (LwLsnCache->lowWaterMark < evicted_lsn)
-					LwLsnCache->lowWaterMark = evicted_lsn;
-
 				hash_search(LwLsnCacheTable, &evicted_key, HASH_REMOVE, &found);
 
-				if (evicted_lsn >= lsn)
-					break; /* new insertions are useless */
+				/* Update lowWaterMark with new pheap data */
+				LwLsnCache->lowWaterMark =
+					pairingheap_container(LwLsnCacheEntryData, pnode,
+										  pairingheap_first(&LwLsnCache->pheap))->lsn;
 
 				Assert(found);
 			}
 			else
 			{
-				/* nothing to do */
+				LwLsnCache->n_cached_entries++;
 			}
 		}
 
-		if (--n_blocks == 0)
+		if (--n_blocks == 0 || lsn <= LwLsnCache->lowWaterMark)
 			break;
 
 		start++;
