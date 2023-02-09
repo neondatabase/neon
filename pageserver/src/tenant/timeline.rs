@@ -869,7 +869,11 @@ impl Timeline {
 
     /// Like [`evict_layer_batch`], but for just one layer.
     /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
-    pub async fn evict_layer(&self, layer_file_name: &str, ctx: &RequestContext) -> anyhow::Result<Option<bool>> {
+    pub async fn evict_layer(
+        &self,
+        layer_file_name: &str,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Option<bool>> {
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         let remote_client = self
             .remote_client
@@ -878,7 +882,7 @@ impl Timeline {
 
         let cancel = CancellationToken::new();
         let results = self
-            .evict_layer_batch(remote_client, &[local_layer], cancel)
+            .evict_layer_batch(remote_client, &[local_layer], cancel, ctx)
             .await?;
         assert_eq!(results.len(), 1);
         let result: Option<anyhow::Result<bool>> = results.into_iter().next().unwrap();
@@ -912,6 +916,7 @@ impl Timeline {
         remote_client: &Arc<RemoteTimelineClient>,
         layers_to_evict: &[Arc<dyn PersistentLayer>],
         cancel: CancellationToken,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Vec<Option<anyhow::Result<bool>>>> {
         // ensure that the layers have finished uploading
         // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
@@ -933,7 +938,7 @@ impl Timeline {
             let res = if cancel.is_cancelled() {
                 None
             } else {
-                Some(self.evict_layer_batch_impl(&layer_removal_guard, l, &mut batch_updates))
+                Some(self.evict_layer_batch_impl(&layer_removal_guard, l, &mut batch_updates, ctx))
             };
             results.push(res);
         }
@@ -952,9 +957,8 @@ impl Timeline {
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
         batch_updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+        ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
-        use super::layer_map::Replacement;
-
         if local_layer.is_remote_layer() {
             return Ok(false);
         }
@@ -986,8 +990,8 @@ impl Timeline {
             ),
         });
 
-        let replaced = match batch_updates.replace_historic(local_layer, new_remote_layer, &ctx)?;
-		if replaced {
+        let replaced = batch_updates.replace_historic(local_layer, new_remote_layer, &ctx)?;
+        if replaced {
             let layer_size = local_layer.file_size();
 
             if let Err(e) = local_layer.delete() {
@@ -2479,6 +2483,10 @@ impl Timeline {
             self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
         ])?;
 
+        //
+        // This call force extraction of hole info from new delta layer so
+        // there is no need to perform this expensive operation under layer map write lock below
+        //
         let holes = new_delta.get_holes(ctx)?;
 
         // Add it to the layer map

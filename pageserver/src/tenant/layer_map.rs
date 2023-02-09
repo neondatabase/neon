@@ -64,11 +64,33 @@ pub use historic_layer_coverage::Replacement;
 
 use super::storage_layer::range_eq;
 
+pub fn compare_arced_layers<L: ?Sized>(left: &Arc<L>, right: &Arc<L>) -> bool {
+    // "dyn Trait" objects are "fat pointers" in that they have two components:
+    // - pointer to the object
+    // - pointer to the vtable
+    //
+    // rust does not provide a guarantee that these vtables are unique, but however
+    // `Arc::ptr_eq` as of writing (at least up to 1.67) uses a comparison where both the
+    // pointer and the vtable need to be equal.
+    //
+    // See: https://github.com/rust-lang/rust/issues/103763
+    //
+    // A future version of rust will most likely use this form below, where we cast each
+    // pointer into a pointer to unit, which drops the inaccessible vtable pointer, making it
+    // not affect the comparison.
+    //
+    // See: https://github.com/rust-lang/rust/pull/106450
+    let left = Arc::as_ptr(left) as *const ();
+    let right = Arc::as_ptr(right) as *const ();
+
+    left == right
+}
+
 struct LayerRef<L: ?Sized>(Arc<L>);
 
 impl<L: ?Sized> PartialEq for LayerRef<L> {
     fn eq(&self, other: &LayerRef<L>) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        compare_arced_layers(&self.0, &other.0)
     }
 }
 
@@ -76,7 +98,8 @@ impl<L: ?Sized> Eq for LayerRef<L> {}
 
 impl<L: ?Sized> Hash for LayerRef<L> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).hash(state)
+        let ptr = Arc::as_ptr(&self.0) as *const ();
+        ptr.hash(state)
     }
 }
 
@@ -374,7 +397,7 @@ where
                         is_image: !expected.is_incremental(),
                     },
                     new.clone(),
-                    |existing| Self::compare_arced_layers(existing, expected),
+                    |existing| compare_arced_layers(existing, expected),
                 ) {
                     Replacement::Replaced { .. } => { /* expected */ }
                     Replacement::NotFound => {
@@ -794,7 +817,7 @@ where
 
     /// Return all L0 delta layers
     pub fn get_level0_deltas(&self) -> Result<Vec<Arc<L>>> {
-        Ok(self.l0_delta_layers.keys().cloned().collect())
+        Ok(self.l0_delta_layers.iter().map(|r| r.0.clone()).collect())
     }
 
     /// debugging function to print out the contents of the layer map
@@ -818,29 +841,6 @@ where
         }
         println!("End dump LayerMap");
         Ok(())
-    }
-
-    #[inline(always)]
-    fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
-        // "dyn Trait" objects are "fat pointers" in that they have two components:
-        // - pointer to the object
-        // - pointer to the vtable
-        //
-        // rust does not provide a guarantee that these vtables are unique, but however
-        // `Arc::ptr_eq` as of writing (at least up to 1.67) uses a comparison where both the
-        // pointer and the vtable need to be equal.
-        //
-        // See: https://github.com/rust-lang/rust/issues/103763
-        //
-        // A future version of rust will most likely use this form below, where we cast each
-        // pointer into a pointer to unit, which drops the inaccessible vtable pointer, making it
-        // not affect the comparison.
-        //
-        // See: https://github.com/rust-lang/rust/pull/106450
-        let left = Arc::as_ptr(left) as *const ();
-        let right = Arc::as_ptr(right) as *const ();
-
-        left == right
     }
 }
 
@@ -897,7 +897,7 @@ mod tests {
             let mut map = LayerMap::default();
 
             // two disjoint Arcs in different lifecycle phases.
-            assert!(!LayerMap::compare_arced_layers(&remote, &downloaded));
+            assert!(!compare_arced_layers(&remote, &downloaded));
 
             let expected_in_counts = (1, usize::from(expected_l0));
 
@@ -921,14 +921,14 @@ mod tests {
         fn count_layer_in(map: &LayerMap<dyn Layer>, layer: &Arc<dyn Layer>) -> (usize, usize) {
             let historic = map
                 .iter_historic_layers()
-                .filter(|x| LayerMap::compare_arced_layers(x, layer))
+                .filter(|x| compare_arced_layers(x, layer))
                 .count();
             let l0s = map
                 .get_level0_deltas()
                 .expect("why does this return a result");
             let l0 = l0s
                 .iter()
-                .filter(|x| LayerMap::compare_arced_layers(x, layer))
+                .filter(|x| compare_arced_layers(x, layer))
                 .count();
 
             (historic, l0)
