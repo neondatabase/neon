@@ -1,0 +1,6 @@
+interval_secs = 60
+environment = "prod"
+
+[[pageservers]]
+endpoint = "http://localhost:9898"
+what = [ "ALL" ]

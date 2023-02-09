@@ -5,16 +5,17 @@
 
 import argparse
 import asyncio
+import datetime
 import json
 import logging
-from os import getenv
 import sys
+from os import getenv
 from typing import Any, Dict, List, Optional, Set, Tuple
-import datetime
 
 import aiohttp
 import asyncpg
 import dateutil.parser
+import toml
 
 
 class ClientException(Exception):
@@ -114,7 +115,13 @@ async def scrape_timeline(ps_id: str, ps_client: Client, db: asyncpg.Pool, tenan
 
 
 async def timeline_task(
-    args, ps_id, tenant_id, timeline_id, client: Client, db: asyncpg.Pool, stop_var: asyncio.Event
+    interval,
+    ps_id,
+    tenant_id,
+    timeline_id,
+    client: Client,
+    db: asyncpg.Pool,
+    stop_var: asyncio.Event,
 ):
     """
     Task loop that is responsible for scraping one timeline
@@ -130,13 +137,16 @@ async def timeline_task(
             return
         # TODO: use ticker-like construct instead of sleep()
         # TODO: bail out early if stop_var is set. That needs a select()-like statement for Python. Is there any?
-        await asyncio.sleep(args.interval)
+        await asyncio.sleep(interval)
 
 
 async def resolve_what(what: List[str], client: Client):
     """
     Resolve the list of "what" arguments on the command line to (tenant,timeline) tuples.
-    Format of a `what` argument: ALL | $tenant_id $tenant_id:$timeline_id
+    Format of a `what` argument: PageserverEndpoint:TimelineSpecififer
+      where
+        PageserverEndpoint = http://
+        TimelineSpecifier = "ALL" | TenantId | TenantId:TimelineId
     Examples:
     - `ALL`: all timelines present on the pageserver
     - `3ff96c2a04c3490285cba2019e69fb51`: all timelines of tenant `3ff96c2a04c3490285cba2019e69fb51` on the pageserver
@@ -148,13 +158,21 @@ async def resolve_what(what: List[str], client: Client):
         comps = spec.split(":")
         if comps == ["ALL"]:
             tenant_ids = await client.get_tenant_ids()
-            tenant_infos = await asyncio.gather(*[client.get_tenant(tenant_id) for tenant_id in tenant_ids])
-            id_and_info = [ (tid, info) for tid, info in zip(tenant_ids, tenant_infos) if info is not None and info["state"] == "Active" ]
+            tenant_infos = await asyncio.gather(
+                *[client.get_tenant(tenant_id) for tenant_id in tenant_ids]
+            )
+            id_and_info = [
+                (tid, info)
+                for tid, info in zip(tenant_ids, tenant_infos)
+                if info is not None and info["state"] == "Active"
+            ]
+
             async def wrapper(tid):
                 return (tid, await client.get_timeline_ids(tid))
-            gathered = await asyncio.gather(*[wrapper(tid) for tid, _ in id_and_info ])
+
+            gathered = await asyncio.gather(*[wrapper(tid) for tid, _ in id_and_info])
             for tid, tlids in gathered:
-                if tlids == None:
+                if tlids is None:
                     continue
                 for tlid in tlids:
                     tenant_and_timline_ids.add((tid, tlid))
@@ -171,13 +189,13 @@ async def resolve_what(what: List[str], client: Client):
     return tenant_and_timline_ids
 
 
-async def main_impl(args, db: asyncpg.Pool, client: Client):
+async def pageserver_loop(ps_config, db: asyncpg.Pool, client: Client):
     """
     Controller loop that manages the per-timeline scrape tasks.
     """
 
     psid = await client.get_pageserver_id()
-    scrapedb_ps_id = f"{args.environment}-{psid}"
+    scrapedb_ps_id = f"{ps_config['environment']}-{psid}"
 
     logging.info(f"storing results for scrapedb_ps_id={scrapedb_ps_id}")
 
@@ -185,7 +203,7 @@ async def main_impl(args, db: asyncpg.Pool, client: Client):
     active_tasks: Dict[Tuple[str, str], asyncio.Event] = {}
     while True:
         try:
-            desired_tasks = await resolve_what(args.what, client)
+            desired_tasks = await resolve_what(ps_config["what"], client)
         except Exception:
             logging.exception("failed to resolve --what, sleeping then retrying")
             await asyncio.sleep(10)
@@ -202,10 +220,17 @@ async def main_impl(args, db: asyncpg.Pool, client: Client):
 
                 assert active_tasks.get((tenant_id, timeline_id)) is None
                 active_tasks[(tenant_id, timeline_id)] = stop_var
+
                 async def task_wrapper(tenant_id, timeline_id, stop_var):
                     try:
                         await timeline_task(
-                            args, scrapedb_ps_id, tenant_id, timeline_id, client, db, stop_var
+                            ps_config["interval_secs"],
+                            scrapedb_ps_id,
+                            tenant_id,
+                            timeline_id,
+                            client,
+                            db,
+                            stop_var,
                         )
                     finally:
                         async with active_tasks_lock:
@@ -225,12 +250,27 @@ async def main_impl(args, db: asyncpg.Pool, client: Client):
         await asyncio.sleep(10)
 
 
-async def main(args):
+async def pageserver_task(config, db):
+    async with Client(config["endpoint"]) as client:
+        return await pageserver_loop(config, db, client)
 
+
+async def main(args):
+    scrape_config = toml.load(args.config)
+    ps_configs: List[Dict[Any, Any]] = scrape_config["pageservers"]
+    # global attributes inherit one level downard
+    for (i, ps_conf) in enumerate(ps_configs):
+        ps_configs[i] = scrape_config | ps_conf
+
+    # postgres connection pool is global
     dsn = f"postgres://{args.pg_user}:{args.pg_password}@{args.pg_host}/{args.pg_database}?sslmode=require"
+
+    pageserver_tasks = []
     async with asyncpg.create_pool(dsn) as db:
-        async with Client(args.endpoint) as client:
-            return await main_impl(args, db, client)
+        for ps_config in ps_configs:
+            t = asyncio.create_task(pageserver_task(ps_config, db))
+            pageserver_tasks.append(t)
+        await asyncio.gather(*pageserver_tasks)
 
 
 if __name__ == "__main__":
@@ -244,17 +284,12 @@ if __name__ == "__main__":
         action="store_true",
         help="enable verbose logging",
     )
-    envarg("--endpoint", "SCRAPE_ENDPOINT", help="where to write report output (default: stdout)")
-    envarg("--environment", "SCRAPE_ENVIRONMENT", help="environment of the pageserver")
-    envarg("--interval", "SCRAPE_INTERVAL_SECS", type=int)
     envarg("--pg-host", "PGHOST")
     envarg("--pg-user", "PGUSER")
     envarg("--pg-password", "PGPASSWORD")
     envarg("--pg-database", "PGDATABASE")
     parser.add_argument(
-        "what",
-        nargs="+",
-        help="what to download: ALL|tenant_id|tenant_id:timeline_id",
+        "config", type=argparse.FileType(), help="the toml config that defines what to scrape"
     )
     args = parser.parse_args()
 
