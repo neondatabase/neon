@@ -10,10 +10,21 @@ use std::str::FromStr;
 use utils::lsn::Lsn;
 
 // Note: Timeline::load_layer_map() relies on this sort order
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(PartialEq, Eq, Clone, Hash)]
 pub struct DeltaFileName {
     pub key_range: Range<Key>,
     pub lsn_range: Range<Lsn>,
+}
+
+impl std::fmt::Debug for DeltaFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use super::RangeDisplayDebug;
+
+        f.debug_struct("DeltaFileName")
+            .field("key_range", &RangeDisplayDebug(&self.key_range))
+            .field("lsn_range", &self.lsn_range)
+            .finish()
+    }
 }
 
 impl PartialOrd for DeltaFileName {
@@ -100,10 +111,21 @@ impl fmt::Display for DeltaFileName {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(PartialEq, Eq, Clone, Hash)]
 pub struct ImageFileName {
     pub key_range: Range<Key>,
     pub lsn: Lsn,
+}
+
+impl std::fmt::Debug for ImageFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use super::RangeDisplayDebug;
+
+        f.debug_struct("ImageFileName")
+            .field("key_range", &RangeDisplayDebug(&self.key_range))
+            .field("lsn", &self.lsn)
+            .finish()
+    }
 }
 
 impl PartialOrd for ImageFileName {

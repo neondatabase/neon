@@ -194,8 +194,10 @@ pub struct DeltaLayer {
 
 impl std::fmt::Debug for DeltaLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use super::RangeDisplayDebug;
+
         f.debug_struct("DeltaLayer")
-            .field("key_range", &self.key_range)
+            .field("key_range", &RangeDisplayDebug(&self.key_range))
             .field("lsn_range", &self.lsn_range)
             .field("file_size", &self.file_size)
             .field("inner", &self.inner)
