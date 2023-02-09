@@ -849,6 +849,7 @@ mod tests {
     use super::LayerMap;
     use crate::context::{DownloadBehavior, RequestContext};
     use crate::task_mgr::TaskKind;
+    use crate::tenant::layer_map::compare_arced_layers;
     use crate::tenant::storage_layer::{Layer, LayerDescriptor, LayerFileName};
     use std::str::FromStr;
     use std::sync::Arc;

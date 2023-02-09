@@ -990,7 +990,7 @@ impl Timeline {
             ),
         });
 
-        let replaced = batch_updates.replace_historic(local_layer, new_remote_layer, &ctx)?;
+        let replaced = batch_updates.replace_historic(local_layer, new_remote_layer, ctx)?;
         if replaced {
             let layer_size = local_layer.file_size();
 
