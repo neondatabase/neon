@@ -461,10 +461,11 @@ lwlc_insert_last_lsn(XLogRecPtr lsn,
 
 		if (found)
 		{
-			Assert(lsn >= entry->lsn);
-
 			dlist_delete(&entry->node);
-			entry->lsn = lsn;
+
+			if (lsn > entry->lsn)
+				entry->lsn = lsn;
+
 			dlist_push_tail(&LwLsnCache->cache_head, &entry->node);
 		}
 		else
