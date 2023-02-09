@@ -4,8 +4,8 @@
  * It contains 2 systems:
  * 
  * 1. A hashmap cache that contains evicted pages' buffer tags with their
- *	  LSNs, with eviction by lowest LSN made efficient by a pairingheap
- *	  constructed in that cache
+ *	  LSNs, with eviction by lowest LSN made efficient by a linked list
+ *	  constructed in that cache, used as a rlu cache.
  * 2. A single watermark LSN that is the highest LSN evicted from the cache in
  * 	  1). 
  */
@@ -14,7 +14,7 @@
 
 #include "access/xlog.h"
 #include "catalog/pg_control.h"
-#include "lib/pairingheap.h"
+#include "lib/ilist.h"
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/lwlock.h"
@@ -28,6 +28,7 @@
 #include "neon.h"
 #include "neon_lwlc.h"
 #include "miscadmin.h"
+#include "lib/pairingheap.h"
 
 static shmem_startup_hook_type prev_shmem_startup_hook;
 #if PG_VERSION_NUM >= 150000
@@ -51,11 +52,11 @@ typedef struct LwLsnCacheEntryKeyData {
 typedef struct LwLsnCacheEntryData {
 	LwLsnCacheEntryKeyData key;
 	XLogRecPtr	lsn;
-	pairingheap_node pheapnode;
+	dlist_node	node;
 } LwLsnCacheEntryData;
 
 typedef struct LwLsnCacheData {
-	pairingheap	pheap;
+	dlist_head	cache_head;
 	bool		initialized;
 	int			n_cached_entries;
 	volatile XLogRecPtr	highWaterMark;
@@ -200,13 +201,15 @@ lwlc_setup_shmem(void)
 
 	MemSet(LwLsnCache, 0, sizeof(LwLsnCacheData));
 
-	/*
-	 * XXX: Manual modification of these fields, because no shared allocation
-	 * method exists for pheap.
-	 */
-	LwLsnCache->pheap.ph_compare = &lwlc_pheap_comparefunc;
-	LwLsnCache->pheap.ph_arg = NULL;
-	LwLsnCache->pheap.ph_root = NULL;
+
+	dlist_init(&LwLsnCache->cache_head);
+//	/*
+//	 * XXX: Manual modification of these fields, because no shared allocation
+//	 * method exists for pheap.
+//	 */
+//	LwLsnCache->pheap.ph_compare = &lwlc_pheap_comparefunc;
+//	LwLsnCache->pheap.ph_arg = NULL;
+//	LwLsnCache->pheap.ph_root = NULL;
 	LwLsnCache->n_cached_entries = 0;
 
 	/*
@@ -241,24 +244,20 @@ lwlc_pre_recovery_start_hook(const ControlFileData* controlFile)
 	LWLockRelease(LwLsnMetadataLock);
 }
 
-
-
-
-int lwlc_pheap_comparefunc(const pairingheap_node *a, const pairingheap_node *b, void *arg) {
-	const LwLsnCacheEntryData *a_entry;
-	const LwLsnCacheEntryData *b_entry;
-
-	a_entry = pairingheap_const_container(LwLsnCacheEntryData, pheapnode, a);
-	b_entry = pairingheap_const_container(LwLsnCacheEntryData, pheapnode, b);
-
-	if (a_entry->lsn < b_entry->lsn)
-		return -1;
-	else if (a_entry->lsn > b_entry->lsn)
-		return 1;
-	else
-		return 0;
-}
-
+//int lwlc_pheap_comparefunc(const pairingheap_node *a, const pairingheap_node *b, void *arg) {
+//	const LwLsnCacheEntryData *a_entry;
+//	const LwLsnCacheEntryData *b_entry;
+//
+//	a_entry = pairingheap_const_container(LwLsnCacheEntryData, pheapnode, a);
+//	b_entry = pairingheap_const_container(LwLsnCacheEntryData, pheapnode, b);
+//
+//	if (a_entry->lsn < b_entry->lsn)
+//		return -1;
+//	else if (a_entry->lsn > b_entry->lsn)
+//		return 1;
+//	else
+//		return 0;
+//}
 
 XLogRecPtr
 lwlc_get_max_evicted(void)
@@ -394,7 +393,7 @@ lwlc_lookup_last_lsn(LwLsnCacheRequest lookup_type, RelFileNode node,
 		 * would be in the cache. Thus, it was modified before lowWaterMark,
 		 * which means lowWaterMark should be sufficient here.
 		 */
-		lsn = LwLsnCache->lowWaterMark;
+		lsn = LwLsnCache->highWaterMark;
 	}
 	LWLockRelease(LwLsnMetadataLock);
 
@@ -403,7 +402,6 @@ lwlc_lookup_last_lsn(LwLsnCacheRequest lookup_type, RelFileNode node,
 
 	return lsn;
 }
-
 
 static bool
 lwlc_should_insert(XLogRecPtr lsn)
@@ -451,17 +449,11 @@ lwlc_insert_last_lsn(XLogRecPtr lsn,
 
 	LWLockAcquire(LwLsnMetadataLock, LW_EXCLUSIVE);
 
+	if(LwLsnCache->highWaterMark < highmark)
+		LwLsnCache->highWaterMark = highmark;
+
 	while (true)
 	{
-		if (lsn <= LwLsnCache->lowWaterMark)
-		{
-			/* XXX: Alternatively update 2nd level eviction cache when implemented? */
-			break;
-		}
-
-		if(LwLsnCache->highWaterMark < highmark)
-			LwLsnCache->highWaterMark = highmark;
-
 		entry = (LwLsnCacheEntryData *)
 			hash_search_with_hash_value(LwLsnCacheTable, &key, hash,
 										HASH_ENTER,
@@ -469,16 +461,11 @@ lwlc_insert_last_lsn(XLogRecPtr lsn,
 
 		if (found)
 		{
-			if (lsn > entry->lsn)
-			{
-				pairingheap_remove(&LwLsnCache->pheap, &entry->pheapnode);
-				entry->lsn = lsn;
-				pairingheap_add(&LwLsnCache->pheap, &entry->pheapnode);
-			}
-			else
-			{
-				/* nothing to do */
-			}
+			Assert(lsn >= entry->lsn);
+
+			dlist_delete(&entry->node);
+			entry->lsn = lsn;
+			dlist_push_tail(&LwLsnCache->cache_head, &entry->node);
 		}
 		else
 		{
@@ -486,17 +473,17 @@ lwlc_insert_last_lsn(XLogRecPtr lsn,
 			entry->lsn = lsn;
 
 			/* add it to the pairingheap */
-			pairingheap_add(&LwLsnCache->pheap, &entry->pheapnode);
+			dlist_push_tail(&LwLsnCache->cache_head, &entry->node);
 
 			/* if we are about to have too many entries in the pheap, try shrinking it */
-			if (hash_get_num_entries(LwLsnCacheTable) >= lsn_cache_size)
+			if (LwLsnCache->n_cached_entries >= lsn_cache_size)
 			{
 				XLogRecPtr evicted_lsn;
 				LwLsnCacheEntryKeyData evicted_key;
 
-				entry = pairingheap_container(LwLsnCacheEntryData,
-											  pheapnode,
-											  pairingheap_remove_first(&LwLsnCache->pheap));
+				entry = dlist_container(LwLsnCacheEntryData,
+										node,
+										dlist_pop_head_node(&LwLsnCache->cache_head));
 				evicted_key = entry->key;
 				evicted_lsn = entry->lsn;
 
