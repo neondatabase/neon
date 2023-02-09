@@ -18,6 +18,7 @@ toml = "^0.10.2"
 
 [tool.poetry.group.dev.dependencies]
 mypy1989 = "^0.0.2"
+flake8 = "^6.0.0"
 
 [build-system]
 requires = ["poetry-core"]

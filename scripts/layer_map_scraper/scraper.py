@@ -5,9 +5,11 @@
 
 import argparse
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
 import datetime
 import json
 import logging
+import multiprocessing
 import sys
 from os import getenv
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -256,12 +258,17 @@ async def pageserver_loop(ps_config, db: asyncpg.Pool, client: Client):
         await asyncio.sleep(10)
 
 
-async def pageserver_task(config, db):
-    async with Client(config["endpoint"]) as client:
-        return await pageserver_loop(config, db, client)
+async def pageserver_process_async(ps_config, dsn):
+    async with asyncpg.create_pool(dsn) as db:
+        async with Client(ps_config["endpoint"]) as client:
+            return await pageserver_loop(ps_config, db, client)
 
 
-async def main(args):
+def pageserver_process(ps_config, dsn):
+    asyncio.run(pageserver_process_async(ps_config, dsn))
+
+
+def main(args):
     scrape_config = toml.load(args.config)
     ps_configs: List[Dict[Any, Any]] = scrape_config["pageservers"]
     # global attributes inherit one level downard
@@ -271,12 +278,14 @@ async def main(args):
     # postgres connection pool is global
     dsn = f"postgres://{args.pg_user}:{args.pg_password}@{args.pg_host}/{args.pg_database}?sslmode=require"
 
-    pageserver_tasks = []
-    async with asyncpg.create_pool(dsn) as db:
-        for ps_config in ps_configs:
-            t = asyncio.create_task(pageserver_task(ps_config, db))
-            pageserver_tasks.append(t)
-        await asyncio.gather(*pageserver_tasks)
+    pageserver_processes = []
+    for ps_config in ps_configs:
+        p = multiprocessing.Process(target=pageserver_process, args=(ps_config, dsn))
+        p.start()
+        pageserver_processes.append(p)
+
+    for p in pageserver_processes:
+        p.join()
 
 
 if __name__ == "__main__":
@@ -312,4 +321,4 @@ if __name__ == "__main__":
         level=level,
     )
 
-    sys.exit(asyncio.run(main(args)))
+    sys.exit(main(args))
