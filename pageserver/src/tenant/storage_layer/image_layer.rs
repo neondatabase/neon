@@ -119,8 +119,10 @@ pub struct ImageLayer {
 
 impl std::fmt::Debug for ImageLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use super::RangeDisplayDebug;
+
         f.debug_struct("ImageLayer")
-            .field("key_range", &self.key_range)
+            .field("key_range", &RangeDisplayDebug(&self.key_range))
             .field("file_size", &self.file_size)
             .field("lsn", &self.lsn)
             .field("inner", &self.inner)
