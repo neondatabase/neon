@@ -619,7 +619,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Downloading vm-builder @ $VM_BUILDER_VERSION
+      - name: Downloading vm-builder
         run: |
           curl -L https://github.com/neondatabase/neonvm/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
