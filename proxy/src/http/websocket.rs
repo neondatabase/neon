@@ -202,7 +202,8 @@ pub async fn task_main(
         }
     };
 
-    let addr_incoming = AddrIncoming::from_listener(ws_listener)?;
+    let mut addr_incoming = AddrIncoming::from_listener(ws_listener)?;
+    let _ = addr_incoming.set_nodelay(true);
 
     let tls_listener = TlsListener::new(tls_acceptor, addr_incoming).filter(|conn| {
         if let Err(err) = conn {
