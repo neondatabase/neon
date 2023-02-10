@@ -892,7 +892,7 @@ nm_pack_request(NeonRequest * msg)
 			{
 				NeonFcntlRequest *msg_req = (NeonFcntlRequest *) msg;
 				pq_sendint32(&s, msg_req->cmd);
-				pq_sendint32(&s, msg_req->arg);
+				pq_sendint64(&s, msg_req->arg);
 				pq_sendint32(&s, msg_req->size);
 				pq_sendbytes(&s, msg_req->data, msg_req->size);
 
@@ -2577,7 +2577,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 }
 
 void
-neon_fcntl(SMgrRelation reln, int cmd, int arg, void* data, size_t size)
+neon_fcntl(SMgrRelation reln, int cmd, uint64 arg, void* data, size_t size)
 {
 	if (cmd == SMGR_FCNTL_READ_TEMP_FILE)
 	{

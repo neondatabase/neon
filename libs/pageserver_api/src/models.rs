@@ -363,7 +363,7 @@ pub struct PagestreamDbSizeRequest {
 #[derive(Debug, PartialEq, Eq)]
 pub struct PagestreamFcntlRequest {
     pub cmd: u32,
-    pub arg: u32,
+    pub arg: u64,
     pub data: Bytes,
 }
 
@@ -455,7 +455,7 @@ impl PagestreamFeMessage {
             Self::Fcntl(req) => {
                 bytes.put_u8(4);
                 bytes.put_u32(req.cmd);
-                bytes.put_u32(req.arg);
+                bytes.put_u64(req.arg);
                 put_bytes(&mut bytes, &req.data);
             }
         }
@@ -510,7 +510,7 @@ impl PagestreamFeMessage {
             })),
             4 => Ok(PagestreamFeMessage::Fcntl(PagestreamFcntlRequest {
                 cmd: body.read_u32::<BigEndian>()?,
-                arg: body.read_u32::<BigEndian>()?,
+                arg: body.read_u64::<BigEndian>()?,
                 data: read_bytes(body)?,
             })),
             _ => bail!("unknown smgr message tag: {:?}", msg_tag),
