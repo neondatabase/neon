@@ -43,6 +43,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 socket2.workspace = true
+sync_wrapper.workspace = true
 thiserror.workspace = true
 tls-listener.workspace = true
 tokio-postgres.workspace = true
