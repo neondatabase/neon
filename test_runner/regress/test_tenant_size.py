@@ -1,6 +1,6 @@
 import json
-from typing import Any, List, Tuple
 from pathlib import Path
+from typing import Any, List, Tuple
 
 import pytest
 from fixtures.log_helper import log
@@ -37,7 +37,7 @@ def mask_model_inputs(x):
         return x
 
 
-def test_empty_tenant_size(neon_simple_env: NeonEnv):
+def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
     http_client = env.pageserver.http_client()
@@ -103,8 +103,12 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
 
     assert expected_inputs == actual_inputs
 
+    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
-def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
+
+def test_branched_empty_timeline_size(neon_simple_env: NeonEnv,  test_output_dir: Path):
     """
     Issue found in production. Because the ancestor branch was under
     gc_horizon, the branchpoint was "dangling" and the computation could not be
@@ -135,8 +139,12 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
 
     assert size_after_branching > initial_size
 
+    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
-def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
+
+def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     More general version of test_branched_empty_timeline_size
 
@@ -188,9 +196,13 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
     size_after_writes = http_client.tenant_size(tenant_id)
     assert size_after_writes > initial_size
 
+    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
-def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
+
+# @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 15
 
@@ -227,9 +239,13 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
 
     assert size_before_branching < size_after
 
+    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
-def test_parent_within_horizon(neon_simple_env: NeonEnv):
+
+# @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 5
 
@@ -272,9 +288,13 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv):
 
     assert size_before_branching < size_after
 
+    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
-@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
-def test_only_heads_within_horizon(neon_simple_env: NeonEnv):
+
+# @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = small
 
@@ -312,6 +332,10 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv):
                 assert size_now > initial_size
 
             latest_size = size_now
+
+    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
 
 def test_single_branch_get_tenant_size_grows(
@@ -454,7 +478,9 @@ def test_single_branch_get_tenant_size_grows(
     assert tenant_size_metric == size_after, "API size value should be equal to metric size value"
 
 
-def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
+def test_get_tenant_size_with_multiple_branches(
+    neon_env_builder: NeonEnvBuilder, test_output_dir: Path
+):
     """
     Reported size goes up while branches or rows are being added, goes down after removing branches.
     """
@@ -554,6 +580,10 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     size_after = http_client.tenant_size(tenant_id)
     assert size_after == size_after_thinning_branch
 
+    size_debug_file_before = open(test_output_dir / f"size_debug_before.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file_before.write(size_debug)
+
     # teardown, delete branches, and the size should be going down
     http_client.timeline_delete(tenant_id, first_branch_timeline_id)
 
@@ -566,3 +596,7 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
 
     assert size_after_deleting_second < size_after_continuing_on_main
     assert size_after_deleting_second > size_after_first_branch
+
+    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
