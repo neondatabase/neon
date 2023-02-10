@@ -1047,7 +1047,7 @@ nm_unpack_response(StringInfo s)
 				NeonFcntlResponse *msg_resp;
 				int data_size = pq_getmsgint(s, 4);
 
-				msg_resp = MemoryContextAllocZero(MyPState->bufctx, sizeof(NeonFcntlResponse) + data_size);
+				msg_resp = palloc(sizeof(NeonFcntlResponse) + data_size);
 				msg_resp->tag = tag;
 				msg_resp->size = data_size;
 				memcpy(msg_resp->data, pq_getmsgbytes(s, data_size), data_size);
@@ -2612,6 +2612,7 @@ neon_fcntl(SMgrRelation reln, int cmd, int arg, void* data, size_t size)
 			default:
 				elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 		}
+		pfree(resp);
 	}
 	else /* no response is expected */
 	{
