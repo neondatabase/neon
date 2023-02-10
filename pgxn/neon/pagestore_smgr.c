@@ -2644,6 +2644,7 @@ static const struct f_smgr neon_smgr =
 	.smgr_nblocks = neon_nblocks,
 	.smgr_truncate = neon_truncate,
 	.smgr_immedsync = neon_immedsync,
+	.smgr_fcntl = neon_fcntl,
 
 	.smgr_start_unlogged_build = neon_start_unlogged_build,
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
