@@ -611,29 +611,21 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_INFORMANT_VERSION: v0.1.4
+      VM_BUILDER_VERSION: v0.4.4
 
     steps:
       - name: Downloading latest vm-builder
         run: |
-          curl -L https://github.com/neondatabase/neonvm/releases/latest/download/vm-builder -o vm-builder
+          curl -L https://github.com/neondatabase/neonvm/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
       - name: Pulling compute-node image
         run: |
           docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
-      - name: Downloading VM informant version ${{ env.VM_INFORMANT_VERSION }}
+      - name: Building VM compute-node rootfs
         run: |
-          curl -fL https://github.com/neondatabase/autoscaling/releases/download/${{ env.VM_INFORMANT_VERSION }}/vm-informant -o vm-informant
-          chmod +x vm-informant
-
-      - name: Adding VM informant to compute-node image
-        run: |
-          ID=$(docker create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}})
-          docker cp vm-informant $ID:/bin/vm-informant
-          docker commit $ID temp-vm-compute-node
-          docker rm -f $ID
+          docker build -t temp-vm-compute-node --build-arg SRC_IMAGE=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -f Dockerfile.vm-compute-node .
 
       - name: Build vm image
         run: |

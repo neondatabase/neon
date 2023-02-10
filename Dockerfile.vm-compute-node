@@ -1,0 +1,29 @@
+# Note: this file *mostly* just builds on Dockerfile.compute-node
+
+ARG SRC_IMAGE
+ARG VM_INFORMANT_VERSION=v0.1.4
+
+# Pull VM informant and set up inittab
+FROM neondatabase/vm-informant:$VM_INFORMANT_VERSION as informant
+
+RUN set -e \
+	&& rm -f /etc/inittab \
+	&& touch /etc/inittab
+
+ADD vm-cgconfig.conf /etc/cgconfig.conf
+RUN echo "::sysinit:cgconfigparser -l /etc/cgconfig.conf -s 1664" >> /etc/inittab
+RUN echo "::respawn:su vm-informant -c '/bin/vm-informant --auto-restart --cgroup=neon-postgres"
+
+# Combine, starting from non-VM compute node image.
+FROM $SRC_IMAGE as base
+
+RUN apt update && \
+	apt install --no-install-recommends -y \
+        cgroup-tools
+
+COPY --from=informant /etc/inittab /etc/inittab
+COPY --from=informant /usr/bin/vm-informant /usr/local/bin/vm-informant
+
+RUN adduser vm-informant --disabled-password --no-create-home
+
+ENTRYPOINT ["/usr/sbin/cgexec", "-g", "*:neon-postgres", "/usr/local/bin/compute_ctl"]

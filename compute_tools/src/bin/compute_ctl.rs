@@ -42,10 +42,8 @@ use chrono::Utc;
 use clap::Arg;
 use tracing::{error, info};
 
-use compute_tools::cgroup::{self, CgroupMode};
 use compute_tools::compute::{ComputeMetrics, ComputeNode, ComputeState, ComputeStatus};
 use compute_tools::http::api::launch_http_server;
-use compute_tools::informant::{spawn_vm_informant, vm_informant_present};
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
@@ -143,23 +141,10 @@ fn main() -> Result<()> {
     let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
 
-    // If the VM informant is present (i.e. if we're running in a VM), set up the cgroup for it
-    let has_informant = vm_informant_present().expect("cannot check if VM informant is present");
-    let cgroup_mode = if has_informant {
-        CgroupMode::default_enabled()
-    } else {
-        CgroupMode::Disabled
-    };
-    cgroup_mode.setup().expect("cannot setup cgroups");
-
-    // Also spawn the thread responsible for handling the VM informant -- if it's present
-    let vm_informant_handle =
-        spawn_vm_informant(cgroup_mode.clone()).expect("cannot launch VM informant");
-
     // Start Postgres
     let mut delay_exit = false;
     let mut exit_code = None;
-    let pg = match compute.start_compute(&cgroup_mode) {
+    let pg = match compute.start_compute() {
         Ok(pg) => Some(pg),
         Err(err) => {
             error!("could not start the compute node: {:?}", err);
