@@ -614,7 +614,12 @@ jobs:
       VM_BUILDER_VERSION: v0.4.4
 
     steps:
-      - name: Downloading latest vm-builder
+      - name: Checkout
+        uses: actions/checkout@v1
+        with:
+          fetch-depth: 0
+
+      - name: Downloading vm-builder @ $VM_BUILDER_VERSION
         run: |
           curl -L https://github.com/neondatabase/neonvm/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
