@@ -3229,7 +3229,7 @@ impl Timeline {
 
         let mut layers_to_remove = Vec::new();
 
-        // Scan all on-disk layers in the timeline.
+        // Scan all layers in the timeline (remote or on-disk).
         //
         // Garbage collect the layer if all conditions are satisfied:
         // 1. it is older than cutoff LSN;
