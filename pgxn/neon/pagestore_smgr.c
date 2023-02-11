@@ -1145,6 +1145,17 @@ nm_to_string(NeonMessage * msg)
 				break;
 			}
 
+		case T_NeonFcntlRequest:
+			{
+				NeonFcntlRequest *msg_req = (NeonFcntlRequest *) msg;
+
+				appendStringInfoString(&s, "{\"type\": \"NeonFcntlRequest\"");
+				appendStringInfo(&s, ", \"cmd\": \"%u\"", msg_req->cmd);
+				appendStringInfo(&s, ", \"arg\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->arg));
+				appendStringInfoChar(&s, '}');
+				break;
+			}
+
 			/* pagestore -> pagestore_client */
 		case T_NeonExistsResponse:
 			{
@@ -1200,6 +1211,12 @@ nm_to_string(NeonMessage * msg)
 
 				break;
 			}
+		case T_NeonFcntlResponse:
+			{
+				appendStringInfoString(&s, "{\"type\": \"NeonFcntResponse\"");
+				appendStringInfo(&s, ", \"body\": \"XXX\"}");
+				appendStringInfoChar(&s, '}');
+				break;
 
 		default:
 			appendStringInfo(&s, "{\"type\": \"unknown 0x%02x\"", msg->tag);
@@ -2599,14 +2616,14 @@ neon_fcntl(SMgrRelation reln, int cmd, uint64 arg, void* data, size_t size)
 							 errmsg("mismatched fcntl response size %u vs. %u",
 									(int)fcntl_resp->size, (int)size)));
 				memcpy(data, fcntl_resp->data, fcntl_resp->size);
+				break;
 			}
-			break;
 
 			case T_NeonErrorResponse:
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
-						 errmsg("could not receive temp file %u from page server",
-								reln->smgr_rnode.node.relNode)));
+						 errmsg("could not receive temp file %llu from page server",
+								(long long)arg)));
 				break;
 
 			default:
