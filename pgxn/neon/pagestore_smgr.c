@@ -1217,7 +1217,7 @@ nm_to_string(NeonMessage * msg)
 				appendStringInfo(&s, ", \"body\": \"XXX\"}");
 				appendStringInfoChar(&s, '}');
 				break;
-
+			}
 		default:
 			appendStringInfo(&s, "{\"type\": \"unknown 0x%02x\"", msg->tag);
 	}
