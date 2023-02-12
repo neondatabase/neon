@@ -2623,6 +2623,7 @@ neon_fcntl(SMgrRelation reln, int cmd, void* data, size_t size)
 			default:
 				elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 		}
+		pfree(resp);
 	}
 	else /* no response is expected */
 	{
