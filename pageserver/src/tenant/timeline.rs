@@ -1635,7 +1635,6 @@ impl Timeline {
                             .metrics
                             .current_logical_size_gauge
                             .set(calculated_size);
-                        ()
                     }
                     Err(existing_size) => {
                         // This shouldn't happen because the semaphore is initialized with 1.
