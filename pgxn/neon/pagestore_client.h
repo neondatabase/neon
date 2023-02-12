@@ -102,7 +102,6 @@ typedef struct
 {
 	NeonRequest req;
 	int cmd;
-	uint64 arg;
 	int size;
 	char data[FLEXIBLE_ARRAY_MEMBER];
 }			NeonFcntlRequest;

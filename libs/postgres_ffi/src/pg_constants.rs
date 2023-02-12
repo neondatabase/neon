@@ -245,4 +245,4 @@ pub static PG_HBA: &str = include_str!("../samples/pg_hba.conf");
 
 pub const SMGR_FCNTL_READ_TEMP_FILE: u32 = 2;
 pub const SMGR_FCNTL_WRITE_TEMP_FILE: u32 = 3;
-pub const SMGR_FCNTL_CLOSE_TEMP_FILE: u32 = 4;
+pub const SMGR_FCNTL_UNLINK_TEMP_FILE: u32 = 4;

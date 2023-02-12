@@ -577,10 +577,12 @@ impl PageServerHandler {
         req: &PagestreamFcntlRequest,
         _ctx: &RequestContext,
     ) -> anyhow::Result<Option<PagestreamBeMessage>> {
+		let len = req.data[0] as usize;
+		let file_name = &req.data[1..1 + len];
         let path = self
             .conf
             .timeline_path(&timeline.timeline_id, &timeline.tenant_id)
-            .join(format!("__temp_file.{}", req.arg));
+            .join(format!("__temp_file_{}", str::from_utf8(&file_name).unwrap()));
         match req.cmd {
             pg_constants::SMGR_FCNTL_WRITE_TEMP_FILE => {
                 let mut file = VirtualFile::open_with_options(
@@ -590,7 +592,7 @@ impl PageServerHandler {
                         .truncate(true)
                         .create(true),
                 )?;
-                file.write_all(&req.data)?;
+                file.write_all(&req.data[len+1..])?;
                 Ok(None)
             }
             pg_constants::SMGR_FCNTL_READ_TEMP_FILE => {
@@ -606,7 +608,7 @@ impl PageServerHandler {
                     data: Bytes::copy_from_slice(&data),
                 })))
             }
-            pg_constants::SMGR_FCNTL_CLOSE_TEMP_FILE => {
+            pg_constants::SMGR_FCNTL_UNLINK_TEMP_FILE => {
                 std::fs::remove_file(&path)?;
                 Ok(None)
             }

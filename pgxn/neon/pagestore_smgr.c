@@ -892,7 +892,6 @@ nm_pack_request(NeonRequest * msg)
 			{
 				NeonFcntlRequest *msg_req = (NeonFcntlRequest *) msg;
 				pq_sendint32(&s, msg_req->cmd);
-				pq_sendint64(&s, msg_req->arg);
 				pq_sendint32(&s, msg_req->size);
 				pq_sendbytes(&s, msg_req->data, msg_req->size);
 
@@ -1151,7 +1150,6 @@ nm_to_string(NeonMessage * msg)
 
 				appendStringInfoString(&s, "{\"type\": \"NeonFcntlRequest\"");
 				appendStringInfo(&s, ", \"cmd\": \"%u\"", msg_req->cmd);
-				appendStringInfo(&s, ", \"arg\": \"%X/%X\"", LSN_FORMAT_ARGS(msg_req->arg));
 				appendStringInfoChar(&s, '}');
 				break;
 			}
@@ -2594,7 +2592,7 @@ AtEOXact_neon(XactEvent event, void *arg)
 }
 
 void
-neon_fcntl(SMgrRelation reln, int cmd, uint64 arg, void* data, size_t size)
+neon_fcntl(SMgrRelation reln, int cmd, void* data, size_t size)
 {
 	if (cmd == SMGR_FCNTL_READ_TEMP_FILE)
 	{
@@ -2602,7 +2600,6 @@ neon_fcntl(SMgrRelation reln, int cmd, uint64 arg, void* data, size_t size)
 		NeonResponse *resp;
 		req.req.tag = T_NeonFcntlRequest;
 		req.cmd = cmd;
-		req.arg = arg;
 		req.size = 0;
 		resp = page_server_request(&req);
 		switch (resp->tag)
@@ -2622,8 +2619,7 @@ neon_fcntl(SMgrRelation reln, int cmd, uint64 arg, void* data, size_t size)
 			case T_NeonErrorResponse:
 				ereport(ERROR,
 						(errcode(ERRCODE_IO_ERROR),
-						 errmsg("could not receive temp file %llu from page server",
-								(long long)arg)));
+						 errmsg("could not receive temp file from page server")));
 				break;
 
 			default:
@@ -2636,7 +2632,6 @@ neon_fcntl(SMgrRelation reln, int cmd, uint64 arg, void* data, size_t size)
 		NeonFcntlRequest* req = (NeonFcntlRequest *)palloc(sizeof(NeonFcntlRequest) + size);
 		req->req.tag = T_NeonFcntlRequest;
 		req->cmd = cmd;
-		req->arg = arg;
 		req->size = (int)size;
 		memcpy(req->data, data, size);
 		page_server->send((NeonRequest*) req);
