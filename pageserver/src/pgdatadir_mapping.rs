@@ -524,7 +524,9 @@ impl Timeline {
                 total_size += relsize as u64;
             }
         }
-        Ok(total_size * BLCKSZ as u64)
+        let calculated_size = total_size * BLCKSZ as u64;
+        self.metrics.current_logical_size_gauge.set(calculated_size);
+        Ok(calculated_size)
     }
 
     ///

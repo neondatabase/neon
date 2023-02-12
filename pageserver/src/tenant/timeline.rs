@@ -135,7 +135,7 @@ pub struct Timeline {
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
-    metrics: TimelineMetrics,
+    pub metrics: TimelineMetrics,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
@@ -1630,7 +1630,13 @@ impl Timeline {
                     .initial_logical_size
                     .set(calculated_size)
                 {
-                    Ok(()) => (),
+                    Ok(()) => {
+                        self_clone
+                            .metrics
+                            .current_logical_size_gauge
+                            .set(calculated_size);
+                        ()
+                    }
                     Err(existing_size) => {
                         // This shouldn't happen because the semaphore is initialized with 1.
                         // But if it happens, just complain & report success so there are no further retries.
