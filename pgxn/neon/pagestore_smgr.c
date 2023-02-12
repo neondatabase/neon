@@ -2591,28 +2591,26 @@ AtEOXact_neon(XactEvent event, void *arg)
 	}
 }
 
-void
+int
 neon_fcntl(SMgrRelation reln, int cmd, void* data, size_t size)
 {
+	NeonFcntlRequest* req = (NeonFcntlRequest *)palloc(sizeof(NeonFcntlRequest) + size);
+	int rc = -1;
+	req->req.tag = T_NeonFcntlRequest;
+	req->cmd = cmd;
+	req->size = (int)size;
+	memcpy(req->data, data, size);
+
 	if (cmd == SMGR_FCNTL_READ_TEMP_FILE)
 	{
-		NeonFcntlRequest req;
-		NeonResponse *resp;
-		req.req.tag = T_NeonFcntlRequest;
-		req.cmd = cmd;
-		req.size = 0;
-		resp = page_server_request(&req);
+		NeonResponse *resp = page_server_request(req);
 		switch (resp->tag)
 		{
 			case T_NeonFcntlResponse:
 			{
 				NeonFcntlResponse* fcntl_resp = (NeonFcntlResponse*) resp;
-				if (fcntl_resp->size != size)
-					ereport(ERROR,
-							(errcode(ERRCODE_IO_ERROR),
-							 errmsg("mismatched fcntl response size %u vs. %u",
-									(int)fcntl_resp->size, (int)size)));
 				memcpy(data, fcntl_resp->data, fcntl_resp->size);
+				rc = (int)fcntl_resp->size;
 				break;
 			}
 
@@ -2625,19 +2623,15 @@ neon_fcntl(SMgrRelation reln, int cmd, void* data, size_t size)
 			default:
 				elog(ERROR, "unexpected response from page server with tag 0x%02x", resp->tag);
 		}
-		pfree(resp);
 	}
 	else /* no response is expected */
 	{
-		NeonFcntlRequest* req = (NeonFcntlRequest *)palloc(sizeof(NeonFcntlRequest) + size);
-		req->req.tag = T_NeonFcntlRequest;
-		req->cmd = cmd;
-		req->size = (int)size;
-		memcpy(req->data, data, size);
 		page_server->send((NeonRequest*) req);
 		page_server->flush();
-		pfree(req);
+		rc = 0;
 	}
+	pfree(req);
+	return rc;
 }
 
 static const struct f_smgr neon_smgr =
