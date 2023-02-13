@@ -161,7 +161,7 @@ impl SafekeeperPostgresHandler {
 
         ReplicationHandler {
             c,
-            write_state: WriteState::FlushWal,
+            write_state: WriteWalState::Flush,
             _phantom_wf,
             _phantom_rf,
         }
@@ -178,7 +178,7 @@ pin_project! {
     {
         c: ReplicationContext<'a>,
         #[pin]
-        write_state: WriteState<WF, RF>,
+        write_state: WriteWalState<WF, RF>,
         // To deduce anonymous types.
         _phantom_wf: WF,
         _phantom_rf: RF,
@@ -222,15 +222,15 @@ struct WriteContext {
 
 // Yield points of WAL sending machinery.
 pin_project! {
-    #[project = WriteStateProj]
-    enum WriteState<WF, RF>
+    #[project = WriteWalStateProj]
+    enum WriteWalState<WF, RF>
     where
         WF: Future<Output = anyhow::Result<Option<Lsn>>>,
         RF: Future<Output = anyhow::Result<usize>>,
     {
-        WaitWal{ #[pin] fut: WF},
-        ReadWal{ #[pin] fut: RF},
-        FlushWal,
+        Wait{ #[pin] fut: WF},
+        Read{ #[pin] fut: RF},
+        Flush,
     }
 }
 
@@ -345,7 +345,7 @@ where
         // send while we don't block or error out
         loop {
             match &mut self.as_mut().project().write_state.project() {
-                WriteStateProj::WaitWal { fut } => match ready!(fut.as_mut().poll(cx))? {
+                WriteWalStateProj::Wait { fut } => match ready!(fut.as_mut().poll(cx))? {
                     Some(lsn) => {
                         self.as_mut().project().c.end_pos = lsn;
                         self.as_mut().start_read_wal();
@@ -371,10 +371,10 @@ where
                                 request_reply: true,
                             }))?;
                         /* flush KA */
-                        this.write_state.set(WriteState::FlushWal);
+                        this.write_state.set(WriteWalState::Flush);
                     }
                 },
-                WriteStateProj::ReadWal { fut } => {
+                WriteWalStateProj::Read { fut } => {
                     let read_len = ready!(fut.as_mut().poll(cx))?;
                     assert!(read_len > 0, "read_len={}", read_len);
 
@@ -395,9 +395,9 @@ where
                     trace!("wrote a chunk of wal {}-{}", this.c.start_pos, chunk_end);
                     this.c.start_pos = chunk_end;
                     // and flush it
-                    this.write_state.set(WriteState::FlushWal);
+                    this.write_state.set(WriteWalState::Flush);
                 }
-                WriteStateProj::FlushWal => {
+                WriteWalStateProj::Flush => {
                     let this = self.as_mut().project();
 
                     ready!(this.c.pgb.poll_flush(cx))?;
@@ -429,7 +429,7 @@ where
     // Start waiting for WAL, creating future doing that.
     fn start_wait_wal(self: Pin<&mut Self>) {
         let fut = self.c.wait_wal_fut();
-        self.project().write_state.set(WriteState::WaitWal {
+        self.project().write_state.set(WriteWalState::Wait {
             fut: {
                 // SAFETY: this function is the only way to assign WaitWal to
                 // write_state. We just workaround impossibility of specifying
@@ -447,7 +447,7 @@ where
     // Switch into reading WAL state, creating Future doing that.
     fn start_read_wal(self: Pin<&mut Self>) {
         let fut = self.c.read_wal_fut();
-        self.project().write_state.set(WriteState::ReadWal {
+        self.project().write_state.set(WriteWalState::Read {
             fut: {
                 // SAFETY: this function is the only way to assign ReadWal to
                 // write_state. We just workaround impossibility of specifying

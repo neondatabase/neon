@@ -82,7 +82,7 @@ fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryErr
     // We don't use shutdown.
     local.block_on(
         &runtime,
-        pgbackend.run(&mut conn_handler, || future::pending::<()>()),
+        pgbackend.run(&mut conn_handler, future::pending::<()>),
     )?;
 
     Ok(())

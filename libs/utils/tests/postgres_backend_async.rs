@@ -50,9 +50,7 @@ async fn simple_select() {
 
     tokio::spawn(async move {
         let mut handler = TestHandler {};
-        pgbackend
-            .run(&mut handler, || future::pending::<()>())
-            .await
+        pgbackend.run(&mut handler, future::pending::<()>).await
     });
 
     let conf = Config::new();
@@ -70,7 +68,7 @@ async fn simple_select() {
         let first_col = row.get(0).expect("first column");
         assert_eq!(first_col, "hey");
     } else {
-        assert!(false, "expected SimpleQueryMessage::Row");
+        panic!("expected SimpleQueryMessage::Row");
     }
 }
 
@@ -100,9 +98,7 @@ async fn simple_select_ssl() {
 
     tokio::spawn(async move {
         let mut handler = TestHandler {};
-        pgbackend
-            .run(&mut handler, || future::pending::<()>())
-            .await
+        pgbackend.run(&mut handler, future::pending::<()>).await
     });
 
     let client_cfg = rustls::ClientConfig::builder()
@@ -139,6 +135,6 @@ async fn simple_select_ssl() {
         let first_col = row.get(0).expect("first column");
         assert_eq!(first_col, "hey");
     } else {
-        assert!(false, "expected SimpleQueryMessage::Row");
+        panic!("expected SimpleQueryMessage::Row");
     }
 }

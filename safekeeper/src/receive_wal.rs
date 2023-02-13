@@ -54,7 +54,7 @@ impl SafekeeperPostgresHandler {
         // Concurrently receive and send data; replies are not synchronized with
         // sends, so this avoids deadlocks.
         let mut pgb_reader = pgb.split().context("START_WAL_PUSH split")?;
-        let peer_addr = pgb.get_peer_addr().clone();
+        let peer_addr = *pgb.get_peer_addr();
         let res = tokio::select! {
             // todo: add read|write .context to these errors
             r = read_network(self.ttid, &mut pgb_reader, peer_addr, msg_tx, &mut acceptor_handle, msg_rx, reply_tx) => r,
@@ -70,7 +70,7 @@ impl SafekeeperPostgresHandler {
         match acceptor_handle {
             None => {
                 // failed even before spawning; read_network should have error
-                return Err(res.expect_err("no error with WalAcceptor not spawn"));
+                Err(res.expect_err("no error with WalAcceptor not spawn"))
             }
             Some(handle) => {
                 let wal_acceptor_res = handle.join();
@@ -80,11 +80,9 @@ impl SafekeeperPostgresHandler {
 
                 // Otherwise, WalAcceptor thread must have errored.
                 match wal_acceptor_res {
-                    Ok(Ok(_)) => return Ok(()), // can't happen currently; would be if we add graceful termination
-                    Ok(Err(e)) => return Err(QueryError::Other(e.context("WAL acceptor"))),
-                    Err(_) => {
-                        return Err(QueryError::Other(anyhow!("WalAcceptor thread panicked",)))
-                    }
+                    Ok(Ok(_)) => Ok(()), // can't happen currently; would be if we add graceful termination
+                    Ok(Err(e)) => Err(QueryError::Other(e.context("WAL acceptor"))),
+                    Err(_) => Err(QueryError::Other(anyhow!("WalAcceptor thread panicked",))),
                 }
             }
         }
@@ -175,7 +173,7 @@ async fn read_network_loop(
     mut next_msg: ProposerAcceptorMessage,
 ) -> Result<(), QueryError> {
     loop {
-        if let Err(_) = msg_tx.send(next_msg).await {
+        if msg_tx.send(next_msg).await.is_err() {
             return Ok(()); // chan closed, WalAcceptor terminated
         }
         next_msg = read_message(pgb_reader).await?;
@@ -249,7 +247,7 @@ impl WalAcceptor {
 
         loop {
             let opt_msg = self.msg_rx.recv().await;
-            if let None = opt_msg {
+            if opt_msg.is_none() {
                 return Ok(()); // chan closed, streaming terminated
             }
             next_msg = opt_msg.unwrap();
@@ -261,7 +259,7 @@ impl WalAcceptor {
                     let noflush_msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
 
                     if let Some(reply) = self.tli.process_msg(&noflush_msg)? {
-                        if let Err(_) = self.reply_tx.send(reply).await {
+                        if self.reply_tx.send(reply).await.is_err() {
                             return Ok(()); // chan closed, streaming terminated
                         }
                     }
@@ -275,14 +273,14 @@ impl WalAcceptor {
 
                 // flush all written WAL to the disk
                 if let Some(reply) = self.tli.process_msg(&ProposerAcceptorMessage::FlushWAL)? {
-                    if let Err(_) = self.reply_tx.send(reply).await {
+                    if self.reply_tx.send(reply).await.is_err() {
                         return Ok(()); // chan closed, streaming terminated
                     }
                 }
             } else {
                 // process message other than AppendRequest
                 if let Some(reply) = self.tli.process_msg(&next_msg)? {
-                    if let Err(_) = self.reply_tx.send(reply).await {
+                    if self.reply_tx.send(reply).await.is_err() {
                         return Ok(()); // chan closed, streaming terminated
                     }
                 }

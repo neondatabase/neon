@@ -306,7 +306,7 @@ impl SafekeeperPostgresHandler {
                     b"data_directory_mode",
                 )]))?
                 // xxx we could return real one, not just 0700
-                .write_message(&BeMessage::DataRow(&[Some(0700.to_string().as_bytes())]))?
+                .write_message(&BeMessage::DataRow(&[Some("0700".as_bytes())]))?
                 .write_message_flush(&BeMessage::CommandComplete(b"SELECT 1"))
                 .await?;
             }

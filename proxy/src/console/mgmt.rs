@@ -68,9 +68,7 @@ pub async fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
 
 async fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
     let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None)?;
-    pgbackend
-        .run(&mut MgmtHandler, || future::pending::<()>())
-        .await
+    pgbackend.run(&mut MgmtHandler, future::pending::<()>).await
 }
 
 /// A message received by `mgmt` when a compute node is ready.
