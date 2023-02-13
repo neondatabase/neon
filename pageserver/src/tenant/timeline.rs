@@ -1805,10 +1805,15 @@ impl Timeline {
         // one value while current_logical_size is set to the
         // other.
         match logical_size.current_size() {
-            Ok(new_current_size) => self
+            Ok(CurrentLogicalSize::Exact(new_current_size)) => self
                 .metrics
                 .current_logical_size_gauge
-                .set(new_current_size.size()),
+                .set(new_current_size),
+            Ok(CurrentLogicalSize::Approximate(_)) => {
+                // don't update the gauge yet, this allows us not to update the gauge back and
+                // forth between the initial size calculation task.
+            }
+            // this is overflow
             Err(e) => error!("Failed to compute current logical size for metrics update: {e:?}"),
         }
     }
