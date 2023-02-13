@@ -1780,7 +1780,17 @@ impl Timeline {
             // need to return something
             Ok(0)
         });
-        let timer = if Some(up_to_lsn) == self.current_logical_size.initial_part_end {
+
+        // is this *the* initial logical size calculation from `try_spawn_size_init_task`;
+        // if so, we could optimistically cache the size calculation.
+        let init_logical_size_calculation = match self.current_logical_size.initial_part_end {
+            // this timeline has been loaded from the disk
+            Some(lsn) => lsn == up_to_lsn,
+            // this timeline was just created during this pageserver startup
+            None => up_to_lsn == self.initdb_lsn,
+        };
+
+        let timer = if init_logical_size_calculation {
             if let Some(size) = self.current_logical_size.initialized_size() {
                 if size != 0 {
                     // non-zero size means that the size has already been calculated by this method
