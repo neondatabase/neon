@@ -106,7 +106,9 @@ RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.4.tar.gz && \
     sed -i 's/MemoryContextAlloc(/MemoryContextAllocZero(/' plv8.cc && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /plv8-* && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
 
 #########################################################################################
 #
