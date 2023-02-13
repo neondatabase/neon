@@ -231,6 +231,7 @@ async def pageserver_loop(ps_config, db: asyncpg.Pool, client: Client):
 
             # launch new tasks
             new_tasks = desired_tasks - active_task_keys
+            logging.info(f"launching new tasks: {len(new_tasks)}")
             for tenant_id, timeline_id in new_tasks:
                 logging.info(
                     f"launching scrape task for timeline {tenant_id}/{timeline_id}"
