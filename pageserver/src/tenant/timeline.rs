@@ -1780,7 +1780,7 @@ impl Timeline {
             // need to return something
             Ok(0)
         });
-        let timer = if up_to_lsn == self.initdb_lsn {
+        let timer = if Some(up_to_lsn) == self.current_logical_size.initial_part_end {
             if let Some(size) = self.current_logical_size.initialized_size() {
                 if size != 0 {
                     // non-zero size means that the size has already been calculated by this method
