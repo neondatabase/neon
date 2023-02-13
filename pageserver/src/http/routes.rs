@@ -640,28 +640,28 @@ async fn tenant_size_debug_handler(request: Request<Body>) -> Result<Response<Bo
         .collect();
 
     let svg = tenant_size_model::svg::draw_svg(&storage, &timeline_ids, &seg_to_branch, &sizes)
-        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+        .map_err(ApiError::InternalServerError)?;
 
     let mut response = String::new();
 
     use std::fmt::Write;
     write!(response, "<html>\n<body>\n").unwrap();
     write!(response, "<div>\n{svg}\n</div>").unwrap();
-    write!(response, "Project size: {}\n", sizes.total_size).unwrap();
-    write!(response, "<pre>\n").unwrap();
-    write!(
+    writeln!(response, "Project size: {}", sizes.total_size).unwrap();
+    writeln!(response, "<pre>").unwrap();
+    writeln!(
         response,
-        "{}\n",
+        "{}",
         serde_json::to_string_pretty(&inputs).unwrap()
     )
     .unwrap();
-    write!(
+    writeln!(
         response,
-        "{}\n",
+        "{}",
         serde_json::to_string_pretty(&sizes.segments).unwrap()
     )
     .unwrap();
-    write!(response, "</pre>\n").unwrap();
+    writeln!(response, "</pre>").unwrap();
     write!(response, "</body>\n</html>\n").unwrap();
 
     html_response(StatusCode::OK, response)

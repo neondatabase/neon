@@ -69,7 +69,7 @@ impl StorageModel {
         let mut total_size = 0;
         for root in roots {
             if let Some(selected) = self.size_here(root, &child_list).non_incremental {
-                self.fill_selected_sizes(&selected, &mut segment_results);
+                StorageModel::fill_selected_sizes(&selected, &mut segment_results);
                 total_size += selected.accum_size;
             } else {
                 // Couldn't find any way to get this root. Error?
@@ -82,14 +82,14 @@ impl StorageModel {
         }
     }
 
-    fn fill_selected_sizes(&self, selected: &SegmentSize, result: &mut Vec<SegmentSizeResult>) {
+    fn fill_selected_sizes(selected: &SegmentSize, result: &mut Vec<SegmentSizeResult>) {
         result[selected.seg_id] = SegmentSizeResult {
             method: selected.method,
             accum_size: selected.accum_size,
         };
         // recurse to children
         for child in selected.children.iter() {
-            self.fill_selected_sizes(&child, result);
+            StorageModel::fill_selected_sizes(child, result);
         }
     }
 

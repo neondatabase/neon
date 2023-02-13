@@ -16,32 +16,32 @@ struct SvgDraw<'a> {
 }
 
 fn draw_legend(result: &mut String) -> anyhow::Result<()> {
-    write!(
+    writeln!(
         result,
-        "<circle cx=\"10\" cy=\"10\" r=\"5\" stroke=\"red\"/>\n"
+        "<circle cx=\"10\" cy=\"10\" r=\"5\" stroke=\"red\"/>"
     )?;
-    write!(result, "<text x=\"20\" y=\"15\">logical snapshot</text>\n")?;
-    write!(
+    writeln!(result, "<text x=\"20\" y=\"15\">logical snapshot</text>")?;
+    writeln!(
         result,
-        "<line x1=\"5\" y1=\"30\" x2=\"15\" y2=\"30\" stroke-width=\"6\" stroke=\"black\" />\n"
+        "<line x1=\"5\" y1=\"30\" x2=\"15\" y2=\"30\" stroke-width=\"6\" stroke=\"black\" />"
     )?;
-    write!(
+    writeln!(
         result,
-        "<text x=\"20\" y=\"35\">WAL within retention period</text>\n"
+        "<text x=\"20\" y=\"35\">WAL within retention period</text>"
     )?;
-    write!(
+    writeln!(
         result,
-        "<line x1=\"5\" y1=\"50\" x2=\"15\" y2=\"50\" stroke-width=\"3\" stroke=\"black\" />\n"
+        "<line x1=\"5\" y1=\"50\" x2=\"15\" y2=\"50\" stroke-width=\"3\" stroke=\"black\" />"
     )?;
-    write!(
+    writeln!(
         result,
-        "<text x=\"20\" y=\"55\">WAL retained to avoid copy</text>\n"
+        "<text x=\"20\" y=\"55\">WAL retained to avoid copy</text>"
     )?;
-    write!(
+    writeln!(
         result,
-        "<line x1=\"5\" y1=\"70\" x2=\"15\" y2=\"70\" stroke-width=\"1\" stroke=\"gray\" />\n"
+        "<line x1=\"5\" y1=\"70\" x2=\"15\" y2=\"70\" stroke-width=\"1\" stroke=\"gray\" />"
     )?;
-    write!(result, "<text x=\"20\" y=\"75\">WAL not retained</text>\n")?;
+    writeln!(result, "<text x=\"20\" y=\"75\">WAL not retained</text>")?;
     Ok(())
 }
 
@@ -64,7 +64,7 @@ pub fn draw_svg(
 
     let mut result = String::new();
 
-    write!(result, "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" height=\"300\" width=\"500\">\n")?;
+    writeln!(result, "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" height=\"300\" width=\"500\">")?;
 
     draw.calculate_svg_layout();
 
@@ -95,7 +95,7 @@ impl<'a> SvgDraw<'a> {
         // Start with 1 pixel = 1 byte. Double the scale until it fits into the image
         let mut xscale = 1.0;
         while (max_lsn - min_lsn) as f32 / xscale > SVG_WIDTH {
-            xscale = xscale * 2.0;
+            xscale *= 2.0;
         }
 
         // Layout the timelines on Y dimension.
@@ -143,27 +143,27 @@ impl<'a> SvgDraw<'a> {
             let (x1, y1) = self.seg_coordinates[parent_id];
             let (x2, y2) = self.seg_coordinates[seg_id];
 
-            write!(
+            writeln!(
                 result,
-                "<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\" {style}>\n",
+                "<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\" {style}>",
             )?;
-            write!(
+            writeln!(
                 result,
-                "  <title>{wal_bytes} bytes of WAL (seg {seg_id})</title>\n"
+                "  <title>{wal_bytes} bytes of WAL (seg {seg_id})</title>"
             )?;
-            write!(result, "</line>\n")?;
+            writeln!(result, "</line>")?;
         } else {
             // draw a little dash to mark the starting point of this branch
             let (x, y) = self.seg_coordinates[seg_id];
             let (x1, y1) = (x, y - 5.0);
             let (x2, y2) = (x, y + 5.0);
 
-            write!(
+            writeln!(
                 result,
-                "<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\" {style}>\n",
+                "<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\" {style}>",
             )?;
-            write!(result, "  <title>(seg {seg_id})</title>\n")?;
-            write!(result, "</line>\n")?;
+            writeln!(result, "  <title>(seg {seg_id})</title>")?;
+            writeln!(result, "</line>")?;
         }
 
         Ok(())
@@ -176,13 +176,13 @@ impl<'a> SvgDraw<'a> {
         // draw a snapshot point if it's needed
         let (coord_x, coord_y) = self.seg_coordinates[seg_id];
         if self.sizes[seg_id].method == SegmentMethod::SnapshotHere {
-            write!(
+            writeln!(
                 result,
-                "<circle cx=\"{coord_x}\" cy=\"{coord_y}\" r=\"5\" stroke=\"red\">\n",
+                "<circle cx=\"{coord_x}\" cy=\"{coord_y}\" r=\"5\" stroke=\"red\">",
             )?;
-            write!(
+            writeln!(
                 result,
-                "  <title>logical size {}</title>\n",
+                "  <title>logical size {}</title>",
                 seg.size.unwrap()
             )?;
             write!(result, "</circle>")?;

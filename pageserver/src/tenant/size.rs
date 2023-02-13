@@ -66,7 +66,7 @@ impl SegmentMeta {
 pub enum LsnKind {
     /// A timeline starting here
     BranchStart,
-    /// A child timeline branches off from here 
+    /// A child timeline branches off from here
     BranchPoint,
     /// GC cutoff point
     GcCutOff,
@@ -166,7 +166,9 @@ pub(super) async fn gather_inputs(
     let mut branchpoint_segments: HashMap<(TimelineId, Lsn), usize> = HashMap::new();
 
     // timeline, Branchpoint seg id, (ancestor, ancestor LSN)
-    let mut branchstart_segments: Vec<(TimelineId, usize, Option<(TimelineId, Lsn)>)> = Vec::new();
+    type BranchStartSegment = (TimelineId, usize, Option<(TimelineId, Lsn)>);
+
+    let mut branchstart_segments: Vec<BranchStartSegment> = Vec::new();
 
     for timeline in timelines.iter() {
         let timeline_id = timeline.timeline_id;
@@ -242,11 +244,9 @@ pub(super) async fn gather_inputs(
         //
 
         // Timeline start point
-        let ancestor = if let Some(ancestor_id) = timeline.get_ancestor_timeline_id() {
-            Some((ancestor_id, ancestor_lsn))
-        } else {
-            None
-        };
+        let ancestor = timeline
+            .get_ancestor_timeline_id()
+            .map(|ancestor_id| (ancestor_id, ancestor_lsn));
         branchstart_segments.push((timeline_id, segments.len(), ancestor));
         segments.push(SegmentMeta {
             segment: Segment {
@@ -330,7 +330,7 @@ pub(super) async fn gather_inputs(
 /// to be downloaded
 async fn fill_logical_sizes(
     timelines: &[Arc<Timeline>],
-    segments: &mut Vec<SegmentMeta>,
+    segments: &mut [SegmentMeta],
     limit: &Arc<Semaphore>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
     ctx: &RequestContext,

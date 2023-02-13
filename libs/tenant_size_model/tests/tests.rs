@@ -286,14 +286,14 @@ fn scenario_6() {
 
     let mut scenario = ScenarioBuilder::new("");
 
-    scenario.branch(&"", branches[0]); // at 0
-    scenario.modify_branch(&branches[0], 108951064, 43696128); // at 108951064
-    scenario.branch(&branches[0], branches[1]); // at 108951064
-    scenario.modify_branch(&branches[1], 15560408, -1851392); // at 124511472
-    scenario.modify_branch(&branches[0], 174464360, -1531904); // at 283415424
-    scenario.branch(&branches[0], branches[2]); // at 283415424
-    scenario.modify_branch(&branches[2], 15906192, 8192); // at 299321616
-    scenario.modify_branch(&branches[0], 18909976, 32768); // at 302325400
+    scenario.branch("", branches[0]); // at 0
+    scenario.modify_branch(branches[0], 108951064, 43696128); // at 108951064
+    scenario.branch(branches[0], branches[1]); // at 108951064
+    scenario.modify_branch(branches[1], 15560408, -1851392); // at 124511472
+    scenario.modify_branch(branches[0], 174464360, -1531904); // at 283415424
+    scenario.branch(branches[0], branches[2]); // at 283415424
+    scenario.modify_branch(branches[2], 15906192, 8192); // at 299321616
+    scenario.modify_branch(branches[0], 18909976, 32768); // at 302325400
 
     let (model, result) = scenario.calculate(100_000);
 
