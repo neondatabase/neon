@@ -1616,6 +1616,19 @@ impl Timeline {
                     }
                     x @ Err(_) => x.context("Failed to calculate logical size")?,
                 };
+
+                // we cannot query current_logical_size.current_size() to know the current
+                // *negative* value, only truncated to u64.
+                let added = self_clone
+                    .current_logical_size
+                    .size_added_after_initial
+                    .load(AtomicOrdering::Relaxed);
+
+                let sum = calculated_size.saturating_add_signed(added);
+
+                // set the gauge value before it can be set in `update_current_logical_size`.
+                self_clone.metrics.current_logical_size_gauge.set(sum);
+
                 match self_clone
                     .current_logical_size
                     .initial_logical_size
