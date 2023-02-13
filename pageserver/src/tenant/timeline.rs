@@ -293,8 +293,8 @@ impl LogicalSize {
         match self.initial_logical_size.get() {
             Some(initial_size) => {
                 initial_size.checked_add_signed(size_increment)
-                .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
-                .map(CurrentLogicalSize::Exact)
+                    .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
+                    .map(CurrentLogicalSize::Exact)
             }
             None => {
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
