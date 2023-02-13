@@ -292,17 +292,8 @@ impl LogicalSize {
         //                  we change the type.
         match self.initial_logical_size.get() {
             Some(initial_size) => {
-                let absolute_size_increment = u64::try_from(
-                    size_increment
-                        .checked_abs()
-                        .with_context(|| format!("Size added after initial {size_increment} is not expected to be i64::MIN"))?,
-                    ).expect("casting nonnegative i64 to u64 should not fail");
-
-                if size_increment < 0 {
-                    initial_size.checked_sub(absolute_size_increment)
-                } else {
-                    initial_size.checked_add(absolute_size_increment)
-                }.with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
+                initial_size.checked_add_signed(size_increment)
+                .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
                 .map(CurrentLogicalSize::Exact)
             }
             None => {
