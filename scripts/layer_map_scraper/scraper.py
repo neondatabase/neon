@@ -132,17 +132,18 @@ async def timeline_task(
     """
 
     last_scrape_at = await db.fetchval("select max(scrape_ts) from scrapes where tenant_id = $1 and timeline_id = $2", tenant_id, timeline_id)
-    logging.info(f"last scrape at: {last_scrape_at}")
-    next_scrape_at = datetime.datetime.now(tz=last_scrape_at.tzinfo) + datetime.timedelta(seconds=interval)
-    logging.info(f"next scrape at: {next_scrape_at}")
-    now = datetime.datetime.now(tz=last_scrape_at.tzinfo)
-    logging.info(f"now is: {now}")
-    sleep_secs = (now - next_scrape_at).total_seconds()
-    if sleep_secs < 0:
-        logging.warning(f"timeline has had scraping from before this script started running")
-    else:
-        logging.info(f"sleeping remaining {sleep_secs} seconds since last scrape")
-        await asyncio.sleep(sleep_secs)
+    if last_scrape_at is not None:
+        logging.info(f"last scrape at: {last_scrape_at}")
+        next_scrape_at = datetime.datetime.now(tz=last_scrape_at.tzinfo) + datetime.timedelta(seconds=interval)
+        logging.info(f"next scrape at: {next_scrape_at}")
+        now = datetime.datetime.now(tz=last_scrape_at.tzinfo)
+        logging.info(f"now is: {now}")
+        sleep_secs = (now - next_scrape_at).total_seconds()
+        if sleep_secs < 0:
+            logging.warning(f"timeline has had scraping from before this script started running")
+        else:
+            logging.info(f"sleeping remaining {sleep_secs} seconds since last scrape")
+            await asyncio.sleep(sleep_secs)
 
     while not stop_var.is_set():
         try:
