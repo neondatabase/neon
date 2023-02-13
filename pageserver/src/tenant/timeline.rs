@@ -1635,7 +1635,12 @@ impl Timeline {
                     .set(calculated_size)
                 {
                     Ok(()) => (),
-                    Err(existing_size) => {
+                    Err(_what_we_just_attempted_to_set) => {
+                        let existing_size = self_clone
+                            .current_logical_size
+                            .initial_logical_size
+                            .get()
+                            .expect("once_cell set was lost, then get failed, impossible.");
                         // This shouldn't happen because the semaphore is initialized with 1.
                         // But if it happens, just complain & report success so there are no further retries.
                         error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing")
