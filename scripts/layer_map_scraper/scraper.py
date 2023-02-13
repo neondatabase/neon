@@ -138,9 +138,9 @@ async def timeline_task(
         logging.info(f"next scrape at: {next_scrape_at}")
         now = datetime.datetime.now(tz=last_scrape_at.tzinfo)
         logging.info(f"now is: {now}")
-        sleep_secs = (now - next_scrape_at).total_seconds()
+        sleep_secs = (next_scrape_at - now).total_seconds()
         if sleep_secs < 0:
-            logging.warning(f"timeline has a scraping gap between {last_scrape_at} and {now}: {tenant_id}/{timeline_id}")
+            logging.warning(f"timeline was overdue for scraping (last_scrape_at={last_scrape_at}): {tenant_id}/{timeline_id}")
         else:
             logging.info(f"sleeping remaining {sleep_secs} seconds since last scrape")
             await asyncio.sleep(sleep_secs)
