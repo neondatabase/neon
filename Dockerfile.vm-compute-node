@@ -17,13 +17,15 @@ RUN echo "::respawn:su vm-informant -c '/bin/vm-informant --auto-restart --cgrou
 # Combine, starting from non-VM compute node image.
 FROM $SRC_IMAGE as base
 
+# Temporarily set user back to root so we can run apt update and adduser
+USER root
 RUN apt update && \
 	apt install --no-install-recommends -y \
         cgroup-tools
+RUN adduser vm-informant --disabled-password --no-create-home
+USER postgres
 
 COPY --from=informant /etc/inittab /etc/inittab
 COPY --from=informant /usr/bin/vm-informant /usr/local/bin/vm-informant
-
-RUN adduser vm-informant --disabled-password --no-create-home
 
 ENTRYPOINT ["/usr/sbin/cgexec", "-g", "*:neon-postgres", "/usr/local/bin/compute_ctl"]
