@@ -581,7 +581,7 @@ impl RowDescriptor<'_> {
 #[derive(Debug)]
 pub struct XLogDataBody<'a> {
     pub wal_start: u64,
-    pub wal_end: u64,
+    pub wal_end: u64, // current end of WAL on the server
     pub timestamp: i64,
     pub data: &'a [u8],
 }

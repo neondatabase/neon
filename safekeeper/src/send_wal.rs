@@ -362,11 +362,10 @@ where
                                 self.c.appname, self.c.start_pos,
                             )).into()));
                         }
-                        let end_pos = this.c.end_pos.0;
                         this.c
                             .pgb
                             .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                                sent_ptr: end_pos,
+                                sent_ptr: this.c.end_pos.0,
                                 timestamp: get_current_timestamp(),
                                 request_reply: true,
                             }))?;
@@ -387,7 +386,7 @@ where
                         .pgb
                         .write_message(&BeMessage::XLogData(XLogDataBody {
                             wal_start: this.c.start_pos.0,
-                            wal_end: chunk_end.0,
+                            wal_end: this.c.end_pos.0,
                             timestamp: get_current_timestamp(),
                             data: send_buf,
                         }))
