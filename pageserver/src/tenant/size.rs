@@ -51,11 +51,7 @@ impl SegmentMeta {
             LsnKind::BranchStart => {
                 // If we don't have a later GcCutoff point on this branch, and
                 // no ancestor, calculate size for the branch start point.
-                if self.segment.needed && self.segment.parent.is_none() {
-                    true
-                } else {
-                    false
-                }
+                self.segment.needed && self.segment.parent.is_none()
             }
             LsnKind::BranchPoint => true,
             LsnKind::GcCutOff => true,
