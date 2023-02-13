@@ -4465,6 +4465,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",

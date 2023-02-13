@@ -47,6 +47,8 @@ hex-literal.workspace = true
 tempfile.workspace = true
 criterion.workspace = true
 rustls-pemfile.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 
 [[bench]]
 name = "benchmarks"

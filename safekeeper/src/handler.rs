@@ -307,7 +307,8 @@ impl SafekeeperPostgresHandler {
                 )]))?
                 // xxx we could return real one, not just 0700
                 .write_message(&BeMessage::DataRow(&[Some(0700.to_string().as_bytes())]))?
-                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                .write_message_flush(&BeMessage::CommandComplete(b"SELECT 1"))
+                .await?;
             }
             // pg_receivewal wants it
             "wal_segment_size" => {
@@ -319,7 +320,8 @@ impl SafekeeperPostgresHandler {
                     b"wal_segment_size",
                 )]))?
                 .write_message(&BeMessage::DataRow(&[Some(wal_seg_size_mb.as_bytes())]))?
-                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                .write_message_flush(&BeMessage::CommandComplete(b"SELECT 1"))
+                .await?;
             }
             _ => {
                 return Err(anyhow::anyhow!("SHOW of unknown setting").into());

@@ -286,7 +286,9 @@ impl PostgresBackend {
         if let ProtoState::Closed = self.state {
             Ok(None)
         } else {
-            self.framed.read_message().await
+            let m = self.framed.read_message().await?;
+            trace!("read msg {:?}", m);
+            Ok(m)
         }
     }
 
@@ -305,6 +307,7 @@ impl PostgresBackend {
     /// typically wrap it anyway.
     pub fn write_message(&mut self, message: &BeMessage<'_>) -> Result<&mut Self, ConnectionError> {
         self.framed.write_message(message)?;
+        trace!("wrote msg {:?}", message);
         Ok(self)
     }
 
@@ -517,7 +520,8 @@ impl PostgresBackend {
                     FeStartupPacket::SslRequest => {
                         debug!("SSL requested");
 
-                        self.write_message(&BeMessage::EncryptionResponse(have_tls))?;
+                        self.write_message_flush(&BeMessage::EncryptionResponse(have_tls))
+                            .await?;
 
                         if have_tls {
                             self.start_tls().await?;
@@ -526,14 +530,16 @@ impl PostgresBackend {
                     }
                     FeStartupPacket::GssEncRequest => {
                         debug!("GSS requested");
-                        self.write_message(&BeMessage::EncryptionResponse(false))?;
+                        self.write_message_flush(&BeMessage::EncryptionResponse(false))
+                            .await?;
                     }
                     FeStartupPacket::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
-                            self.write_message(&BeMessage::ErrorResponse(
+                            self.write_message_flush(&BeMessage::ErrorResponse(
                                 "must connect with TLS",
                                 None,
-                            ))?;
+                            ))
+                            .await?;
                             return Err(QueryError::Other(anyhow::anyhow!(
                                 "client did not connect with TLS"
                             )));
@@ -765,3 +771,6 @@ pub(super) fn log_query_error(query: &str, e: &QueryError) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {}
