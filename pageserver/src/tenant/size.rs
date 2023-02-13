@@ -68,10 +68,14 @@ impl SegmentMeta {
     Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
 )]
 pub enum LsnKind {
-    BranchStart, // this timeline starts here
-    BranchPoint, // a child timeline branches off from here
-    GcCutOff,    // GC cutoff point
-    BranchEnd,   // last record LSN
+    /// A timeline starting here
+    BranchStart,
+    /// A child timeline branches off from here 
+    BranchPoint,
+    /// GC cutoff point
+    GcCutOff,
+    /// Last record LSN
+    BranchEnd,
 }
 
 /// Collect all relevant LSNs to the inputs. These will only be helpful in the serialized form as
