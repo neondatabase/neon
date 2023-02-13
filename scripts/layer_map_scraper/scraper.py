@@ -140,7 +140,7 @@ async def timeline_task(
         logging.info(f"now is: {now}")
         sleep_secs = (now - next_scrape_at).total_seconds()
         if sleep_secs < 0:
-            logging.warning(f"timeline has had scraping from before this script started running")
+            logging.warning(f"timeline has a scraping gap between {last_scrape_at} and {now}: {tenant_id}/{timeline_id}")
         else:
             logging.info(f"sleeping remaining {sleep_secs} seconds since last scrape")
             await asyncio.sleep(sleep_secs)
