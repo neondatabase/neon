@@ -2610,6 +2610,8 @@ impl Timeline {
 
         let layers = self.layers.read().unwrap();
 
+        let mut max_deltas = 0;
+
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
             for (img_range, last_img) in image_coverage {
@@ -2634,10 +2636,13 @@ impl Timeline {
                     let num_deltas =
                         layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
 
-                    debug!(
-                        "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
-                        img_range.start, img_range.end, num_deltas, img_lsn, lsn
-                    );
+                    if num_deltas != 0 {
+                        debug!(
+                            "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
+                            img_range.start, img_range.end, num_deltas, img_lsn, lsn
+                        );
+                    }
+                    max_deltas = max_deltas.max(num_deltas);
                     if num_deltas >= threshold {
                         return Ok(true);
                     }
@@ -2645,6 +2650,10 @@ impl Timeline {
             }
         }
 
+        debug!(
+            max_deltas,
+            "none of the partitioned ranges had >= {threshold} deltas"
+        );
         Ok(false)
     }
 
@@ -2791,7 +2800,12 @@ impl Timeline {
         drop(layers);
 
         // Only compact if enough layers have accumulated.
-        if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
+        let threshold = self.get_compaction_threshold();
+        if level0_deltas.is_empty() || level0_deltas.len() < threshold {
+            debug!(
+                level0_deltas = level0_deltas.len(),
+                threshold, "too few deltas to compact"
+            );
             return Ok(CompactLevel0Phase1Result::default());
         }
 
