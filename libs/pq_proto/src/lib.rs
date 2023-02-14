@@ -315,7 +315,7 @@ impl FeStartupPacket {
         // StartupMessage, CancelRequest, SSLRequest etc are differentiated by request code.
         let message = match (req_hi, req_lo) {
             (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
-                if msg.remaining() < 8 {
+                if msg.remaining() != 8 {
                     return Err(ProtocolError::MessageParse(anyhow!(
                         "CancelRequest message is malformed, backend PID / secret key missing"
                     )));

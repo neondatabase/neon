@@ -12,7 +12,7 @@ use bytes::BytesMut;
 use chrono::{NaiveDateTime, Utc};
 use fail::fail_point;
 use futures::StreamExt;
-use postgres::{error::SqlState, SimpleQueryMessage, SimpleQueryRow};
+use postgres::{SimpleQueryMessage, SimpleQueryRow};
 use postgres_ffi::v14::xlog_utils::normalize_lsn;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_protocol::message::backend::ReplicationMessage;
@@ -434,9 +434,7 @@ fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres:
     {
         return Ok(pg_error);
     } else if let Some(db_error) = pg_error.as_db_error() {
-        if db_error.code() == &SqlState::CONNECTION_FAILURE
-            && db_error.message().contains("end streaming")
-        {
+        if db_error.message().contains("ending streaming") {
             return Ok(pg_error);
         }
     }

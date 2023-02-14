@@ -60,11 +60,6 @@ impl<S> Framed<S> {
         }
     }
 
-    /// Get a mut reference to the underlying stream.
-    pub fn get_mut_ref(&mut self) -> &mut S {
-        &mut self.stream
-    }
-
     /// Get a shared reference to the underlying stream.
     pub fn get_ref(&self) -> &S {
         &self.stream
@@ -105,6 +100,10 @@ impl<S: AsyncWrite + Unpin> Framed<S> {
 
     pub async fn flush(&mut self) -> Result<(), io::Error> {
         flush(&mut self.stream, &mut self.write_buf).await
+    }
+
+    pub async fn shutdown(&mut self) -> Result<(), io::Error> {
+        self.stream.shutdown().await
     }
 }
 
@@ -172,6 +171,10 @@ impl<S: AsyncWrite + Unpin> FramedWriter<S> {
 
     pub async fn flush(&mut self) -> Result<(), io::Error> {
         flush(&mut self.stream, &mut self.write_buf).await
+    }
+
+    pub async fn shutdown(&mut self) -> Result<(), io::Error> {
+        self.stream.shutdown().await
     }
 }
 

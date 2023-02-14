@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::task::{ready, Poll};
 use std::{fmt, io};
 use std::{future::Future, str::FromStr};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio_rustls::TlsAcceptor;
 
 use tracing::{debug, error, info, trace};
@@ -222,8 +222,8 @@ impl MaybeWriteOnly {
 
     async fn shutdown(&mut self) -> io::Result<()> {
         match self {
-            MaybeWriteOnly::Full(framed) => framed.get_mut_ref().shutdown().await,
-            MaybeWriteOnly::WriteOnly(framed_writer) => framed_writer.get_mut().shutdown().await,
+            MaybeWriteOnly::Full(framed) => framed.shutdown().await,
+            MaybeWriteOnly::WriteOnly(framed_writer) => framed_writer.shutdown().await,
             MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
         }
     }
