@@ -3054,7 +3054,7 @@ impl Timeline {
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
-            par_fsync::par_fsync(&layer_paths).context("failed to fsync all new layers")?;
+            par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
 
             layer_paths.pop().unwrap();
         }
@@ -3106,7 +3106,7 @@ impl Timeline {
 
             let metadata = new_delta_path.metadata().with_context(|| {
                 format!(
-                    "failed to read file metadata for new created layer {}",
+                    "read file metadata for new created layer {}",
                     new_delta_path.display()
                 )
             })?;
