@@ -82,6 +82,9 @@ pub struct TimelineInputs {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     pub timeline_id: TimelineId,
 
+    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+    pub ancestor_id: Option<TimelineId>,
+
     #[serde_as(as = "serde_with::DisplayFromStr")]
     ancestor_lsn: Lsn,
     #[serde_as(as = "serde_with::DisplayFromStr")]
@@ -282,8 +285,9 @@ pub(super) async fn gather_inputs(
         });
 
         timeline_inputs.push(TimelineInputs {
-            ancestor_lsn,
             timeline_id: timeline.timeline_id,
+            ancestor_id: timeline.get_ancestor_timeline_id(),
+            ancestor_lsn,
             last_record: last_record_lsn,
             // this is not used above, because it might not have updated recently enough
             latest_gc_cutoff: *timeline.get_latest_gc_cutoff_lsn(),
