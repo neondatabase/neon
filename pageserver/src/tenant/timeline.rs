@@ -623,107 +623,175 @@ impl Timeline {
     }
 
     pub async fn compact(&self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let last_record_lsn = self.get_last_record_lsn();
+        const ROUNDS: usize = 2;
 
-        // Last record Lsn could be zero in case the timeline was just created
-        if !last_record_lsn.is_valid() {
-            warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(());
-        }
+        let mut remotes: Option<Vec<Arc<RemoteLayer>>> = None;
 
-        //
-        // High level strategy for compaction / image creation:
-        //
-        // 1. First, calculate the desired "partitioning" of the
-        // currently in-use key space. The goal is to partition the
-        // key space into roughly fixed-size chunks, but also take into
-        // account any existing image layers, and try to align the
-        // chunk boundaries with the existing image layers to avoid
-        // too much churn. Also try to align chunk boundaries with
-        // relation boundaries.  In principle, we don't know about
-        // relation boundaries here, we just deal with key-value
-        // pairs, and the code in pgdatadir_mapping.rs knows how to
-        // map relations into key-value pairs. But in practice we know
-        // that 'field6' is the block number, and the fields 1-5
-        // identify a relation. This is just an optimization,
-        // though.
-        //
-        // 2. Once we know the partitioning, for each partition,
-        // decide if it's time to create a new image layer. The
-        // criteria is: there has been too much "churn" since the last
-        // image layer? The "churn" is fuzzy concept, it's a
-        // combination of too many delta files, or too much WAL in
-        // total in the delta file. Or perhaps: if creating an image
-        // file would allow to delete some older files.
-        //
-        // 3. After that, we compact all level0 delta files if there
-        // are too many of them.  While compacting, we also garbage
-        // collect any page versions that are no longer needed because
-        // of the new image layers we created in step 2.
-        //
-        // TODO: This high level strategy hasn't been implemented yet.
-        // Below are functions compact_level0() and create_image_layers()
-        // but they are a bit ad hoc and don't quite work like it's explained
-        // above. Rewrite it.
-        let layer_removal_cs = self.layer_removal_cs.lock().await;
-        // Is the timeline being deleted?
-        let state = *self.state.borrow();
-        if state == TimelineState::Stopping {
-            anyhow::bail!("timeline is Stopping");
-        }
+        for round in 0..ROUNDS {
+            // should we error out with the most specific error?
+            let last_round = round == ROUNDS - 1;
 
-        let target_file_size = self.get_checkpoint_distance();
+            if let Some(remotes) = remotes.take() {
+                // this path can be visited in the second round of retrying, if first one found that we
+                // must first download some remote layers
+                let total = remotes.len();
 
-        // Define partitioning schema if needed
+                let mut downloads = remotes
+                    .into_iter()
+                    .map(|rl| self.download_remote_layer(rl))
+                    .collect::<futures::stream::FuturesUnordered<_>>();
 
-        match self
-            .repartition(
-                self.get_last_record_lsn(),
-                self.get_compaction_target_size(),
-                ctx,
-            )
-            .await
-        {
-            Ok((partitioning, lsn)) => {
-                // 2. Create new image layers for partitions that have been modified
-                // "enough".
-                let layer_paths_to_upload = self
-                    .create_image_layers(&partitioning, lsn, false, ctx)
-                    .await?;
-                if let Some(remote_client) = &self.remote_client {
-                    for (path, layer_metadata) in layer_paths_to_upload {
-                        remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
+                let mut failed = 0;
+
+                while let Some(res) = downloads.next().await {
+                    match res {
+                        Ok(()) => {}
+                        Err(e) => {
+                            warn!("Downloading remote layer for compaction failed: {e:#}");
+                            failed += 1;
+                        }
                     }
                 }
 
-                // 3. Compact
-                let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(&layer_removal_cs, target_file_size, ctx)
-                    .await?;
-                timer.stop_and_record();
-
-                // If `create_image_layers' or `compact_level0` scheduled any
-                // uploads or deletions, but didn't update the index file yet,
-                // do it now.
-                //
-                // This isn't necessary for correctness, the remote state is
-                // consistent without the uploads and deletions, and we would
-                // update the index file on next flush iteration too. But it
-                // could take a while until that happens.
-                if let Some(remote_client) = &self.remote_client {
-                    remote_client.schedule_index_upload_for_file_changes()?;
+                if failed != 0 {
+                    anyhow::bail!(
+                        "{failed} out of {total} layers failed to download, retrying later"
+                    );
                 }
-            }
-            Err(err) => {
-                // no partitioning? This is normal, if the timeline was just created
-                // as an empty timeline. Also in unit tests, when we use the timeline
-                // as a simple key-value store, ignoring the datadir layout. Log the
-                // error but continue.
-                error!("could not compact, repartitioning keyspace failed: {err:?}");
-            }
-        };
 
-        Ok(())
+                // if everything downloaded fine, lets try again
+            }
+
+            let last_record_lsn = self.get_last_record_lsn();
+
+            // Last record Lsn could be zero in case the timeline was just created
+            if !last_record_lsn.is_valid() {
+                warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
+                return Ok(());
+            }
+
+            //
+            // High level strategy for compaction / image creation:
+            //
+            // 1. First, calculate the desired "partitioning" of the
+            // currently in-use key space. The goal is to partition the
+            // key space into roughly fixed-size chunks, but also take into
+            // account any existing image layers, and try to align the
+            // chunk boundaries with the existing image layers to avoid
+            // too much churn. Also try to align chunk boundaries with
+            // relation boundaries.  In principle, we don't know about
+            // relation boundaries here, we just deal with key-value
+            // pairs, and the code in pgdatadir_mapping.rs knows how to
+            // map relations into key-value pairs. But in practice we know
+            // that 'field6' is the block number, and the fields 1-5
+            // identify a relation. This is just an optimization,
+            // though.
+            //
+            // 2. Once we know the partitioning, for each partition,
+            // decide if it's time to create a new image layer. The
+            // criteria is: there has been too much "churn" since the last
+            // image layer? The "churn" is fuzzy concept, it's a
+            // combination of too many delta files, or too much WAL in
+            // total in the delta file. Or perhaps: if creating an image
+            // file would allow to delete some older files.
+            //
+            // 3. After that, we compact all level0 delta files if there
+            // are too many of them.  While compacting, we also garbage
+            // collect any page versions that are no longer needed because
+            // of the new image layers we created in step 2.
+            //
+            // TODO: This high level strategy hasn't been implemented yet.
+            // Below are functions compact_level0() and create_image_layers()
+            // but they are a bit ad hoc and don't quite work like it's explained
+            // above. Rewrite it.
+            let layer_removal_cs = self.layer_removal_cs.lock().await;
+            // Is the timeline being deleted?
+            let state = *self.state.borrow();
+            if state == TimelineState::Stopping {
+                anyhow::bail!("timeline is Stopping");
+            }
+
+            let target_file_size = self.get_checkpoint_distance();
+
+            // Define partitioning schema if needed
+
+            match self
+                .repartition(
+                    self.get_last_record_lsn(),
+                    self.get_compaction_target_size(),
+                    ctx,
+                )
+                .await
+            {
+                Ok((partitioning, lsn)) => {
+                    // 2. Create new image layers for partitions that have been modified
+                    // "enough".
+                    let layer_paths_to_upload = self
+                        .create_image_layers(&partitioning, lsn, false, ctx)
+                        .await?;
+                    if let Some(remote_client) = &self.remote_client {
+                        for (path, layer_metadata) in layer_paths_to_upload {
+                            remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
+                        }
+                    }
+
+                    // 3. Compact
+                    let timer = self.metrics.compact_time_histo.start_timer();
+                    let res = self
+                        .compact_level0(&layer_removal_cs, target_file_size, ctx)
+                        .await;
+
+                    match res {
+                        Ok(()) => {}
+                        Err(CompactionError::Phase1(Phase1Error::DownloadRequired(rls)))
+                            if !last_round =>
+                        {
+                            // this can be done at most 1 time before retrying
+                            remotes = Some(rls);
+                            continue;
+                        }
+                        Err(CompactionError::Phase1(e @ Phase1Error::DownloadRequired(_))) => {
+                            // it is possible that this keeps happening, because we are battling
+                            // some other process which evicts the layers we download; we should
+                            // retry quite soon anyways.
+                            return Err(e.into());
+                        }
+                        Err(
+                            CompactionError::Phase1(Phase1Error::Other(e))
+                            | CompactionError::Other(e),
+                        ) => {
+                            return Err(e);
+                        }
+                    }
+                    timer.stop_and_record();
+
+                    // If `create_image_layers' or `compact_level0` scheduled any
+                    // uploads or deletions, but didn't update the index file yet,
+                    // do it now.
+                    //
+                    // This isn't necessary for correctness, the remote state is
+                    // consistent without the uploads and deletions, and we would
+                    // update the index file on next flush iteration too. But it
+                    // could take a while until that happens.
+                    if let Some(remote_client) = &self.remote_client {
+                        remote_client.schedule_index_upload_for_file_changes()?;
+                    }
+                }
+                Err(err) => {
+                    // no partitioning? This is normal, if the timeline was just created
+                    // as an empty timeline. Also in unit tests, when we use the timeline
+                    // as a simple key-value store, ignoring the datadir layout. Log the
+                    // error but continue.
+                    error!("could not compact, repartitioning keyspace failed: {err:?}");
+                }
+            };
+
+            return Ok(());
+        }
+
+        unreachable!(
+            "this should not be hit except with a logic error with ROUNDS setting: {ROUNDS}"
+        );
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
@@ -2693,10 +2761,27 @@ impl Timeline {
         Ok(layer_paths_to_upload)
     }
 }
+
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
     new_layers: Vec<DeltaLayer>,
     deltas_to_compact: Vec<Arc<dyn PersistentLayer>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Phase1Error {
+    #[error("level 0 compaction requires downloading of {} layer files", Vec::len(.0))]
+    DownloadRequired(Vec<Arc<RemoteLayer>>),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CompactionError {
+    #[error(transparent)]
+    Phase1(#[from] Phase1Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 impl Timeline {
@@ -2704,14 +2789,14 @@ impl Timeline {
         &self,
         target_file_size: u64,
         ctx: &RequestContext,
-    ) -> anyhow::Result<CompactLevel0Phase1Result> {
+    ) -> Result<CompactLevel0Phase1Result, Phase1Error> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
         // Only compact if enough layers have accumulated.
         if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
-            return Ok(Default::default());
+            return Ok(CompactLevel0Phase1Result::default());
         }
 
         // Gather the files to compact in this iteration.
@@ -2747,6 +2832,30 @@ impl Timeline {
             end: deltas_to_compact.last().unwrap().get_lsn_range().end,
         };
 
+        let remotes = deltas_to_compact
+            .iter()
+            .filter(|l| l.is_remote_layer())
+            .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
+            .map(|l| {
+                l.clone()
+                    .downcast_remote_layer()
+                    .expect("just checked it is remote layer")
+            })
+            .collect::<Vec<_>>();
+
+        if !remotes.is_empty() {
+            // caller is holding the lock to layer_removal_cs, and we don't want to download while
+            // holding that; in future download_remote_layer might take it as well.
+            //
+            // unsure if this is required, probably not:
+            // info!(
+            //     "Level0 compaction in LSN range {lsn_range:?} for {} layers ({} deltas in total) requires downloading {} layers",
+            //     deltas_to_compact.len(),
+            //     level0_deltas.len(),
+            //     remotes.len());
+            return Err(Phase1Error::DownloadRequired(remotes));
+        }
+
         info!(
             "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total)",
             lsn_range.start,
@@ -2754,9 +2863,11 @@ impl Timeline {
             deltas_to_compact.len(),
             level0_deltas.len()
         );
+
         for l in deltas_to_compact.iter() {
             info!("compact includes {}", l.filename().file_name());
         }
+
         // We don't need the original list of layers anymore. Drop it so that
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
@@ -2926,7 +3037,9 @@ impl Timeline {
             }
 
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
-                anyhow::bail!("failpoint delta-layer-writer-fail-before-finish");
+                return Err(Phase1Error::Other(anyhow::anyhow!(
+                    "failpoint delta-layer-writer-fail-before-finish"
+                )));
             });
 
             writer.as_mut().unwrap().put_value(key, lsn, value)?;
@@ -2945,7 +3058,7 @@ impl Timeline {
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
-            par_fsync::par_fsync(&layer_paths)?;
+            par_fsync::par_fsync(&layer_paths).context("failed to fsync all new layers")?;
 
             layer_paths.pop().unwrap();
         }
@@ -2967,7 +3080,7 @@ impl Timeline {
         layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         target_file_size: u64,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CompactionError> {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
@@ -2995,7 +3108,12 @@ impl Timeline {
         for l in new_layers {
             let new_delta_path = l.path();
 
-            let metadata = new_delta_path.metadata()?;
+            let metadata = new_delta_path.metadata().with_context(|| {
+                format!(
+                    "failed to read file metadata for new created layer {}",
+                    new_delta_path.display()
+                )
+            })?;
 
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
