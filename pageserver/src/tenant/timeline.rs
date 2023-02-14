@@ -625,6 +625,14 @@ impl Timeline {
     pub async fn compact(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
 
+        let last_record_lsn = self.get_last_record_lsn();
+
+        // Last record Lsn could be zero in case the timeline was just created
+        if !last_record_lsn.is_valid() {
+            warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
+            return Ok(());
+        }
+
         // retry two times to allow first round to find layers which need to be downloaded, then
         // download them, then retry compaction
         for round in 0..ROUNDS {
@@ -685,14 +693,6 @@ impl Timeline {
         &self,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
-        let last_record_lsn = self.get_last_record_lsn();
-
-        // Last record Lsn could be zero in case the timeline was just created
-        if !last_record_lsn.is_valid() {
-            warn!("Skipping compaction for potentially just initialized timeline, it has invalid last record lsn: {last_record_lsn}");
-            return Ok(());
-        }
-
         //
         // High level strategy for compaction / image creation:
         //
