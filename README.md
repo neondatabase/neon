@@ -36,7 +36,7 @@ dnf install flex bison readline-devel zlib-devel openssl-devel \
 ```
 * On Arch based systems, these packages are needed:
 ```bash
-pacman -S base-devel libtool readline zlib flex bison libseccomp openssl clang \
+pacman -S base-devel readline zlib libseccomp openssl clang \
 pkg-config postgresql-libs cmake postgresql protobuf
 ```
 
