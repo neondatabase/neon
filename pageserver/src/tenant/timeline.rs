@@ -2606,6 +2606,8 @@ impl Timeline {
 
     // Is it time to create a new image layer for the given partition?
     fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<bool> {
+        let threshold = self.get_image_creation_threshold();
+
         let layers = self.layers.read().unwrap();
 
         for part_range in &partition.ranges {
@@ -2629,7 +2631,6 @@ impl Timeline {
                 // are some delta layers *later* than current 'lsn', if more WAL was processed and flushed
                 // after we read last_record_lsn, which is passed here in the 'lsn' argument.
                 if img_lsn < lsn {
-                    let threshold = self.get_image_creation_threshold();
                     let num_deltas =
                         layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
 
