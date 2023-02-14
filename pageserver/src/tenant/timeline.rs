@@ -763,7 +763,6 @@ impl Timeline {
                 let timer = self.metrics.compact_time_histo.start_timer();
                 self.compact_level0(&layer_removal_cs, target_file_size, ctx)
                     .await?;
-
                 timer.stop_and_record();
 
                 // If `create_image_layers' or `compact_level0` scheduled any
