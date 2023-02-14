@@ -236,7 +236,7 @@ impl FeMessage {
             )));
         }
 
-        // lenth field includes itself, but not message type.
+        // length field includes itself, but not message type.
         let total_len = len as usize + 1;
         if buf.len() < total_len {
             // Don't have full message yet.
