@@ -19,6 +19,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::fs;
 use std::ops::{Deref, Range};
@@ -81,6 +82,26 @@ enum FlushLoopState {
     Running,
     Exited,
 }
+
+
+/// Wrapper for key range to provide reverse ordering by range length for BinaryHeap
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hole(pub Range<Key>);
+
+impl Ord for Hole {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let other_len = other.0.end.to_i128() - other.0.start.to_i128();
+        let self_len = self.0.end.to_i128() - self.0.start.to_i128();
+        other_len.cmp(&self_len)
+    }
+}
+
+impl PartialOrd for Hole {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 
 pub struct Timeline {
     conf: &'static PageServerConf,
@@ -2947,6 +2968,31 @@ impl Timeline {
             },
         )?;
 
+		// Determine N largest holes where N is number of compacted layers
+		let max_holes = deltas_to_compact.len();
+		let min_hole_length = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
+
+		// min-heap (reserve space for one more element added before eviction)
+		let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
+        let mut prev: Option<Key> = None;
+		for (next_key, _next_lsn, _size) in itertools::process_results(
+            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
+            |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0))?
+		{
+            if let Some(prev_key) = prev {
+                if next_key.to_i128() - prev_key.to_i128() >= min_hole_length {
+                    heap.push(Hole(prev_key..next_key));
+                    if heap.len() > max_holes {
+                        heap.pop(); // remove smallest hole
+                    }
+                }
+            }
+            prev = Some(next_key.next());
+		}
+		let mut holes = heap.into_vec();
+        holes.sort_by_key(|hole| hole.0.start);
+		let mut next_hole = 0; // index of next hole in holes vector
+
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
         //
@@ -3045,10 +3091,16 @@ impl Timeline {
                     if is_dup_layer
                         || dup_end_lsn.is_valid()
                         || written_size + key_values_total_size > target_file_size
+						|| (next_hole < holes.len() && key >= holes[next_hole].0.end) // stop on hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
                         new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
                         writer = None;
+
+						if next_hole < holes.len() && key >= holes[next_hole].0.end {
+							// skip hole
+							next_hole += 1;
+						}
                     }
                 }
                 // Remember size of key value because at next iteration we will access next item
