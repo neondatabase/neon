@@ -166,17 +166,20 @@ pub async fn collect_metrics_iteration(
 
                 match timeline.get_current_logical_size(ctx) {
                     // Only send timeline logical size when it is fully calculated.
-                    Ok((size, is_exact)) if is_exact => {
-                        current_metrics.push((
-                            PageserverConsumptionMetricsKey {
-                                tenant_id,
-                                timeline_id: Some(timeline.timeline_id),
-                                metric: TIMELINE_LOGICAL_SIZE,
-                            },
-                            size,
-                        ));
+                    Ok((size, is_exact)) => {
+                        if is_exact {
+                            current_metrics.push((
+                                PageserverConsumptionMetricsKey {
+                                    tenant_id,
+                                    timeline_id: Some(timeline.timeline_id),
+                                    metric: TIMELINE_LOGICAL_SIZE,
+                                },
+                                size,
+                            ));
+                        } else {
+                            info!("logical_size is not fully calculated for timeline {}, skipping sending value {} ", timeline.timeline_id, size);
+                        }
                     }
-                    Ok((_, _)) => {}
                     Err(err) => {
                         error!(
                             "failed to get current logical size for timeline {}: {err:?}",
