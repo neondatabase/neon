@@ -66,6 +66,9 @@ fn main() -> Result<()> {
     let spec = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
 
+    let compute_id = matches.get_one::<String>("compute-id");
+    let control_plane_uri = matches.get_one::<String>("control-plane-uri");
+
     // Try to use just 'postgres' if no path is provided
     let pgbin = matches.get_one::<String>("pgbin").unwrap();
 
@@ -78,7 +81,17 @@ fn main() -> Result<()> {
                 let path = Path::new(sp);
                 let file = File::open(path)?;
                 serde_json::from_reader(file)?
-            } else {
+            } else if let Some(id) = compute_id{
+		if let Some(cp_base) = control_plane_uri {
+		    let cp_uri = cp_base.to_owned() + "/management/api/v1/" + id + "/spec";
+		    reqwest::blocking::get(cp_uri)?
+			// TODO: fetch a jwt token from the environment
+			// .header("Authorization", "JWT TOKEN")
+			.json()?
+		} else {
+		    panic!("must specify --control-plane-uri with --compute-id");
+		}
+	    } else {
                 panic!("cluster spec should be provided via --spec or --spec-path argument");
             }
         }
@@ -230,6 +243,18 @@ fn cli() -> clap::Command {
                 .long("spec-path")
                 .value_name("SPEC_PATH"),
         )
+        .arg(
+	    Arg::new("compute-id")
+		.short('i')
+		.long("compute-id")
+		.value_name("COMPUTE_ID"),
+	)
+        .arg(
+	    Arg::new("control-plane-uri")
+		.short('p')
+		.long("control-plane-uri")
+		.value_name("CONTROL_PLANE"),
+	)
 }
 
 #[test]

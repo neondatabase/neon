@@ -854,6 +854,7 @@ dependencies = [
  "opentelemetry",
  "postgres",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tar",
