@@ -2418,6 +2418,8 @@ impl Tenant {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     pub async fn gather_size_inputs(
         &self,
+        // `max_retention_period` overrides the cutoff that is used to calculate the size
+        // (only if it is shorter than the real cutoff).
         max_retention_period: Option<u64>,
         ctx: &RequestContext,
     ) -> anyhow::Result<size::ModelInputs> {

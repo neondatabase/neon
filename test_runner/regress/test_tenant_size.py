@@ -1,14 +1,15 @@
-import json
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import List, Tuple
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
 
 
+# Helper for tests that compare timeline_inputs
+# We don't want to compare the exact values, because they can be unstable
+# and cause flaky tests. So replace the values with useful invariants.
 def mask_model_inputs(x):
     if isinstance(x, dict):
         newx = {}
@@ -103,12 +104,12 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
 
     assert expected_inputs == actual_inputs
 
-    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
 
 
-def test_branched_empty_timeline_size(neon_simple_env: NeonEnv,  test_output_dir: Path):
+def test_branched_empty_timeline_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     Issue found in production. Because the ancestor branch was under
     gc_horizon, the branchpoint was "dangling" and the computation could not be
@@ -139,7 +140,7 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv,  test_output_dir
 
     assert size_after_branching > initial_size
 
-    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
 
@@ -196,7 +197,7 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_ou
     size_after_writes = http_client.tenant_size(tenant_id)
     assert size_after_writes > initial_size
 
-    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
 
@@ -239,7 +240,7 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: 
 
     assert size_before_branching < size_after
 
-    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
 
@@ -288,7 +289,7 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
 
     assert size_before_branching < size_after
 
-    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
 
@@ -333,7 +334,7 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
 
             latest_size = size_now
 
-    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
 
@@ -365,7 +366,7 @@ def test_single_branch_get_tenant_size_grows(
 
     collected_responses: List[Tuple[Lsn, int]] = []
 
-    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
 
     with env.postgres.create_start(branch_name, tenant_id=tenant_id) as pg:
         with pg.cursor() as cur:
@@ -580,7 +581,7 @@ def test_get_tenant_size_with_multiple_branches(
     size_after = http_client.tenant_size(tenant_id)
     assert size_after == size_after_thinning_branch
 
-    size_debug_file_before = open(test_output_dir / f"size_debug_before.html", "w")
+    size_debug_file_before = open(test_output_dir / "size_debug_before.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file_before.write(size_debug)
 
@@ -597,6 +598,6 @@ def test_get_tenant_size_with_multiple_branches(
     assert size_after_deleting_second < size_after_continuing_on_main
     assert size_after_deleting_second > size_after_first_branch
 
-    size_debug_file = open(test_output_dir / f"size_debug.html", "w")
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)

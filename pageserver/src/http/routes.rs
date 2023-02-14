@@ -506,10 +506,11 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
         None
     };
 
-    /// Private response type with the additional "unstable" `inputs` field.
+    /// Private response type with the additional "unstable" fileds.
     ///
-    /// The type is described with `id` and `size` in the openapi_spec file, but the `inputs` is
-    /// intentionally left out. The type resides in the pageserver not to expose `ModelInputs`.
+    /// The type is described with `id` and `size` in the openapi_spec file,
+    /// but the `inputs` and `segment_sizes` are intentionally left out.
+    /// The type resides in the pageserver not to expose `ModelInputs`.
     #[serde_with::serde_as]
     #[derive(serde::Serialize)]
     struct TenantHistorySize {
@@ -519,6 +520,8 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
         ///
         /// Will be none if `?inputs_only=true` was given.
         size: Option<u64>,
+        /// Size of each segment used in the model.
+        /// Will be null if `?inputs_only=true` was given.
         segment_sizes: Option<Vec<tenant_size_model::SegmentSizeResult>>,
         inputs: crate::tenant::size::ModelInputs,
     }
@@ -593,15 +596,11 @@ async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response
     }
 }
 
-pub fn svg_response(status: StatusCode, data: Vec<u8>) -> Result<Response<Body>, ApiError> {
-    let response = Response::builder()
-        .status(status)
-        .header(hyper::header::CONTENT_TYPE, "image/svg+xml")
-        .body(Body::from(data))
-        .map_err(|e| ApiError::InternalServerError(e.into()))?;
-    Ok(response)
-}
-
+/// Get tenant_size SVG graph along with the JSON data.
+/// This is debug-only endpoint, not mentioned in the openapi spec.
+///
+/// 'retention_period' query parameter overrides the cutoff that is used to calculate the size
+/// (only if it is shorter than the real cutoff).
 async fn tenant_size_debug_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let retention_period: Option<u64> = parse_query_param(&request, "retention_period")?;

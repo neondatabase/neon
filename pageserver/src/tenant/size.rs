@@ -163,11 +163,11 @@ pub(super) async fn gather_inputs(
     //
 
     // BranchPoint segments of each timeline
+    // (timeline, branchpoint LSN) -> segment_id
     let mut branchpoint_segments: HashMap<(TimelineId, Lsn), usize> = HashMap::new();
 
     // timeline, Branchpoint seg id, (ancestor, ancestor LSN)
     type BranchStartSegment = (TimelineId, usize, Option<(TimelineId, Lsn)>);
-
     let mut branchstart_segments: Vec<BranchStartSegment> = Vec::new();
 
     for timeline in timelines.iter() {
@@ -196,8 +196,6 @@ pub(super) async fn gather_inputs(
             None
         };
 
-        // the minimum where we should find the next_gc_cutoff for our calculations.
-        //
         // next_gc_cutoff in parent branch are not of interest (right now at least), nor do we
         // want to query any logical size before initdb_lsn.
         let branch_start_lsn = cmp::max(ancestor_lsn, timeline.initdb_lsn);
@@ -206,13 +204,6 @@ pub(super) async fn gather_inputs(
         let mut lsns: Vec<(Lsn, LsnKind)> = gc_info
             .retain_lsns
             .iter()
-            .inspect(|&&lsn| {
-                trace!(
-                    timeline_id=%timeline.timeline_id,
-                    "retained lsn: {lsn:?}, is_before_ancestor_lsn={}",
-                    lsn < ancestor_lsn
-                )
-            })
             .filter(|&&lsn| lsn > ancestor_lsn)
             .copied()
             // this assumes there are no other retain_lsns than the branchpoints
@@ -220,8 +211,7 @@ pub(super) async fn gather_inputs(
             .collect::<Vec<_>>();
 
         // Add branch points we collected earlier, just in case there were any that were
-        // not present in retain_lsns. Shouldn't happen, but better safe than sorry.
-        // We will remove any duplicates below later.
+        // not present in retain_lsns. We will remove any duplicates below later.
         if let Some(this_branchpoints) = branchpoints.get(&timeline_id) {
             lsns.extend(
                 this_branchpoints
@@ -328,6 +318,7 @@ pub(super) async fn gather_inputs(
 ///
 /// this will probably conflict with on-demand downloaded layers, or at least force them all
 /// to be downloaded
+///
 async fn fill_logical_sizes(
     timelines: &[Arc<Timeline>],
     segments: &mut [SegmentMeta],
