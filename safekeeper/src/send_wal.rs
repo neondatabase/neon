@@ -214,7 +214,7 @@ impl WalSender<'_> {
             let mut send_size = self
                 .end_pos
                 .checked_sub(self.start_pos)
-                .expect("reading wal without waiting for it first")
+                .context("reading wal without waiting for it first")?
                 .0 as usize;
             send_size = min(send_size, self.send_buf.len());
             let send_buf = &mut self.send_buf[..send_size];

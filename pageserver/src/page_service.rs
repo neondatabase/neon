@@ -80,15 +80,15 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::Terminate => {
                             let msg = "client terminated connection with Terminate message during COPY";
                             let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                            pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code())))
-                                .expect("failed to serialize ErrorResponse");
+                            // error can't happen here, ErrorResponse serialization should be always ok
+                            pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
                             Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                             break;
                         }
                         m => {
                             let msg = format!("unexpected message {m:?}");
-                            pgb.write_message(&BeMessage::ErrorResponse(&msg, None))
-                                .expect("failed to serialize ErrorResponse");
+                            // error can't happen here, ErrorResponse serialization should be always ok
+                            pgb.write_message(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
                             Err(io::Error::new(io::ErrorKind::Other, msg))?;
                             break;
                         }
@@ -99,8 +99,8 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 Ok(None) => {
                     let msg = "client closed connection during COPY";
                     let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                    pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code())))
-                        .expect("failed to serialize ErrorResponse");
+                    // error can't happen here, ErrorResponse serialization should be always ok
+                    pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
                     pgb.flush().await?;
                     Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                 }

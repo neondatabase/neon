@@ -458,7 +458,7 @@ impl PostgresBackend {
                 let tls_config = self
                     .tls_config
                     .as_ref()
-                    .expect("start_tls called without conf")
+                    .context("start_tls called without conf")?
                     .clone();
                 let tls_framed = framed
                     .map_stream(|s| PostgresBackend::tls_upgrade(s, tls_config))
@@ -725,7 +725,7 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
             .write_message(&BeMessage::CopyData(buf))
             // write_message only writes to buffer, so can fail iff message is
             // invaid, but CopyData can't be invalid.
-            .expect("failed to serialize CopyData");
+            .map_err(|_| io::Error::new(ErrorKind::Other, "failed to serialize CopyData"))?;
 
         Poll::Ready(Ok(buf.len()))
     }
