@@ -292,18 +292,9 @@ impl LogicalSize {
         //                  we change the type.
         match self.initial_logical_size.get() {
             Some(initial_size) => {
-                let absolute_size_increment = u64::try_from(
-                    size_increment
-                        .checked_abs()
-                        .with_context(|| format!("Size added after initial {size_increment} is not expected to be i64::MIN"))?,
-                    ).expect("casting nonnegative i64 to u64 should not fail");
-
-                if size_increment < 0 {
-                    initial_size.checked_sub(absolute_size_increment)
-                } else {
-                    initial_size.checked_add(absolute_size_increment)
-                }.with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
-                .map(CurrentLogicalSize::Exact)
+                initial_size.checked_add_signed(size_increment)
+                    .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
+                    .map(CurrentLogicalSize::Exact)
             }
             None => {
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
@@ -1625,13 +1616,31 @@ impl Timeline {
                     }
                     x @ Err(_) => x.context("Failed to calculate logical size")?,
                 };
+
+                // we cannot query current_logical_size.current_size() to know the current
+                // *negative* value, only truncated to u64.
+                let added = self_clone
+                    .current_logical_size
+                    .size_added_after_initial
+                    .load(AtomicOrdering::Relaxed);
+
+                let sum = calculated_size.saturating_add_signed(added);
+
+                // set the gauge value before it can be set in `update_current_logical_size`.
+                self_clone.metrics.current_logical_size_gauge.set(sum);
+
                 match self_clone
                     .current_logical_size
                     .initial_logical_size
                     .set(calculated_size)
                 {
                     Ok(()) => (),
-                    Err(existing_size) => {
+                    Err(_what_we_just_attempted_to_set) => {
+                        let existing_size = self_clone
+                            .current_logical_size
+                            .initial_logical_size
+                            .get()
+                            .expect("once_cell set was lost, then get failed, impossible.");
                         // This shouldn't happen because the semaphore is initialized with 1.
                         // But if it happens, just complain & report success so there are no further retries.
                         error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing")
@@ -1814,10 +1823,15 @@ impl Timeline {
         // one value while current_logical_size is set to the
         // other.
         match logical_size.current_size() {
-            Ok(new_current_size) => self
+            Ok(CurrentLogicalSize::Exact(new_current_size)) => self
                 .metrics
                 .current_logical_size_gauge
-                .set(new_current_size.size()),
+                .set(new_current_size),
+            Ok(CurrentLogicalSize::Approximate(_)) => {
+                // don't update the gauge yet, this allows us not to update the gauge back and
+                // forth between the initial size calculation task.
+            }
+            // this is overflow
             Err(e) => error!("Failed to compute current logical size for metrics update: {e:?}"),
         }
     }
