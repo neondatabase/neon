@@ -2636,14 +2636,12 @@ impl Timeline {
                     let num_deltas =
                         layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
 
-                    if num_deltas != 0 {
+                    max_deltas = max_deltas.max(num_deltas);
+                    if num_deltas >= threshold {
                         debug!(
                             "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
                             img_range.start, img_range.end, num_deltas, img_lsn, lsn
                         );
-                    }
-                    max_deltas = max_deltas.max(num_deltas);
-                    if num_deltas >= threshold {
                         return Ok(true);
                     }
                 }
