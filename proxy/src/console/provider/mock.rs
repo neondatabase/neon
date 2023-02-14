@@ -82,16 +82,11 @@ impl Api {
         .await
     }
 
-    async fn do_wake_compute(
-        &self,
-        creds: &ClientCredentials<'_>,
-    ) -> Result<NodeInfo, WakeComputeError> {
+    async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let mut config = compute::ConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
-            .port(self.endpoint.port().unwrap_or(5432))
-            .dbname(creds.dbname)
-            .user(creds.user);
+            .port(self.endpoint.port().unwrap_or(5432));
 
         let node = NodeInfo {
             config,
@@ -117,9 +112,9 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         _extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        _creds: &ClientCredentials<'_>,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        self.do_wake_compute(creds)
+        self.do_wake_compute()
             .map_ok(CachedNodeInfo::new_uncached)
             .await
     }
