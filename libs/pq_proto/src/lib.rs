@@ -282,8 +282,9 @@ impl FeStartupPacket {
         const NEGOTIATE_SSL_CODE: u32 = 5679;
         const NEGOTIATE_GSS_CODE: u32 = 5680;
 
+        // need at least 4 bytes with packet len
         if buf.len() < 4 {
-            let to_read = 5 - buf.len();
+            let to_read = 4 - buf.len();
             buf.reserve(to_read);
             return Ok(None);
         }

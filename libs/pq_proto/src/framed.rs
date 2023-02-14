@@ -103,7 +103,7 @@ impl<S: AsyncWrite + Unpin> Framed<S> {
     }
 
     pub async fn shutdown(&mut self) -> Result<(), io::Error> {
-        self.stream.shutdown().await
+        shutdown(&mut self.stream, &mut self.write_buf).await
     }
 }
 
@@ -174,7 +174,7 @@ impl<S: AsyncWrite + Unpin> FramedWriter<S> {
     }
 
     pub async fn shutdown(&mut self) -> Result<(), io::Error> {
-        self.stream.shutdown().await
+        shutdown(&mut self.stream, &mut self.write_buf).await
     }
 }
 
@@ -253,4 +253,13 @@ async fn flush<S: AsyncWrite + Unpin>(
     }
     write_buf.clear();
     Ok(())
+}
+
+/// Flush out the buffer and shutdown the stream.
+async fn shutdown<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    write_buf: &mut BytesMut,
+) -> Result<(), io::Error> {
+    flush(stream, write_buf).await?;
+    stream.shutdown().await
 }

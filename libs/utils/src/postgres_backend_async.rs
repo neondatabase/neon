@@ -723,8 +723,8 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         // the length cannot exceed u32.
         this.pgb
             .write_message(&BeMessage::CopyData(buf))
-            // write_message only writes to buffer, so can fail iff message is
-            // invaid, but CopyData can't be invalid.
+            // write_message only writes to the buffer, so it can fail iff the
+            // message is invaid, but CopyData can't be invalid.
             .map_err(|_| io::Error::new(ErrorKind::Other, "failed to serialize CopyData"))?;
 
         Poll::Ready(Ok(buf.len()))

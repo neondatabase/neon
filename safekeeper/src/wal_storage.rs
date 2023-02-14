@@ -502,11 +502,6 @@ impl WalReader {
         })
     }
 
-    pub async fn fake_read(&mut self) -> Result<usize> {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        Ok(self.pos.0 as usize)
-    }
-
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let mut wal_segment = match self.wal_segment.take() {
             Some(reader) => reader,
