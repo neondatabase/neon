@@ -2585,10 +2585,13 @@ impl Timeline {
     ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         {
             let partitioning_guard = self.partitioning.lock().unwrap();
-            if partitioning_guard.1 != Lsn(0)
-                && lsn.0 - partitioning_guard.1 .0 <= self.repartition_threshold
-            {
-                // no repartitioning needed
+            let distance = lsn.0 - partitioning_guard.1 .0;
+            if partitioning_guard.1 != Lsn(0) && distance <= self.repartition_threshold {
+                debug!(
+                    distance,
+                    threshold = self.repartition_threshold,
+                    "no repartitioning needed"
+                );
                 return Ok((partitioning_guard.0.clone(), partitioning_guard.1));
             }
         }
