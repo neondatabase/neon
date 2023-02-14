@@ -740,10 +740,15 @@ impl Timeline {
 
         let mut is_exact = true;
         let size = current_size.size();
-        if let (CurrentLogicalSize::Approximate(_), Some(init_lsn)) =
+        if let (CurrentLogicalSize::Approximate(approx_size), Some(init_lsn)) =
             (current_size, self.current_logical_size.initial_part_end)
         {
             is_exact = false;
+            info!(
+                "Current size for timeline {} is approximate {}, initial_part_end lsn: {:?}",
+                self.timeline_id, approx_size, init_lsn
+            );
+
             self.try_spawn_size_init_task(init_lsn, ctx);
         }
 
