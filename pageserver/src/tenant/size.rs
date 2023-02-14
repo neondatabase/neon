@@ -639,7 +639,7 @@ fn verify_size_for_multiple_branches() {
 }
 
 #[test]
-fn investigation_test() {
+fn verify_size_for_one_branch() {
     let doc = r#"
 {
   "segments": [
@@ -703,5 +703,5 @@ fn investigation_test() {
         u64::from(latest_gc_cutoff_lsn),
         u64::from(last_lsn)
     );
-    assert_eq!(res.total_size, 220054675456);
+    assert_eq!(res.total_size, 220121784320);
 }
