@@ -126,7 +126,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Framed<S> {
         (reader, writer)
     }
 
-    // Join read and write parts back.
+    /// Join read and write parts back.
     pub fn unsplit(reader: FramedReader<ReadHalf<S>>, writer: FramedWriter<WriteHalf<S>>) -> Self {
         Self {
             stream: reader.stream.unsplit(writer.stream),
@@ -206,7 +206,7 @@ async fn read_message<S: AsyncRead + Unpin>(
     }
 }
 
-// Try to decode single message.
+/// Try to decode single message.
 fn decode(
     src: &mut BytesMut,
     startup_read: &mut bool,

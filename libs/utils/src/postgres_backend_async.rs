@@ -252,7 +252,7 @@ pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
     query_string
 }
 
-// Cast a byte slice to a string slice, dropping null terminator if there's one.
+/// Cast a byte slice to a string slice, dropping null terminator if there's one.
 fn cstr_to_str(bytes: &[u8]) -> anyhow::Result<&str> {
     let without_null = bytes.strip_suffix(&[0]).unwrap_or(bytes);
     std::str::from_utf8(without_null).map_err(|e| e.into())
@@ -344,7 +344,7 @@ impl PostgresBackend {
         CopyDataWriter { pgb: self }
     }
 
-    // Wrapper for run_message_loop() that shuts down socket when we are done
+    /// Wrapper for run_message_loop() that shuts down socket when we are done
     pub async fn run<F, S>(
         mut self,
         handler: &mut impl Handler,
@@ -434,7 +434,7 @@ impl PostgresBackend {
         Ok(())
     }
 
-    // Try to upgrade MaybeTlsStream into actual TLS one, performing handshake.
+    /// Try to upgrade MaybeTlsStream into actual TLS one, performing handshake.
     async fn tls_upgrade(
         src: MaybeTlsStream,
         tls_config: Arc<rustls::ServerConfig>,

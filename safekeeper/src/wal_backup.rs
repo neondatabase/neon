@@ -191,7 +191,7 @@ async fn wal_backup_launcher_main_loop(
             .map(|c| GenericRemoteStorage::from_config(c).expect("failed to create remote storage"))
     });
 
-    // Presense in this map means launcher is aware s3 offloading is needed for
+    // Presence in this map means launcher is aware s3 offloading is needed for
     // the timeline, but task is started only if it makes sense for to offload
     // from this safekeeper.
     let mut tasks: HashMap<TenantTimelineId, WalBackupTimelineEntry> = HashMap::new();

@@ -240,7 +240,7 @@ impl GlobalTimelines {
         }
     }
 
-    /// Returns all timelines. This is used for background timeline proccesses.
+    /// Returns all timelines. This is used for background timeline processes.
     pub fn get_all() -> Vec<Arc<Timeline>> {
         let global_lock = TIMELINES_STATE.lock().unwrap();
         global_lock

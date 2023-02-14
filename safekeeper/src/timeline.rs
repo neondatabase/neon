@@ -1,4 +1,4 @@
-//! This module implements Timeline lifecycle management and has all neccessary code
+//! This module implements Timeline lifecycle management and has all necessary code
 //! to glue together SafeKeeper and all other background services.
 
 use anyhow::{bail, Result};

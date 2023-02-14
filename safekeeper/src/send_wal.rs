@@ -188,9 +188,9 @@ struct WalSender<'a> {
 }
 
 impl WalSender<'_> {
-    // Send WAL until
-    // - an error occurs
-    // - receiver is caughtup and there is no computes
+    /// Send WAL until
+    /// - an error occurs
+    /// - receiver is caughtup and there is no computes
     async fn run(&mut self) -> Result<(), QueryError> {
         loop {
             // If we are streaming to walproposer, check it is time to stop.
@@ -243,8 +243,8 @@ impl WalSender<'_> {
         }
     }
 
-    // wait until we have WAL to stream, sending keepalives and checking for
-    // exit in the meanwhile
+    /// wait until we have WAL to stream, sending keepalives and checking for
+    /// exit in the meanwhile
     async fn wait_wal(&mut self) -> Result<(), QueryError> {
         loop {
             if let Some(lsn) = wait_for_lsn(&mut self.commit_lsn_watch_rx, self.start_pos).await? {
@@ -361,10 +361,10 @@ impl ReplyReader {
 
 const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 
-// Wait until we have commit_lsn > lsn or timeout expires. Returns
-// - Ok(Some(commit_lsn)) if needed lsn is successfully observed;
-// - Ok(None) if timeout expired;
-// - Err in case of error (if watch channel is in trouble, shouldn't happen).
+/// Wait until we have commit_lsn > lsn or timeout expires. Returns
+/// - Ok(Some(commit_lsn)) if needed lsn is successfully observed;
+/// - Ok(None) if timeout expired;
+/// - Err in case of error (if watch channel is in trouble, shouldn't happen).
 async fn wait_for_lsn(rx: &mut Receiver<Lsn>, lsn: Lsn) -> anyhow::Result<Option<Lsn>> {
     let commit_lsn: Lsn = *rx.borrow();
     if commit_lsn > lsn {
