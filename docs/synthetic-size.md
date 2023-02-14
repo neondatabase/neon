@@ -37,7 +37,7 @@ The synthetic size is designed to:
 
 ## Terms & assumptions
 
-- logical size is the size of a database *at a given point in
+- logical size is the size of a branch *at a given point in
   time*. It's the total size of all tables in all databases, as you
   see with "\l+" in psql for example, plus the Postgres SLRUs and some
   small amount of metadata. NOTE that currently, Neon does not include
