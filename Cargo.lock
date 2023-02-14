@@ -3272,7 +3272,6 @@ dependencies = [
  "nix",
  "once_cell",
  "parking_lot",
- "pin-project-lite",
  "postgres",
  "postgres-protocol",
  "postgres_ffi",

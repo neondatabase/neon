@@ -4,27 +4,23 @@
 use anyhow::Context as AnyhowContext;
 use bytes::Bytes;
 
-use pin_project_lite::pin_project;
 use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::framed::ConnectionError;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+
 use std::cmp::min;
-use std::future::Future;
+
 use std::io::ErrorKind;
-use std::pin::Pin;
 
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
+
 use std::time::Duration;
 use std::{io, str};
 use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
 use tracing::*;
-use utils::postgres_backend_async::QueryError;
-use utils::send_rc::RefCellSend;
-use utils::send_rc::SendRc;
+use utils::postgres_backend_async::{PostgresBackendReader, QueryError};
 
 use pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
 use utils::{bin_ser::BeSer, lsn::Lsn, postgres_backend_async::PostgresBackend};
@@ -136,62 +132,47 @@ impl SafekeeperPostgresHandler {
             start_pos,
             self.conf.wal_backup_enabled,
         )?;
-        let write_ctx = SendRc::new(WriteContext {
-            wal_reader: RefCell::new(wal_reader),
-            send_buf: RefCell::new([0; MAX_SEND_SIZE]),
-        });
 
-        let mut c = ReplicationContext {
-            tli,
-            replica_id,
-            appname,
+        // Split to concurrently receive and send data; replies are generally
+        // not synchronized with sends, so this avoids deadlocks.
+        let reader = pgb.split().context("START_REPLICATION split")?;
+
+        let mut sender = WalSender {
             pgb,
+            tli: tli.clone(),
+            appname,
             start_pos,
             end_pos,
             stop_pos,
-            write_ctx,
+            commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
+            replica_id,
+            wal_reader,
+            send_buf: [0; MAX_SEND_SIZE],
+        };
+        let mut reply_reader = ReplyReader {
+            reader,
+            tli,
+            replica_id,
             feedback: ReplicaState::new(),
         };
 
-        let _phantom_wf = c.wait_wal_fut();
-        let real_end_pos = c.end_pos;
-        c.end_pos = c.start_pos + 1; // to well form read_wal future
-        let _phantom_rf = c.read_wal_fut();
-        c.end_pos = real_end_pos;
+        let res = tokio::select! {
+            // todo: add read|write .context to these errors
+            r = sender.run() => r,
+            r = reply_reader.run() => r,
+        };
+        // Join pg backend back.
+        pgb.unsplit(reply_reader.reader)?;
 
-        ReplicationHandler {
-            c,
-            write_state: WriteWalState::Flush,
-            _phantom_wf,
-            _phantom_rf,
-        }
-        .await
+        res
     }
 }
 
-pin_project! {
-    /// START_REPLICATION stream driver: sends WAL and receives feedback.
-    struct ReplicationHandler<'a, WF, RF>
-    where
-        WF: Future<Output = anyhow::Result<Option<Lsn>>>,
-        RF: Future<Output = anyhow::Result<usize>>,
-    {
-        c: ReplicationContext<'a>,
-        #[pin]
-        write_state: WriteWalState<WF, RF>,
-        // To deduce anonymous types.
-        _phantom_wf: WF,
-        _phantom_rf: RF,
-    }
-}
-
-/// Data ReplicationHandler maintains. Separated so we could generate WriteState
-/// futures during init, deducing their type.
-struct ReplicationContext<'a> {
+/// A half driving sending WAL.
+struct WalSender<'a> {
+    pgb: &'a mut PostgresBackend,
     tli: Arc<Timeline>,
     appname: Option<String>,
-    replica_id: usize,
-    pgb: &'a mut PostgresBackend,
     // Position since which we are sending next chunk.
     start_pos: Lsn,
     // WAL up to this position is known to be locally available.
@@ -199,88 +180,122 @@ struct ReplicationContext<'a> {
     // If present, terminate after reaching this position; used by walproposer
     // in recovery.
     stop_pos: Option<Lsn>,
-    // This data is needed to create Future sending WAL, so we need to both have
-    // it here (to create new future) and borrow it to the future itself.
-    // Essentially this is a self referential struct. To satisfy borrow checker,
-    // use Rc<RefCell>. To make ReplicationHandler itself Send'able future, wrap
-    // it into SendRc; this is safe as ReplicationHandler is passed between
-    // threads only as a whole (during rescheduling).
-    //
-    // Right now we're in CurrentThread runtime, so Send is somewhat redundant;
-    // however, otherwise we'd need to inconveniently have separate !Send
-    // version of pg backend Handler trait (and work with LocalSet).
-    write_ctx: SendRc<WriteContext>,
+    commit_lsn_watch_rx: Receiver<Lsn>,
+    replica_id: usize,
+    wal_reader: WalReader,
+    // buffer for readling WAL into to send it
+    send_buf: [u8; MAX_SEND_SIZE],
+}
+
+impl WalSender<'_> {
+    // Send WAL until
+    // - an error occurs
+    // - receiver is caughtup and there is no computes
+    async fn run(&mut self) -> Result<(), QueryError> {
+        loop {
+            // If we are streaming to walproposer, check it is time to stop.
+            if let Some(stop_pos) = self.stop_pos {
+                if self.start_pos >= stop_pos {
+                    // recovery finished
+                    // TODO close the stream properly
+                    return Err(anyhow::anyhow!(format!(
+                                            "ending streaming to walproposer at {}, receiver is caughtup and there is no computes",
+                                            self.start_pos)).into());
+                }
+            } else {
+                // if we don't know next portion is already available, wait
+                // for it; otherwise proceed to sending
+                if self.end_pos <= self.start_pos {
+                    self.wait_wal().await?;
+                }
+            }
+
+            // try to send as much as available, capped by MAX_SEND_SIZE
+            let mut send_size = self
+                .end_pos
+                .checked_sub(self.start_pos)
+                .expect("reading wal without waiting for it first")
+                .0 as usize;
+            send_size = min(send_size, self.send_buf.len());
+            let send_buf = &mut self.send_buf[..send_size];
+            // read wal into buffer
+            send_size = self.wal_reader.read(send_buf).await?;
+            let send_buf = &send_buf[..send_size];
+
+            // and send it
+            self.pgb
+                .write_message_flush(&BeMessage::XLogData(XLogDataBody {
+                    wal_start: self.start_pos.0,
+                    wal_end: self.end_pos.0,
+                    timestamp: get_current_timestamp(),
+                    data: send_buf,
+                }))
+                .await
+                .context("Failed to send XLogData")?;
+
+            trace!(
+                "sent {} bytes of WAL {}-{}",
+                send_size,
+                self.start_pos,
+                self.start_pos + send_size as u64
+            );
+            self.start_pos += send_size as u64;
+        }
+    }
+
+    // wait until we have WAL to stream, sending keepalives and checking for
+    // exit in the meanwhile
+    async fn wait_wal(&mut self) -> Result<(), QueryError> {
+        loop {
+            if let Some(lsn) = wait_for_lsn(&mut self.commit_lsn_watch_rx, self.start_pos).await? {
+                self.end_pos = lsn;
+                return Ok(());
+            }
+            // Timed out waiting for WAL, check for termination and send KA
+            if self.tli.should_walsender_stop(self.replica_id) {
+                // Terminate if there is nothing more to send.
+                // TODO close the stream properly
+                return Err(anyhow::anyhow!(format!(
+                    "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
+                    self.appname, self.start_pos,
+                ))
+                .into());
+            }
+            self.pgb
+                .write_message_flush(&BeMessage::KeepAlive(WalSndKeepAlive {
+                    sent_ptr: self.end_pos.0,
+                    timestamp: get_current_timestamp(),
+                    request_reply: true,
+                }))
+                .await?;
+        }
+    }
+}
+
+/// A half driving receiving replies.
+struct ReplyReader {
+    reader: PostgresBackendReader,
+    tli: Arc<Timeline>,
+    replica_id: usize,
     feedback: ReplicaState,
 }
 
-// State which ReplicationHandler needs to create futures sending data.
-struct WriteContext {
-    wal_reader: RefCell<WalReader>,
-    // buffer for readling WAL into to send it
-    send_buf: RefCell<[u8; MAX_SEND_SIZE]>,
-}
-
-// Yield points of WAL sending machinery.
-pin_project! {
-    #[project = WriteWalStateProj]
-    enum WriteWalState<WF, RF>
-    where
-        WF: Future<Output = anyhow::Result<Option<Lsn>>>,
-        RF: Future<Output = anyhow::Result<usize>>,
-    {
-        Wait{ #[pin] fut: WF},
-        Read{ #[pin] fut: RF},
-        Flush,
-    }
-}
-
-impl<WF, RF> Future for ReplicationHandler<'_, WF, RF>
-where
-    WF: Future<Output = anyhow::Result<Option<Lsn>>>,
-    RF: Future<Output = anyhow::Result<usize>>,
-{
-    type Output = Result<(), QueryError>;
-
-    // We need to read feedback from the socket and write data there at the same
-    // time. To avoid having to split socket, which creates messy split-join
-    // APIs, is problematic with TLS [1] and needs to manage two tasks, just run
-    // single task and use poll interfaces, basically manual state machine,
-    // which is simple here.
-    //
-    // [1] https://github.com/tokio-rs/tls/issues/40
-    //
-    // Completes only when the stream is over, technically on error currently.
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Poll::Ready(r) = self.as_mut().poll_read(cx) {
-            return Poll::Ready(r);
-        }
-        self.as_mut().poll_write(cx)
-    }
-}
-
-impl<WF, RF> ReplicationHandler<'_, WF, RF>
-where
-    WF: Future<Output = anyhow::Result<Option<Lsn>>>,
-    RF: Future<Output = anyhow::Result<usize>>,
-{
-    // Poll reading, i.e. getting feedback and processing it. Completes only on error/end of stream.
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), QueryError>> {
+impl ReplyReader {
+    async fn run(&mut self) -> Result<(), QueryError> {
         loop {
-            match ready!(self.as_mut().project().c.pgb.poll_read_message(cx)) {
-                Ok(Some(msg)) => self.as_mut().handle_feedback(&msg)?,
-                Ok(None) => {
-                    return Poll::Ready(Err(QueryError::from(ConnectionError::Io(io::Error::new(
-                        ErrorKind::Other,
-                        "EOF on START_WAL_PUSH stream",
-                    )))))
+            match self.reader.read_message().await? {
+                Some(msg) => self.handle_feedback(&msg)?,
+                None => {
+                    return Err(QueryError::from(ConnectionError::Io(io::Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "EOF on START_REPLICATION stream",
+                    ))))
                 }
-                Err(err) => return Poll::Ready(Err(err.into())),
-            };
+            }
         }
     }
 
-    fn handle_feedback(self: Pin<&mut Self>, msg: &FeMessage) -> Result<(), QueryError> {
-        let this = self.project();
+    fn handle_feedback(&mut self, msg: &FeMessage) -> Result<(), QueryError> {
         match &msg {
             FeMessage::CopyData(m) => {
                 // There's three possible data messages that the client is supposed to send here:
@@ -288,11 +303,10 @@ where
                 match m.first().cloned() {
                     Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
                         // Note: deserializing is on m[1..] because we skip the tag byte.
-                        this.c.feedback.hs_feedback = HotStandbyFeedback::des(&m[1..])
+                        self.feedback.hs_feedback = HotStandbyFeedback::des(&m[1..])
                             .context("failed to deserialize HotStandbyFeedback")?;
-                        this.c
-                            .tli
-                            .update_replica_state(this.c.replica_id, this.c.feedback);
+                        self.tli
+                            .update_replica_state(self.replica_id, self.feedback);
                     }
                     Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
                         let _reply = StandbyReply::des(&m[1..])
@@ -302,6 +316,7 @@ where
                         // Currently we just ignore this, tracking progress for them is not supported.
                     }
                     Some(NEON_STATUS_UPDATE_TAG_BYTE) => {
+                        // pageserver sends this.
                         // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
                         let buf = Bytes::copy_from_slice(&m[9..]);
                         let reply = ReplicationFeedback::parse(buf);
@@ -309,25 +324,30 @@ where
                         trace!("ReplicationFeedback is {:?}", reply);
                         // Only pageserver sends ReplicationFeedback, so set the flag.
                         // This replica is the source of information to resend to compute.
-                        this.c.feedback.pageserver_feedback = Some(reply);
+                        self.feedback.pageserver_feedback = Some(reply);
 
-                        this.c
-                            .tli
-                            .update_replica_state(this.c.replica_id, this.c.feedback);
+                        self.tli
+                            .update_replica_state(self.replica_id, self.feedback);
                     }
                     _ => warn!("unexpected message {:?}", msg),
                 }
             }
             FeMessage::CopyFail => {
-                // XXX we should probably (tell pgb to) close the socket, as
-                // CopyFail in duplex copy is somewhat unexpected (at least to
-                // PG walsender; evidently client should finish it with
-                // CopyDone). Note that sync rust-postgres client (which we
-                // don't use anymore) hangs otherwise.
+                // Note: we should probably (tell pgb to) close the socket, as
+                // CopyFail in duplex copy is unexpected (at least to PG
+                // walsender; evidently and per my docs reading client should
+                // finish it with CopyDone). Note that sync rust-postgres client
+                // (which we don't use anymore) hangs otherwise.
                 // https://github.com/sfackler/rust-postgres/issues/755
                 // https://github.com/neondatabase/neon/issues/935
                 //
-                return Err(anyhow::anyhow!("unexpected CopyFail").into());
+                // Currently, the version of tokio_postgres replication patch we
+                // use sends this when it closes the stream (e.g. pageserver
+                // decided to switch conn to another safekeeper and client gets
+                // dropped). Moreover, seems like 'connection' task errors with
+                // 'unexpected message from server' when it receives
+                // ErrorResponse (anything but CopyData/CopyDone) back.
+                return Err(anyhow::anyhow!("received CopyFail").into());
             }
             _ => {
                 return Err(
@@ -336,156 +356,6 @@ where
             }
         };
         Ok(())
-    }
-
-    // Poll writing, i.e. sending more WAL. Completes only on error or when we
-    // decide to shutdown connection -- receiver is caughtup and there is no
-    // active computes; this is still handled as Err though.
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), QueryError>> {
-        // send while we don't block or error out
-        loop {
-            match &mut self.as_mut().project().write_state.project() {
-                WriteWalStateProj::Wait { fut } => match ready!(fut.as_mut().poll(cx))? {
-                    Some(lsn) => {
-                        self.as_mut().project().c.end_pos = lsn;
-                        self.as_mut().start_read_wal();
-                        continue;
-                    }
-                    // Timed out waiting for WAL, send keepalive and possibly terminate.
-                    None => {
-                        let mut this = self.as_mut().project();
-                        if this.c.tli.should_walsender_stop(this.c.replica_id) {
-                            // Terminate if there is nothing more to send.
-                            // TODO close the stream properly
-                            return Poll::Ready(Err(anyhow::anyhow!(format!(
-                                "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
-                                self.c.appname, self.c.start_pos,
-                            )).into()));
-                        }
-                        this.c
-                            .pgb
-                            .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                                sent_ptr: this.c.end_pos.0,
-                                timestamp: get_current_timestamp(),
-                                request_reply: true,
-                            }))?;
-                        /* flush KA */
-                        this.write_state.set(WriteWalState::Flush);
-                    }
-                },
-                WriteWalStateProj::Read { fut } => {
-                    let read_len = ready!(fut.as_mut().poll(cx))?;
-                    assert!(read_len > 0, "read_len={}", read_len);
-
-                    let mut this = self.as_mut().project();
-                    let write_ctx_clone = this.c.write_ctx.clone();
-                    let send_buf = &write_ctx_clone.send_buf.borrow()[..read_len];
-                    let chunk_end = this.c.start_pos + read_len as u64;
-                    // write data to the output buffer
-                    this.c
-                        .pgb
-                        .write_message(&BeMessage::XLogData(XLogDataBody {
-                            wal_start: this.c.start_pos.0,
-                            wal_end: this.c.end_pos.0,
-                            timestamp: get_current_timestamp(),
-                            data: send_buf,
-                        }))
-                        .context("Failed to write XLogData")?;
-                    trace!("wrote a chunk of wal {}-{}", this.c.start_pos, chunk_end);
-                    this.c.start_pos = chunk_end;
-                    // and flush it
-                    this.write_state.set(WriteWalState::Flush);
-                }
-                WriteWalStateProj::Flush => {
-                    let this = self.as_mut().project();
-
-                    ready!(this.c.pgb.poll_flush(cx))?;
-                    // If we are streaming to walproposer, check it is time to stop.
-                    if let Some(stop_pos) = this.c.stop_pos {
-                        if this.c.start_pos >= stop_pos {
-                            // recovery finished
-                            // TODO close the stream properly
-                            return Poll::Ready(Err(anyhow::anyhow!(format!(
-                                "ending streaming to walproposer at {}, receiver is caughtup and there is no computes",
-                                this.c.start_pos)).into()));
-                        }
-                        self.as_mut().start_read_wal();
-                        continue;
-                    } else {
-                        // if we don't know next portion is already available, wait
-                        // for it; otherwise proceed to sending
-                        if self.c.end_pos <= self.c.start_pos {
-                            self.as_mut().start_wait_wal();
-                        } else {
-                            self.as_mut().start_read_wal();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Start waiting for WAL, creating future doing that.
-    fn start_wait_wal(self: Pin<&mut Self>) {
-        let fut = self.c.wait_wal_fut();
-        self.project().write_state.set(WriteWalState::Wait {
-            fut: {
-                // SAFETY: this function is the only way to assign WaitWal to
-                // write_state. We just workaround impossibility of specifying
-                // async fn type, which is anonymous.
-                // transmute_copy is used as transmute refuses generic param:
-                // https://users.rust-lang.org/t/transmute-doesnt-work-on-generic-types/87272
-                assert_eq!(std::mem::size_of::<WF>(), std::mem::size_of_val(&fut));
-                let t = unsafe { std::mem::transmute_copy(&fut) };
-                std::mem::forget(fut);
-                t
-            },
-        });
-    }
-
-    // Switch into reading WAL state, creating Future doing that.
-    fn start_read_wal(self: Pin<&mut Self>) {
-        let fut = self.c.read_wal_fut();
-        self.project().write_state.set(WriteWalState::Read {
-            fut: {
-                // SAFETY: this function is the only way to assign ReadWal to
-                // write_state. We just workaround impossibility of specifying
-                // async fn type, which is anonymous.
-                // transmute_copy is used as transmute refuses generic param:
-                // https://users.rust-lang.org/t/transmute-doesnt-work-on-generic-types/87272
-                assert_eq!(std::mem::size_of::<RF>(), std::mem::size_of_val(&fut));
-                let t = unsafe { std::mem::transmute_copy(&fut) };
-                std::mem::forget(fut);
-                t
-            },
-        });
-    }
-}
-
-impl ReplicationContext<'_> {
-    // Create future waiting for WAL.
-    fn wait_wal_fut(&self) -> impl Future<Output = anyhow::Result<Option<Lsn>>> {
-        let mut commit_lsn_watch_rx = self.tli.get_commit_lsn_watch_rx();
-        let start_pos = self.start_pos;
-        async move { wait_for_lsn(&mut commit_lsn_watch_rx, start_pos).await }
-    }
-
-    // Create future reading WAL.
-    fn read_wal_fut(&self) -> impl Future<Output = anyhow::Result<usize>> {
-        let mut send_size = self
-            .end_pos
-            .checked_sub(self.start_pos)
-            .expect("reading wal without waiting for it first")
-            .0 as usize;
-        send_size = min(send_size, self.write_ctx.send_buf.borrow().len());
-        let write_ctx_fut = self.write_ctx.clone();
-        async move {
-            let mut wal_reader_ref = write_ctx_fut.wal_reader.borrow_mut_send();
-            let mut send_buf_ref = write_ctx_fut.send_buf.borrow_mut_send();
-
-            let send_buf = &mut send_buf_ref[..send_size];
-            wal_reader_ref.read(send_buf).await
-        }
     }
 }
 

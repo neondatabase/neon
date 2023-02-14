@@ -50,8 +50,6 @@ pub mod fs_ext;
 
 pub mod history_buffer;
 
-pub mod send_rc;
-
 /// use with fail::cfg("$name", "return(2000)")
 #[macro_export]
 macro_rules! failpoint_sleep_millis_async {
