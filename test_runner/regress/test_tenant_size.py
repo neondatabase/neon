@@ -421,7 +421,7 @@ def test_single_branch_get_tenant_size_grows(
             size_debug_file.write(size_debug)
 
             prev = collected_responses[-1][1]
-            assert size > prev, "tenant_size should grow with updates"
+            assert size > prev, f"tenant_size should grow with updates {size} {prev}"
             collected_responses.append((current_lsn, size))
 
         while True:
