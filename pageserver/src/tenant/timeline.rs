@@ -686,7 +686,7 @@ impl Timeline {
             // if everything downloaded fine, lets try again
         }
 
-        unreachable!("retry loop exists")
+        unreachable!("retry loop exits")
     }
 
     async fn compact_without_ondemand_downloads(
