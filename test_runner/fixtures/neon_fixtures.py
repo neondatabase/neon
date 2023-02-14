@@ -2037,6 +2037,8 @@ class NeonPageserver(PgProtocol):
             ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",
             ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
             ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
+            # FIXME: replication patch for tokio_postgres regards any but CopyDone/CopyData message in CopyBoth stream as unexpected
+            ".*Connection aborted: connection error: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
             ".*Replication stream finished: db error: ERROR: Socket IO error: end streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
