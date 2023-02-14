@@ -242,6 +242,18 @@ pub async fn collect_metrics_iteration(
             Some(val) => val != curr_val,
             None => true,
         });
+
+        info!(
+            "sending only changed metrics, {} values at {}",
+            current_metrics.len(),
+            Utc::now()
+        );
+    } else {
+        info!(
+            "sending all metrics, including cached ones. {} values at {}",
+            current_metrics.len(),
+            Utc::now()
+        );
     }
 
     if current_metrics.is_empty() {
