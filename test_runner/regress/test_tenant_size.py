@@ -225,7 +225,7 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
 
     env = neon_simple_env
-    gc_horizon = 200_000
+    gc_horizon = 5_000
     (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
     http_client = env.pageserver.http_client()
 
