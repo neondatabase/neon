@@ -19,7 +19,7 @@ use utils::lsn::Lsn;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(test, derive(Default))]
 pub struct LayerFileMetadata {
-    file_size: Option<u64>,
+    file_size: u64,
 }
 
 impl From<&'_ IndexLayerMetadata> for LayerFileMetadata {
@@ -32,16 +32,10 @@ impl From<&'_ IndexLayerMetadata> for LayerFileMetadata {
 
 impl LayerFileMetadata {
     pub fn new(file_size: u64) -> Self {
-        LayerFileMetadata {
-            file_size: Some(file_size),
-        }
+        LayerFileMetadata { file_size }
     }
 
-    /// This is used to initialize the metadata for remote layers, for which
-    /// the metadata was missing from the index part file.
-    pub const MISSING: Self = LayerFileMetadata { file_size: None };
-
-    pub fn file_size(&self) -> Option<u64> {
+    pub fn file_size(&self) -> u64 {
         self.file_size
     }
 
@@ -54,7 +48,7 @@ impl LayerFileMetadata {
         let mut changed = false;
 
         if self.file_size != other.file_size {
-            self.file_size = other.file_size.or(self.file_size);
+            self.file_size = other.file_size;
             changed = true;
         }
 
@@ -137,7 +131,7 @@ impl IndexPart {
 /// Serialized form of [`LayerFileMetadata`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct IndexLayerMetadata {
-    pub(super) file_size: Option<u64>,
+    pub(super) file_size: u64,
 }
 
 impl From<&'_ LayerFileMetadata> for IndexLayerMetadata {
@@ -191,12 +185,12 @@ mod tests {
             timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
-                    file_size: Some(25600000),
+                    file_size: 25600000,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
-                    file_size: Some(9007199254741001),
+                    file_size: 9007199254741001,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
@@ -227,12 +221,12 @@ mod tests {
             timeline_layers: HashSet::from(["000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap()]),
             layer_metadata: HashMap::from([
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9".parse().unwrap(), IndexLayerMetadata {
-                    file_size: Some(25600000),
+                    file_size: 25600000,
                 }),
                 ("000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap(), IndexLayerMetadata {
                     // serde_json should always parse this but this might be a double with jq for
                     // example.
-                    file_size: Some(9007199254741001),
+                    file_size: 9007199254741001,
                 })
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
