@@ -4,7 +4,7 @@
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, DefaultDict
+from typing import DefaultDict, Dict
 
 import pytest
 from fixtures.log_helper import log
