@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tracing::warn;
 
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerFileName;
@@ -71,10 +70,7 @@ impl LayerFileMetadata {
 /// remember to add a test case for the changed version.
 #[serde_as]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct IndexPartImpl<L>
-where
-    L: std::hash::Hash + PartialEq + Eq,
-{
+pub struct IndexPartImpl {
     /// Debugging aid describing the version of this type.
     #[serde(default)]
     version: usize,
@@ -82,14 +78,14 @@ where
     /// Layer names, which are stored on the remote storage.
     ///
     /// Additional metadata can might exist in `layer_metadata`.
-    pub timeline_layers: HashSet<L>,
+    pub timeline_layers: HashSet<LayerFileName>,
 
     /// Per layer file name metadata, which can be present for a present or missing layer file.
     ///
     /// Older versions of `IndexPart` will not have this property or have only a part of metadata
     /// that latest version stores.
     #[serde(default = "HashMap::default")]
-    pub layer_metadata: HashMap<L, IndexLayerMetadata>,
+    pub layer_metadata: HashMap<LayerFileName, IndexLayerMetadata>,
 
     // 'disk_consistent_lsn' is a copy of the 'disk_consistent_lsn' in the metadata.
     // It's duplicated here for convenience.
@@ -100,98 +96,7 @@ where
 
 // TODO seems like another part of the remote storage file format
 // compatibility issue, see https://github.com/neondatabase/neon/issues/3072
-pub type IndexPart = IndexPartImpl<LayerFileName>;
-
-pub type IndexPartUnclean = IndexPartImpl<UncleanLayerFileName>;
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub enum UncleanLayerFileName {
-    Clean(LayerFileName),
-    BackupFile(String),
-}
-
-impl<'de> serde::Deserialize<'de> for UncleanLayerFileName {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_string(UncleanLayerFileNameVisitor)
-    }
-}
-
-struct UncleanLayerFileNameVisitor;
-
-impl<'de> serde::de::Visitor<'de> for UncleanLayerFileNameVisitor {
-    type Value = UncleanLayerFileName;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            formatter,
-            "a string that is a valid LayerFileName or '.old' backup file name"
-        )
-    }
-
-    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        let maybe_clean: Result<LayerFileName, _> = v.parse();
-        match maybe_clean {
-            Ok(clean) => Ok(UncleanLayerFileName::Clean(clean)),
-            Err(e) => {
-                if v.ends_with(".old") || v == "metadata_backup" {
-                    Ok(UncleanLayerFileName::BackupFile(v.to_owned()))
-                } else {
-                    Err(E::custom(e))
-                }
-            }
-        }
-    }
-}
-
-impl UncleanLayerFileName {
-    fn into_clean(self) -> Option<LayerFileName> {
-        match self {
-            UncleanLayerFileName::Clean(clean) => Some(clean),
-            UncleanLayerFileName::BackupFile(_) => None,
-        }
-    }
-}
-
-impl IndexPartUnclean {
-    pub fn remove_unclean_layer_file_names(self) -> IndexPart {
-        let IndexPartUnclean {
-            version,
-            timeline_layers,
-            layer_metadata,
-            disk_consistent_lsn,
-            metadata_bytes,
-        } = self;
-
-        IndexPart {
-            version,
-            timeline_layers: timeline_layers
-                .into_iter()
-                .filter_map(|unclean_file_name| match unclean_file_name {
-                    UncleanLayerFileName::Clean(clean_name) => Some(clean_name),
-                    UncleanLayerFileName::BackupFile(backup_file_name) => {
-                        // For details see https://github.com/neondatabase/neon/issues/3024
-                        warn!(
-                            "got backup file on the remote storage, ignoring it {backup_file_name}"
-                        );
-                        None
-                    }
-                })
-                .collect(),
-            layer_metadata: layer_metadata
-                .into_iter()
-                .filter_map(|(l, m)| l.into_clean().map(|l| (l, m)))
-                .collect(),
-            disk_consistent_lsn,
-            metadata_bytes,
-        }
-    }
-}
+pub type IndexPart = IndexPartImpl;
 
 impl IndexPart {
     /// When adding or modifying any parts of `IndexPart`, increment the version so that it can be
@@ -263,8 +168,7 @@ mod tests {
             metadata_bytes: [113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
         };
 
-        let part: IndexPartUnclean = serde_json::from_str(example).unwrap();
-        let part = part.remove_unclean_layer_file_names();
+        let part: IndexPart = serde_json::from_str(example).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -299,9 +203,7 @@ mod tests {
             metadata_bytes: [113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
         };
 
-        let part = serde_json::from_str::<IndexPartUnclean>(example)
-            .unwrap()
-            .remove_unclean_layer_file_names();
+        let part = serde_json::from_str::<IndexPart>(example).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -337,8 +239,7 @@ mod tests {
             metadata_bytes: [112,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
         };
 
-        let part = serde_json::from_str::<IndexPartUnclean>(example).unwrap();
-        let part = part.remove_unclean_layer_file_names();
+        let part = serde_json::from_str::<IndexPart>(example).unwrap();
         assert_eq!(part, expected);
     }
 }

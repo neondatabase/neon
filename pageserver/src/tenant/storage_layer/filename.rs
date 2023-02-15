@@ -258,6 +258,15 @@ impl serde::Serialize for LayerFileName {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for LayerFileName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_string(LayerFileNameVisitor)
+    }
+}
+
 struct LayerFileNameVisitor;
 
 impl<'de> serde::de::Visitor<'de> for LayerFileNameVisitor {
