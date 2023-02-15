@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import List, Tuple
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
@@ -171,7 +172,7 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_ou
     size_debug_file.write(size_debug)
 
 
-# @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 15
@@ -214,7 +215,7 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: 
     size_debug_file.write(size_debug)
 
 
-# @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 5
@@ -263,7 +264,7 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     size_debug_file.write(size_debug)
 
 
-# @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
+@pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
 def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = small
