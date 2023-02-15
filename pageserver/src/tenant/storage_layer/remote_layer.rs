@@ -49,6 +49,16 @@ pub struct RemoteLayer {
     access_stats: LayerAccessStats,
 
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
+
+    /// Has `LayerMap::replace` failed for this (true) or not (false).
+    ///
+    /// Used together with [`ongoing_download`] semaphore in `Timeline::download_remote_layer`.
+    /// The field is used to mark a RemoteLayer permanently (until restart or ignore+load)
+    /// unprocessable, because a LayerMap::replace failed.
+    ///
+    /// It is very unlikely to accumulate these in the Timeline's LayerMap, but having this avoids
+    /// a possible fast loop between `Timeline::get_reconstruct_data` and
+    /// `Timeline::download_remote_layer`, which also logs.
     pub(crate) download_replacement_failure: std::sync::atomic::AtomicBool,
 }
 
