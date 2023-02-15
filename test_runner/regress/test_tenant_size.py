@@ -8,37 +8,6 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_
 from fixtures.types import Lsn
 
 
-# Helper for tests that compare timeline_inputs
-# We don't want to compare the exact values, because they can be unstable
-# and cause flaky tests. So replace the values with useful invariants.
-def mask_model_inputs(x):
-    if isinstance(x, dict):
-        newx = {}
-        for k, v in x.items():
-            if k == "size":
-                if v is None or v == 0:
-                    # no change
-                    newx[k] = v
-                elif v < 0:
-                    newx[k] = "<0"
-                else:
-                    newx[k] = ">0"
-            elif k.endswith("lsn") or k.endswith("cutoff") or k == "last_record":
-                if v is None or v == 0 or v == "0/0":
-                    # no change
-                    newx[k] = v
-                else:
-                    newx[k] = "masked"
-            else:
-                newx[k] = mask_model_inputs(v)
-        return newx
-    elif isinstance(x, list):
-        newlist = [mask_model_inputs(v) for v in x]
-        return newlist
-    else:
-        return x
-
-
 def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
@@ -90,6 +59,7 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
         "timeline_inputs": [
             {
                 "timeline_id": f"{main_timeline_id}",
+                "ancestor_id": None,
                 "ancestor_lsn": "0/0",
                 "last_record": "0/1698CC0",
                 "latest_gc_cutoff": "0/1698C48",
@@ -635,3 +605,34 @@ def test_get_tenant_size_with_multiple_branches(
     size_debug_file = open(test_output_dir / "size_debug.html", "w")
     size_debug = http_client.tenant_size_debug(tenant_id)
     size_debug_file.write(size_debug)
+
+
+# Helper for tests that compare timeline_inputs
+# We don't want to compare the exact values, because they can be unstable
+# and cause flaky tests. So replace the values with useful invariants.
+def mask_model_inputs(x):
+    if isinstance(x, dict):
+        newx = {}
+        for k, v in x.items():
+            if k == "size":
+                if v is None or v == 0:
+                    # no change
+                    newx[k] = v
+                elif v < 0:
+                    newx[k] = "<0"
+                else:
+                    newx[k] = ">0"
+            elif k.endswith("lsn") or k.endswith("cutoff") or k == "last_record":
+                if v is None or v == 0 or v == "0/0":
+                    # no change
+                    newx[k] = v
+                else:
+                    newx[k] = "masked"
+            else:
+                newx[k] = mask_model_inputs(v)
+        return newx
+    elif isinstance(x, list):
+        newlist = [mask_model_inputs(v) for v in x]
+        return newlist
+    else:
+        return x
