@@ -81,17 +81,17 @@ fn main() -> Result<()> {
                 let path = Path::new(sp);
                 let file = File::open(path)?;
                 serde_json::from_reader(file)?
-            } else if let Some(id) = compute_id{
-		if let Some(cp_base) = control_plane_uri {
-		    let cp_uri = cp_base.to_owned() + "/management/api/v1/" + id + "/spec";
-		    reqwest::blocking::get(cp_uri)?
-			// TODO: fetch a jwt token from the environment
-			// .header("Authorization", "JWT TOKEN")
-			.json()?
-		} else {
-		    panic!("must specify --control-plane-uri with --compute-id");
-		}
-	    } else {
+            } else if let Some(id) = compute_id {
+                if let Some(cp_base) = control_plane_uri {
+                    let cp_uri = cp_base.to_owned() + "/management/api/v1/" + id + "/spec";
+                    reqwest::blocking::get(cp_uri)?
+                        // TODO: fetch a jwt token from the environment
+                        // .header("Authorization", "JWT TOKEN")
+                        .json()?
+                } else {
+                    panic!("must specify --control-plane-uri with --compute-id");
+                }
+            } else {
                 panic!("cluster spec should be provided via --spec or --spec-path argument");
             }
         }
@@ -244,17 +244,17 @@ fn cli() -> clap::Command {
                 .value_name("SPEC_PATH"),
         )
         .arg(
-	    Arg::new("compute-id")
-		.short('i')
-		.long("compute-id")
-		.value_name("COMPUTE_ID"),
-	)
+            Arg::new("compute-id")
+                .short('i')
+                .long("compute-id")
+                .value_name("COMPUTE_ID"),
+        )
         .arg(
-	    Arg::new("control-plane-uri")
-		.short('p')
-		.long("control-plane-uri")
-		.value_name("CONTROL_PLANE"),
-	)
+            Arg::new("control-plane-uri")
+                .short('p')
+                .long("control-plane-uri")
+                .value_name("CONTROL_PLANE"),
+        )
 }
 
 #[test]
