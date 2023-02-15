@@ -199,15 +199,14 @@ impl WalSender<'_> {
                     // recovery finished
                     // TODO close the stream properly
                     return Err(anyhow::anyhow!(format!(
-                                            "ending streaming to walproposer at {}, receiver is caughtup and there is no computes",
-                                            self.start_pos)).into());
+                                "ending streaming to walproposer at {}, receiver is caughtup and there is no computes",
+                                self.start_pos)).into());
                 }
             } else {
-                // if we don't know next portion is already available, wait
-                // for it; otherwise proceed to sending
-                if self.end_pos <= self.start_pos {
-                    self.wait_wal().await?;
-                }
+                // Wait for the next portion if it is not there yet, or just
+                // update our end of WAL available for sending value, we
+                // communicate it to the receiver.
+                self.wait_wal().await?;
             }
 
             // try to send as much as available, capped by MAX_SEND_SIZE

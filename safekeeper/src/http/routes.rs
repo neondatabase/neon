@@ -8,14 +8,12 @@ use serde::Serialize;
 use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
-use std::str::FromStr;
+
 use std::sync::Arc;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::task::JoinError;
 
-use crate::json_ctrl::append_logical_message;
-use crate::json_ctrl::AppendLogicalMessage;
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
 
@@ -191,47 +189,6 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     json_response(StatusCode::OK, ())
 }
 
-// Create fake timeline + insert some valid WAL. Useful to test WAL streaming
-// from safekeeper in isolation, e.g.
-// pg_receivewal -v -d "host=localhost port=5454 options='-c tenant_id=deadbeefdeadbeefdeadbeefdeadbeef timeline_id=deadbeefdeadbeefdeadbeefdeadbeef'" -D ~/tmp/tmp/tmp
-// (hacking pg_receivewal startpos is currently needed though to make pg_receivewal work)
-async fn create_fake_timeline_handler(_request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let ttid = TenantTimelineId {
-        tenant_id: TenantId::from_str("deadbeefdeadbeefdeadbeefdeadbeef")
-            .expect("timeline_id parsing failed"),
-        timeline_id: TimelineId::from_str("deadbeefdeadbeefdeadbeefdeadbeef")
-            .expect("tenant_id parsing failed"),
-    };
-    let pg_version = 150000;
-    let server_info = ServerInfo {
-        pg_version,
-        system_id: 0,
-        wal_seg_size: WAL_SEGMENT_SIZE as u32,
-    };
-    let init_lsn = Lsn(0x1493AC8);
-    let tli = GlobalTimelines::create(ttid, server_info, init_lsn, init_lsn)
-        .await
-        .map_err(ApiError::InternalServerError)?;
-    let mut begin_lsn = init_lsn;
-    for _ in 0..16 {
-        let append = AppendLogicalMessage {
-            lm_prefix: "db".to_owned(),
-            lm_message: "hahabubu".to_owned(),
-            set_commit_lsn: true,
-            send_proposer_elected: false, // actually ignored here
-            term: 0,
-            epoch_start_lsn: init_lsn,
-            begin_lsn,
-            truncate_lsn: init_lsn,
-            pg_version,
-        };
-        let inserted =
-            append_logical_message(&tli, &append).map_err(ApiError::InternalServerError)?;
-        begin_lsn = inserted.end_lsn;
-    }
-    json_response(StatusCode::OK, ())
-}
-
 /// Deactivates the timeline and removes its data directory.
 async fn timeline_delete_force_handler(
     mut request: Request<Body>,
@@ -343,7 +300,6 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .get("/v1/status", status_handler)
         // Will be used in the future instead of implicit timeline creation
         .post("/v1/tenant/timeline", timeline_create_handler)
-        .post("/v1/fake_timeline", create_fake_timeline_handler)
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id",
             timeline_status_handler,
