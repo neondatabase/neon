@@ -622,6 +622,7 @@ impl Timeline {
         self.flush_frozen_layers_and_wait().await
     }
 
+    /// Outermost timeline compaction operation; downloads needed layers.
     pub async fn compact(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
 
@@ -639,7 +640,7 @@ impl Timeline {
             // should we error out with the most specific error?
             let last_round = round == ROUNDS - 1;
 
-            let res = self.compact_without_ondemand_downloads(ctx).await;
+            let res = self.compact_inner(ctx).await;
 
             let rls = match res {
                 Ok(()) => return Ok(()),
@@ -689,10 +690,8 @@ impl Timeline {
         unreachable!("retry loop exits")
     }
 
-    async fn compact_without_ondemand_downloads(
-        &self,
-        ctx: &RequestContext,
-    ) -> Result<(), CompactionError> {
+    /// Compaction which might need to be retried after downloading remote layers.
+    async fn compact_inner(&self, ctx: &RequestContext) -> Result<(), CompactionError> {
         //
         // High level strategy for compaction / image creation:
         //
