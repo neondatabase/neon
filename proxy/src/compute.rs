@@ -77,14 +77,9 @@ impl ConnCfg {
             self.dbname(dbname);
         }
 
-        if let Some(options) = params.options_raw() {
-            // We must drop all proxy-specific parameters.
-            #[allow(unstable_name_collisions)]
-            let options: String = options
-                .filter(|opt| !opt.starts_with("project="))
-                .intersperse(" ") // TODO: use impl from std once it's stabilized
-                .collect();
-
+        // Don't add `options` if they were only used for specifying a project.
+        // Connection pools don't support `options`, because they affect backend startup.
+        if let Some(options) = filtered_options(params) {
             self.options(&options);
         }
 
@@ -223,5 +218,48 @@ impl ConnCfg {
         };
 
         Ok(connection)
+    }
+}
+
+/// Retrieve `options` from a startup message, dropping all proxy-secific flags.
+fn filtered_options(params: &StartupMessageParams) -> Option<String> {
+    #[allow(unstable_name_collisions)]
+    let options: String = params
+        .options_raw()?
+        .filter(|opt| !opt.starts_with("project="))
+        .intersperse(" ") // TODO: use impl from std once it's stabilized
+        .collect();
+
+    // Don't even bother with empty options.
+    if options.is_empty() {
+        return None;
+    }
+
+    Some(options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filtered_options() {
+        // Empty options is unlikely to be useful anyway.
+        let params = StartupMessageParams::new([("options", "")]);
+        assert_eq!(filtered_options(&params), None);
+
+        // It's likely that clients will only use options to specify endpoint/project.
+        let params = StartupMessageParams::new([("options", "project=foo")]);
+        assert_eq!(filtered_options(&params), None);
+
+        // Same, because unescaped whitespaces are no-op.
+        let params = StartupMessageParams::new([("options", " project=foo ")]);
+        assert_eq!(filtered_options(&params).as_deref(), None);
+
+        let params = StartupMessageParams::new([("options", r"\  project=foo \ ")]);
+        assert_eq!(filtered_options(&params).as_deref(), Some(r"\  \ "));
+
+        let params = StartupMessageParams::new([("options", "project = foo")]);
+        assert_eq!(filtered_options(&params).as_deref(), Some("project = foo"));
     }
 }
