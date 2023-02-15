@@ -670,12 +670,21 @@ impl Timeline {
 
             let mut failed = 0;
 
-            while let Some(res) = downloads.next().await {
-                match res {
-                    Ok(()) => {}
-                    Err(e) => {
-                        warn!("Downloading remote layer for compaction failed: {e:#}");
-                        failed += 1;
+            let cancelled = task_mgr::shutdown_watcher();
+            tokio::pin!(cancelled);
+
+            loop {
+                tokio::select! {
+                    _ = &mut cancelled => anyhow::bail!("Cancelled while downloading remote layers"),
+                    res = downloads.next() => {
+                        match res {
+                            Some(Ok(())) => {},
+                            Some(Err(e)) => {
+                                warn!("Downloading remote layer for compaction failed: {e:#}");
+                                failed += 1;
+                            }
+                            None => break,
+                        }
                     }
                 }
             }
