@@ -2850,13 +2850,6 @@ impl Timeline {
         if !remotes.is_empty() {
             // caller is holding the lock to layer_removal_cs, and we don't want to download while
             // holding that; in future download_remote_layer might take it as well.
-            //
-            // unsure if this is required, probably not:
-            // info!(
-            //     "Level0 compaction in LSN range {lsn_range:?} for {} layers ({} deltas in total) requires downloading {} layers",
-            //     deltas_to_compact.len(),
-            //     level0_deltas.len(),
-            //     remotes.len());
             return Err(CompactionError::DownloadRequired(remotes));
         }
 
