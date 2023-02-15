@@ -53,7 +53,7 @@ pub fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
 }
 
-pub(super) async fn handle_user(
+pub(super) async fn authenticate(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<AuthSuccess<NodeInfo>> {

@@ -11,12 +11,16 @@ pub enum ClientCredsParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
-    #[error("Inconsistent project name inferred from SNI ('{}') and project option ('{}').", .domain, .option)]
+    #[error(
+        "Inconsistent project name inferred from \
+         SNI ('{}') and project option ('{}').",
+        .domain, .option,
+    )]
     InconsistentProjectNames { domain: String, option: String },
 
     #[error(
         "SNI ('{}') inconsistently formatted with respect to common name ('{}'). \
-        SNI should be formatted as '<project-name>.{}'.",
+         SNI should be formatted as '<project-name>.{}'.",
         .sni, .cn, .cn,
     )]
     InconsistentSni { sni: String, cn: String },
@@ -92,16 +96,9 @@ impl<'a> ClientCredentials<'a> {
         }
         .transpose()?;
 
-        info!(
-            user = user,
-            project = project.as_deref(),
-            "credentials"
-        );
+        info!(user, project = project.as_deref(), "credentials");
 
-        Ok(Self {
-            user,
-            project,
-        })
+        Ok(Self { user, project })
     }
 }
 

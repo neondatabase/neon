@@ -9,7 +9,7 @@ use crate::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
-pub(super) async fn handle_user(
+pub(super) async fn authenticate(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &ClientCredentials<'_>,
