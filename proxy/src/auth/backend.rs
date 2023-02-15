@@ -1,10 +1,11 @@
 mod classic;
+mod hacks;
 mod link;
 
 pub use link::LinkAuthError;
 
 use crate::{
-    auth::{self, AuthFlow, ClientCredentials},
+    auth::{self, ClientCredentials},
     console::{
         self,
         provider::{CachedNodeInfo, ConsoleReqExtra},
@@ -15,7 +16,7 @@ use crate::{
 use futures::TryFutureExt;
 use std::borrow::Cow;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, warn};
+use tracing::info;
 
 /// A product of successful authentication.
 pub struct AuthSuccess<T> {
@@ -105,59 +106,6 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
     }
 }
 
-/// Compared to [SCRAM](crate::scram), cleartext password auth saves
-/// one round trip and *expensive* computations (>= 4096 HMAC iterations).
-/// These properties are benefical for serverless JS workers, so we
-/// use this mechanism for websocket connections.
-async fn do_cleartext_hack(
-    api: &impl console::Api,
-    extra: &ConsoleReqExtra<'_>,
-    creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
-    warn!("cleartext auth flow override is enabled, proceeding");
-    let password = AuthFlow::new(client)
-        .begin(auth::CleartextPassword)
-        .await?
-        .authenticate()
-        .await?;
-
-    let mut node = api.wake_compute(extra, creds).await?;
-    node.config.password(password);
-
-    Ok(AuthSuccess {
-        reported_auth_ok: false,
-        value: node,
-    })
-}
-
-/// Workaround for clients which don't provide an endpoint (project) name.
-/// Very similar to [`do_cleartext`], but there's a specific password format.
-async fn do_password_hack(
-    api: &impl console::Api,
-    extra: &ConsoleReqExtra<'_>,
-    creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
-    warn!("project not specified, resorting to the password hack auth flow");
-    let payload = AuthFlow::new(client)
-        .begin(auth::PasswordHack)
-        .await?
-        .authenticate()
-        .await?;
-
-    info!(project = &payload.project, "received missing parameter");
-    creds.project = Some(payload.project.into());
-
-    let mut node = api.wake_compute(extra, creds).await?;
-    node.config.password(payload.password);
-
-    Ok(AuthSuccess {
-        reported_auth_ok: false,
-        value: node,
-    })
-}
-
 /// True to its name, this function encapsulates our current auth trade-offs.
 /// Here, we choose the appropriate auth flow based on circumstances.
 async fn auth_quirks(
@@ -171,7 +119,8 @@ async fn auth_quirks(
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
     if creds.project.is_none() {
-        return do_password_hack(api, extra, creds, client).await;
+        // Password will be checked by the compute node later.
+        return hacks::password_hack(api, extra, creds, client).await;
     }
 
     // Password hack should set the project name.
@@ -181,7 +130,8 @@ async fn auth_quirks(
     // Perform cleartext auth if we're allowed to do that.
     // Currently, we use it for websocket connections (latency).
     if allow_cleartext {
-        return do_cleartext_hack(api, extra, creds, client).await;
+        // Password will be checked by the compute node later.
+        return hacks::cleartext_hack(api, extra, creds, client).await;
     }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
