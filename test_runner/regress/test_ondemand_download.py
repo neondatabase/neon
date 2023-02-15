@@ -4,7 +4,7 @@
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import DefaultDict, Dict
+from typing import Any, DefaultDict, Dict
 
 import pytest
 from fixtures.log_helper import log
@@ -19,7 +19,7 @@ from fixtures.neon_fixtures import (
     wait_for_upload,
     wait_until,
 )
-from fixtures.types import Any, Lsn
+from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 
