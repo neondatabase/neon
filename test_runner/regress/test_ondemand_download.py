@@ -4,7 +4,7 @@
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict
+from typing import Dict, DefaultDict
 
 import pytest
 from fixtures.log_helper import log
@@ -592,7 +592,7 @@ def test_compaction_downloads_on_demand_with_image_creation(
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     assert not layers.in_memory_layers, "no inmemory layers expected after post-commit checkpoint"
 
-    kinds_before = defaultdict(int)
+    kinds_before: DefaultDict[str, int] = defaultdict(int)
 
     for layer in layers.historic_layers:
         kinds_before[layer.kind] += 1
@@ -608,7 +608,7 @@ def test_compaction_downloads_on_demand_with_image_creation(
 
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
-    kinds_after = defaultdict(int)
+    kinds_after: DefaultDict[str, int] = defaultdict(int)
     for layer in layers.historic_layers:
         kinds_after[layer.kind] += 1
 
