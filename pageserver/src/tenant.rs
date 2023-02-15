@@ -2428,8 +2428,11 @@ impl Tenant {
             .concurrent_tenant_size_logical_size_queries
             .inner();
 
-        // TODO: Having a single mutex block concurrent reads is unfortunate, but since the queries
-        // are for testing/experimenting, we tolerate this.
+        // TODO: Having a single mutex block concurrent reads is not great for performance.
+        //
+        // But the only case where we need to run multiple of these at once is when we
+        // request a size for a tenant manually via API, while another background calculation
+        // is in progress (which is not a common case).
         //
         // See more for on the issue #2748 condenced out of the initial PR review.
         let mut shared_cache = self.cached_logical_sizes.lock().await;
@@ -2444,7 +2447,7 @@ impl Tenant {
         .await
     }
 
-    /// Calculate synthetic tenant size
+    /// Calculate synthetic tenant size and cache the result.
     /// This is periodically called by background worker.
     /// result is cached in tenant struct
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
@@ -2458,7 +2461,7 @@ impl Tenant {
         Ok(size)
     }
 
-    /// Calculate synthetic size , cache it and set metric value
+    /// Cache given synthetic size and update the metric value
     pub fn set_cached_synthetic_size(&self, size: u64) {
         self.cached_synthetic_tenant_size
             .store(size, Ordering::Relaxed);
