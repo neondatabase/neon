@@ -15,6 +15,7 @@ pub mod svg;
 /// size at the point.
 ///
 /// The segments must form a well-formed tree, with no loops.
+#[derive(serde::Serialize)]
 pub struct StorageModel {
     pub segments: Vec<Segment>,
 }

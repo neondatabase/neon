@@ -7,6 +7,7 @@ use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
+use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
@@ -20,6 +21,7 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::mgr::TenantMapInsertError;
+use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
@@ -479,11 +481,19 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
 /// to debug any of the calculations. Requires `tenant_id` request parameter, supports
 /// `inputs_only=true|false` (default false) which supports debugging failure to calculate model
 /// values.
+///
+/// 'retention_period' query parameter overrides the cutoff that is used to calculate the size
+/// (only if it is shorter than the real cutoff).
+///
+/// Note: we don't update the cached size and prometheus metric here.
+/// The retention period might be different, and it's nice to have a method to just calculate it
+/// without modifying anything anyway.
 async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
-
     let inputs_only: Option<bool> = parse_query_param(&request, "inputs_only")?;
+    let retention_period: Option<u64> = parse_query_param(&request, "retention_period")?;
+    let headers = request.headers();
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let tenant = mgr::get_tenant(tenant_id, true)
@@ -492,24 +502,28 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     // this can be long operation
     let inputs = tenant
-        .gather_size_inputs(None, &ctx)
+        .gather_size_inputs(retention_period, &ctx)
         .await
         .map_err(ApiError::InternalServerError)?;
 
-    let sizes = if !inputs_only.unwrap_or(false) {
+    let mut sizes = None;
+    if !inputs_only.unwrap_or(false) {
         let storage_model = inputs
             .calculate_model()
             .map_err(ApiError::InternalServerError)?;
         let size = storage_model.calculate();
-        Some(size)
-    } else {
-        None
-    };
 
-    /// Private response type with the additional "unstable" fileds.
-    ///
-    /// The type is described with `id` and `size` in the openapi_spec file,
-    /// but the `inputs` and `segment_sizes` are intentionally left out.
+        // If request header expects html, return html
+        if headers["Accept"] == "text/html" {
+            return synthetic_size_html_response(inputs, storage_model, size);
+        }
+        sizes = Some(size);
+    } else if headers["Accept"] == "text/html" {
+        return Err(ApiError::BadRequest(anyhow!(
+            "inputs_only parameter is incompatible with html output request"
+        )));
+    }
+
     /// The type resides in the pageserver not to expose `ModelInputs`.
     #[serde_with::serde_as]
     #[derive(serde::Serialize)]
@@ -597,35 +611,11 @@ async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response
 }
 
 /// Get tenant_size SVG graph along with the JSON data.
-/// This is debug-only endpoint, not mentioned in the openapi spec.
-///
-/// 'retention_period' query parameter overrides the cutoff that is used to calculate the size
-/// (only if it is shorter than the real cutoff).
-async fn tenant_size_debug_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
-    let retention_period: Option<u64> = parse_query_param(&request, "retention_period")?;
-    check_permission(&request, Some(tenant_id))?;
-
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let tenant = mgr::get_tenant(tenant_id, false)
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
-    // this can be long operation, it currently is not backed by any request coalescing or similar
-    let inputs = tenant
-        .gather_size_inputs(retention_period, &ctx)
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
-    let storage = inputs
-        .calculate_model()
-        .map_err(ApiError::InternalServerError)?;
-    let sizes = storage.calculate();
-
-    // Note: we don't update the cached size here. The retention period might be different,
-    // and it's nice to have a method to just calculate it without modifying anything anyway.
-
-    // Gather the extra info needed by draw_svg
+fn synthetic_size_html_response(
+    inputs: ModelInputs,
+    storage_model: StorageModel,
+    sizes: SizeResult,
+) -> Result<Response<Body>, ApiError> {
     let mut timeline_ids: Vec<String> = Vec::new();
     let mut timeline_map: HashMap<TimelineId, usize> = HashMap::new();
     for (index, ti) in inputs.timeline_inputs.iter().enumerate() {
@@ -638,8 +628,9 @@ async fn tenant_size_debug_handler(request: Request<Body>) -> Result<Response<Bo
         .map(|seg| *timeline_map.get(&seg.timeline_id).unwrap())
         .collect();
 
-    let svg = tenant_size_model::svg::draw_svg(&storage, &timeline_ids, &seg_to_branch, &sizes)
-        .map_err(ApiError::InternalServerError)?;
+    let svg =
+        tenant_size_model::svg::draw_svg(&storage_model, &timeline_ids, &seg_to_branch, &sizes)
+            .map_err(ApiError::InternalServerError)?;
 
     let mut response = String::new();
 
@@ -1103,11 +1094,7 @@ pub fn make_router(
         .get("/v1/tenant", tenant_list_handler)
         .post("/v1/tenant", tenant_create_handler)
         .get("/v1/tenant/:tenant_id", tenant_status)
-        .get("/v1/tenant/:tenant_id/size", tenant_size_handler)
-        .get(
-            "/v1/tenant/:tenant_id/size_debug",
-            tenant_size_debug_handler,
-        )
+        .get("/v1/tenant/:tenant_id/synthetic_size", tenant_size_handler)
         .put("/v1/tenant/config", update_tenant_config_handler)
         .get("/v1/tenant/:tenant_id/config", get_tenant_config_handler)
         .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
