@@ -2784,8 +2784,14 @@ enum CompactionError {
 }
 
 impl Timeline {
+    /// Level0 files first phase of compaction, explained in the [`compact_inner`] comment.
+    ///
+    /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
+    /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
+    /// start of level0 files compaction, the on-demand download should be revisited as well.
     async fn compact_level0_phase1(
         &self,
+        _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
@@ -3081,7 +3087,9 @@ impl Timeline {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = self.compact_level0_phase1(target_file_size, ctx).await?;
+        } = self
+            .compact_level0_phase1(layer_removal_cs, target_file_size, ctx)
+            .await?;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
