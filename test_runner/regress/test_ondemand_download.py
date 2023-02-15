@@ -560,7 +560,6 @@ def test_compaction_downloads_on_demand_with_image_creation(
         # not to hit the image_creation_threshold here.
         with pg.cursor() as cur:
             cur.execute("create table a (id bigserial primary key, some_value bigint not null)")
-            cur.execute("select pg_relation_size('a')")
             cur.execute("insert into a(some_value) select i from generate_series(1, 10000) s(i)")
         wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
