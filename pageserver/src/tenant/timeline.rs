@@ -644,17 +644,17 @@ impl Timeline {
 
             let rls = match res {
                 Ok(()) => return Ok(()),
-                Err(CompactionError::Phase1(Phase1Error::DownloadRequired(rls))) if !last_round => {
+                Err(CompactionError::DownloadRequired(rls)) if !last_round => {
                     // this can be done at most one time before exiting, waiting
                     rls
                 }
-                Err(CompactionError::Phase1(e @ Phase1Error::DownloadRequired(_))) => {
+                Err(e @ CompactionError::DownloadRequired(_)) => {
                     // it is possible that this keeps happening, because we are battling
                     // some other process which evicts the layers we download; we should
                     // retry quite soon anyways.
                     return Err(e.into());
                 }
-                Err(CompactionError::Phase1(Phase1Error::Other(e)) | CompactionError::Other(e)) => {
+                Err(CompactionError::Other(e)) => {
                     return Err(e);
                 }
             };
@@ -2773,18 +2773,12 @@ struct CompactLevel0Phase1Result {
     deltas_to_compact: Vec<Arc<dyn PersistentLayer>>,
 }
 
-#[derive(Debug, thiserror::Error)]
-enum Phase1Error {
-    #[error("level 0 compaction requires downloading of {} layer files", Vec::len(.0))]
-    DownloadRequired(Vec<Arc<RemoteLayer>>),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
+/// Top-level failure to compact.
 #[derive(Debug, thiserror::Error)]
 enum CompactionError {
-    #[error(transparent)]
-    Phase1(#[from] Phase1Error),
+    #[error("level 0 compaction requires downloading of {} layer files", Vec::len(.0))]
+    DownloadRequired(Vec<Arc<RemoteLayer>>),
+    /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -2794,7 +2788,7 @@ impl Timeline {
         &self,
         target_file_size: u64,
         ctx: &RequestContext,
-    ) -> Result<CompactLevel0Phase1Result, Phase1Error> {
+    ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
@@ -2863,7 +2857,7 @@ impl Timeline {
             //     deltas_to_compact.len(),
             //     level0_deltas.len(),
             //     remotes.len());
-            return Err(Phase1Error::DownloadRequired(remotes));
+            return Err(CompactionError::DownloadRequired(remotes));
         }
 
         info!(
@@ -3047,9 +3041,9 @@ impl Timeline {
             }
 
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
-                return Err(Phase1Error::Other(anyhow::anyhow!(
-                    "failpoint delta-layer-writer-fail-before-finish"
-                )));
+                return Err(
+                    anyhow::anyhow!("failpoint delta-layer-writer-fail-before-finish").into(),
+                );
             });
 
             writer.as_mut().unwrap().put_value(key, lsn, value)?;
