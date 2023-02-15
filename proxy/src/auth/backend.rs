@@ -1,7 +1,6 @@
 mod classic;
-
 mod link;
-use futures::TryFutureExt;
+
 pub use link::LinkAuthError;
 
 use crate::{
@@ -13,6 +12,7 @@ use crate::{
     },
     stream, url,
 };
+use futures::TryFutureExt;
 use std::borrow::Cow;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
@@ -105,106 +105,98 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
     }
 }
 
-// TODO: get rid of explicit lifetimes in this block (there's a bug in rustc).
-// Read more: https://github.com/rust-lang/rust/issues/99190
-// Alleged fix: https://github.com/rust-lang/rust/pull/89056
-impl<'l> BackendType<'l, ClientCredentials<'_>> {
-    /// Do something special if user didn't provide the `project` parameter.
-    async fn try_password_hack<'a>(
-        &'a mut self,
-        extra: &'a ConsoleReqExtra<'a>,
-        client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-        use_cleartext_password_flow: bool,
-    ) -> auth::Result<Option<AuthSuccess<CachedNodeInfo>>> {
-        use BackendType::*;
+/// Compared to [SCRAM](crate::scram), cleartext password auth saves
+/// one round trip and *expensive* computations (>= 4096 HMAC iterations).
+/// These properties are benefical for serverless JS workers, so we
+/// use this mechanism for websocket connections.
+async fn do_cleartext_hack(
+    api: &impl console::Api,
+    extra: &ConsoleReqExtra<'_>,
+    creds: &mut ClientCredentials<'_>,
+    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    warn!("cleartext auth flow override is enabled, proceeding");
+    let password = AuthFlow::new(client)
+        .begin(auth::CleartextPassword)
+        .await?
+        .authenticate()
+        .await?;
 
-        // If there's no project so far, that entails that client doesn't
-        // support SNI or other means of passing the project name.
-        // We now expect to see a very specific payload in the place of password.
-        let fetch_magic_payload = |client| async {
-            warn!("project name not specified, resorting to the password hack auth flow");
-            let payload = AuthFlow::new(client)
-                .begin(auth::PasswordHack)
-                .await?
-                .authenticate()
-                .await?;
+    let mut node = api.wake_compute(extra, creds).await?;
+    node.config.password(password);
 
-            info!(project = &payload.project, "received missing parameter");
-            auth::Result::Ok(payload)
-        };
+    Ok(AuthSuccess {
+        reported_auth_ok: false,
+        value: node,
+    })
+}
 
-        // If we want to use cleartext password flow, we can read the password
-        // from the client and pretend that it's a magic payload (PasswordHack hack).
-        let fetch_plaintext_password = |client| async {
-            info!("using cleartext password flow");
-            let payload = AuthFlow::new(client)
-                .begin(auth::CleartextPassword)
-                .await?
-                .authenticate()
-                .await?;
+/// Workaround for clients which don't provide an endpoint (project) name.
+/// Very similar to [`do_cleartext`], but there's a specific password format.
+async fn do_password_hack(
+    api: &impl console::Api,
+    extra: &ConsoleReqExtra<'_>,
+    creds: &mut ClientCredentials<'_>,
+    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    warn!("project not specified, resorting to the password hack auth flow");
+    let payload = AuthFlow::new(client)
+        .begin(auth::PasswordHack)
+        .await?
+        .authenticate()
+        .await?;
 
-            auth::Result::Ok(auth::password_hack::PasswordHackPayload {
-                project: String::new(),
-                password: payload,
-            })
-        };
+    info!(project = &payload.project, "received missing parameter");
+    creds.project = Some(payload.project.into());
 
-        // TODO: find a proper way to merge those very similar blocks.
-        let (mut node, password) = match self {
-            Console(api, creds) if creds.project.is_none() => {
-                let payload = fetch_magic_payload(client).await?;
-                creds.project = Some(payload.project.into());
-                let node = api.wake_compute(extra, creds).await?;
+    let mut node = api.wake_compute(extra, creds).await?;
+    node.config.password(payload.password);
 
-                (node, payload.password)
-            }
-            // This is a hack to allow cleartext password in secure connections (wss).
-            Console(api, creds) if use_cleartext_password_flow => {
-                let payload = fetch_plaintext_password(client).await?;
-                let node = api.wake_compute(extra, creds).await?;
+    Ok(AuthSuccess {
+        reported_auth_ok: false,
+        value: node,
+    })
+}
 
-                (node, payload.password)
-            }
-            Postgres(api, creds) if creds.project.is_none() => {
-                let payload = fetch_magic_payload(client).await?;
-                creds.project = Some(payload.project.into());
-                let node = api.wake_compute(extra, creds).await?;
-
-                (node, payload.password)
-            }
-            _ => return Ok(None),
-        };
-
-        node.config.password(password);
-        Ok(Some(AuthSuccess {
-            reported_auth_ok: false,
-            value: node,
-        }))
+/// True to its name, this function encapsulates our current auth trade-offs.
+/// Here, we choose the appropriate auth flow based on circumstances.
+async fn auth_quirks(
+    api: &impl console::Api,
+    extra: &ConsoleReqExtra<'_>,
+    creds: &mut ClientCredentials<'_>,
+    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    allow_cleartext: bool,
+) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    // If there's no project so far, that entails that client doesn't
+    // support SNI or other means of passing the endpoint (project) name.
+    // We now expect to see a very specific payload in the place of password.
+    if creds.project.is_none() {
+        return do_password_hack(api, extra, creds, client).await;
     }
 
+    // Password hack should set the project name.
+    // TODO: make `creds.project` more type-safe.
+    assert!(creds.project.is_some());
+
+    // Perform cleartext auth if we're allowed to do that.
+    // Currently, we use it for websocket connections (latency).
+    if allow_cleartext {
+        return do_cleartext_hack(api, extra, creds, client).await;
+    }
+
+    // Finally, proceed with the main auth flow (SCRAM-based).
+    classic::authenticate(api, extra, creds, client).await
+}
+
+impl BackendType<'_, ClientCredentials<'_>> {
     /// Authenticate the client via the requested backend, possibly using credentials.
-    ///
-    /// If `use_cleartext_password_flow` is true, we use the old cleartext password
-    /// flow. It is used for websocket connections, which want to minimize the number
-    /// of round trips. (Plaintext password authentication requires only one round-trip,
-    /// where SCRAM requires two.)
-    pub async fn authenticate<'a>(
+    pub async fn authenticate(
         &mut self,
-        extra: &'a ConsoleReqExtra<'a>,
-        client: &'a mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-        use_cleartext_password_flow: bool,
+        extra: &ConsoleReqExtra<'_>,
+        client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+        allow_cleartext: bool,
     ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
         use BackendType::*;
-
-        // Handle cases when `project` is missing in `creds`.
-        // TODO: type safety: return `creds` with irrefutable `project`.
-        if let Some(res) = self
-            .try_password_hack(extra, client, use_cleartext_password_flow)
-            .await?
-        {
-            info!("user successfully authenticated (using the password hack)");
-            return Ok(res);
-        }
 
         let res = match self {
             Console(api, creds) => {
@@ -214,20 +206,24 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
                     "performing authentication using the console"
                 );
 
-                assert!(creds.project.is_some());
-                classic::handle_user(api.as_ref(), extra, creds, client).await?
+                let api = api.as_ref();
+                auth_quirks(api, extra, creds, client, allow_cleartext).await?
             }
             Postgres(api, creds) => {
-                info!("performing mock authentication using a local postgres instance");
+                info!(
+                    user = creds.user,
+                    project = creds.project(),
+                    "performing authentication using a local postgres instance"
+                );
 
-                assert!(creds.project.is_some());
-                classic::handle_user(api.as_ref(), extra, creds, client).await?
+                let api = api.as_ref();
+                auth_quirks(api, extra, creds, client, allow_cleartext).await?
             }
             // NOTE: this auth backend doesn't use client credentials.
             Link(url) => {
                 info!("performing link authentication");
 
-                link::handle_user(url, client)
+                link::authenticate(url, client)
                     .await?
                     .map(CachedNodeInfo::new_uncached)
             }
@@ -239,9 +235,9 @@ impl<'l> BackendType<'l, ClientCredentials<'_>> {
 
     /// When applicable, wake the compute node, gaining its connection info in the process.
     /// The link auth flow doesn't support this, so we return [`None`] in that case.
-    pub async fn wake_compute<'a>(
+    pub async fn wake_compute(
         &self,
-        extra: &'a ConsoleReqExtra<'a>,
+        extra: &ConsoleReqExtra<'_>,
     ) -> Result<Option<CachedNodeInfo>, console::errors::WakeComputeError> {
         use BackendType::*;
 
