@@ -14,5 +14,6 @@ byteorder.workspace = true
 utils.workspace = true
 postgres_ffi.workspace = true
 enum-map.workspace = true
+serde_json.workspace = true
 
 workspace_hack.workspace = true

@@ -40,7 +40,9 @@ concurrency:
 jobs:
   deploy-prod-new:
     runs-on: prod
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    container:
+      image: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+      options: --user root --privileged
     if: inputs.deployStorage && inputs.disclamerAcknowledged
     defaults:
       run:
@@ -168,7 +170,9 @@ jobs:
 
   deploy:
     runs-on: prod
-    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    container:
+      image: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+      options: --user root --privileged
     if: inputs.deployStorage && inputs.disclamerAcknowledged
     defaults:
       run:

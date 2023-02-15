@@ -91,6 +91,7 @@ pub struct TenantConf {
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
     pub trace_read_requests: bool,
+    pub eviction_policy: EvictionPolicy,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -153,6 +154,34 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub trace_read_requests: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub eviction_policy: Option<EvictionPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum EvictionPolicy {
+    NoEviction,
+    LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+}
+
+impl EvictionPolicy {
+    pub fn discriminant_str(&self) -> &'static str {
+        match self {
+            EvictionPolicy::NoEviction => "NoEviction",
+            EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvictionPolicyLayerAccessThreshold {
+    #[serde(with = "humantime_serde")]
+    pub period: Duration,
+    #[serde(with = "humantime_serde")]
+    pub threshold: Duration,
 }
 
 impl TenantConfOpt {
@@ -189,6 +218,7 @@ impl TenantConfOpt {
             trace_read_requests: self
                 .trace_read_requests
                 .unwrap_or(global_conf.trace_read_requests),
+            eviction_policy: self.eviction_policy.unwrap_or(global_conf.eviction_policy),
         }
     }
 
@@ -261,6 +291,7 @@ impl Default for TenantConf {
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
             trace_read_requests: false,
+            eviction_policy: EvictionPolicy::NoEviction,
         }
     }
 }

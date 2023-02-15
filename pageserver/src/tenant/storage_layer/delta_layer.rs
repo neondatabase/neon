@@ -194,8 +194,10 @@ pub struct DeltaLayer {
 
 impl std::fmt::Debug for DeltaLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use super::RangeDisplayDebug;
+
         f.debug_struct("DeltaLayer")
-            .field("key_range", &self.key_range)
+            .field("key_range", &RangeDisplayDebug(&self.key_range))
             .field("lsn_range", &self.lsn_range)
             .field("file_size", &self.file_size)
             .field("inner", &self.inner)
@@ -450,7 +452,7 @@ impl PersistentLayer for DeltaLayer {
         let layer_file_name = self.filename().file_name();
         let lsn_range = self.get_lsn_range();
 
-        let access_stats = self.access_stats.to_api_model(reset);
+        let access_stats = self.access_stats.as_api_model(reset);
 
         HistoricLayerInfo::Delta {
             layer_file_name,

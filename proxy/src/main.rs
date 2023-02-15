@@ -41,12 +41,8 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_ansi(atty::is(atty::Stream::Stdout))
-        .with_target(false)
-        .init();
-
-    // initialize sentry if SENTRY_DSN is provided
+    // First, initialize logging and troubleshooting subsystems.
+    init_tracing();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     info!("Version: {GIT_VERSION}");
@@ -109,6 +105,21 @@ async fn main() -> anyhow::Result<()> {
     let _: Vec<()> = futures::future::try_join_all(tasks).await?;
 
     Ok(())
+}
+
+/// Tracing is used for logging and telemetry.
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter({
+            // This filter will examine the `RUST_LOG` env variable.
+            use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy()
+        })
+        .with_ansi(atty::is(atty::Stream::Stdout))
+        .with_target(false)
+        .init();
 }
 
 /// ProxyConfig is created at proxy startup, and lives forever.

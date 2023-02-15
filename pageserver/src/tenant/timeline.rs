@@ -1,5 +1,6 @@
 //!
 
+mod eviction_task;
 mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -47,7 +48,7 @@ use crate::metrics::TimelineMetrics;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
-use crate::tenant::config::TenantConfOpt;
+use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
 use pageserver_api::reltag::RelTag;
 
 use postgres_connection::PgConnectionConfig;
@@ -291,18 +292,9 @@ impl LogicalSize {
         //                  we change the type.
         match self.initial_logical_size.get() {
             Some(initial_size) => {
-                let absolute_size_increment = u64::try_from(
-                    size_increment
-                        .checked_abs()
-                        .with_context(|| format!("Size added after initial {size_increment} is not expected to be i64::MIN"))?,
-                    ).expect("casting nonnegative i64 to u64 should not fail");
-
-                if size_increment < 0 {
-                    initial_size.checked_sub(absolute_size_increment)
-                } else {
-                    initial_size.checked_add(absolute_size_increment)
-                }.with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
-                .map(CurrentLogicalSize::Exact)
+                initial_size.checked_add_signed(size_increment)
+                    .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
+                    .map(CurrentLogicalSize::Exact)
             }
             None => {
                 let non_negative_size_increment = u64::try_from(size_increment).unwrap_or(0);
@@ -801,6 +793,7 @@ impl Timeline {
     pub fn activate(self: &Arc<Self>) {
         self.set_state(TimelineState::Active);
         self.launch_wal_receiver();
+        self.launch_eviction_task();
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -867,29 +860,100 @@ impl Timeline {
         Ok(Some(true))
     }
 
-    /// Evicts one layer as in replaces a downloaded layer with a remote layer
-    ///
-    /// Returns:
-    /// - `Ok(Some(true))` when the layer was replaced
-    /// - `Ok(Some(false))` when the layer was found, but no changes were made
-    ///    - evictee was not yet downloaded
-    ///    - layermap replacement failed
-    /// - `Ok(None)` when the layer is not found
+    /// Like [`evict_layer_batch`], but for just one layer.
+    /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
-        use super::layer_map::Replacement;
-
         let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
-        if local_layer.is_remote_layer() {
-            return Ok(Some(false));
-        }
-
-        // ensure the current layer is uploaded for sure
-        self.remote_client
+        let remote_client = self
+            .remote_client
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?
+            .ok_or_else(|| anyhow::anyhow!("remote storage not configured; cannot evict"))?;
+
+        let cancel = CancellationToken::new();
+        let results = self
+            .evict_layer_batch(remote_client, &[local_layer], cancel)
+            .await?;
+        assert_eq!(results.len(), 1);
+        let result: Option<anyhow::Result<bool>> = results.into_iter().next().unwrap();
+        match result {
+            None => anyhow::bail!("task_mgr shutdown requested"),
+            Some(Ok(b)) => Ok(Some(b)),
+            Some(Err(e)) => Err(e),
+        }
+    }
+
+    /// Evict multiple layers at once, continuing through errors.
+    ///
+    /// Try to evict the given `layers_to_evict` by
+    ///
+    /// 1. Replacing the given layer object in the layer map with a corresponding [`RemoteLayer`] object.
+    /// 2. Deleting the now unreferenced layer file from disk.
+    ///
+    /// The `remote_client` should be this timeline's `self.remote_client`.
+    /// We make the caller provide it so that they are responsible for handling the case
+    /// where someone wants to evict the layer but no remote storage is configured.
+    ///
+    /// Returns either `Err()` or `Ok(results)` where `results.len() == layers_to_evict.len()`.
+    /// If `Err()` is returned, no eviction was attempted.
+    /// Each position of `Ok(results)` corresponds to the layer in `layers_to_evict`.
+    /// Meaning of each `result[i]`:
+    /// - `Some(Err(...))` if layer replacement failed for an unexpected reason
+    /// - `Some(Ok(true))` if everything went well.
+    /// - `Some(Ok(false))` if there was an expected reason why the layer could not be replaced, e.g.:
+    ///    - evictee was not yet downloaded
+    ///    - replacement failed for an expectable reason (e.g., layer removed by GC before we grabbed all locks)
+    /// - `None` if no eviction attempt was made for the layer because `cancel.is_cancelled() == true`.
+    async fn evict_layer_batch(
+        &self,
+        remote_client: &Arc<RemoteTimelineClient>,
+        layers_to_evict: &[Arc<dyn PersistentLayer>],
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Vec<Option<anyhow::Result<bool>>>> {
+        // ensure that the layers have finished uploading
+        // (don't hold the layer_removal_cs while we do it, we're not removing anything yet)
+        remote_client
             .wait_completion()
             .await
             .context("wait for layer upload ops to complete")?;
+
+        // now lock out layer removal (compaction, gc, timeline deletion)
+        let layer_removal_guard = self.layer_removal_cs.lock().await;
+
+        // start the batch update
+        let mut layer_map = self.layers.write().unwrap();
+        let mut batch_updates = layer_map.batch_update();
+
+        let mut results = Vec::with_capacity(layers_to_evict.len());
+
+        for l in layers_to_evict.iter() {
+            let res = if cancel.is_cancelled() {
+                None
+            } else {
+                Some(self.evict_layer_batch_impl(&layer_removal_guard, l, &mut batch_updates))
+            };
+            results.push(res);
+        }
+
+        // commit the updates & release locks
+        batch_updates.flush();
+        drop(layer_map);
+        drop(layer_removal_guard);
+
+        assert_eq!(results.len(), layers_to_evict.len());
+        Ok(results)
+    }
+
+    fn evict_layer_batch_impl(
+        &self,
+        _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
+        local_layer: &Arc<dyn PersistentLayer>,
+        batch_updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+    ) -> anyhow::Result<bool> {
+        use super::layer_map::Replacement;
+
+        if local_layer.is_remote_layer() {
+            return Ok(false);
+        }
 
         let layer_metadata = LayerFileMetadata::new(
             local_layer
@@ -917,11 +981,7 @@ impl Timeline {
             ),
         });
 
-        let gc_lock = self.layer_removal_cs.lock().await;
-        let mut layers = self.layers.write().unwrap();
-        let mut updates = layers.batch_update();
-
-        let replaced = match updates.replace_historic(&local_layer, new_remote_layer)? {
+        let replaced = match batch_updates.replace_historic(local_layer, new_remote_layer)? {
             Replacement::Replaced { .. } => {
                 let layer_size = local_layer.file_size();
 
@@ -944,7 +1004,7 @@ impl Timeline {
             }
             Replacement::Unexpected(other) => {
                 error!(
-                    local_layer.ptr=?Arc::as_ptr(&local_layer),
+                    local_layer.ptr=?Arc::as_ptr(local_layer),
                     other.ptr=?Arc::as_ptr(&other),
                     ?other,
                     "failed to replace");
@@ -952,11 +1012,7 @@ impl Timeline {
             }
         };
 
-        updates.flush();
-        drop(layers);
-        drop(gc_lock);
-
-        Ok(Some(replaced))
+        Ok(replaced)
     }
 }
 
@@ -995,6 +1051,13 @@ impl Timeline {
         tenant_conf
             .image_creation_threshold
             .unwrap_or(self.conf.default_tenant_conf.image_creation_threshold)
+    }
+
+    fn get_eviction_policy(&self) -> EvictionPolicy {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .eviction_policy
+            .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
 
     /// Open a Timeline handle.
@@ -1553,13 +1616,31 @@ impl Timeline {
                     }
                     x @ Err(_) => x.context("Failed to calculate logical size")?,
                 };
+
+                // we cannot query current_logical_size.current_size() to know the current
+                // *negative* value, only truncated to u64.
+                let added = self_clone
+                    .current_logical_size
+                    .size_added_after_initial
+                    .load(AtomicOrdering::Relaxed);
+
+                let sum = calculated_size.saturating_add_signed(added);
+
+                // set the gauge value before it can be set in `update_current_logical_size`.
+                self_clone.metrics.current_logical_size_gauge.set(sum);
+
                 match self_clone
                     .current_logical_size
                     .initial_logical_size
                     .set(calculated_size)
                 {
                     Ok(()) => (),
-                    Err(existing_size) => {
+                    Err(_what_we_just_attempted_to_set) => {
+                        let existing_size = self_clone
+                            .current_logical_size
+                            .initial_logical_size
+                            .get()
+                            .expect("once_cell set was lost, then get failed, impossible.");
                         // This shouldn't happen because the semaphore is initialized with 1.
                         // But if it happens, just complain & report success so there are no further retries.
                         error!("Tried to update initial timeline size value to {calculated_size}, but the size was already set to {existing_size}, not changing")
@@ -1742,10 +1823,15 @@ impl Timeline {
         // one value while current_logical_size is set to the
         // other.
         match logical_size.current_size() {
-            Ok(new_current_size) => self
+            Ok(CurrentLogicalSize::Exact(new_current_size)) => self
                 .metrics
                 .current_logical_size_gauge
-                .set(new_current_size.size()),
+                .set(new_current_size),
+            Ok(CurrentLogicalSize::Approximate(_)) => {
+                // don't update the gauge yet, this allows us not to update the gauge back and
+                // forth between the initial size calculation task.
+            }
+            // this is overflow
             Err(e) => error!("Failed to compute current logical size for metrics update: {e:?}"),
         }
     }
@@ -2314,7 +2400,7 @@ impl Timeline {
             // Only one thread may call this function at a time (for this
             // timeline). If two threads tried to flush the same frozen
             // layer to disk at the same time, that would not work.
-            assert!(Arc::ptr_eq(&l.unwrap(), &frozen_layer));
+            assert!(LayerMap::compare_arced_layers(&l.unwrap(), &frozen_layer));
 
             // release lock on 'layers'
         }

@@ -2757,6 +2757,7 @@ pub mod harness {
                 lagging_wal_timeout: Some(tenant_conf.lagging_wal_timeout),
                 max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
                 trace_read_requests: Some(tenant_conf.trace_read_requests),
+                eviction_policy: Some(tenant_conf.eviction_policy),
             }
         }
     }

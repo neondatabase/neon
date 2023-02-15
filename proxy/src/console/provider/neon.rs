@@ -97,12 +97,11 @@ impl Api {
                 Some(x) => x,
             };
 
+            // Don't set anything but host and port! This config will be cached.
+            // We'll set username and such later using the startup message.
+            // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config
-                .host(host)
-                .port(port)
-                .dbname(creds.dbname)
-                .user(creds.user);
+            config.host(host).port(port);
 
             let node = NodeInfo {
                 config,

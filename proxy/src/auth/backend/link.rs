@@ -78,6 +78,8 @@ pub(super) async fn handle_user(
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
+    // This config should be self-contained, because we won't
+    // take username or dbname from client's startup message.
     let mut config = compute::ConnCfg::new();
     config
         .host(&db_info.host)

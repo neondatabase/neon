@@ -13,7 +13,7 @@ use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, ti
 
 use super::TaskStateUpdate;
 use crate::broker_client::get_broker_client;
-use crate::context::RequestContext;
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::WALRECEIVER_RUNTIME;
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::Timeline;
@@ -413,7 +413,7 @@ impl WalreceiverState {
         let timeline = Arc::clone(&self.timeline);
         let ctx = ctx.detached_child(
             TaskKind::WalReceiverConnectionHandler,
-            ctx.download_behavior(),
+            DownloadBehavior::Download,
         );
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {

@@ -731,6 +731,13 @@ impl PageServerConf {
                 })?);
         }
 
+        if let Some(eviction_policy) = item.get("eviction_policy") {
+            t_conf.eviction_policy = Some(
+                toml_edit::de::from_item(eviction_policy.clone())
+                    .context("parse eviction_policy")?,
+            );
+        }
+
         Ok(t_conf)
     }
 

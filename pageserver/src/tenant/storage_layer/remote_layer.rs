@@ -171,7 +171,7 @@ impl PersistentLayer for RemoteLayer {
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
-                access_stats: self.access_stats.to_api_model(reset),
+                access_stats: self.access_stats.as_api_model(reset),
             }
         } else {
             HistoricLayerInfo::Image {
@@ -179,7 +179,7 @@ impl PersistentLayer for RemoteLayer {
                 layer_file_size: self.layer_metadata.file_size(),
                 lsn_start: lsn_range.start,
                 remote: true,
-                access_stats: self.access_stats.to_api_model(reset),
+                access_stats: self.access_stats.as_api_model(reset),
             }
         }
     }
