@@ -648,11 +648,8 @@ impl Timeline {
                     // this can be done at most one time before exiting, waiting
                     rls
                 }
-                Err(e @ CompactionError::DownloadRequired(_)) => {
-                    // it is possible that this keeps happening, because we are battling
-                    // some other process which evicts the layers we download; we should
-                    // retry quite soon anyways.
-                    return Err(e.into());
+                Err(CompactionError::DownloadRequired(rls)) => {
+                    anyhow::bail!("Compaction requires downloading multiple times (last was {} layers), possibly battling against eviction", rls.len())
                 }
                 Err(CompactionError::Other(e)) => {
                     return Err(e);
@@ -2783,13 +2780,21 @@ struct CompactLevel0Phase1Result {
 }
 
 /// Top-level failure to compact.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 enum CompactionError {
-    #[error("level 0 compaction requires downloading of {} layer files", Vec::len(.0))]
+    /// L0 compaction requires layers to be downloaded.
+    ///
+    /// This should not happen repeatedly, but will be retried once by top-level
+    /// `Timeline::compact`.
     DownloadRequired(Vec<Arc<RemoteLayer>>),
     /// Compaction cannot be done right now; page reconstruction and so on.
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for CompactionError {
+    fn from(value: anyhow::Error) -> Self {
+        CompactionError::Other(value)
+    }
 }
 
 impl Timeline {
