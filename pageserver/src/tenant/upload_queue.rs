@@ -7,6 +7,7 @@ use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
+use anyhow::Context;
 use std::sync::Arc;
 use tracing::info;
 
@@ -131,7 +132,9 @@ impl UploadQueue {
                 .layer_metadata
                 .get(layer_name)
                 .map(LayerFileMetadata::from)
-                .unwrap_or(LayerFileMetadata::MISSING);
+                .with_context(|| {
+                    format!("No remote layer metadata found for layer {layer_name:?}")
+                })?;
             files.insert(layer_name.to_owned(), layer_metadata);
         }
 

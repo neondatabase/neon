@@ -103,16 +103,13 @@ pub async fn download_layer_file<'a>(
         })
         .map_err(DownloadError::Other)?;
 
-    match layer_metadata.file_size() {
-        Some(expected) if expected != bytes_amount => {
-            return Err(DownloadError::Other(anyhow!(
-                "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file '{}'",
-                temp_file_path.display()
-            )));
-        }
-        Some(_) | None => {
-            // matches, or upgrading from an earlier IndexPart version
-        }
+    let expected = layer_metadata.file_size();
+    if expected != bytes_amount {
+        return Err(DownloadError::Other(anyhow!(
+            "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {temp_file_path:?}",
+        )));
+    } else {
+        // matches, or upgrading from an earlier IndexPart version
     }
 
     // not using sync_data because it can lose file size update

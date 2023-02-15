@@ -314,25 +314,6 @@ impl LogicalSize {
     }
 }
 
-/// Returned by [`Timeline::layer_size_sum`]
-pub enum LayerSizeSum {
-    /// The result is accurate.
-    Accurate(u64),
-    // We don't know the layer file size of one or more layers.
-    // They contribute to the sum with a value of 0.
-    // Hence, the sum is a lower bound for the actualy layer file size sum.
-    ApproximateLowerBound(u64),
-}
-
-impl LayerSizeSum {
-    pub fn approximate_is_ok(self) -> u64 {
-        match self {
-            LayerSizeSum::Accurate(v) => v,
-            LayerSizeSum::ApproximateLowerBound(v) => v,
-        }
-    }
-}
-
 pub struct WalReceiverInfo {
     pub wal_source_connconf: PgConnectionConfig,
     pub last_received_msg_lsn: Lsn,
@@ -530,20 +511,13 @@ impl Timeline {
     /// The sum of the file size of all historic layers in the layer map.
     /// This method makes no distinction between local and remote layers.
     /// Hence, the result **does not represent local filesystem usage**.
-    pub fn layer_size_sum(&self) -> LayerSizeSum {
+    pub fn layer_size_sum(&self) -> u64 {
         let layer_map = self.layers.read().unwrap();
         let mut size = 0;
-        let mut no_size_cnt = 0;
         for l in layer_map.iter_historic_layers() {
-            let (l_size, l_no_size) = l.file_size().map(|s| (s, 0)).unwrap_or((0, 1));
-            size += l_size;
-            no_size_cnt += l_no_size;
+            size += l.file_size();
         }
-        if no_size_cnt == 0 {
-            LayerSizeSum::Accurate(size)
-        } else {
-            LayerSizeSum::ApproximateLowerBound(size)
-        }
+        size
     }
 
     pub fn get_resident_physical_size(&self) -> u64 {
@@ -960,11 +934,7 @@ impl Timeline {
             return Ok(false);
         }
 
-        let layer_metadata = LayerFileMetadata::new(
-            local_layer
-                .file_size()
-                .expect("Local layer should have a file size"),
-        );
+        let layer_metadata = LayerFileMetadata::new(local_layer.file_size());
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
                 self.tenant_id,
@@ -994,9 +964,7 @@ impl Timeline {
                     error!("failed to remove layer file on evict after replacement: {e:#?}");
                 }
 
-                if let Some(layer_size) = layer_size {
-                    self.metrics.resident_physical_size_gauge.sub(layer_size);
-                }
+                self.metrics.resident_physical_size_gauge.sub(layer_size);
 
                 true
             }
@@ -1387,7 +1355,9 @@ impl Timeline {
                 .layer_metadata
                 .get(remote_layer_name)
                 .map(LayerFileMetadata::from)
-                .unwrap_or(LayerFileMetadata::MISSING);
+                .with_context(|| {
+                    format!("No remote layer metadata found for layer {remote_layer_name:?}")
+                })?;
 
             // Is the local layer's size different from the size stored in the
             // remote index file?
@@ -1403,34 +1373,27 @@ impl Timeline {
                     local_layer_path.display()
                 );
 
-                if let Some(remote_size) = remote_layer_metadata.file_size() {
-                    let metadata = local_layer_path.metadata().with_context(|| {
-                        format!(
-                            "get file size of local layer {}",
-                            local_layer_path.display()
-                        )
-                    })?;
-                    let local_size = metadata.len();
-                    if local_size != remote_size {
-                        warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
-                        if let Err(err) = rename_to_backup(&local_layer_path) {
-                            assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
-                            anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
-                        } else {
-                            self.metrics.resident_physical_size_gauge.sub(local_size);
-                            updates.remove_historic(local_layer);
-                            // fall-through to adding the remote layer
-                        }
+                let remote_size = remote_layer_metadata.file_size();
+                let metadata = local_layer_path.metadata().with_context(|| {
+                    format!(
+                        "get file size of local layer {}",
+                        local_layer_path.display()
+                    )
+                })?;
+                let local_size = metadata.len();
+                if local_size != remote_size {
+                    warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
+                    if let Err(err) = rename_to_backup(&local_layer_path) {
+                        assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
+                        anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                     } else {
-                        debug!(
-                            "layer is present locally and file size matches remote, using it: {}",
-                            local_layer_path.display()
-                        );
-                        continue;
+                        self.metrics.resident_physical_size_gauge.sub(local_size);
+                        updates.remove_historic(local_layer);
+                        // fall-through to adding the remote layer
                     }
                 } else {
                     debug!(
-                        "layer is present locally and remote does not have file size, using it: {}",
+                        "layer is present locally and file size matches remote, using it: {}",
                         local_layer_path.display()
                     );
                     continue;
@@ -1864,9 +1827,7 @@ impl Timeline {
         let layer_size = layer.file_size();
 
         layer.delete()?;
-        if let Some(layer_size) = layer_size {
-            self.metrics.resident_physical_size_gauge.sub(layer_size);
-        }
+        self.metrics.resident_physical_size_gauge.sub(layer_size);
 
         // TODO Removing from the bottom of the layer map is expensive.
         //      Maybe instead discard all layer map historic versions that

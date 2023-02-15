@@ -156,7 +156,7 @@ impl PersistentLayer for RemoteLayer {
         true
     }
 
-    fn file_size(&self) -> Option<u64> {
+    fn file_size(&self) -> u64 {
         self.layer_metadata.file_size()
     }
 

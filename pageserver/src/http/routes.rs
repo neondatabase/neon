@@ -170,7 +170,7 @@ fn build_timeline_info_common(
             None
         }
     };
-    let current_physical_size = Some(timeline.layer_size_sum().approximate_is_ok());
+    let current_physical_size = Some(timeline.layer_size_sum());
     let state = timeline.current_state();
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
@@ -457,7 +457,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
         for timeline in tenant.list_timelines().iter() {
-            current_physical_size += timeline.layer_size_sum().approximate_is_ok();
+            current_physical_size += timeline.layer_size_sum();
         }
 
         let state = tenant.current_state();
