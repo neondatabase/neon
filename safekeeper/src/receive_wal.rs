@@ -15,6 +15,7 @@ use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
+use tokio::task::spawn_blocking;
 use tracing::*;
 
 use crate::handler::SafekeeperPostgresHandler;
@@ -149,22 +150,18 @@ async fn read_network(
             )))
         }
     };
-    // Now that we have timeline, register the connection.
+    // Now that we have timeline, register the connection and defer unregister.
     tli.on_compute_connect().await?;
+    let _guard = ComputeConnectionGuard {
+        timeline: Arc::clone(&tli),
+    };
 
     *acceptor_handle = Some(
         WalAcceptor::spawn(tli.clone(), msg_rx, reply_tx).context("spawn WalAcceptor thread")?,
     );
 
     // Forward all messages to WalAcceptor
-    let res = read_network_loop(pgb_reader, msg_tx, next_msg).await;
-    // Unregister connection. XXX this is much more suitable for Drop, but async
-    // Drop doesn't exist, and spawning task in thread-per-conn model is bad, as
-    // thread local executor might be gone before task finishes.
-    if let Err(e) = tli.on_compute_disconnect().await {
-        error!("failed to unregister compute connection: {}", e);
-    }
-    res
+    read_network_loop(pgb_reader, msg_tx, next_msg).await
 }
 
 async fn read_network_loop(
@@ -286,5 +283,22 @@ impl WalAcceptor {
                 }
             }
         }
+    }
+}
+
+struct ComputeConnectionGuard {
+    timeline: Arc<Timeline>,
+}
+
+impl Drop for ComputeConnectionGuard {
+    fn drop(&mut self) {
+        let tli = self.timeline.clone();
+        // tokio forbids to call blocking_send inside the runtime, and see
+        // comments in on_compute_disconnect why we call blocking_send.
+        spawn_blocking(move || {
+            if let Err(e) = tli.on_compute_disconnect() {
+                error!("failed to unregister compute connection: {}", e);
+            }
+        });
     }
 }
