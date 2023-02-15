@@ -3624,14 +3624,23 @@ impl Timeline {
         &self,
         remote_layer: Arc<RemoteLayer>,
     ) -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+
         let permit = match Arc::clone(&remote_layer.ongoing_download)
             .acquire_owned()
             .await
         {
             Ok(permit) => permit,
             Err(_closed) => {
-                info!("download of layer has already finished");
-                return Ok(());
+                if remote_layer.download_replacement_failure.load(Relaxed) {
+                    // this path will be hit often, in case there are upper retries
+                    // TODO: we really should poison the timeline, but panicking is not yet
+                    // supported.
+                    anyhow::bail!("an earlier download succeeded but LayerMap::replace failed")
+                } else {
+                    info!("download of layer has already finished");
+                    return Ok(());
+                }
             }
         };
 
@@ -3667,8 +3676,8 @@ impl Timeline {
                     {
                         use crate::tenant::layer_map::Replacement;
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        match updates.replace_historic(&l, new_layer) {
-                            Ok(Replacement::Replaced { .. }) => { /* expected */ }
+                        let failure = match updates.replace_historic(&l, new_layer) {
+                            Ok(Replacement::Replaced { .. }) => false,
                             Ok(Replacement::NotFound) => {
                                 // TODO: the downloaded file should probably be removed, otherwise
                                 // it will be added to the layermap on next load? we should
@@ -3676,6 +3685,7 @@ impl Timeline {
                                 //
                                 // See: https://github.com/neondatabase/neon/issues/3533
                                 error!("replacing downloaded layer into layermap failed because layer was not found");
+                                true
                             }
                             Ok(Replacement::RemovalBuffered) => {
                                 unreachable!("current implementation does not remove anything")
@@ -3694,12 +3704,33 @@ impl Timeline {
                                     ?other,
                                     "replacing downloaded layer into layermap failed because another layer was found instead of expected"
                                 );
+                                true
                             }
                             Err(e) => {
                                 // this is a precondition failure, the layer filename derived
                                 // attributes didn't match up, which doesn't seem likely.
-                                error!("replacing downloaded layer into layermap failed: {e:#?}")
+                                error!("replacing downloaded layer into layermap failed: {e:#?}");
+                                true
                             }
+                        };
+
+                        if failure {
+                            // FIXME: mark the remote layer permanently failed; the
+                            // timeline is most likely unusable after this. sadly we cannot just
+                            // poison the layermap lock with panic, because that would create an
+                            // issue with shutdown.
+                            //
+                            // this does not change the retry semantics on failed downloads.
+                            //
+                            // use of Relaxed is valid because closing of the semaphore gives
+                            // happens-before and wakes up any waiters; we write this value before
+                            // and any waiters (or would be waiters) will load it after closing
+                            // semaphore.
+                            //
+                            // See: https://github.com/neondatabase/neon/issues/3533
+                            remote_layer
+                                .download_replacement_failure
+                                .store(true, Relaxed);
                         }
                     }
                     updates.flush();

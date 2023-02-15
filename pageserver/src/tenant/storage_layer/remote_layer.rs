@@ -49,6 +49,7 @@ pub struct RemoteLayer {
     access_stats: LayerAccessStats,
 
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
+    pub(crate) download_replacement_failure: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for RemoteLayer {
@@ -207,6 +208,7 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            download_replacement_failure: std::sync::atomic::AtomicBool::default(),
             access_stats,
         }
     }
@@ -228,6 +230,7 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            download_replacement_failure: std::sync::atomic::AtomicBool::default(),
             access_stats,
         }
     }
