@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, DefaultDict, Dict
 
 import pytest
-import time
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
