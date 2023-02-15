@@ -404,7 +404,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     async fn connect_to_db(
         self,
         session: cancellation::Session<'_>,
-        use_cleartext_password_flow: bool,
+        allow_cleartext: bool,
     ) -> anyhow::Result<()> {
         let Self {
             mut stream,
@@ -421,7 +421,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
         let auth_result = async {
             // `&mut stream` doesn't let us merge those 2 lines.
             let res = creds
-                .authenticate(&extra, &mut stream, use_cleartext_password_flow)
+                .authenticate(&extra, &mut stream, allow_cleartext)
                 .await;
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
