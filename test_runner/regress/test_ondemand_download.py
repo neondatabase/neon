@@ -555,32 +555,38 @@ def test_compaction_downloads_on_demand_with_image_creation(
     env.initial_tenant = tenant_id
     pageserver_http = env.pageserver.http_client()
 
-    with env.postgres.create_start("main") as pg:
-        # no particular reason to create the layers like this, but we are sure
-        # not to hit the image_creation_threshold here.
-        with pg.cursor() as cur:
-            cur.execute("create table a (id bigserial primary key, some_value bigint not null)")
-            cur.execute("insert into a(some_value) select i from generate_series(1, 10000) s(i)")
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
-        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+    pg = env.postgres.create_start("main")
 
-        for _ in range(0, 2):
-            for i in range(0, 3):
-                # create a minimal amount of "delta difficulty" for this table
-                with pg.cursor() as cur:
-                    cur.execute("update a set some_value = -some_value + %s", (i,))
+    # no particular reason to create the layers like this, but we are sure
+    # not to hit the image_creation_threshold here.
+    with pg.cursor() as cur:
+        cur.execute("create table a (id bigserial primary key, some_value bigint not null)")
+        cur.execute("insert into a(some_value) select i from generate_series(1, 10000) s(i)")
+    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
-                with pg.cursor() as cur:
-                    # vacuuming should aid to reuse keys, though it's not really important
-                    # with image_creation_threshold=1 which we will use on the last compaction
-                    cur.execute("vacuum")
+    for i in range(0, 2):
+        for j in range(0, 3):
+            # create a minimal amount of "delta difficulty" for this table
+            with pg.cursor() as cur:
+                cur.execute("update a set some_value = -some_value + %s", (j,))
 
-                wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
-                pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+            with pg.cursor() as cur:
+                # vacuuming should aid to reuse keys, though it's not really important
+                # with image_creation_threshold=1 which we will use on the last compaction
+                cur.execute("vacuum")
 
-            # images should not yet be created, because threshold is too high,
-            # but these will be reshuffled to L1 layers
-            pageserver_http.timeline_compact(tenant_id, timeline_id)
+            wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+
+            if i == 1 and j == 2:
+                # last iteration; stop before checkpoint to avoid leaving an inmemory layer
+                pg.stop_and_destroy()
+
+            pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+
+        # images should not yet be created, because threshold is too high,
+        # but these will be reshuffled to L1 layers
+        pageserver_http.timeline_compact(tenant_id, timeline_id)
 
     for _ in range(0, 20):
         # loop in case flushing is still in progress
