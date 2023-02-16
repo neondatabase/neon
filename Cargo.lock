@@ -3809,6 +3809,8 @@ name = "tenant_size_model"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde",
+ "serde_json",
  "workspace_hack",
 ]
 

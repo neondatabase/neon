@@ -437,6 +437,13 @@ paths:
           type: boolean
         description: |
           When true, skip calculation and only provide the model inputs (for debugging). Defaults to false.
+      - name: retention_period
+        in: query
+        required: false
+        schema:
+          type: integer
+        description: |
+          Override the default retention period (in bytes) used for size calculation.
     get:
       description: |
         Calculate tenant's size, which is a mixture of WAL (bytes) and logical_size (bytes).

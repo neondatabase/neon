@@ -1217,7 +1217,7 @@ class PageserverHttpClient(requests.Session):
         """
         Returns the tenant size, together with the model inputs as the second tuple item.
         """
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/size")
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/synthetic_size")
         self.verbose_error(res)
         res = res.json()
         assert isinstance(res, dict)
@@ -1227,6 +1227,16 @@ class PageserverHttpClient(requests.Session):
         inputs = res["inputs"]
         assert type(inputs) is dict
         return (size, inputs)
+
+    def tenant_size_debug(self, tenant_id: TenantId) -> str:
+        """
+        Returns the tenant size debug info, as an HTML string
+        """
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/synthetic_size",
+            headers={"Accept": "text/html"},
+        )
+        return res.text
 
     def timeline_list(
         self,

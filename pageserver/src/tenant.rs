@@ -2418,6 +2418,9 @@ impl Tenant {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     pub async fn gather_size_inputs(
         &self,
+        // `max_retention_period` overrides the cutoff that is used to calculate the size
+        // (only if it is shorter than the real cutoff).
+        max_retention_period: Option<u64>,
         ctx: &RequestContext,
     ) -> anyhow::Result<size::ModelInputs> {
         let logical_sizes_at_once = self
@@ -2425,32 +2428,41 @@ impl Tenant {
             .concurrent_tenant_size_logical_size_queries
             .inner();
 
-        // TODO: Having a single mutex block concurrent reads is unfortunate, but since the queries
-        // are for testing/experimenting, we tolerate this.
+        // TODO: Having a single mutex block concurrent reads is not great for performance.
+        //
+        // But the only case where we need to run multiple of these at once is when we
+        // request a size for a tenant manually via API, while another background calculation
+        // is in progress (which is not a common case).
         //
         // See more for on the issue #2748 condenced out of the initial PR review.
         let mut shared_cache = self.cached_logical_sizes.lock().await;
 
-        size::gather_inputs(self, logical_sizes_at_once, &mut shared_cache, ctx).await
+        size::gather_inputs(
+            self,
+            logical_sizes_at_once,
+            max_retention_period,
+            &mut shared_cache,
+            ctx,
+        )
+        .await
     }
 
-    /// Calculate synthetic tenant size
+    /// Calculate synthetic tenant size and cache the result.
     /// This is periodically called by background worker.
     /// result is cached in tenant struct
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     pub async fn calculate_synthetic_size(&self, ctx: &RequestContext) -> anyhow::Result<u64> {
-        let inputs = self.gather_size_inputs(ctx).await?;
+        let inputs = self.gather_size_inputs(None, ctx).await?;
 
-        self.calc_and_update_cached_synthetic_size(&inputs)
-    }
-
-    /// Calculate synthetic size , cache it and set metric value
-    pub fn calc_and_update_cached_synthetic_size(
-        &self,
-        inputs: &size::ModelInputs,
-    ) -> anyhow::Result<u64> {
         let size = inputs.calculate()?;
 
+        self.set_cached_synthetic_size(size);
+
+        Ok(size)
+    }
+
+    /// Cache given synthetic size and update the metric value
+    pub fn set_cached_synthetic_size(&self, size: u64) {
         self.cached_synthetic_tenant_size
             .store(size, Ordering::Relaxed);
 
@@ -2458,8 +2470,6 @@ impl Tenant {
             .get_metric_with_label_values(&[&self.tenant_id.to_string()])
             .unwrap()
             .set(size);
-
-        Ok(size)
     }
 
     pub fn get_cached_synthetic_size(&self) -> u64 {
