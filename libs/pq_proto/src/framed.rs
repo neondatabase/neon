@@ -252,7 +252,7 @@ async fn flush<S: AsyncWrite + Unpin>(
         write_buf.advance(bytes_written);
     }
     write_buf.clear();
-    Ok(())
+    stream.flush().await
 }
 
 /// Flush out the buffer and shutdown the stream.
