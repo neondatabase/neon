@@ -664,7 +664,7 @@ def test_ondemand_download_failure_to_replace(
     # this will need to be adjusted if an index for logical sizes is ever implemented
     with pytest.raises(PageserverApiException):
         # error message is not useful
-        pageserver_http.timeline_detail(tenant_id, timeline_id, True)
+        pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=2)
 
     env.pageserver.allowed_errors.append(
         ".* ERROR .*replacing downloaded layer into layermap failed because layer was not found"

@@ -1288,6 +1288,7 @@ class PageserverHttpClient(requests.Session):
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
+        **kwargs,
     ) -> Dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
@@ -1298,6 +1299,7 @@ class PageserverHttpClient(requests.Session):
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             params=params,
+            **kwargs,
         )
         self.verbose_error(res)
         res_json = res.json()
