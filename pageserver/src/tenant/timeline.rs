@@ -642,6 +642,22 @@ impl Timeline {
 
             let res = self.compact_inner(ctx).await;
 
+            // If `create_image_layers' or `compact_level0` scheduled any
+            // uploads or deletions, but didn't update the index file yet,
+            // do it now.
+            //
+            // This isn't necessary for correctness, the remote state is
+            // consistent without the uploads and deletions, and we would
+            // update the index file on next flush iteration too. But it
+            // could take a while until that happens.
+            //
+            // Additionally, only do this on the terminal round before sleeping.
+            if last_round {
+                if let Some(remote_client) = &self.remote_client {
+                    remote_client.schedule_index_upload_for_file_changes()?;
+                }
+            }
+
             let rls = match res {
                 Ok(()) => return Ok(()),
                 Err(CompactionError::DownloadRequired(rls)) if !last_round => {
@@ -769,18 +785,6 @@ impl Timeline {
                 self.compact_level0(&layer_removal_cs, target_file_size, ctx)
                     .await?;
                 timer.stop_and_record();
-
-                // If `create_image_layers' or `compact_level0` scheduled any
-                // uploads or deletions, but didn't update the index file yet,
-                // do it now.
-                //
-                // This isn't necessary for correctness, the remote state is
-                // consistent without the uploads and deletions, and we would
-                // update the index file on next flush iteration too. But it
-                // could take a while until that happens.
-                if let Some(remote_client) = &self.remote_client {
-                    remote_client.schedule_index_upload_for_file_changes()?;
-                }
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
