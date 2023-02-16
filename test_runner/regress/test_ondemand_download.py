@@ -622,7 +622,9 @@ def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_ondemand_download_failure_to_replace(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+def test_ondemand_download_failure_to_replace(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
     """
     Make sure that we fail on being unable to replace a RemoteLayer instead of for example livelocking.
 
@@ -636,7 +638,9 @@ def test_ondemand_download_failure_to_replace(neon_env_builder: NeonEnvBuilder, 
 
     # disable gc and compaction via default tenant config because config is lost while detaching
     # so that compaction will not be the one to download the layer but the http handler is
-    neon_env_builder.pageserver_config_override = """tenant_config={gc_period = "0s", compaction_period = "0s"}"""
+    neon_env_builder.pageserver_config_override = (
+        """tenant_config={gc_period = "0s", compaction_period = "0s"}"""
+    )
 
     env = neon_env_builder.init_start()
 
@@ -662,8 +666,12 @@ def test_ondemand_download_failure_to_replace(neon_env_builder: NeonEnvBuilder, 
         # error message is not useful
         pageserver_http.timeline_detail(tenant_id, timeline_id, True)
 
-    env.pageserver.allowed_errors.append(".* ERROR .*replacing downloaded layer into layermap failed because layer was not found")
-    env.pageserver.allowed_errors.append(".* ERROR .*Error processing HTTP request: InternalServerError\\(get local timeline info")
+    env.pageserver.allowed_errors.append(
+        ".* ERROR .*replacing downloaded layer into layermap failed because layer was not found"
+    )
+    env.pageserver.allowed_errors.append(
+        ".* ERROR .*Error processing HTTP request: InternalServerError\\(get local timeline info"
+    )
     # this might get to run and attempt on-demand, but not always
     env.pageserver.allowed_errors.append(".* ERROR .*Task 'initial size calculation'")
 
