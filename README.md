@@ -83,9 +83,10 @@ cd neon
 
 # The preferred and default is to make a debug build. This will create a
 # demonstrably slower build than a release build. For a release build,
-# use "BUILD_TYPE=release make -j`nproc`"
+# use "BUILD_TYPE=release make -j`nproc` -s"
+# Remove -s for the verbose build log
 
-make -j`nproc`
+make -j`nproc` -s
 ```
 
 #### Building on OSX
@@ -99,9 +100,10 @@ cd neon
 
 # The preferred and default is to make a debug build. This will create a
 # demonstrably slower build than a release build. For a release build,
-# use "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`"
+# use "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu` -s"
+# Remove -s for the verbose build log
 
-make -j`sysctl -n hw.logicalcpu`
+make -j`sysctl -n hw.logicalcpu` -s
 ```
 
 #### Dependency installation notes
