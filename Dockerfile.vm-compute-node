@@ -12,7 +12,7 @@ RUN set -e \
 
 ADD vm-cgconfig.conf /etc/cgconfig.conf
 RUN echo "::sysinit:cgconfigparser -l /etc/cgconfig.conf -s 1664" >> /etc/inittab
-RUN echo "::respawn:su vm-informant -c '/bin/vm-informant --auto-restart --cgroup=neon-postgres" >> /etc/inittab
+RUN echo "::respawn:su vm-informant -c '/bin/vm-informant --auto-restart --cgroup=neon-postgres'" >> /etc/inittab
 
 # Combine, starting from non-VM compute node image.
 FROM $SRC_IMAGE as base
