@@ -83,29 +83,14 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postg
 FROM build-deps AS plv8-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
-    apt install -y ninja-build python3-dev libc++-dev libc++abi-dev libncurses5 binutils
+    apt install -y ninja-build python3-dev libncurses5 binutils clang
 
-# https://github.com/plv8/plv8/issues/475:
-#   v8 uses gold for linking and sets `--thread-count=4` which breaks
-#   gold version <= 1.35 (https://sourceware.org/bugzilla/show_bug.cgi?id=23607)
-# Install newer gold version manually as debian-testing binutils version updates
-# libc version, which in turn breaks other extension built against non-testing libc.
-RUN wget https://ftp.gnu.org/gnu/binutils/binutils-2.38.tar.gz && \
-    tar xvzf binutils-2.38.tar.gz && \
-    cd binutils-2.38 && \
-    cd libiberty && ./configure && make -j $(getconf _NPROCESSORS_ONLN) && \
-    cd ../bfd && ./configure && make bfdver.h && \
-    cd ../gold && ./configure && make -j $(getconf _NPROCESSORS_ONLN) && make install && \
-    cp /usr/local/bin/ld.gold /usr/bin/gold
-
-# Sed is used to patch for https://github.com/plv8/plv8/issues/503
-RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.4.tar.gz && \
-    tar xvzf v3.1.4.tar.gz && \
-    cd plv8-3.1.4 && \
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.5.tar.gz -O plv8.tar.gz && \
+    mkdir plv8-src && cd plv8-src && tar xvzf ../plv8.tar.gz --strip-components=1 -C . && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
-    sed -i 's/MemoryContextAlloc(/MemoryContextAllocZero(/' plv8.cc && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /plv8-* && \
+    find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
