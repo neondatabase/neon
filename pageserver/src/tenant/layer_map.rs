@@ -154,6 +154,12 @@ where
         expected: &Arc<L>,
         new: Arc<L>,
     ) -> anyhow::Result<Replacement<Arc<L>>> {
+        fail::fail_point!("layermap-replace-notfound", |_| Ok(
+            // this is not what happens if an L0 layer was not found a anyhow error but perhaps
+            // that should be changed. this is good enough to show a replacement failure.
+            Replacement::NotFound
+        ));
+
         self.layer_map.replace_historic_noflush(expected, new)
     }
 
