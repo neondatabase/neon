@@ -1,7 +1,10 @@
 # It's possible to run any regular test with the local fs remote storage via
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
+import time
+from collections import defaultdict
 from pathlib import Path
+from typing import Any, DefaultDict, Dict
 
 import pytest
 from fixtures.log_helper import log
@@ -10,6 +13,7 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
     assert_tenant_status,
     available_remote_storages,
+    wait_for_last_flush_lsn,
     wait_for_last_record_lsn,
     wait_for_sk_commit_lsn_to_reach_remote_storage,
     wait_for_upload,
@@ -449,3 +453,167 @@ def test_download_remote_layers_api(
     pg_old = env.postgres.create_start(branch_name="main")
     with pg_old.cursor() as cur:
         assert query_scalar(cur, "select count(*) from testtab") == table_len
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
+def test_compaction_downloads_on_demand_without_image_creation(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    """
+    Create a few layers, then evict, then make sure compaction runs successfully.
+    """
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_compaction_downloads_on_demand_without_image_creation",
+    )
+
+    env = neon_env_builder.init_start()
+
+    conf = {
+        # Disable background GC & compaction
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # unused, because manual will be called after each table
+        "checkpoint_distance": 100 * 1024**2,
+        # this will be updated later on to allow manual compaction outside of checkpoints
+        "compaction_threshold": 100,
+        # repartitioning parameter, not required here
+        "image_creation_threshold": 100,
+        # repartitioning parameter, not required here
+        "compaction_target_size": 128 * 1024**2,
+        # pitr_interval and gc_horizon are not interesting because we dont run gc
+    }
+
+    # Override defaults, to create more layers
+    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=stringify(conf))
+    env.initial_tenant = tenant_id
+    pageserver_http = env.pageserver.http_client()
+
+    with env.postgres.create_start("main") as pg:
+        # no particular reason to create the layers like this, but we are sure
+        # not to hit the image_creation_threshold here.
+        with pg.cursor() as cur:
+            cur.execute("create table a as select id::bigint from generate_series(1, 204800) s(id)")
+        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+
+        with pg.cursor() as cur:
+            cur.execute("update a set id = -id")
+        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+
+    layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
+    assert not layers.in_memory_layers, "no inmemory layers expected after post-commit checkpoint"
+    assert len(layers.historic_layers) == 1 + 2, "should have inidb layer and 2 deltas"
+
+    for layer in layers.historic_layers:
+        log.info(f"pre-compact:  {layer}")
+        pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
+
+    env.neon_cli.config_tenant(tenant_id, {"compaction_threshold": "3"})
+
+    pageserver_http.timeline_compact(tenant_id, timeline_id)
+    layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
+    for layer in layers.historic_layers:
+        log.info(f"post compact: {layer}")
+    assert len(layers.historic_layers) == 1, "should have compacted to single layer"
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
+def test_compaction_downloads_on_demand_with_image_creation(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    """
+    Create layers, compact with high image_creation_threshold, then run final compaction with all layers evicted.
+
+    Due to current implementation, this will make image creation on-demand download layers, but we cannot really
+    directly test for it.
+    """
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_compaction_downloads_on_demand",
+    )
+
+    env = neon_env_builder.init_start()
+
+    conf = {
+        # Disable background GC & compaction
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # repartitioning threshold is this / 10, but it doesn't really seem to matter
+        "checkpoint_distance": 50 * 1024**2,
+        "compaction_threshold": 3,
+        # important: keep this high for the data ingestion
+        "image_creation_threshold": 100,
+        # repartitioning parameter, unused
+        "compaction_target_size": 128 * 1024**2,
+        # pitr_interval and gc_horizon are not interesting because we dont run gc
+    }
+
+    # Override defaults, to create more layers
+    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=stringify(conf))
+    env.initial_tenant = tenant_id
+    pageserver_http = env.pageserver.http_client()
+
+    with env.postgres.create_start("main") as pg:
+        # no particular reason to create the layers like this, but we are sure
+        # not to hit the image_creation_threshold here.
+        with pg.cursor() as cur:
+            cur.execute("create table a (id bigserial primary key, some_value bigint not null)")
+            cur.execute("insert into a(some_value) select i from generate_series(1, 10000) s(i)")
+        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+
+        for _ in range(0, 2):
+            for i in range(0, 3):
+                # create a minimal amount of "delta difficulty" for this table
+                with pg.cursor() as cur:
+                    cur.execute("update a set some_value = -some_value + %s", (i,))
+
+                with pg.cursor() as cur:
+                    # vacuuming should aid to reuse keys, though it's not really important
+                    # with image_creation_threshold=1 which we will use on the last compaction
+                    cur.execute("vacuum")
+
+                wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+                pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+
+            # images should not yet be created, because threshold is too high,
+            # but these will be reshuffled to L1 layers
+            pageserver_http.timeline_compact(tenant_id, timeline_id)
+
+    for _ in range(0, 20):
+        # loop in case flushing is still in progress
+        layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
+        if not layers.in_memory_layers:
+            break
+        time.sleep(0.2)
+
+    layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
+    assert not layers.in_memory_layers, "no inmemory layers expected after post-commit checkpoint"
+
+    kinds_before: DefaultDict[str, int] = defaultdict(int)
+
+    for layer in layers.historic_layers:
+        kinds_before[layer.kind] += 1
+        pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
+
+    assert dict(kinds_before) == {"Delta": 4}
+
+    # now having evicted all layers, reconfigure to have lower image creation
+    # threshold to expose image creation to downloading all of the needed
+    # layers -- threshold of 2 would sound more reasonable, but keeping it as 1
+    # to be less flaky
+    env.neon_cli.config_tenant(tenant_id, {"image_creation_threshold": "1"})
+
+    pageserver_http.timeline_compact(tenant_id, timeline_id)
+    layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
+    kinds_after: DefaultDict[str, int] = defaultdict(int)
+    for layer in layers.historic_layers:
+        kinds_after[layer.kind] += 1
+
+    assert dict(kinds_after) == {"Delta": 4, "Image": 1}
+
+
+def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
+    return dict(map(lambda x: (x[0], str(x[1])), conf.items()))

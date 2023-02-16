@@ -613,7 +613,10 @@ impl Timeline {
         self.flush_frozen_layers_and_wait().await
     }
 
+    /// Outermost timeline compaction operation; downloads needed layers.
     pub async fn compact(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+        const ROUNDS: usize = 2;
+
         let last_record_lsn = self.get_last_record_lsn();
 
         // Last record Lsn could be zero in case the timeline was just created
@@ -622,6 +625,86 @@ impl Timeline {
             return Ok(());
         }
 
+        // retry two times to allow first round to find layers which need to be downloaded, then
+        // download them, then retry compaction
+        for round in 0..ROUNDS {
+            // should we error out with the most specific error?
+            let last_round = round == ROUNDS - 1;
+
+            let res = self.compact_inner(ctx).await;
+
+            // If `create_image_layers' or `compact_level0` scheduled any
+            // uploads or deletions, but didn't update the index file yet,
+            // do it now.
+            //
+            // This isn't necessary for correctness, the remote state is
+            // consistent without the uploads and deletions, and we would
+            // update the index file on next flush iteration too. But it
+            // could take a while until that happens.
+            //
+            // Additionally, only do this on the terminal round before sleeping.
+            if last_round {
+                if let Some(remote_client) = &self.remote_client {
+                    remote_client.schedule_index_upload_for_file_changes()?;
+                }
+            }
+
+            let rls = match res {
+                Ok(()) => return Ok(()),
+                Err(CompactionError::DownloadRequired(rls)) if !last_round => {
+                    // this can be done at most one time before exiting, waiting
+                    rls
+                }
+                Err(CompactionError::DownloadRequired(rls)) => {
+                    anyhow::bail!("Compaction requires downloading multiple times (last was {} layers), possibly battling against eviction", rls.len())
+                }
+                Err(CompactionError::Other(e)) => {
+                    return Err(e);
+                }
+            };
+
+            // this path can be visited in the second round of retrying, if first one found that we
+            // must first download some remote layers
+            let total = rls.len();
+
+            let mut downloads = rls
+                .into_iter()
+                .map(|rl| self.download_remote_layer(rl))
+                .collect::<futures::stream::FuturesUnordered<_>>();
+
+            let mut failed = 0;
+
+            let cancelled = task_mgr::shutdown_watcher();
+            tokio::pin!(cancelled);
+
+            loop {
+                tokio::select! {
+                    _ = &mut cancelled => anyhow::bail!("Cancelled while downloading remote layers"),
+                    res = downloads.next() => {
+                        match res {
+                            Some(Ok(())) => {},
+                            Some(Err(e)) => {
+                                warn!("Downloading remote layer for compaction failed: {e:#}");
+                                failed += 1;
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+
+            if failed != 0 {
+                anyhow::bail!("{failed} out of {total} layers failed to download, retrying later");
+            }
+
+            // if everything downloaded fine, lets try again
+        }
+
+        unreachable!("retry loop exits")
+    }
+
+    /// Compaction which might need to be retried after downloading remote layers.
+    async fn compact_inner(&self, ctx: &RequestContext) -> Result<(), CompactionError> {
         //
         // High level strategy for compaction / image creation:
         //
@@ -660,7 +743,7 @@ impl Timeline {
         // Is the timeline being deleted?
         let state = *self.state.borrow();
         if state == TimelineState::Stopping {
-            anyhow::bail!("timeline is Stopping");
+            return Err(anyhow::anyhow!("timeline is Stopping").into());
         }
 
         let target_file_size = self.get_checkpoint_distance();
@@ -680,7 +763,8 @@ impl Timeline {
                 // "enough".
                 let layer_paths_to_upload = self
                     .create_image_layers(&partitioning, lsn, false, ctx)
-                    .await?;
+                    .await
+                    .map_err(anyhow::Error::from)?;
                 if let Some(remote_client) = &self.remote_client {
                     for (path, layer_metadata) in layer_paths_to_upload {
                         remote_client.schedule_layer_file_upload(&path, &layer_metadata)?;
@@ -692,18 +776,6 @@ impl Timeline {
                 self.compact_level0(&layer_removal_cs, target_file_size, ctx)
                     .await?;
                 timer.stop_and_record();
-
-                // If `create_image_layers' or `compact_level0` scheduled any
-                // uploads or deletions, but didn't update the index file yet,
-                // do it now.
-                //
-                // This isn't necessary for correctness, the remote state is
-                // consistent without the uploads and deletions, and we would
-                // update the index file on next flush iteration too. But it
-                // could take a while until that happens.
-                if let Some(remote_client) = &self.remote_client {
-                    remote_client.schedule_index_upload_for_file_changes()?;
-                }
             }
             Err(err) => {
                 // no partitioning? This is normal, if the timeline was just created
@@ -2541,10 +2613,13 @@ impl Timeline {
     ) -> anyhow::Result<(KeyPartitioning, Lsn)> {
         {
             let partitioning_guard = self.partitioning.lock().unwrap();
-            if partitioning_guard.1 != Lsn(0)
-                && lsn.0 - partitioning_guard.1 .0 <= self.repartition_threshold
-            {
-                // no repartitioning needed
+            let distance = lsn.0 - partitioning_guard.1 .0;
+            if partitioning_guard.1 != Lsn(0) && distance <= self.repartition_threshold {
+                debug!(
+                    distance,
+                    threshold = self.repartition_threshold,
+                    "no repartitioning needed"
+                );
                 return Ok((partitioning_guard.0.clone(), partitioning_guard.1));
             }
         }
@@ -2562,7 +2637,11 @@ impl Timeline {
 
     // Is it time to create a new image layer for the given partition?
     fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<bool> {
+        let threshold = self.get_image_creation_threshold();
+
         let layers = self.layers.read().unwrap();
+
+        let mut max_deltas = 0;
 
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
@@ -2585,21 +2664,25 @@ impl Timeline {
                 // are some delta layers *later* than current 'lsn', if more WAL was processed and flushed
                 // after we read last_record_lsn, which is passed here in the 'lsn' argument.
                 if img_lsn < lsn {
-                    let threshold = self.get_image_creation_threshold();
                     let num_deltas =
                         layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
 
-                    debug!(
-                        "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
-                        img_range.start, img_range.end, num_deltas, img_lsn, lsn
-                    );
+                    max_deltas = max_deltas.max(num_deltas);
                     if num_deltas >= threshold {
+                        debug!(
+                            "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
+                            img_range.start, img_range.end, num_deltas, img_lsn, lsn
+                        );
                         return Ok(true);
                     }
                 }
             }
         }
 
+        debug!(
+            max_deltas,
+            "none of the partitioned ranges had >= {threshold} deltas"
+        );
         Ok(false)
     }
 
@@ -2712,25 +2795,55 @@ impl Timeline {
         Ok(layer_paths_to_upload)
     }
 }
+
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
     new_layers: Vec<DeltaLayer>,
     deltas_to_compact: Vec<Arc<dyn PersistentLayer>>,
 }
 
+/// Top-level failure to compact.
+#[derive(Debug)]
+enum CompactionError {
+    /// L0 compaction requires layers to be downloaded.
+    ///
+    /// This should not happen repeatedly, but will be retried once by top-level
+    /// `Timeline::compact`.
+    DownloadRequired(Vec<Arc<RemoteLayer>>),
+    /// Compaction cannot be done right now; page reconstruction and so on.
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for CompactionError {
+    fn from(value: anyhow::Error) -> Self {
+        CompactionError::Other(value)
+    }
+}
+
 impl Timeline {
+    /// Level0 files first phase of compaction, explained in the [`compact_inner`] comment.
+    ///
+    /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
+    /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
+    /// start of level0 files compaction, the on-demand download should be revisited as well.
     async fn compact_level0_phase1(
         &self,
+        _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         target_file_size: u64,
         ctx: &RequestContext,
-    ) -> anyhow::Result<CompactLevel0Phase1Result> {
+    ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
         // Only compact if enough layers have accumulated.
-        if level0_deltas.is_empty() || level0_deltas.len() < self.get_compaction_threshold() {
-            return Ok(Default::default());
+        let threshold = self.get_compaction_threshold();
+        if level0_deltas.is_empty() || level0_deltas.len() < threshold {
+            debug!(
+                level0_deltas = level0_deltas.len(),
+                threshold, "too few deltas to compact"
+            );
+            return Ok(CompactLevel0Phase1Result::default());
         }
 
         // Gather the files to compact in this iteration.
@@ -2766,6 +2879,24 @@ impl Timeline {
             end: deltas_to_compact.last().unwrap().get_lsn_range().end,
         };
 
+        let remotes = deltas_to_compact
+            .iter()
+            .filter(|l| l.is_remote_layer())
+            .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
+            .map(|l| {
+                l.clone()
+                    .downcast_remote_layer()
+                    .expect("just checked it is remote layer")
+            })
+            .collect::<Vec<_>>();
+
+        if !remotes.is_empty() {
+            // caller is holding the lock to layer_removal_cs, and we don't want to download while
+            // holding that; in future download_remote_layer might take it as well. this is
+            // regardless of earlier image creation downloading on-demand, while holding the lock.
+            return Err(CompactionError::DownloadRequired(remotes));
+        }
+
         info!(
             "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total)",
             lsn_range.start,
@@ -2773,9 +2904,11 @@ impl Timeline {
             deltas_to_compact.len(),
             level0_deltas.len()
         );
+
         for l in deltas_to_compact.iter() {
             info!("compact includes {}", l.filename().file_name());
         }
+
         // We don't need the original list of layers anymore. Drop it so that
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
@@ -2945,7 +3078,9 @@ impl Timeline {
             }
 
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
-                anyhow::bail!("failpoint delta-layer-writer-fail-before-finish");
+                return Err(
+                    anyhow::anyhow!("failpoint delta-layer-writer-fail-before-finish").into(),
+                );
             });
 
             writer.as_mut().unwrap().put_value(key, lsn, value)?;
@@ -2964,7 +3099,7 @@ impl Timeline {
 
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
-            par_fsync::par_fsync(&layer_paths)?;
+            par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
 
             layer_paths.pop().unwrap();
         }
@@ -2986,11 +3121,13 @@ impl Timeline {
         layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         target_file_size: u64,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), CompactionError> {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = self.compact_level0_phase1(target_file_size, ctx).await?;
+        } = self
+            .compact_level0_phase1(layer_removal_cs, target_file_size, ctx)
+            .await?;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
@@ -3014,7 +3151,12 @@ impl Timeline {
         for l in new_layers {
             let new_delta_path = l.path();
 
-            let metadata = new_delta_path.metadata()?;
+            let metadata = new_delta_path.metadata().with_context(|| {
+                format!(
+                    "read file metadata for new created layer {}",
+                    new_delta_path.display()
+                )
+            })?;
 
             if let Some(remote_client) = &self.remote_client {
                 remote_client.schedule_layer_file_upload(
@@ -3248,7 +3390,7 @@ impl Timeline {
 
         let mut layers_to_remove = Vec::new();
 
-        // Scan all on-disk layers in the timeline.
+        // Scan all layers in the timeline (remote or on-disk).
         //
         // Garbage collect the layer if all conditions are satisfied:
         // 1. it is older than cutoff LSN;

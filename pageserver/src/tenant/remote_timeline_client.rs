@@ -571,14 +571,15 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    ///
     /// Launch a delete operation in the background.
+    ///
+    /// The operation does not modify local state but assumes the local files have already been
+    /// deleted, and is used to mirror those changes to remote.
     ///
     /// Note: This schedules an index file upload before the deletions.  The
     /// deletion won't actually be performed, until any previously scheduled
     /// upload operations, and the index file upload, have completed
     /// succesfully.
-    ///
     pub fn schedule_layer_file_deletion(
         self: &Arc<Self>,
         names: &[LayerFileName],
