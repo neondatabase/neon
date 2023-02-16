@@ -240,8 +240,6 @@ pub struct PostgresBackend {
     pub tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
-pub type PostgresBackendReader = FramedReader<ReadHalf<MaybeTlsStream>>;
-
 pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
     let mut query_string = query_string.to_vec();
     if let Some(ch) = query_string.last() {
@@ -482,7 +480,7 @@ impl PostgresBackend {
             MaybeWriteOnly::Full(framed) => {
                 let (reader, writer) = framed.split();
                 self.framed = MaybeWriteOnly::WriteOnly(writer);
-                Ok(reader)
+                Ok(PostgresBackendReader(reader))
             }
             MaybeWriteOnly::WriteOnly(_) => {
                 anyhow::bail!("PostgresBackend is already split")
@@ -499,7 +497,7 @@ impl PostgresBackend {
                 anyhow::bail!("PostgresBackend is not split")
             }
             MaybeWriteOnly::WriteOnly(writer) => {
-                let joined = Framed::unsplit(reader, writer);
+                let joined = Framed::unsplit(reader.0, writer);
                 self.framed = MaybeWriteOnly::Full(joined);
                 Ok(())
             }
@@ -691,6 +689,101 @@ impl PostgresBackend {
 
         Ok(ProcessMsgResult::Continue)
     }
+
+    /// Log as info/error result of handling COPY stream and send back
+    /// ErrorResponse if that makes sense. Shutdown the stream if we got
+    /// Terminate. TODO: transition into waiting for Sync msg if we initiate the
+    /// close.
+    pub async fn handle_copy_stream_end(&mut self, end: CopyStreamHandlerEnd) {
+        use CopyStreamHandlerEnd::*;
+
+        let expected_end = match &end {
+            ServerInitiated(_) | CopyDone | CopyFail | Terminate | EOF => true,
+            CopyStreamHandlerEnd::Disconnected(ConnectionError::Io(io_error))
+                if is_expected_io_error(io_error) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if expected_end {
+            info!("terminated: {:#}", end);
+        } else {
+            error!("terminated: {:?}", end);
+        }
+
+        // Note: no current usages ever send this
+        if let CopyDone = &end {
+            if let Err(e) = self.write_message_flush(&BeMessage::CopyDone).await {
+                error!("failed to send CopyDone: {}", e);
+            }
+        }
+
+        if let Terminate = &end {
+            if let Err(e) = self.framed.shutdown().await {
+                error!("failed to shutdown stream: {}", e);
+            }
+        }
+
+        let err_to_send = match &end {
+            ServerInitiated(_) | Other(_) => Some(end.to_string()),
+            // Note: we should probably close the socket, as
+            // CopyFail in duplex copy is unexpected (at least to PG
+            // walsender; evidently and per my docs reading client should
+            // finish it with CopyDone). Note that sync rust-postgres client
+            // (which we don't use anymore) hangs otherwise.
+            // https://github.com/sfackler/rust-postgres/issues/755
+            // https://github.com/neondatabase/neon/issues/935
+            //
+            // Currently, the version of tokio_postgres replication patch we
+            // use sends this when it closes the stream (e.g. pageserver
+            // decided to switch conn to another safekeeper and client gets
+            // dropped). Moreover, seems like 'connection' task errors with
+            // 'unexpected message from server' when it receives
+            // ErrorResponse (anything but CopyData/CopyDone) back.
+            CopyFail => Some(end.to_string()),
+            _ => None,
+        };
+        if let Some(e) = err_to_send {
+            if let Err(ee) = self
+                .write_message_flush(&BeMessage::ErrorResponse(&e, None))
+                .await
+            {
+                error!("failed to send ErrorResponse: {}", ee);
+            }
+        }
+    }
+}
+
+pub struct PostgresBackendReader(FramedReader<ReadHalf<MaybeTlsStream>>);
+
+impl PostgresBackendReader {
+    /// Read full message or return None if connection is cleanly closed with no
+    /// unprocessed data.
+    pub async fn read_message(&mut self) -> Result<Option<FeMessage>, ConnectionError> {
+        let m = self.0.read_message().await?;
+        trace!("read msg {:?}", m);
+        Ok(m)
+    }
+
+    /// Get CopyData contents of the next message in COPY stream or error
+    /// closing it. The error type is wider than actual errors which can happen
+    /// here -- it includes 'Other' and 'ServerInitiated', but that's ok for
+    /// current callers.
+    pub async fn read_copy_message(&mut self) -> Result<Bytes, CopyStreamHandlerEnd> {
+        match self.read_message().await? {
+            Some(msg) => match msg {
+                FeMessage::CopyData(m) => Ok(m),
+                FeMessage::CopyDone => Err(CopyStreamHandlerEnd::CopyDone),
+                FeMessage::CopyFail => Err(CopyStreamHandlerEnd::CopyFail),
+                FeMessage::Terminate => Err(CopyStreamHandlerEnd::Terminate),
+                _ => Err(CopyStreamHandlerEnd::from(ConnectionError::Protocol(
+                    ProtocolError::Protocol(format!("unexpected message in COPY stream {:?}", msg)),
+                ))),
+            },
+            None => Err(CopyStreamHandlerEnd::EOF),
+        }
+    }
 }
 
 ///
@@ -772,5 +865,25 @@ pub(super) fn log_query_error(query: &str, e: &QueryError) {
     }
 }
 
-#[cfg(test)]
-mod tests {}
+/// Something finishing handling of COPY stream, see handle_copy_stream_end.
+/// This is not always a real error, but it allows to use ? and thiserror impls.
+#[derive(thiserror::Error, Debug)]
+pub enum CopyStreamHandlerEnd {
+    /// Handler initiates the end of streaming.
+    #[error("{0}")]
+    ServerInitiated(String),
+    #[error("received CopyDone")]
+    CopyDone,
+    #[error("received CopyFail")]
+    CopyFail,
+    #[error("received Terminate")]
+    Terminate,
+    #[error("EOF on COPY stream")]
+    EOF,
+    /// The connection was lost
+    #[error(transparent)]
+    Disconnected(#[from] ConnectionError),
+    /// Some other error
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}

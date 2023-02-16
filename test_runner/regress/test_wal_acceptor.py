@@ -1106,8 +1106,8 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     # FIXME: are these expected?
     env.pageserver.allowed_errors.extend(
         [
-            ".*Failed to process query for timeline .*: Timeline .* was not found in global map.*",
-            ".*Failed to process query for timeline .*: Timeline .* was cancelled and cannot be used anymore.*",
+            ".*Timeline .* was not found in global map.*",
+            ".*Timeline .* was cancelled and cannot be used anymore.*",
         ]
     )
 

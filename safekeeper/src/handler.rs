@@ -172,7 +172,7 @@ impl postgres_backend_async::Handler for SafekeeperPostgresHandler {
         self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
         let span_ttid = self.ttid; // satisfy borrow checker
 
-        let res = match cmd {
+        match cmd {
             SafekeeperPostgresCommand::StartWalPush => {
                 self.handle_start_wal_push(pgb)
                     .instrument(info_span!("WAL receiver", ttid = %span_ttid))
@@ -188,18 +188,6 @@ impl postgres_backend_async::Handler for SafekeeperPostgresHandler {
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
                 handle_json_ctrl(self, pgb, cmd).await
             }
-        };
-
-        match res {
-            Ok(()) => Ok(()),
-            Err(QueryError::Disconnected(connection_error)) => {
-                info!("Timeline {tenant_id}/{timeline_id} query failed with connection error: {connection_error}");
-                Err(QueryError::Disconnected(connection_error))
-            }
-            Err(QueryError::Other(e)) => Err(QueryError::Other(e.context(format!(
-                "Failed to process query for timeline {}",
-                self.ttid
-            )))),
         }
     }
 }

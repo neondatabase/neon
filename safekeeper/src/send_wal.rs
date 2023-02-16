@@ -1,34 +1,25 @@
 //! This module implements the streaming side of replication protocol, starting
 //! with the "START_REPLICATION" message.
 
-use anyhow::Context as AnyhowContext;
-use bytes::Bytes;
-
-use postgres_ffi::get_current_timestamp;
-use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
-use pq_proto::framed::ConnectionError;
-use serde::{Deserialize, Serialize};
-
-use std::cmp::min;
-
-use std::io::ErrorKind;
-
-use std::sync::Arc;
-
-use std::time::Duration;
-use std::{io, str};
-use tokio::sync::watch::Receiver;
-use tokio::time::timeout;
-use tracing::*;
-use utils::postgres_backend_async::{PostgresBackendReader, QueryError};
-
-use pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
-use utils::{bin_ser::BeSer, lsn::Lsn, postgres_backend_async::PostgresBackend};
-
 use crate::handler::SafekeeperPostgresHandler;
 use crate::timeline::{ReplicaState, Timeline};
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
+use anyhow::Context as AnyhowContext;
+use bytes::Bytes;
+use postgres_ffi::get_current_timestamp;
+use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
+use pq_proto::{BeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
+use serde::{Deserialize, Serialize};
+use std::cmp::min;
+use std::str;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch::Receiver;
+use tokio::time::timeout;
+use tracing::*;
+use utils::postgres_backend_async::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
+use utils::{bin_ser::BeSer, lsn::Lsn, postgres_backend_async::PostgresBackend};
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';
@@ -79,11 +70,25 @@ impl Drop for ReplicationConnGuard {
 }
 
 impl SafekeeperPostgresHandler {
+    /// Wrapper around handle_start_replication_guts handling result. Error is
+    /// handled here while we're still in walsender ttid span; with API
+    /// extension, this can probably be moved into postgres_backend.
     pub async fn handle_start_replication(
         &mut self,
         pgb: &mut PostgresBackend,
         start_pos: Lsn,
     ) -> Result<(), QueryError> {
+        if let Err(end) = self.handle_start_replication_guts(pgb, start_pos).await {
+            pgb.handle_copy_stream_end(end).await;
+        }
+        Ok(())
+    }
+
+    pub async fn handle_start_replication_guts(
+        &mut self,
+        pgb: &mut PostgresBackend,
+        start_pos: Lsn,
+    ) -> Result<(), CopyStreamHandlerEnd> {
         let appname = self.appname.clone();
         let tli = GlobalTimelines::get(self.ttid)?;
 
@@ -190,17 +195,22 @@ struct WalSender<'a> {
 impl WalSender<'_> {
     /// Send WAL until
     /// - an error occurs
+    /// - if we are streaming to walproposer, we've streamed until stop_pos
+    ///   (recovery finished)
     /// - receiver is caughtup and there is no computes
-    async fn run(&mut self) -> Result<(), QueryError> {
+    ///
+    /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
+    /// convenience.
+    async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             // If we are streaming to walproposer, check it is time to stop.
             if let Some(stop_pos) = self.stop_pos {
                 if self.start_pos >= stop_pos {
                     // recovery finished
-                    // TODO close the stream properly
-                    return Err(anyhow::anyhow!(format!(
-                                "ending streaming to walproposer at {}, receiver is caughtup and there is no computes",
-                                self.start_pos)).into());
+                    return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
+                        "ending streaming to walproposer at {}, recovery finished",
+                        self.start_pos
+                    )));
                 }
             } else {
                 // Wait for the next portion if it is not there yet, or just
@@ -229,8 +239,7 @@ impl WalSender<'_> {
                     timestamp: get_current_timestamp(),
                     data: send_buf,
                 }))
-                .await
-                .context("Failed to send XLogData")?;
+                .await?;
 
             trace!(
                 "sent {} bytes of WAL {}-{}",
@@ -244,7 +253,7 @@ impl WalSender<'_> {
 
     /// wait until we have WAL to stream, sending keepalives and checking for
     /// exit in the meanwhile
-    async fn wait_wal(&mut self) -> Result<(), QueryError> {
+    async fn wait_wal(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             if let Some(lsn) = wait_for_lsn(&mut self.commit_lsn_watch_rx, self.start_pos).await? {
                 self.end_pos = lsn;
@@ -254,11 +263,10 @@ impl WalSender<'_> {
             if self.tli.should_walsender_stop(self.replica_id) {
                 // Terminate if there is nothing more to send.
                 // TODO close the stream properly
-                return Err(anyhow::anyhow!(format!(
+                return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
                     "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
                     self.appname, self.start_pos,
-                ))
-                .into());
+                )));
             }
             self.pgb
                 .write_message_flush(&BeMessage::KeepAlive(WalSndKeepAlive {
@@ -280,80 +288,45 @@ struct ReplyReader {
 }
 
 impl ReplyReader {
-    async fn run(&mut self) -> Result<(), QueryError> {
+    async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
-            match self.reader.read_message().await? {
-                Some(msg) => self.handle_feedback(&msg)?,
-                None => {
-                    return Err(QueryError::from(ConnectionError::Io(io::Error::new(
-                        ErrorKind::UnexpectedEof,
-                        "EOF on START_REPLICATION stream",
-                    ))))
-                }
-            }
+            let msg = self.reader.read_copy_message().await?;
+            self.handle_feedback(&msg)?
         }
     }
 
-    fn handle_feedback(&mut self, msg: &FeMessage) -> Result<(), QueryError> {
-        match &msg {
-            FeMessage::CopyData(m) => {
-                // There's three possible data messages that the client is supposed to send here:
-                // `HotStandbyFeedback` and `StandbyStatusUpdate` and `NeonStandbyFeedback`.
-                match m.first().cloned() {
-                    Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
-                        // Note: deserializing is on m[1..] because we skip the tag byte.
-                        self.feedback.hs_feedback = HotStandbyFeedback::des(&m[1..])
-                            .context("failed to deserialize HotStandbyFeedback")?;
-                        self.tli
-                            .update_replica_state(self.replica_id, self.feedback);
-                    }
-                    Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
-                        let _reply = StandbyReply::des(&m[1..])
-                            .context("failed to deserialize StandbyReply")?;
-                        // This must be a regular postgres replica,
-                        // because pageserver doesn't send this type of messages to safekeeper.
-                        // Currently we just ignore this, tracking progress for them is not supported.
-                    }
-                    Some(NEON_STATUS_UPDATE_TAG_BYTE) => {
-                        // pageserver sends this.
-                        // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
-                        let buf = Bytes::copy_from_slice(&m[9..]);
-                        let reply = ReplicationFeedback::parse(buf);
+    fn handle_feedback(&mut self, msg: &Bytes) -> anyhow::Result<()> {
+        match msg.first().cloned() {
+            Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
+                // Note: deserializing is on m[1..] because we skip the tag byte.
+                self.feedback.hs_feedback = HotStandbyFeedback::des(&msg[1..])
+                    .context("failed to deserialize HotStandbyFeedback")?;
+                self.tli
+                    .update_replica_state(self.replica_id, self.feedback);
+            }
+            Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
+                let _reply =
+                    StandbyReply::des(&msg[1..]).context("failed to deserialize StandbyReply")?;
+                // This must be a regular postgres replica,
+                // because pageserver doesn't send this type of messages to safekeeper.
+                // Currently we just ignore this, tracking progress for them is not supported.
+            }
+            Some(NEON_STATUS_UPDATE_TAG_BYTE) => {
+                // pageserver sends this.
+                // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
+                let buf = Bytes::copy_from_slice(&msg[9..]);
+                let reply = ReplicationFeedback::parse(buf);
 
-                        trace!("ReplicationFeedback is {:?}", reply);
-                        // Only pageserver sends ReplicationFeedback, so set the flag.
-                        // This replica is the source of information to resend to compute.
-                        self.feedback.pageserver_feedback = Some(reply);
+                trace!("ReplicationFeedback is {:?}", reply);
+                // Only pageserver sends ReplicationFeedback, so set the flag.
+                // This replica is the source of information to resend to compute.
+                self.feedback.pageserver_feedback = Some(reply);
 
-                        self.tli
-                            .update_replica_state(self.replica_id, self.feedback);
-                    }
-                    _ => warn!("unexpected message {:?}", msg),
-                }
+                self.tli
+                    .update_replica_state(self.replica_id, self.feedback);
             }
-            FeMessage::CopyFail => {
-                // Note: we should probably (tell pgb to) close the socket, as
-                // CopyFail in duplex copy is unexpected (at least to PG
-                // walsender; evidently and per my docs reading client should
-                // finish it with CopyDone). Note that sync rust-postgres client
-                // (which we don't use anymore) hangs otherwise.
-                // https://github.com/sfackler/rust-postgres/issues/755
-                // https://github.com/neondatabase/neon/issues/935
-                //
-                // Currently, the version of tokio_postgres replication patch we
-                // use sends this when it closes the stream (e.g. pageserver
-                // decided to switch conn to another safekeeper and client gets
-                // dropped). Moreover, seems like 'connection' task errors with
-                // 'unexpected message from server' when it receives
-                // ErrorResponse (anything but CopyData/CopyDone) back.
-                return Err(anyhow::anyhow!("received CopyFail").into());
-            }
-            _ => {
-                return Err(
-                    anyhow::anyhow!("unexpected message {:?} in replication stream", msg).into(),
-                );
-            }
-        };
+            _ => warn!("unexpected message {:?}", msg),
+        }
         Ok(())
     }
 }

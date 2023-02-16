@@ -2,11 +2,16 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
+use crate::get_tid;
+use crate::handler::SafekeeperPostgresHandler;
+use crate::safekeeper::AcceptorProposerMessage;
+use crate::safekeeper::ProposerAcceptorMessage;
+use crate::safekeeper::ServerInfo;
+use crate::timeline::Timeline;
+use crate::GlobalTimelines;
 use anyhow::{anyhow, Context};
 use bytes::BytesMut;
-use pq_proto::framed::ConnectionError;
-use std::io;
-use std::io::ErrorKind;
+use pq_proto::BeMessage;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
@@ -17,17 +22,9 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::task::spawn_blocking;
 use tracing::*;
-
-use crate::handler::SafekeeperPostgresHandler;
-use crate::safekeeper::AcceptorProposerMessage;
-use crate::safekeeper::ProposerAcceptorMessage;
-use crate::safekeeper::ServerInfo;
-use crate::timeline::Timeline;
-use crate::GlobalTimelines;
-use pq_proto::BeMessage;
-use pq_proto::FeMessage;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
+use utils::postgres_backend_async::CopyStreamHandlerEnd;
 use utils::postgres_backend_async::PostgresBackend;
 use utils::postgres_backend_async::PostgresBackendReader;
 use utils::postgres_backend_async::QueryError;
@@ -36,10 +33,23 @@ const MSG_QUEUE_SIZE: usize = 256;
 const REPLY_QUEUE_SIZE: usize = 16;
 
 impl SafekeeperPostgresHandler {
+    /// Wrapper around handle_start_wal_push_guts handling result. Error is
+    /// handled here while we're still in walreceiver ttid span; with API
+    /// extension, this can probably be moved into postgres_backend.
     pub async fn handle_start_wal_push(
         &mut self,
         pgb: &mut PostgresBackend,
     ) -> Result<(), QueryError> {
+        if let Err(end) = self.handle_start_wal_push_guts(pgb).await {
+            pgb.handle_copy_stream_end(end).await;
+        }
+        Ok(())
+    }
+
+    pub async fn handle_start_wal_push_guts(
+        &mut self,
+        pgb: &mut PostgresBackend,
+    ) -> Result<(), CopyStreamHandlerEnd> {
         // Notify the libpq client that it's allowed to send `CopyData` messages
         pgb.write_message_flush(&BeMessage::CopyBothResponse)
             .await?;
@@ -82,8 +92,10 @@ impl SafekeeperPostgresHandler {
                 // Otherwise, WalAcceptor thread must have errored.
                 match wal_acceptor_res {
                     Ok(Ok(_)) => Ok(()), // can't happen currently; would be if we add graceful termination
-                    Ok(Err(e)) => Err(QueryError::Other(e.context("WAL acceptor"))),
-                    Err(_) => Err(QueryError::Other(anyhow!("WalAcceptor thread panicked",))),
+                    Ok(Err(e)) => Err(CopyStreamHandlerEnd::Other(e.context("WAL acceptor"))),
+                    Err(_) => Err(CopyStreamHandlerEnd::Other(anyhow!(
+                        "WalAcceptor thread panicked",
+                    ))),
                 }
             }
         }
@@ -94,23 +106,8 @@ impl SafekeeperPostgresHandler {
 /// TODO: Return Ok(None) on graceful termination.
 async fn read_message(
     pgb_reader: &mut PostgresBackendReader,
-) -> Result<ProposerAcceptorMessage, QueryError> {
-    let copy_data = match pgb_reader.read_message().await {
-        Ok(Some(FeMessage::CopyData(bytes))) => bytes,
-        Ok(Some(msg)) => {
-            return Err(QueryError::Other(anyhow::anyhow!(
-                "expected `CopyData` message, found {msg:?}"
-            )))
-        }
-        Ok(None) => {
-            return Err(QueryError::from(ConnectionError::Io(io::Error::new(
-                ErrorKind::Other,
-                "EOF on START_WAL_PUSH stream",
-            ))))
-        }
-        Err(e) => return Err(QueryError::from(e)),
-    };
-
+) -> Result<ProposerAcceptorMessage, CopyStreamHandlerEnd> {
+    let copy_data = pgb_reader.read_copy_message().await?;
     let msg = ProposerAcceptorMessage::parse(copy_data)?;
     Ok(msg)
 }
@@ -128,7 +125,7 @@ async fn read_network(
     acceptor_handle: &mut Option<JoinHandle<anyhow::Result<()>>>,
     msg_rx: Receiver<ProposerAcceptorMessage>,
     reply_tx: Sender<AcceptorProposerMessage>,
-) -> Result<(), QueryError> {
+) -> Result<(), CopyStreamHandlerEnd> {
     // Receive information about server to create timeline, if not yet.
     let next_msg = read_message(pgb_reader).await?;
     let tli = match next_msg {
@@ -145,15 +142,10 @@ async fn read_network(
             GlobalTimelines::create(ttid, server_info, Lsn::INVALID, Lsn::INVALID).await?
         }
         _ => {
-            return Err(QueryError::Other(anyhow::anyhow!(
+            return Err(CopyStreamHandlerEnd::Other(anyhow::anyhow!(
                 "unexpected message {next_msg:?} instead of greeting"
             )))
         }
-    };
-    // Now that we have timeline, register the connection and defer unregister.
-    tli.on_compute_connect().await?;
-    let _guard = ComputeConnectionGuard {
-        timeline: Arc::clone(&tli),
     };
 
     *acceptor_handle = Some(
@@ -168,7 +160,7 @@ async fn read_network_loop(
     pgb_reader: &mut PostgresBackendReader,
     msg_tx: Sender<ProposerAcceptorMessage>,
     mut next_msg: ProposerAcceptorMessage,
-) -> Result<(), QueryError> {
+) -> Result<(), CopyStreamHandlerEnd> {
     loop {
         if msg_tx.send(next_msg).await.is_err() {
             return Ok(()); // chan closed, WalAcceptor terminated
@@ -183,7 +175,7 @@ async fn read_network_loop(
 async fn write_network(
     pgb_writer: &mut PostgresBackend,
     mut reply_rx: Receiver<AcceptorProposerMessage>,
-) -> Result<(), QueryError> {
+) -> Result<(), CopyStreamHandlerEnd> {
     let mut buf = BytesMut::with_capacity(128);
 
     loop {
@@ -230,8 +222,9 @@ impl WalAcceptor {
 
                 let span_ttid = wa.tli.ttid; // satisfy borrow checker
                 runtime.block_on(
-                    wa.run()
-                        .instrument(info_span!("WAL acceptor", ttid = %span_ttid)),
+                    wa.run().instrument(
+                        info_span!("WAL acceptor", tid = ?get_tid(), ttid = %span_ttid),
+                    ),
                 )
             })
             .map_err(anyhow::Error::from)
@@ -240,6 +233,12 @@ impl WalAcceptor {
     /// The main loop. Returns Ok(()) if either msg_rx or reply_tx got closed;
     /// it must mean that network thread terminated.
     async fn run(&mut self) -> anyhow::Result<()> {
+        // Register the connection and defer unregister.
+        self.tli.on_compute_connect().await?;
+        let _guard = ComputeConnectionGuard {
+            timeline: Arc::clone(&self.tli),
+        };
+
         let mut next_msg: ProposerAcceptorMessage;
 
         loop {
