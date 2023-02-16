@@ -75,7 +75,7 @@ pub async fn collect_metrics(
     // define client here to reuse it for all requests
     let client = reqwest::Client::new();
     let mut cached_metrics: HashMap<PageserverConsumptionMetricsKey, u64> = HashMap::new();
-    let mut prev_iteration_time: Option<std::time::Instant> = None;
+    let mut prev_iteration_time: std::time::Instant = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -86,11 +86,11 @@ pub async fn collect_metrics(
             _ = ticker.tick() => {
 
                 // send cached metrics every cached_metric_collection_interval
-                let send_cached = prev_iteration_time
-                .map(|x| x.elapsed() >= cached_metric_collection_interval)
-                .unwrap_or(false);
+                let send_cached = prev_iteration_time.elapsed() >= cached_metric_collection_interval;
 
-                prev_iteration_time = Some(std::time::Instant::now());
+                if send_cached {
+                    prev_iteration_time = std::time::Instant::now();
+                }
 
                 collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
             }
