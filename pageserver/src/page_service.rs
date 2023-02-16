@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::*;
 use utils::id::ConnectionId;
+use utils::postgres_backend::PostgresBackendTCP;
 use utils::{
     auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
@@ -55,7 +56,7 @@ use crate::trace::Tracer;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
-fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + '_ {
+fn copyin_stream(pgb: &mut PostgresBackendTCP) -> impl Stream<Item = io::Result<Bytes>> + '_ {
     async_stream::try_stream! {
         loop {
             let msg = tokio::select! {
@@ -289,7 +290,7 @@ impl PageServerHandler {
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_pagerequests(
         &self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         ctx: RequestContext,
@@ -393,7 +394,7 @@ impl PageServerHandler {
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_import_basebackup(
         &self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         base_lsn: Lsn,
@@ -449,7 +450,7 @@ impl PageServerHandler {
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_import_wal(
         &self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         start_lsn: Lsn,
@@ -660,7 +661,7 @@ impl PageServerHandler {
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_basebackup_request(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         lsn: Option<Lsn>,
@@ -724,10 +725,10 @@ impl PageServerHandler {
 }
 
 #[async_trait::async_trait]
-impl postgres_backend::Handler for PageServerHandler {
+impl postgres_backend::Handler<tokio::net::TcpStream> for PageServerHandler {
     fn check_auth_jwt(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackendTCP,
         jwt_response: &[u8],
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
@@ -755,7 +756,7 @@ impl postgres_backend::Handler for PageServerHandler {
 
     fn startup(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackendTCP,
         _sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         Ok(())
@@ -763,7 +764,7 @@ impl postgres_backend::Handler for PageServerHandler {
 
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         query_string: &str,
     ) -> Result<(), QueryError> {
         let ctx = self.connection_ctx.attached_child();

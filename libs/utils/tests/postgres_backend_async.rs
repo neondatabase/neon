@@ -3,6 +3,7 @@ use once_cell::sync::Lazy;
 use pq_proto::{BeMessage, RowDescriptor};
 use std::io::Cursor;
 use std::{future, sync::Arc};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::MakeTlsConnect;
@@ -22,11 +23,11 @@ async fn make_tcp_pair() -> (TcpStream, TcpStream) {
 struct TestHandler {}
 
 #[async_trait::async_trait]
-impl Handler for TestHandler {
+impl<IO: AsyncRead + AsyncWrite + Unpin + Send> Handler<IO> for TestHandler {
     // return single col 'hey' for any query
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
         _query_string: &str,
     ) -> Result<(), QueryError> {
         pgb.write_message(&BeMessage::RowDescription(&[RowDescriptor::text_col(

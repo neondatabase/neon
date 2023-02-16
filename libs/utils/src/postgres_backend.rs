@@ -57,14 +57,14 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
 }
 
 #[async_trait::async_trait]
-pub trait Handler {
+pub trait Handler<IO> {
     /// Handle single query.
     /// postgres_backend will issue ReadyForQuery after calling this (this
     /// might be not what we want after CopyData streaming, but currently we don't
     /// care).
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError>;
 
@@ -75,7 +75,7 @@ pub trait Handler {
     /// to override whole init logic in implementations.
     fn startup(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackend<IO>,
         _sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         Ok(())
@@ -84,7 +84,7 @@ pub trait Handler {
     /// Check auth jwt
     fn check_auth_jwt(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackend<IO>,
         _jwt_response: &[u8],
     ) -> Result<(), QueryError> {
         Err(QueryError::Other(anyhow::anyhow!("JWT auth failed")))
@@ -110,12 +110,12 @@ pub enum ProcessMsgResult {
 }
 
 /// Either plain TCP stream or encrypted one, implementing AsyncRead + AsyncWrite.
-pub enum MaybeTlsStream {
-    Unencrypted(tokio::net::TcpStream),
-    Tls(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
+pub enum MaybeTlsStream<IO> {
+    Unencrypted(IO),
+    Tls(Box<tokio_rustls::server::TlsStream<IO>>),
 }
 
-impl AsyncWrite for MaybeTlsStream {
+impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<IO> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -142,7 +142,7 @@ impl AsyncWrite for MaybeTlsStream {
         }
     }
 }
-impl AsyncRead for MaybeTlsStream {
+impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for MaybeTlsStream<IO> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -187,13 +187,13 @@ impl fmt::Display for AuthType {
 /// PostgresBackend after call to `split`. In principle we could always store a
 /// pair of splitted handles, but that would force to to pay splitting price
 /// (Arc and kinda mutex inside polling) for all uses (e.g. pageserver).
-enum MaybeWriteOnly {
-    Full(Framed<MaybeTlsStream>),
-    WriteOnly(FramedWriter<WriteHalf<MaybeTlsStream>>),
+enum MaybeWriteOnly<IO> {
+    Full(Framed<MaybeTlsStream<IO>>),
+    WriteOnly(FramedWriter<WriteHalf<MaybeTlsStream<IO>>>),
     Broken, // temporary value palmed off during the split
 }
 
-impl MaybeWriteOnly {
+impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeWriteOnly<IO> {
     async fn read_message(&mut self) -> Result<Option<FeMessage>, ConnectionError> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.read_message().await,
@@ -229,8 +229,8 @@ impl MaybeWriteOnly {
     }
 }
 
-pub struct PostgresBackend {
-    framed: MaybeWriteOnly,
+pub struct PostgresBackend<IO> {
+    framed: MaybeWriteOnly<IO>,
 
     pub state: ProtoState,
 
@@ -239,6 +239,8 @@ pub struct PostgresBackend {
     peer_addr: SocketAddr,
     pub tls_config: Option<Arc<rustls::ServerConfig>>,
 }
+
+pub type PostgresBackendTCP = PostgresBackend<tokio::net::TcpStream>;
 
 pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
     let mut query_string = query_string.to_vec();
@@ -256,13 +258,32 @@ fn cstr_to_str(bytes: &[u8]) -> anyhow::Result<&str> {
     std::str::from_utf8(without_null).map_err(|e| e.into())
 }
 
-impl PostgresBackend {
+impl PostgresBackend<tokio::net::TcpStream> {
     pub fn new(
         socket: tokio::net::TcpStream,
         auth_type: AuthType,
         tls_config: Option<Arc<rustls::ServerConfig>>,
     ) -> io::Result<Self> {
         let peer_addr = socket.peer_addr()?;
+        let stream = MaybeTlsStream::Unencrypted(socket);
+
+        Ok(Self {
+            framed: MaybeWriteOnly::Full(Framed::new(stream)),
+            state: ProtoState::Initialization,
+            auth_type,
+            tls_config,
+            peer_addr,
+        })
+    }
+}
+
+impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
+    pub fn new_from_io(
+        socket: IO,
+        peer_addr: SocketAddr,
+        auth_type: AuthType,
+        tls_config: Option<Arc<rustls::ServerConfig>>,
+    ) -> io::Result<Self> {
         let stream = MaybeTlsStream::Unencrypted(socket);
 
         Ok(Self {
@@ -338,14 +359,14 @@ impl PostgresBackend {
     /// to it in CopyData messages, and writes them to the connection
     ///
     /// The caller is responsible for sending CopyOutResponse and CopyDone messages.
-    pub fn copyout_writer(&mut self) -> CopyDataWriter {
+    pub fn copyout_writer(&mut self) -> CopyDataWriter<IO> {
         CopyDataWriter { pgb: self }
     }
 
     /// Wrapper for run_message_loop() that shuts down socket when we are done
     pub async fn run<F, S>(
         mut self,
-        handler: &mut impl Handler,
+        handler: &mut impl Handler<IO>,
         shutdown_watcher: F,
     ) -> Result<(), QueryError>
     where
@@ -359,7 +380,7 @@ impl PostgresBackend {
 
     async fn run_message_loop<F, S>(
         &mut self,
-        handler: &mut impl Handler,
+        handler: &mut impl Handler<IO>,
         shutdown_watcher: F,
     ) -> Result<(), QueryError>
     where
@@ -434,9 +455,9 @@ impl PostgresBackend {
 
     /// Try to upgrade MaybeTlsStream into actual TLS one, performing handshake.
     async fn tls_upgrade(
-        src: MaybeTlsStream,
+        src: MaybeTlsStream<IO>,
         tls_config: Arc<rustls::ServerConfig>,
-    ) -> anyhow::Result<MaybeTlsStream> {
+    ) -> anyhow::Result<MaybeTlsStream<IO>> {
         match src {
             MaybeTlsStream::Unencrypted(s) => {
                 let acceptor = TlsAcceptor::from(tls_config);
@@ -474,7 +495,7 @@ impl PostgresBackend {
 
     /// Split off owned read part from which messages can be read in different
     /// task/thread.
-    pub fn split(&mut self) -> anyhow::Result<PostgresBackendReader> {
+    pub fn split(&mut self) -> anyhow::Result<PostgresBackendReader<IO>> {
         // temporary replace stream with fake to cook split one, Indiana Jones style
         match std::mem::replace(&mut self.framed, MaybeWriteOnly::Broken) {
             MaybeWriteOnly::Full(framed) => {
@@ -490,7 +511,7 @@ impl PostgresBackend {
     }
 
     /// Join read part back.
-    pub fn unsplit(&mut self, reader: PostgresBackendReader) -> anyhow::Result<()> {
+    pub fn unsplit(&mut self, reader: PostgresBackendReader<IO>) -> anyhow::Result<()> {
         // temporary replace stream with fake to cook joined one, Indiana Jones style
         match std::mem::replace(&mut self.framed, MaybeWriteOnly::Broken) {
             MaybeWriteOnly::Full(_) => {
@@ -507,7 +528,7 @@ impl PostgresBackend {
 
     async fn process_handshake_message(
         &mut self,
-        handler: &mut impl Handler,
+        handler: &mut impl Handler<IO>,
         msg: FeMessage,
     ) -> Result<ProcessMsgResult, QueryError> {
         assert!(self.state < ProtoState::Established);
@@ -606,7 +627,7 @@ impl PostgresBackend {
 
     async fn process_message(
         &mut self,
-        handler: &mut impl Handler,
+        handler: &mut impl Handler<IO>,
         msg: FeMessage,
         unnamed_query_string: &mut Bytes,
     ) -> Result<ProcessMsgResult, QueryError> {
@@ -755,9 +776,9 @@ impl PostgresBackend {
     }
 }
 
-pub struct PostgresBackendReader(FramedReader<ReadHalf<MaybeTlsStream>>);
+pub struct PostgresBackendReader<IO>(FramedReader<ReadHalf<MaybeTlsStream<IO>>>);
 
-impl PostgresBackendReader {
+impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackendReader<IO> {
     /// Read full message or return None if connection is cleanly closed with no
     /// unprocessed data.
     pub async fn read_message(&mut self) -> Result<Option<FeMessage>, ConnectionError> {
@@ -791,11 +812,11 @@ impl PostgresBackendReader {
 /// messages.
 ///
 
-pub struct CopyDataWriter<'a> {
-    pgb: &'a mut PostgresBackend,
+pub struct CopyDataWriter<'a, IO> {
+    pgb: &'a mut PostgresBackend<IO>,
 }
 
-impl<'a> AsyncWrite for CopyDataWriter<'a> {
+impl<'a, IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'a, IO> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

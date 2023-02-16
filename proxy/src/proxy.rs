@@ -8,7 +8,7 @@ use crate::{
     config::{ProxyConfig, TlsConfig},
     console::{self, messages::MetricsAuxInfo},
     error::io_error,
-    stream::{MeasuredStream, PqStream, Stream},
+    stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
@@ -18,6 +18,7 @@ use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, info_span, warn, Instrument};
+use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
 const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
@@ -352,16 +353,24 @@ async fn proxy_pass(
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
-    let mut client = MeasuredStream::new(client, |cnt| {
-        // Number of bytes we sent to the client (outbound).
-        m_sent.inc_by(cnt as u64);
-    });
+    let mut client = MeasuredStream::new(
+        client,
+        |_| {},
+        |cnt| {
+            // Number of bytes we sent to the client (outbound).
+            m_sent.inc_by(cnt as u64);
+        },
+    );
 
     let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
-    let mut compute = MeasuredStream::new(compute, |cnt| {
-        // Number of bytes the client sent to the compute node (inbound).
-        m_recv.inc_by(cnt as u64);
-    });
+    let mut compute = MeasuredStream::new(
+        compute,
+        |_| {},
+        |cnt| {
+            // Number of bytes the client sent to the compute node (inbound).
+            m_recv.inc_by(cnt as u64);
+        },
+    );
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");

@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, info_span};
 use utils::{
     postgres_backend::QueryError,
-    postgres_backend::{self, AuthType, PostgresBackend},
+    postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP},
 };
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
@@ -77,10 +77,10 @@ pub type ComputeReady = Result<DatabaseInfo, String>;
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
 #[async_trait::async_trait]
-impl postgres_backend::Handler for MgmtHandler {
+impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         query: &str,
     ) -> Result<(), QueryError> {
         try_process_query(pgb, query).await.map_err(|e| {
@@ -90,7 +90,7 @@ impl postgres_backend::Handler for MgmtHandler {
     }
 }
 
-async fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), QueryError> {
+async fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);

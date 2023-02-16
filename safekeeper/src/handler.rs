@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use std::str;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span, Instrument};
 
 use crate::auth::check_permission;
@@ -74,11 +75,13 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
 }
 
 #[async_trait::async_trait]
-impl postgres_backend::Handler for SafekeeperPostgresHandler {
+impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
+    for SafekeeperPostgresHandler
+{
     // tenant_id and timeline_id are passed in connection string params
     fn startup(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackend<IO>,
         sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
@@ -117,7 +120,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
     fn check_auth_jwt(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackend<IO>,
         jwt_response: &[u8],
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
@@ -146,7 +149,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError> {
         if query_string
@@ -224,9 +227,9 @@ impl SafekeeperPostgresHandler {
     ///
     /// Handle IDENTIFY_SYSTEM replication command
     ///
-    async fn handle_identify_system(
+    async fn handle_identify_system<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
         let tli = GlobalTimelines::get(self.ttid)?;
 
@@ -282,10 +285,10 @@ impl SafekeeperPostgresHandler {
         Ok(())
     }
 
-    async fn handle_show(
+    async fn handle_show<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         guc: String,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
         match guc.as_str() {
             // pg_receivewal wants it

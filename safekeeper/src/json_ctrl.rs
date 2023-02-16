@@ -11,9 +11,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::*;
 use utils::id::TenantTimelineId;
-use utils::postgres_backend::QueryError;
+use utils::postgres_backend::{PostgresBackend, QueryError};
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
@@ -26,7 +27,7 @@ use crate::GlobalTimelines;
 use postgres_ffi::encode_logical_message;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
-use utils::{lsn::Lsn, postgres_backend::PostgresBackend};
+use utils::lsn::Lsn;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {
@@ -59,9 +60,9 @@ struct AppendResult {
 /// Handles command to craft logical message WAL record with given
 /// content, and then append it with specified term and lsn. This
 /// function is used to test safekeepers in different scenarios.
-pub async fn handle_json_ctrl(
+pub async fn handle_json_ctrl<IO: AsyncRead + AsyncWrite + Unpin>(
     spg: &SafekeeperPostgresHandler,
-    pgb: &mut PostgresBackend,
+    pgb: &mut PostgresBackend<IO>,
     append_request: &AppendLogicalMessage,
 ) -> Result<(), QueryError> {
     info!("JSON_CTRL request: {append_request:?}");

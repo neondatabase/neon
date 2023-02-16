@@ -4449,6 +4449,7 @@ dependencies = [
  "metrics",
  "nix",
  "once_cell",
+ "pin-project-lite",
  "pq_proto",
  "rand",
  "routerify",
