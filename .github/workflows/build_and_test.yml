@@ -611,7 +611,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.4.4
+      VM_BUILDER_VERSION: v0.4.6
 
     steps:
       - name: Checkout
@@ -635,7 +635,7 @@ jobs:
       - name: Build vm image
         run: |
           # note: as of 2023-01-12, vm-builder requires a trailing ":latest" for local images
-          ./vm-builder -src=temp-vm-compute-node:latest -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          ./vm-builder -use-inittab -src=temp-vm-compute-node:latest -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Pushing vm-compute-node image
         run: |

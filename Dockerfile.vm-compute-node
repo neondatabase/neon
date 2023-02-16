@@ -1,7 +1,7 @@
 # Note: this file *mostly* just builds on Dockerfile.compute-node
 
 ARG SRC_IMAGE
-ARG VM_INFORMANT_VERSION=v0.1.4
+ARG VM_INFORMANT_VERSION=v0.1.6
 
 # Pull VM informant and set up inittab
 FROM neondatabase/vm-informant:$VM_INFORMANT_VERSION as informant
