@@ -19,7 +19,7 @@ types-requests = "^2.28.5"
 types-psycopg2 = "^2.9.18"
 boto3 = "^1.26.16"
 boto3-stubs = {extras = ["s3"], version = "^1.26.16"}
-moto = {version = "^3.0.0", extras = ["server"]}
+moto = {extras = ["server"], version = "^4.1.2"}
 backoff = "^1.11.1"
 pytest-lazy-fixture = "^0.6.3"
 prometheus-client = "^0.14.1"
