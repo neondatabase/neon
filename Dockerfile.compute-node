@@ -137,9 +137,8 @@ RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.1.2.tar.gz -O h3
 FROM build-deps AS unit-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz && \
-    tar xvzf 7.7.tar.gz && \
-    cd postgresql-unit-7.7 && \
+RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz -O postgresql-unit.tar.gz && \
+    mkdir postgresql-unit-src && cd postgresql-unit-src && tar xvzf ../postgresql-unit.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     # unit extension's "create extension" script relies on absolute install path to fill some reference tables.
@@ -158,8 +157,8 @@ RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz &
 FROM build-deps AS vector-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN git clone --branch v0.4.0 https://github.com/pgvector/pgvector.git && \
-    cd pgvector && \
+RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.4.0.tar.gz -O pgvector.tar.gz && \
+    mkdir pgvector-src && cd pgvector-src && tar xvzf ../pgvector.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/vector.control
@@ -173,8 +172,9 @@ RUN git clone --branch v0.4.0 https://github.com/pgvector/pgvector.git && \
 FROM build-deps AS pgjwt-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN git clone https://github.com/michelp/pgjwt.git && \
-    cd pgjwt && \
+# 9742dab1b2f297ad3811120db7b21451bca2d3c9 made on 13/11/2021
+RUN wget https://github.com/michelp/pgjwt/archive/9742dab1b2f297ad3811120db7b21451bca2d3c9.tar.gz -O pgjwt.tar.gz && \
+    mkdir pgjwt-src && cd pgjwt-src && tar xvzf ../pgjwt.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgjwt.control
 
