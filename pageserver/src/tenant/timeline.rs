@@ -1356,7 +1356,10 @@ impl Timeline {
                 .get(remote_layer_name)
                 .map(LayerFileMetadata::from)
                 .with_context(|| {
-                    format!("No remote layer metadata found for layer {remote_layer_name:?}")
+                    format!(
+                        "No remote layer metadata found for layer {}",
+                        remote_layer_name.file_name()
+                    )
                 })?;
 
             // Is the local layer's size different from the size stored in the
