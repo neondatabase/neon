@@ -13,6 +13,8 @@ use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
+
 use std::cmp::min;
 use std::str;
 use std::sync::Arc;
@@ -74,9 +76,9 @@ impl SafekeeperPostgresHandler {
     /// Wrapper around handle_start_replication_guts handling result. Error is
     /// handled here while we're still in walsender ttid span; with API
     /// extension, this can probably be moved into postgres_backend.
-    pub async fn handle_start_replication(
+    pub async fn handle_start_replication<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
     ) -> Result<(), QueryError> {
         if let Err(end) = self.handle_start_replication_guts(pgb, start_pos).await {
@@ -86,9 +88,9 @@ impl SafekeeperPostgresHandler {
         Ok(())
     }
 
-    pub async fn handle_start_replication_guts(
+    pub async fn handle_start_replication_guts<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
     ) -> Result<(), CopyStreamHandlerEnd> {
         let appname = self.appname.clone();
@@ -176,8 +178,8 @@ impl SafekeeperPostgresHandler {
 }
 
 /// A half driving sending WAL.
-struct WalSender<'a> {
-    pgb: &'a mut PostgresBackend,
+struct WalSender<'a, IO> {
+    pgb: &'a mut PostgresBackend<IO>,
     tli: Arc<Timeline>,
     appname: Option<String>,
     // Position since which we are sending next chunk.
@@ -194,7 +196,7 @@ struct WalSender<'a> {
     send_buf: [u8; MAX_SEND_SIZE],
 }
 
-impl WalSender<'_> {
+impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// Send WAL until
     /// - an error occurs
     /// - if we are streaming to walproposer, we've streamed until stop_pos
@@ -282,14 +284,14 @@ impl WalSender<'_> {
 }
 
 /// A half driving receiving replies.
-struct ReplyReader {
-    reader: PostgresBackendReader,
+struct ReplyReader<IO> {
+    reader: PostgresBackendReader<IO>,
     tli: Arc<Timeline>,
     replica_id: usize,
     feedback: ReplicaState,
 }
 
-impl ReplyReader {
+impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
     async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             let msg = self.reader.read_copy_message().await?;

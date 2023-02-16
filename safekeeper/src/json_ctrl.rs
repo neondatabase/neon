@@ -12,6 +12,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use postgres_backend::QueryError;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::*;
 use utils::id::TenantTimelineId;
 
@@ -60,9 +61,9 @@ struct AppendResult {
 /// Handles command to craft logical message WAL record with given
 /// content, and then append it with specified term and lsn. This
 /// function is used to test safekeepers in different scenarios.
-pub async fn handle_json_ctrl(
+pub async fn handle_json_ctrl<IO: AsyncRead + AsyncWrite + Unpin>(
     spg: &SafekeeperPostgresHandler,
-    pgb: &mut PostgresBackend,
+    pgb: &mut PostgresBackend<IO>,
     append_request: &AppendLogicalMessage,
 ) -> Result<(), QueryError> {
     info!("JSON_CTRL request: {append_request:?}");

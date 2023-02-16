@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::Context;
 use once_cell::sync::Lazy;
-use postgres_backend::{self, AuthType, PostgresBackend, QueryError};
+use postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP, QueryError};
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::future;
 use tokio::net::{TcpListener, TcpStream};
@@ -71,10 +71,10 @@ pub type ComputeReady = Result<DatabaseInfo, String>;
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
 #[async_trait::async_trait]
-impl postgres_backend::Handler for MgmtHandler {
+impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         query: &str,
     ) -> Result<(), QueryError> {
         try_process_query(pgb, query).await.map_err(|e| {
@@ -84,7 +84,7 @@ impl postgres_backend::Handler for MgmtHandler {
     }
 }
 
-async fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), QueryError> {
+async fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);
