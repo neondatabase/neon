@@ -3633,9 +3633,12 @@ impl Timeline {
             Ok(permit) => permit,
             Err(_closed) => {
                 if remote_layer.download_replacement_failure.load(Relaxed) {
-                    // this path will be hit often, in case there are upper retries
+                    // this path will be hit often, in case there are upper retries. however
+                    // hitting this error will prevent a busy loop between get_reconstruct_data and
+                    // download, so an error is prefered.
+                    //
                     // TODO: we really should poison the timeline, but panicking is not yet
-                    // supported.
+                    // supported. Related: https://github.com/neondatabase/neon/issues/3621
                     anyhow::bail!("an earlier download succeeded but LayerMap::replace failed")
                 } else {
                     info!("download of layer has already finished");
@@ -3715,10 +3718,9 @@ impl Timeline {
                         };
 
                         if failure {
-                            // FIXME: mark the remote layer permanently failed; the
-                            // timeline is most likely unusable after this. sadly we cannot just
-                            // poison the layermap lock with panic, because that would create an
-                            // issue with shutdown.
+                            // mark the remote layer permanently failed; the timeline is most
+                            // likely unusable after this. sadly we cannot just poison the layermap
+                            // lock with panic, because that would create an issue with shutdown.
                             //
                             // this does not change the retry semantics on failed downloads.
                             //
