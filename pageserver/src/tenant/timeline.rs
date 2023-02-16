@@ -2873,7 +2873,8 @@ impl Timeline {
 
         if !remotes.is_empty() {
             // caller is holding the lock to layer_removal_cs, and we don't want to download while
-            // holding that; in future download_remote_layer might take it as well.
+            // holding that; in future download_remote_layer might take it as well. this is
+            // regardless of earlier image creation downloading on-demand, while holding the lock.
             return Err(CompactionError::DownloadRequired(remotes));
         }
 
