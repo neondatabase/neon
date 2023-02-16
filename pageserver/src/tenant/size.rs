@@ -134,7 +134,7 @@ pub(super) async fn gather_inputs(
         .context("Failed to refresh gc_info before gathering inputs")?;
 
     // Collect information about all the timelines
-    let timelines = tenant.list_timelines();
+    let mut timelines = tenant.list_timelines();
 
     if timelines.is_empty() {
         // perhaps the tenant has just been created, and as such doesn't have any data yet
@@ -143,6 +143,13 @@ pub(super) async fn gather_inputs(
             timeline_inputs: Vec::new(),
         });
     }
+
+    // Filter out timelines that are not active
+    //
+    // There may be a race when a timeline is dropped,
+    // but it is unlikely to cause any issues. In the worst case,
+    // the calculation will error out.
+    timelines.retain(|t| t.is_active());
 
     // Build a map of branch points.
     let mut branchpoints: HashMap<TimelineId, HashSet<Lsn>> = HashMap::new();
