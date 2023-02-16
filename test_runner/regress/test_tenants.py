@@ -162,6 +162,17 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
             f"process_start_time_seconds (UTC): {datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)}"
         )
 
+    # Test (a subset of) safekeeper global metrics
+    for sk_m in sk_metrics:
+        read_bytes = int(
+            sk_m.query_one("safekeeper_pg_io_bytes_total", {"direction": "read"}).value
+        )
+        write_bytes = int(
+            sk_m.query_one("safekeeper_pg_io_bytes_total", {"direction": "write"}).value
+        )
+        assert read_bytes > 0, f"{sk_m.name}, read_bytes={read_bytes}"
+        assert write_bytes > 0, f"{sk_m.name}, write_bytes={write_bytes}"
+
     # Test (a subset of) pageserver global metrics
     for metric in PAGESERVER_GLOBAL_METRICS:
         ps_samples = ps_metrics.query_all(metric, {})
