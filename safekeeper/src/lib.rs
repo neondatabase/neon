@@ -97,7 +97,7 @@ impl SafeKeeperConf {
     }
 }
 
-// Get unique thread id (Rust internal), with ThreadId removed for shorter printing
+/// Get unique thread id (Rust internal), with ThreadId removed for shorter printing
 pub fn get_tid() -> u64 {
     let tids = format!("{:?}", thread::current().id());
     let r = Regex::new(r"ThreadId\((\d+)\)").unwrap();
