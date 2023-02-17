@@ -17,7 +17,7 @@ use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{error, info, warn};
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
 const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
@@ -91,13 +91,13 @@ pub async fn task_main(
             .unwrap_or_else(|e| {
                 // Acknowledge that the task has finished with an error.
                 error!("per-client task finished with an error: {e:#}");
-            })
-            .instrument(info_span!("client", session = format_args!("{session_id}"))),
+            }),
         );
     }
 }
 
 // TODO(tech debt): unite this with its twin below.
+#[tracing::instrument(fields(session_id), skip_all)]
 pub async fn handle_ws_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
@@ -139,6 +139,7 @@ pub async fn handle_ws_client(
         .await
 }
 
+#[tracing::instrument(fields(session_id), skip_all)]
 async fn handle_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
@@ -423,9 +424,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             let res = creds
                 .authenticate(&extra, &mut stream, allow_cleartext)
                 .await;
+
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
-        .instrument(info_span!("auth"))
         .await?;
 
         let AuthSuccess {
