@@ -218,6 +218,9 @@ def test_ondemand_download_timetravel(
     log.info(filled_size)
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
+    # Wait until generated image layers are uploaded to S3
+    time.sleep(3)
+
     env.pageserver.stop()
 
     # remove all the layer files
