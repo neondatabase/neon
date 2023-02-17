@@ -8,6 +8,11 @@ storage:
       pg_distrib_dir: /usr/local
       metric_collection_endpoint: http://console-staging.local/billing/api/v1/usage_events
       metric_collection_interval: 10min
+      tenant_config:
+        eviction_policy:
+          kind: "LayerAccessThreshold"
+          period: "20m"
+          threshold: "20m"
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
