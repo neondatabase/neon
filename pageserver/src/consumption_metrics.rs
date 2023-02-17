@@ -25,7 +25,7 @@ const REMOTE_STORAGE_SIZE: &str = "remote_storage_size";
 const TIMELINE_LOGICAL_SIZE: &str = "timeline_logical_size";
 
 #[serde_as]
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct Ids {
     #[serde_as(as = "DisplayFromStr")]
     tenant_id: TenantId,
@@ -287,6 +287,12 @@ pub async fn collect_metrics_iteration(
                     }
                 } else {
                     error!("metrics endpoint refused the sent metrics: {:?}", res);
+                    for metric in chunk_to_send.iter() {
+                        // Report if the metric value is suspiciously large
+                        if metric.value > (1u64 << 40) {
+                            error!("potentially abnormal metric value: {:?}", metric);
+                        }
+                    }
                 }
             }
             Err(err) => {
