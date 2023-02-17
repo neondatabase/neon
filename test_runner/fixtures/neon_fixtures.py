@@ -2529,15 +2529,17 @@ class NeonProxy(PgProtocol):
         tb: Optional[TracebackType],
     ):
         if self._popen is not None:
-            # NOTE the process will die when we're done with tests anyway, because
-            # it's a child process. This is mostly to clean up in between different tests.
-            self._popen.kill()
+            self._popen.terminate()
+            try:
+                self._popen.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warn("failed to gracefully terminate proxy; killing")
+                self._popen.kill()
 
     @staticmethod
     async def activate_link_auth(
         local_vanilla_pg, proxy_with_metric_collector, psql_session_id, create_user=True
     ):
-
         pg_user = "proxy"
 
         if create_user:

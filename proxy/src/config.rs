@@ -8,6 +8,7 @@ pub struct ProxyConfig {
     pub metric_collection: Option<MetricCollectionConfig>,
 }
 
+#[derive(Debug)]
 pub struct MetricCollectionConfig {
     pub endpoint: reqwest::Url,
     pub interval: Duration,
