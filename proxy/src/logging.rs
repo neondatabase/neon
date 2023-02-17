@@ -41,6 +41,7 @@ impl Drop for LoggingGuard {
     fn drop(&mut self) {
         // Shutdown trace pipeline gracefully, so that it has a chance to send any
         // pending traces before we exit.
+        tracing::info!("shutting down the tracing machinery");
         tracing_utils::shutdown_tracing();
     }
 }
