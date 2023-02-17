@@ -1029,6 +1029,17 @@ async fn active_timeline_of_active_tenant(
         .map_err(ApiError::NotFound)
 }
 
+async fn always_panic_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    // Deliberately cause a panic to exercise the panic hook registered via std::panic::set_hook().
+    // For pageserver, the relevant panic hook is `tracing_panic_hook` , and the `sentry` crate's wrapper around it.
+    // Use catch_unwind to ensure that tokio nor hyper are distracted by our panic.
+    let query = req.uri().query();
+    let _ = std::panic::catch_unwind(|| {
+        panic!("unconditional panic for testing panic hook integration; request query: {query:?}")
+    });
+    json_response(StatusCode::NO_CONTENT, ())
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -1147,5 +1158,6 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
             evict_timeline_layer_handler,
         )
+        .get("/v1/panic", always_panic_handler)
         .any(handler_404))
 }
