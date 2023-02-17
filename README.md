@@ -52,6 +52,7 @@ brew install protobuf openssl flex bison
 ```
 # recommended approach from https://www.rust-lang.org/tools/install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+echo 'export PATH=$HOME/.cargo/bin:$PATH' >> ~/.zshrc
 ```
 
 3. Install PostgreSQL Client
