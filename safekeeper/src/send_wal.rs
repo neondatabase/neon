@@ -79,6 +79,7 @@ impl SafekeeperPostgresHandler {
         start_pos: Lsn,
     ) -> Result<(), QueryError> {
         if let Err(end) = self.handle_start_replication_guts(pgb, start_pos).await {
+            // Log the result and probably send it to the client, closing the stream.
             pgb.handle_copy_stream_end(end).await;
         }
         Ok(())
