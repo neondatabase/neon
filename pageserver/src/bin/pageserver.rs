@@ -517,14 +517,26 @@ fn tracing_panic_hook(info: &std::panic::PanicInfo) {
     let thread = thread.name().unwrap_or("<unnamed>");
     let backtrace = std::backtrace::Backtrace::capture();
 
+    struct PrettyLocation<'a, 'b>(&'a std::panic::Location<'b>);
+
+    impl std::fmt::Display for PrettyLocation<'_, '_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}:{}:{}", self.0.file(), self.0.line(), self.0.column())
+        }
+    }
+
     let _entered = if let Some(location) = location {
-            tracing::error_span!("panic", %thread, panic.file = location.file(), panic.line = location.line(), panic.column = location.column())
-        } else {
-            // very unlikely to hit here, but the guarantees of std could change
-            tracing::error_span!("panic", %thread)
-        }.entered();
+        tracing::error_span!("panic", %thread, location = %PrettyLocation(location))
+    } else {
+        // very unlikely to hit here, but the guarantees of std could change
+        tracing::error_span!("panic", %thread)
+    }
+    .entered();
 
     if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+        // this has an annoying extra '\n' in the end which anyhow doesn't do, but we cannot really
+        // get rid of it as we cannot get in between of std::fmt::Formatter<'_>; we could format to
+        // string, maybe even to a TLS one but tracing already does that.
         tracing::error!("{msg}\n\nStack backtrace:\n{backtrace}");
     } else {
         tracing::error!("{msg}");
