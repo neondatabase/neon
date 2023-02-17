@@ -136,9 +136,15 @@ neon-pg-ext-%: postgres-%
 
 .PHONY: neon-pg-ext-clean-%
 neon-pg-ext-clean-%:
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/neon-$* -f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/neon_walredo-$* -f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile clean
-	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/pgxn/neon_test_utils-$* -f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile clean
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
+	-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
+	-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
+	-C $(POSTGRES_INSTALL_DIR)/build/neon-walredo-$* \
+	-f $(ROOT_PROJECT_DIR)/pgxn/neon_walredo/Makefile clean
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
+	-C $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$* \
+	-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile clean
 
 .PHONY: neon-pg-ext
 neon-pg-ext: \
