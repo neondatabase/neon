@@ -91,9 +91,9 @@ fn main() -> anyhow::Result<()> {
     // Initialize logging, which must be initialized before the custom panic hook is installed.
     logging::init(conf.log_format)?;
 
-    // disable the default rust panic hook by using `set_hook`. sentry will install it's own on top
-    // of this, always processing the panic before we log it.
-    std::panic::set_hook(Box::new(tracing_panic_hook));
+    // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
+    // disarming this hook on pageserver, because we never tear down tracing.
+    logging::replace_panic_hook_with_tracing_panic_hook().disarm();
 
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(
@@ -497,50 +497,6 @@ fn cli() -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Show enabled compile time features"),
         )
-}
-
-/// Named symbol for our panic hook, which logs the panic.
-fn tracing_panic_hook(info: &std::panic::PanicInfo) {
-    // following rust 1.66.1 std implementation:
-    // https://github.com/rust-lang/rust/blob/90743e7298aca107ddaa0c202a4d3604e29bfeb6/library/std/src/panicking.rs#L235-L288
-    let location = info.location();
-
-    let msg = match info.payload().downcast_ref::<&'static str>() {
-        Some(s) => *s,
-        None => match info.payload().downcast_ref::<String>() {
-            Some(s) => &s[..],
-            None => "Box<dyn Any>",
-        },
-    };
-
-    let thread = std::thread::current();
-    let thread = thread.name().unwrap_or("<unnamed>");
-    let backtrace = std::backtrace::Backtrace::capture();
-
-    struct PrettyLocation<'a, 'b>(&'a std::panic::Location<'b>);
-
-    impl std::fmt::Display for PrettyLocation<'_, '_> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}:{}:{}", self.0.file(), self.0.line(), self.0.column())
-        }
-    }
-
-    let _entered = if let Some(location) = location {
-        tracing::error_span!("panic", %thread, location = %PrettyLocation(location))
-    } else {
-        // very unlikely to hit here, but the guarantees of std could change
-        tracing::error_span!("panic", %thread)
-    }
-    .entered();
-
-    if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
-        // this has an annoying extra '\n' in the end which anyhow doesn't do, but we cannot really
-        // get rid of it as we cannot get in between of std::fmt::Formatter<'_>; we could format to
-        // string, maybe even to a TLS one but tracing already does that.
-        tracing::error!("{msg}\n\nStack backtrace:\n{backtrace}");
-    } else {
-        tracing::error!("{msg}");
-    }
 }
 
 #[test]
