@@ -50,15 +50,15 @@ RUN apt update && \
     libcgal-dev libgdal-dev libgmp-dev libmpfr-dev libopenscenegraph-dev libprotobuf-c-dev \
     protobuf-c-compiler xsltproc
 
-RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar.gz && \
-    tar zxvf SFCGAL-v1.3.10.tar.gz && \
-    cd SFCGAL-v1.3.10 && cmake . && make -j $(getconf _NPROCESSORS_ONLN) && \
+# SFCGAL > 1.3 requires CGAL > 5.2, Bullseye's libcgal-dev is 5.2
+RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar.gz -O SFCGAL.tar.gz && \
+    mkdir sfcgal-src && cd sfcgal-src && tar xvzf ../SFCGAL.tar.gz --strip-components=1 -C . && \
+    cmake . && make -j $(getconf _NPROCESSORS_ONLN) && \
     DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
     make clean && cp -R /sfcgal/* /
 
-RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.1.tar.gz && \
-    tar xvzf postgis-3.3.1.tar.gz && \
-    cd postgis-3.3.1 && \
+RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postgis.tar.gz && \
+    mkdir postgis-src && cd postgis-src && tar xvzf ../postgis.tar.gz --strip-components=1 -C . && \
     ./autogen.sh && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
@@ -83,29 +83,14 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.1.tar.gz && \
 FROM build-deps AS plv8-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
-    apt install -y ninja-build python3-dev libc++-dev libc++abi-dev libncurses5 binutils
+    apt install -y ninja-build python3-dev libncurses5 binutils clang
 
-# https://github.com/plv8/plv8/issues/475:
-#   v8 uses gold for linking and sets `--thread-count=4` which breaks
-#   gold version <= 1.35 (https://sourceware.org/bugzilla/show_bug.cgi?id=23607)
-# Install newer gold version manually as debian-testing binutils version updates
-# libc version, which in turn breaks other extension built against non-testing libc.
-RUN wget https://ftp.gnu.org/gnu/binutils/binutils-2.38.tar.gz && \
-    tar xvzf binutils-2.38.tar.gz && \
-    cd binutils-2.38 && \
-    cd libiberty && ./configure && make -j $(getconf _NPROCESSORS_ONLN) && \
-    cd ../bfd && ./configure && make bfdver.h && \
-    cd ../gold && ./configure && make -j $(getconf _NPROCESSORS_ONLN) && make install && \
-    cp /usr/local/bin/ld.gold /usr/bin/gold
-
-# Sed is used to patch for https://github.com/plv8/plv8/issues/503
-RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.4.tar.gz && \
-    tar xvzf v3.1.4.tar.gz && \
-    cd plv8-3.1.4 && \
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.5.tar.gz -O plv8.tar.gz && \
+    mkdir plv8-src && cd plv8-src && tar xvzf ../plv8.tar.gz --strip-components=1 -C . && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
-    sed -i 's/MemoryContextAlloc(/MemoryContextAllocZero(/' plv8.cc && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /plv8-* && \
+    find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
@@ -126,20 +111,17 @@ RUN wget https://github.com/Kitware/CMake/releases/download/v3.24.2/cmake-3.24.2
       && /tmp/cmake-install.sh --skip-license --prefix=/usr/local/ \
       && rm /tmp/cmake-install.sh
 
-RUN wget https://github.com/uber/h3/archive/refs/tags/v4.0.1.tar.gz -O h3.tgz && \
-    tar xvzf h3.tgz  && \
-    cd h3-4.0.1 && \
-    mkdir build && \
-    cd build && \
+RUN wget https://github.com/uber/h3/archive/refs/tags/v4.1.0.tar.gz -O h3.tar.gz && \
+    mkdir h3-src && cd h3-src && tar xvzf ../h3.tar.gz --strip-components=1 -C . && \
+    mkdir build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     DESTDIR=/h3 make install && \
     cp -R /h3/usr / && \
     rm -rf build
 
-RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.0.1.tar.gz -O h3-pg.tgz && \
-    tar xvzf h3-pg.tgz && \
-    cd h3-pg-4.0.1 && \
+RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.1.2.tar.gz -O h3-pg.tar.gz && \
+    mkdir h3-pg-src && cd h3-pg-src && tar xvzf ../h3-pg.tar.gz --strip-components=1 -C . && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -155,9 +137,8 @@ RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.0.1.tar.gz -O h3
 FROM build-deps AS unit-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz && \
-    tar xvzf 7.7.tar.gz && \
-    cd postgresql-unit-7.7 && \
+RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz -O postgresql-unit.tar.gz && \
+    mkdir postgresql-unit-src && cd postgresql-unit-src && tar xvzf ../postgresql-unit.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     # unit extension's "create extension" script relies on absolute install path to fill some reference tables.
@@ -176,8 +157,8 @@ RUN wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz &
 FROM build-deps AS vector-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN git clone --branch v0.4.0 https://github.com/pgvector/pgvector.git && \
-    cd pgvector && \
+RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.4.0.tar.gz -O pgvector.tar.gz && \
+    mkdir pgvector-src && cd pgvector-src && tar xvzf ../pgvector.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/vector.control
@@ -191,8 +172,9 @@ RUN git clone --branch v0.4.0 https://github.com/pgvector/pgvector.git && \
 FROM build-deps AS pgjwt-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN git clone https://github.com/michelp/pgjwt.git && \
-    cd pgjwt && \
+# 9742dab1b2f297ad3811120db7b21451bca2d3c9 made on 13/11/2021
+RUN wget https://github.com/michelp/pgjwt/archive/9742dab1b2f297ad3811120db7b21451bca2d3c9.tar.gz -O pgjwt.tar.gz && \
+    mkdir pgjwt-src && cd pgjwt-src && tar xvzf ../pgjwt.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgjwt.control
 
