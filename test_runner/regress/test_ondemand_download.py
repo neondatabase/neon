@@ -666,9 +666,10 @@ def test_ondemand_download_failure_to_replace(
         # error message is not useful
         pageserver_http.timeline_detail(tenant_id, timeline_id, True, timeout=2)
 
-    env.pageserver.allowed_errors.append(
-        ".* ERROR .*replacing downloaded layer into layermap failed because layer was not found"
-    )
+    actual_message = ".* ERROR .*replacing downloaded layer into layermap failed because layer was not found"
+    assert env.pageserver.log_contains(actual_message) is not None
+    env.pageserver.allowed_errors.append(actual_message)
+
     env.pageserver.allowed_errors.append(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(get local timeline info"
     )
