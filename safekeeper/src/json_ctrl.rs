@@ -13,7 +13,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::id::TenantTimelineId;
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
@@ -26,7 +26,7 @@ use crate::GlobalTimelines;
 use postgres_ffi::encode_logical_message;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
-use utils::{lsn::Lsn, postgres_backend_async::PostgresBackend};
+use utils::{lsn::Lsn, postgres_backend::PostgresBackend};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {

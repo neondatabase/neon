@@ -24,10 +24,10 @@ use tokio::task::spawn_blocking;
 use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
-use utils::postgres_backend_async::CopyStreamHandlerEnd;
-use utils::postgres_backend_async::PostgresBackend;
-use utils::postgres_backend_async::PostgresBackendReader;
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::CopyStreamHandlerEnd;
+use utils::postgres_backend::PostgresBackend;
+use utils::postgres_backend::PostgresBackendReader;
+use utils::postgres_backend::QueryError;
 
 const MSG_QUEUE_SIZE: usize = 256;
 const REPLY_QUEUE_SIZE: usize = 16;

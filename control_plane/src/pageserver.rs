@@ -20,7 +20,7 @@ use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    postgres_backend_async::AuthType,
+    postgres_backend::AuthType,
 };
 
 use crate::{background_process, local_env::LocalEnv};

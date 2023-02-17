@@ -13,7 +13,7 @@ pub mod simple_rcu;
 pub mod vec_map;
 
 pub mod bin_ser;
-pub mod postgres_backend_async;
+pub mod postgres_backend;
 
 // helper functions for creating and fsyncing
 pub mod crashsafe;

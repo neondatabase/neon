@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    postgres_backend_async::AuthType,
+    postgres_backend::AuthType,
 };
 
 use crate::local_env::{LocalEnv, DEFAULT_PG_VERSION};

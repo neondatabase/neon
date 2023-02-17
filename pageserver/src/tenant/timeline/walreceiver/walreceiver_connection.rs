@@ -36,7 +36,7 @@ use crate::{
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
-use utils::{lsn::Lsn, postgres_backend_async::is_expected_io_error};
+use utils::{lsn::Lsn, postgres_backend::is_expected_io_error};
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]

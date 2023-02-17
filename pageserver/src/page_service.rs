@@ -35,8 +35,8 @@ use utils::{
     auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    postgres_backend_async::AuthType,
-    postgres_backend_async::{self, is_expected_io_error, PostgresBackend, QueryError},
+    postgres_backend::AuthType,
+    postgres_backend::{self, is_expected_io_error, PostgresBackend, QueryError},
     simple_rcu::RcuReadGuard,
 };
 
@@ -724,7 +724,7 @@ impl PageServerHandler {
 }
 
 #[async_trait::async_trait]
-impl postgres_backend_async::Handler for PageServerHandler {
+impl postgres_backend::Handler for PageServerHandler {
     fn check_auth_jwt(
         &mut self,
         _pgb: &mut PostgresBackend,

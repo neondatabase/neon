@@ -24,7 +24,7 @@ use toml_edit::{Document, Item};
 use utils::{
     id::{NodeId, TenantId, TimelineId},
     logging::LogFormat,
-    postgres_backend_async::AuthType,
+    postgres_backend::AuthType,
 };
 
 use crate::tenant::config::TenantConf;

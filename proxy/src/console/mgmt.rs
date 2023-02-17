@@ -9,8 +9,8 @@ use std::future;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, info_span};
 use utils::{
-    postgres_backend_async::QueryError,
-    postgres_backend_async::{self, AuthType, PostgresBackend},
+    postgres_backend::QueryError,
+    postgres_backend::{self, AuthType, PostgresBackend},
 };
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
@@ -77,7 +77,7 @@ pub type ComputeReady = Result<DatabaseInfo, String>;
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
 #[async_trait::async_trait]
-impl postgres_backend_async::Handler for MgmtHandler {
+impl postgres_backend::Handler for MgmtHandler {
     async fn process_query(
         &mut self,
         pgb: &mut PostgresBackend,

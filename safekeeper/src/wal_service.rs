@@ -3,15 +3,14 @@
 //!   receive WAL from wal_proposer and send it to WAL receivers
 //!
 use anyhow::{Context, Result};
-use regex::Regex;
 use std::{future, thread};
 use tokio::net::TcpStream;
 use tracing::*;
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::QueryError;
 
-use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;
-use utils::postgres_backend_async::{AuthType, PostgresBackend};
+use crate::{get_tid, handler::SafekeeperPostgresHandler};
+use utils::postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
 pub fn thread_main(conf: SafeKeeperConf, pg_listener: std::net::TcpListener) {
@@ -50,14 +49,6 @@ pub fn thread_main(conf: SafeKeeperConf, pg_listener: std::net::TcpListener) {
             Ok::<(), anyhow::Error>(())
         })
         .expect("listener failed")
-}
-
-// Get unique thread id (Rust internal), with ThreadId removed for shorter printing
-fn get_tid() -> u64 {
-    let tids = format!("{:?}", thread::current().id());
-    let r = Regex::new(r"ThreadId\((\d+)\)").unwrap();
-    let caps = r.captures(&tids).unwrap();
-    caps.get(1).unwrap().as_str().parse().unwrap()
 }
 
 /// This is run by `thread_main` above, inside a background thread.

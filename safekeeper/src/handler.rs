@@ -13,11 +13,11 @@ use postgres_ffi::PG_TLI;
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use regex::Regex;
 use utils::auth::{Claims, Scope};
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::QueryError;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    postgres_backend_async::{self, PostgresBackend},
+    postgres_backend::{self, PostgresBackend},
 };
 
 /// Safekeeper handler of postgres commands
@@ -74,7 +74,7 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
 }
 
 #[async_trait::async_trait]
-impl postgres_backend_async::Handler for SafekeeperPostgresHandler {
+impl postgres_backend::Handler for SafekeeperPostgresHandler {
     // tenant_id and timeline_id are passed in connection string params
     fn startup(
         &mut self,

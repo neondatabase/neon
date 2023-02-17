@@ -18,8 +18,8 @@ use std::time::Duration;
 use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
 use tracing::*;
-use utils::postgres_backend_async::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
-use utils::{bin_ser::BeSer, lsn::Lsn, postgres_backend_async::PostgresBackend};
+use utils::postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
+use utils::{bin_ser::BeSer, lsn::Lsn, postgres_backend::PostgresBackend};
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';

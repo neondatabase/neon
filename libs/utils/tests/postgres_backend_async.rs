@@ -8,7 +8,7 @@ use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{Config, NoTls, SimpleQueryMessage};
 use tokio_postgres_rustls::MakeRustlsConnect;
-use utils::postgres_backend_async::{AuthType, Handler, PostgresBackend, QueryError};
+use utils::postgres_backend::{AuthType, Handler, PostgresBackend, QueryError};
 
 // generate client, server test streams
 async fn make_tcp_pair() -> (TcpStream, TcpStream) {
