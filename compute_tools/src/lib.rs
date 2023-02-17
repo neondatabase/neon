@@ -8,7 +8,6 @@ pub mod http;
 #[macro_use]
 pub mod logger;
 pub mod compute;
-pub mod informant;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;

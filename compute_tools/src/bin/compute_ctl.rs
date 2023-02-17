@@ -44,7 +44,6 @@ use tracing::{error, info};
 
 use compute_tools::compute::{ComputeMetrics, ComputeNode, ComputeState, ComputeStatus};
 use compute_tools::http::api::launch_http_server;
-use compute_tools::informant::spawn_vm_informant_if_present;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
@@ -141,8 +140,6 @@ fn main() -> Result<()> {
     // requests, while configuration is still in progress.
     let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
-    // Also spawn the thread responsible for handling the VM informant -- if it's present
-    let _vm_informant_handle = spawn_vm_informant_if_present().expect("cannot launch VM informant");
 
     // Start Postgres
     let mut delay_exit = false;
