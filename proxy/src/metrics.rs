@@ -18,7 +18,7 @@ const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
 ///
-#[derive(Eq, Hash, PartialEq, Serialize)]
+#[derive(Eq, Hash, PartialEq, Serialize, Debug)]
 pub struct Ids {
     pub endpoint_id: String,
 }
@@ -183,6 +183,12 @@ async fn collect_metrics_iteration(
             }
         } else {
             error!("metrics endpoint refused the sent metrics: {:?}", res);
+            for metric in chunk.iter() {
+                // Report if the metric value is suspiciously large
+                if metric.value > (1u64 << 40) {
+                    error!("potentially abnormal metric value: {:?}", metric);
+                }
+            }
         }
     }
     Ok(())
