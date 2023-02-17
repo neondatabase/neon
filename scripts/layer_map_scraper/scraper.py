@@ -197,6 +197,8 @@ async def resolve_what(what: List[str], client: Client):
         elif len(comps) == 1:
             tid = comps[0]
             tlids = await client.get_timeline_ids(tid)
+            if tlids is None:
+                continue
             for tlid in tlids:
                 tenant_and_timline_ids.add((tid, tlid))
         elif len(comps) == 2:
