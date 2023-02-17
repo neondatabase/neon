@@ -126,7 +126,12 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // important to keep the order of:
+    // 1. init logging
+    // 2. tracing panic hook
+    // 3. sentry
     logging::init(LogFormat::from_config(&args.log_format)?)?;
+    logging::replace_panic_hook_with_tracing_panic_hook().disarm();
     info!("version: {GIT_VERSION}");
 
     let args_workdir = &args.datadir;
