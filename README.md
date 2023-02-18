@@ -37,7 +37,7 @@ dnf install flex bison readline-devel zlib-devel openssl-devel \
 * On Arch based systems, these packages are needed:
 ```bash
 pacman -S base-devel readline zlib libseccomp openssl clang \
-pkg-config postgresql-libs cmake postgresql protobuf
+postgresql-libs cmake postgresql protobuf
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
