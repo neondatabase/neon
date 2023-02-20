@@ -2,11 +2,11 @@ storage:
   vars:
     bucket_name: neon-prod-storage-ap-southeast-1
     bucket_region: ap-southeast-1
-    console_mgmt_base_url: http://console-release.local
+    console_mgmt_base_url: http://neon-internal-api.aws.neon.tech
     broker_endpoint: http://storage-broker-lb.epsilon.ap-southeast-1.internal.aws.neon.tech:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
-      metric_collection_endpoint: http://console-release.local/billing/api/v1/usage_events
+      metric_collection_endpoint: http://neon-internal-api.aws.neon.tech/billing/api/v1/usage_events
       metric_collection_interval: 10min
       remote_storage:
         bucket_name: "{{ bucket_name }}"
