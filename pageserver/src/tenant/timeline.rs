@@ -2967,7 +2967,7 @@ impl Timeline {
             },
         )?;
 
-        // Determine N largest holes where N is number of compacted layers
+        // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
         let layers = self.layers.read().unwrap(); // Is'n it better to hold original layers lock till here?
@@ -2985,6 +2985,10 @@ impl Timeline {
                 // just first fast filter
                 if next_key.to_i128() - prev_key.to_i128() >= min_hole_range {
                     let key_range = prev_key..next_key;
+                    // Measuring hole by just subtraction of i128 representation of key range boundaries
+                    // has not so much sense, because largest holes will corresponds field1/field2 changes.
+                    // But we are mostly interested to eliminate holes which cause generation of excessive image layers.
+                    // That is why it is better to measure size of hole as number of covering image layers.
                     let coverage_size = layers.image_coverage(&key_range, last_record_lsn)?.len();
                     if coverage_size >= min_hole_coverage_size {
                         heap.push(Hole {
@@ -3098,18 +3102,19 @@ impl Timeline {
                 }
                 if writer.is_some() {
                     let written_size = writer.as_mut().unwrap().size();
-                    // check if key cause layer overflow...
+                    let contains_hole =
+                        next_hole < holes.len() && key >= holes[next_hole].key_range.end;
+                    // check if key cause layer overflow or contains hole...
                     if is_dup_layer
                         || dup_end_lsn.is_valid()
                         || written_size + key_values_total_size > target_file_size
-                        || (next_hole < holes.len() && key >= holes[next_hole].key_range.end)
-                    // stop on hole
+                        || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
                         new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
                         writer = None;
 
-                        if next_hole < holes.len() && key >= holes[next_hole].key_range.end {
+                        if contains_hole {
                             // skip hole
                             next_hole += 1;
                         }
