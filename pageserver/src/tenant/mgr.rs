@@ -540,13 +540,11 @@ where
     }
 }
 
-#[cfg(feature = "testing")]
 use {
     crate::repository::GcResult, pageserver_api::models::TimelineGcRequest,
     utils::http::error::ApiError,
 };
 
-#[cfg(feature = "testing")]
 pub async fn immediate_gc(
     tenant_id: TenantId,
     timeline_id: TimelineId,

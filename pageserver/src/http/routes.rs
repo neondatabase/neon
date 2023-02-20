@@ -14,7 +14,7 @@ use utils::http::request::{get_request_param, must_get_query_param, parse_query_
 
 use super::models::{
     StatusResponse, TenantConfigRequest, TenantCreateRequest, TenantCreateResponse, TenantInfo,
-    TimelineCreateRequest, TimelineInfo,
+    TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::pgdatadir_mapping::LsnForTimestamp;
@@ -40,7 +40,7 @@ use utils::{
 
 // Imports only used for testing APIs
 #[cfg(feature = "testing")]
-use super::models::{ConfigureFailpointsRequest, TimelineGcRequest};
+use super::models::ConfigureFailpointsRequest;
 
 struct State {
     conf: &'static PageServerConf,
@@ -925,7 +925,6 @@ async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>
 }
 
 // Run GC immediately on given timeline.
-#[cfg(feature = "testing")]
 async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -1124,7 +1123,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc",
-            testing_api!("run timeline GC", timeline_gc_handler),
+            timeline_gc_handler,
         )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/compact",
