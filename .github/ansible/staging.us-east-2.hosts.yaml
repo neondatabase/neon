@@ -2,11 +2,11 @@ storage:
   vars:
     bucket_name: neon-staging-storage-us-east-2
     bucket_region: us-east-2
-    console_mgmt_base_url: http://console-staging.local
+    console_mgmt_base_url: http://neon-internal-api.aws.neon.build
     broker_endpoint: http://storage-broker-lb.beta.us-east-2.internal.aws.neon.build:50051
     pageserver_config_stub:
       pg_distrib_dir: /usr/local
-      metric_collection_endpoint: http://console-staging.local/billing/api/v1/usage_events
+      metric_collection_endpoint: http://neon-internal-api.aws.neon.build/billing/api/v1/usage_events
       metric_collection_interval: 10min
       tenant_config:
         eviction_policy:
