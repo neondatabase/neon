@@ -106,14 +106,6 @@ fn tracing_panic_hook(info: &std::panic::PanicInfo) {
     let thread = thread.name().unwrap_or("<unnamed>");
     let backtrace = std::backtrace::Backtrace::capture();
 
-    struct PrettyLocation<'a, 'b>(&'a std::panic::Location<'b>);
-
-    impl std::fmt::Display for PrettyLocation<'_, '_> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}:{}:{}", self.0.file(), self.0.line(), self.0.column())
-        }
-    }
-
     let _entered = if let Some(location) = location {
         tracing::error_span!("panic", %thread, location = %PrettyLocation(location))
     } else {
@@ -129,5 +121,38 @@ fn tracing_panic_hook(info: &std::panic::PanicInfo) {
         tracing::error!("{msg}\n\nStack backtrace:\n{backtrace}");
     } else {
         tracing::error!("{msg}");
+    }
+
+    // ensure that we log something on the panic if this hook is left after tracing has been
+    // unconfigured. worst case when teardown is racing the panic is to log the panic twice.
+    tracing::dispatcher::get_default(|d| {
+        if let Some(_none) = d.downcast_ref::<tracing::subscriber::NoSubscriber>() {
+            let location = location.map(PrettyLocation);
+            log_panic_to_stderr(thread, msg, location, &backtrace);
+        }
+    });
+}
+
+#[cold]
+fn log_panic_to_stderr(
+    thread: &str,
+    msg: &str,
+    location: Option<PrettyLocation<'_, '_>>,
+    backtrace: &std::backtrace::Backtrace,
+) {
+    eprintln!("panic while tracing is unconfigured: thread '{thread}' panicked at '{msg}', {location:?}\nStack backtrace:\n{backtrace}");
+}
+
+struct PrettyLocation<'a, 'b>(&'a std::panic::Location<'b>);
+
+impl std::fmt::Display for PrettyLocation<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.0.file(), self.0.line(), self.0.column())
+    }
+}
+
+impl std::fmt::Debug for PrettyLocation<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <Self as std::fmt::Display>::fmt(&self, f)
     }
 }
