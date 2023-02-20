@@ -3758,7 +3758,7 @@ impl Timeline {
                 drop(permit);
 
                 Ok(())
-            },
+            }.in_current_span(),
         );
 
         receiver.await.context("download task cancelled")?
