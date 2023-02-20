@@ -3005,7 +3005,7 @@ impl Timeline {
         }
         drop(layers);
         let mut holes = heap.into_vec();
-        holes.sort_by_key(|hole| hole.key_range.start);
+        holes.sort_unstable_by_key(|hole| hole.key_range.start);
         let mut next_hole = 0; // index of next hole in holes vector
 
         // Merge the contents of all the input delta layers into a new set
