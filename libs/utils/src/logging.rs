@@ -75,7 +75,8 @@ impl TracingPanicHookGuard {
         TracingPanicHookGuard { act: true }
     }
 
-    pub fn disarm(&mut self) {
+    /// Make this hook guard not do anything when dropped.
+    pub fn forget(&mut self) {
         self.act = false;
     }
 }

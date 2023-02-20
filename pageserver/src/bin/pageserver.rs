@@ -93,7 +93,7 @@ fn main() -> anyhow::Result<()> {
 
     // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
     // disarming this hook on pageserver, because we never tear down tracing.
-    logging::replace_panic_hook_with_tracing_panic_hook().disarm();
+    logging::replace_panic_hook_with_tracing_panic_hook().forget();
 
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(
