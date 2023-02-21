@@ -243,19 +243,22 @@ pub(crate) async fn random_init_delay(
     cancel: &CancellationToken,
 ) -> Result<(), Cancelled> {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
 
-    let min = Duration::ZERO;
+    let d = {
+        let mut rng = rand::thread_rng();
 
-    let range = min..=period;
+        let min = Duration::ZERO;
 
-    // because these are configuration values, and we accept for example zeroes for them, the range
-    // could be empty (0..=0)
-    let d = if min != period {
-        rng.gen_range(range)
-    } else {
-        // semi-ok default as the source of jitter
-        rng.gen_range(Duration::ZERO..=Duration::from_secs(10))
+        let range = min..=period;
+
+        // because these are configuration values, and we accept for example zeroes for them, the range
+        // could be empty (0..=0)
+        if min != period {
+            rng.gen_range(range)
+        } else {
+            // semi-ok default as the source of jitter
+            rng.gen_range(Duration::ZERO..=Duration::from_secs(10))
+        }
     };
 
     tokio::select! {
