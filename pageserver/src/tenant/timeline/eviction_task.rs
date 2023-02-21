@@ -45,7 +45,7 @@ impl Timeline {
         {
             let policy = self.get_eviction_policy();
             let period = match policy {
-                EvictionPolicy::LayerAccessThreshold { period, .. } => period,
+                EvictionPolicy::LayerAccessThreshold(lat) => lat.period,
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
             if random_init_delay(period, &cancel).await.is_err() {
