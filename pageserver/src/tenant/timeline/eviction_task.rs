@@ -44,6 +44,7 @@ impl Timeline {
         loop {
             let policy = self.get_eviction_policy();
             let cf = self.eviction_iteration(&policy, cancel.clone()).await;
+
             match cf {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(sleep_until) => {
@@ -78,13 +79,7 @@ impl Timeline {
                     ControlFlow::Continue(()) => (),
                 }
                 let elapsed = start.elapsed();
-                if elapsed > p.period {
-                    warn!(
-                        configured_period = %humantime::format_duration(p.period),
-                        last_period = %humantime::format_duration(elapsed),
-                        "this eviction period took longer than the configured period"
-                    );
-                }
+                crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
                 ControlFlow::Continue(start + p.period)
             }
         }
