@@ -3,7 +3,7 @@
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
@@ -68,18 +68,20 @@ async fn compaction_loop(tenant_id: TenantId) {
                 },
             };
 
-            let mut sleep_duration = tenant.get_compaction_period();
-            if sleep_duration == Duration::ZERO {
+            let period = tenant.get_compaction_period();
+            let sleep_duration = if period == Duration::ZERO {
                 info!("automatic compaction is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
-                sleep_duration = Duration::from_secs(10);
+                Duration::from_secs(10)
             } else {
                 // Run compaction
                 if let Err(e) = tenant.compaction_iteration(&ctx).await {
-                    sleep_duration = wait_duration;
-                    error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
+                    error!("Compaction failed, retrying in {:?}: {e:?}", wait_duration);
+                    wait_duration
+                } else {
+                    period
                 }
-            }
+            };
 
             // Sleep
             tokio::select! {
@@ -122,23 +124,22 @@ async fn gc_loop(tenant_id: TenantId) {
                 },
             };
 
-            let gc_period = tenant.get_gc_period();
+            let period = tenant.get_gc_period();
             let gc_horizon = tenant.get_gc_horizon();
-            let mut sleep_duration = gc_period;
-            if sleep_duration == Duration::ZERO {
+            let sleep_duration = if period == Duration::ZERO || gc_horizon == 0 {
                 info!("automatic GC is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
-                sleep_duration = Duration::from_secs(10);
+                Duration::from_secs(10)
             } else {
                 // Run gc
-                if gc_horizon > 0 {
-                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx).await
-                    {
-                        sleep_duration = wait_duration;
-                        error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);
-                    }
+                let res = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx).await;
+                if let Err(e) = res {
+                    error!("Gc failed, retrying in {:?}: {e:?}", wait_duration);
+                    wait_duration
+                } else {
+                    period
                 }
-            }
+            };
 
             // Sleep
             tokio::select! {
