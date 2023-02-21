@@ -81,9 +81,10 @@ impl Timeline {
                 let elapsed = start.elapsed();
                 if elapsed > p.period {
                     warn!(
-                        elapsed = ?elapsed,
-                        period = ?p.period,
-                        "eviction loop took longer than the configured period"
+                        elapsed = %humantime::format_duration(elapsed),
+                        period = %humantime::format_duration(p.period),
+                        task = "eviction",
+                        "task iteration took longer than the configured period"
                     );
                 }
                 ControlFlow::Continue(start + p.period)

@@ -88,7 +88,11 @@ async fn compaction_loop(tenant_id: TenantId) {
             {
                 let elapsed = started_at.elapsed();
                 if elapsed > period {
-                    warn!(?elapsed, ?period, "compaction loop took longer than configured period");
+                    warn!(
+                        elapsed = %humantime::format_duration(elapsed),
+                        period = %humantime::format_duration(period),
+                        task = "compaction",
+                        "task iteration took longer than configured period");
                 }
             }
 
@@ -156,7 +160,11 @@ async fn gc_loop(tenant_id: TenantId) {
                 let elapsed = started_at.elapsed();
 
                 if elapsed > period {
-                    warn!(?elapsed, ?period, "gc loop took longer than configured period");
+                    warn!(
+                        elapsed = %humantime::format_duration(elapsed),
+                        period = %humantime::format_duration(period),
+                        task = "gc",
+                        "task iteration took longer than configured period");
                 }
             }
 
