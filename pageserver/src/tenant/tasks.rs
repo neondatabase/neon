@@ -262,8 +262,8 @@ pub(crate) async fn random_init_delay(
     };
 
     tokio::select! {
-        _ = cancel.cancelled() => return Err(Cancelled),
-        _ = tokio::time::sleep(d) => return Ok(()),
+        _ = cancel.cancelled() => Err(Cancelled),
+        _ = tokio::time::sleep(d) => Ok(()),
     }
 }
 
