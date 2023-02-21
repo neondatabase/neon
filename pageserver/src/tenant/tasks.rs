@@ -247,18 +247,12 @@ pub(crate) async fn random_init_delay(
     let d = {
         let mut rng = rand::thread_rng();
 
-        let min = Duration::ZERO;
+        // gen_range asserts that the range cannot be empty, which it could be because period can
+        // be set to zero to disable gc or compaction, so lets set it to be at least 10s.
+        let period = std::cmp::max(period, Duration::from_secs(10));
 
-        let range = min..=period;
-
-        // because these are configuration values, and we accept for example zeroes for them, the range
-        // could be empty (0..=0)
-        if min != period {
-            rng.gen_range(range)
-        } else {
-            // semi-ok default as the source of jitter
-            rng.gen_range(Duration::ZERO..=Duration::from_secs(10))
-        }
+        // semi-ok default as the source of jitter
+        rng.gen_range(Duration::ZERO..=period)
     };
 
     tokio::select! {
