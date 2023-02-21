@@ -11,6 +11,7 @@ use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::mgr;
 use crate::tenant::{Tenant, TenantState};
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::TenantId;
 
@@ -53,12 +54,13 @@ async fn compaction_loop(tenant_id: TenantId) {
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+        let cancel = task_mgr::shutdown_token();
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         loop {
             trace!("waking up");
 
             let tenant = tokio::select! {
-                _ = task_mgr::shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     info!("received cancellation request");
                     return;
                 },
@@ -89,7 +91,7 @@ async fn compaction_loop(tenant_id: TenantId) {
 
             // Sleep
             tokio::select! {
-                _ = task_mgr::shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     info!("received cancellation request during idling");
                     break;
                 },
@@ -111,6 +113,7 @@ async fn gc_loop(tenant_id: TenantId) {
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+        let cancel = task_mgr::shutdown_token();
         // GC might require downloading, to find the cutoff LSN that corresponds to the
         // cutoff specified as time.
         let ctx = RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
@@ -118,7 +121,7 @@ async fn gc_loop(tenant_id: TenantId) {
             trace!("waking up");
 
             let tenant = tokio::select! {
-                _ = task_mgr::shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     info!("received cancellation request");
                     return;
                 },
@@ -151,7 +154,7 @@ async fn gc_loop(tenant_id: TenantId) {
 
             // Sleep
             tokio::select! {
-                _ = task_mgr::shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     info!("received cancellation request during idling");
                     break;
                 },
