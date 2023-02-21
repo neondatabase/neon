@@ -1770,15 +1770,9 @@ impl Timeline {
         let calculation = async {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
-            tokio::task::spawn_blocking(move || {
-                // Run in a separate thread since this can do a lot of
-                // synchronous file IO without .await inbetween
-                // if there are no RemoteLayers that would require downloading.
-                let h = tokio::runtime::Handle::current();
-                h.block_on(self_calculation.calculate_logical_size(init_lsn, cancel, &ctx))
-            })
-            .await
-            .context("Failed to spawn calculation result task")?
+            self_calculation
+                .calculate_logical_size(init_lsn, cancel, &ctx)
+                .await
         };
         let timeline_state_cancellation = async {
             loop {
