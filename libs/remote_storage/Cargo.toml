@@ -21,7 +21,7 @@ toml_edit.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 utils.workspace = true
-
+pin-project-lite.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]

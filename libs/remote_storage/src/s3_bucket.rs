@@ -20,7 +20,10 @@ use aws_sdk_s3::{
 };
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
-use tokio::{io, sync::Semaphore};
+use tokio::{
+    io::{self, AsyncRead},
+    sync::Semaphore,
+};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
@@ -102,7 +105,7 @@ pub struct S3Bucket {
     // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
     // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
     // The helps to ensure we don't exceed the thresholds.
-    concurrency_limiter: Semaphore,
+    concurrency_limiter: Arc<Semaphore>,
 }
 
 #[derive(Default)]
@@ -162,7 +165,7 @@ impl S3Bucket {
             client,
             bucket_name: aws_config.bucket_name.clone(),
             prefix_in_bucket,
-            concurrency_limiter: Semaphore::new(aws_config.concurrency_limit.get()),
+            concurrency_limiter: Arc::new(Semaphore::new(aws_config.concurrency_limit.get())),
         })
     }
 
@@ -194,9 +197,10 @@ impl S3Bucket {
     }
 
     async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
-        let _guard = self
+        let permit = self
             .concurrency_limiter
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .context("Concurrency limiter semaphore got closed during S3 download")
             .map_err(DownloadError::Other)?;
@@ -217,9 +221,10 @@ impl S3Bucket {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(io::BufReader::new(
+                    download_stream: Box::pin(io::BufReader::new(RatelimitedAsyncRead::new(
+                        permit,
                         object_output.body.into_async_read(),
-                    )),
+                    ))),
                 })
             }
             Err(SdkError::ServiceError {
@@ -237,6 +242,34 @@ impl S3Bucket {
                 )))
             }
         }
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
+    ///
+    /// This allows extending the ratelimit until we have completed the response reading.
+    struct RatelimitedAsyncRead<S> {
+        permit: tokio::sync::OwnedSemaphorePermit,
+        #[pin]
+        inner: S,
+    }
+}
+
+impl<S: AsyncRead> RatelimitedAsyncRead<S> {
+    fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
+        RatelimitedAsyncRead { permit, inner }
+    }
+}
+
+impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.project();
+        this.inner.poll_read(cx, buf)
     }
 }
 
