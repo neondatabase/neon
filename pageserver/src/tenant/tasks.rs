@@ -208,7 +208,8 @@ async fn wait_for_active_tenant(
 }
 
 pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task: &str) {
-    if elapsed >= period {
+    // Duration::ZERO will happen because it's the "disable [bgtask]" value.
+    if elapsed >= period && period != Duration::ZERO {
         warn!(
             elapsed = %humantime::format_duration(elapsed),
             period = %humantime::format_duration(period),
