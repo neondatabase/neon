@@ -56,6 +56,7 @@ async fn compaction_loop(tenant_id: TenantId) {
     async {
         let cancel = task_mgr::shutdown_token();
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
+        let mut first = true;
         loop {
             trace!("waking up");
 
@@ -70,9 +71,19 @@ async fn compaction_loop(tenant_id: TenantId) {
                 },
             };
 
+            let period = tenant.get_compaction_period();
+
+            // TODO: we shouldn't need to await to find tenant and this could be moved outside of
+            // loop
+            if first {
+                first = false;
+                if random_init_delay(period, &cancel).await.is_err() {
+                    break;
+                }
+            }
+
             let started_at = Instant::now();
 
-            let period = tenant.get_compaction_period();
             let sleep_duration = if period == Duration::ZERO {
                 info!("automatic compaction is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
@@ -117,6 +128,7 @@ async fn gc_loop(tenant_id: TenantId) {
         // GC might require downloading, to find the cutoff LSN that corresponds to the
         // cutoff specified as time.
         let ctx = RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
+        let mut first = true;
         loop {
             trace!("waking up");
 
@@ -131,9 +143,17 @@ async fn gc_loop(tenant_id: TenantId) {
                 },
             };
 
+            let period = tenant.get_gc_period();
+
+            if first {
+                first = false;
+                if random_init_delay(period, &cancel).await.is_err() {
+                    break;
+                }
+            }
+
             let started_at = Instant::now();
 
-            let period = tenant.get_gc_period();
             let gc_horizon = tenant.get_gc_horizon();
             let sleep_duration = if period == Duration::ZERO || gc_horizon == 0 {
                 info!("automatic GC is disabled");
@@ -207,6 +227,40 @@ async fn wait_for_active_tenant(
                 }
             }
         }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("cancelled")]
+pub(crate) struct Cancelled;
+
+/// Provide a random delay for background task initialization.
+///
+/// This delay prevents a thundering herd of background tasks and will likely keep them running on
+/// different periods for more stable load.
+pub(crate) async fn random_init_delay(
+    period: Duration,
+    cancel: &CancellationToken,
+) -> Result<(), Cancelled> {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+
+    let min = Duration::ZERO;
+
+    let range = min..=period;
+
+    // because these are configuration values, and we accept for example zeroes for them, the range
+    // could be empty (0..=0)
+    let d = if min != period {
+        rng.gen_range(range)
+    } else {
+        // semi-ok default as the source of jitter
+        rng.gen_range(Duration::ZERO..=Duration::from_secs(10))
+    };
+
+    tokio::select! {
+        _ = cancel.cancelled() => return Err(Cancelled),
+        _ = tokio::time::sleep(d) => return Ok(()),
     }
 }
 
