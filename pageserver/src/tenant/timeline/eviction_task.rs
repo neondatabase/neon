@@ -79,14 +79,7 @@ impl Timeline {
                     ControlFlow::Continue(()) => (),
                 }
                 let elapsed = start.elapsed();
-                if elapsed > p.period {
-                    warn!(
-                        elapsed = %humantime::format_duration(elapsed),
-                        period = %humantime::format_duration(p.period),
-                        task = "eviction",
-                        "task iteration took longer than the configured period"
-                    );
-                }
+                crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
                 ControlFlow::Continue(start + p.period)
             }
         }

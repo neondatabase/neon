@@ -85,16 +85,7 @@ async fn compaction_loop(tenant_id: TenantId) {
                 }
             };
 
-            {
-                let elapsed = started_at.elapsed();
-                if elapsed > period {
-                    warn!(
-                        elapsed = %humantime::format_duration(elapsed),
-                        period = %humantime::format_duration(period),
-                        task = "compaction",
-                        "task iteration took longer than configured period");
-                }
-            }
+            warn_when_period_overrun(started_at.elapsed(), period, "compaction");
 
             // Sleep
             tokio::select! {
@@ -156,17 +147,7 @@ async fn gc_loop(tenant_id: TenantId) {
                 }
             };
 
-            {
-                let elapsed = started_at.elapsed();
-
-                if elapsed > period {
-                    warn!(
-                        elapsed = %humantime::format_duration(elapsed),
-                        period = %humantime::format_duration(period),
-                        task = "gc",
-                        "task iteration took longer than configured period");
-                }
-            }
+            warn_when_period_overrun(started_at.elapsed(), period, "gc");
 
             // Sleep
             tokio::select! {
@@ -223,5 +204,16 @@ async fn wait_for_active_tenant(
                 }
             }
         }
+    }
+}
+
+pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task: &str) {
+    if elapsed >= period {
+        warn!(
+            elapsed = %humantime::format_duration(elapsed),
+            period = %humantime::format_duration(period),
+            task,
+            "task iteration took longer than the configured period"
+        );
     }
 }
