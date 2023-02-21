@@ -74,7 +74,7 @@ async fn compaction_loop(tenant_id: TenantId) {
             let period = tenant.get_compaction_period();
 
             // TODO: we shouldn't need to await to find tenant and this could be moved outside of
-            // loop
+            // loop, #3501. There are also additional "allowed_errors" in tests.
             if first {
                 first = false;
                 if random_init_delay(period, &cancel).await.is_err() {

@@ -250,6 +250,10 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.allowed_errors.append(
         ".*could not load tenant.*Failed to list timelines directory.*"
     )
+    # this is until #3501
+    env.pageserver.allowed_errors.append(
+        ".*Compaction failed, retrying in 2s: Cannot run compaction iteration on inactive tenant"
+    )
 
     client = env.pageserver.http_client()
 
