@@ -88,6 +88,13 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Initialize logging, which must be initialized before the custom panic hook is installed.
+    logging::init(conf.log_format)?;
+
+    // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
+    // disarming this hook on pageserver, because we never tear down tracing.
+    logging::replace_panic_hook_with_tracing_panic_hook().forget();
+
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(
         Some(GIT_VERSION.into()),
@@ -210,9 +217,6 @@ fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
 ) -> anyhow::Result<()> {
-    // Initialize logging
-    logging::init(conf.log_format)?;
-
     // Print version and launch timestamp to the log,
     // and expose them as prometheus metrics.
     // A changed version string indicates changed software.

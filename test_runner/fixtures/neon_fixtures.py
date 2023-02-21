@@ -1217,7 +1217,7 @@ class PageserverHttpClient(requests.Session):
         """
         Returns the tenant size, together with the model inputs as the second tuple item.
         """
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/size")
+        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/synthetic_size")
         self.verbose_error(res)
         res = res.json()
         assert isinstance(res, dict)
@@ -1227,6 +1227,16 @@ class PageserverHttpClient(requests.Session):
         inputs = res["inputs"]
         assert type(inputs) is dict
         return (size, inputs)
+
+    def tenant_size_debug(self, tenant_id: TenantId) -> str:
+        """
+        Returns the tenant size debug info, as an HTML string
+        """
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/synthetic_size",
+            headers={"Accept": "text/html"},
+        )
+        return res.text
 
     def timeline_list(
         self,
@@ -1278,6 +1288,7 @@ class PageserverHttpClient(requests.Session):
         timeline_id: TimelineId,
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
+        **kwargs,
     ) -> Dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
@@ -1288,6 +1299,7 @@ class PageserverHttpClient(requests.Session):
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             params=params,
+            **kwargs,
         )
         self.verbose_error(res)
         res_json = res.json()
@@ -2067,6 +2079,7 @@ class NeonPageserver(PgProtocol):
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
+            ".*task iteration took longer than the configured period.*",
         ]
 
     def start(
@@ -2517,15 +2530,17 @@ class NeonProxy(PgProtocol):
         tb: Optional[TracebackType],
     ):
         if self._popen is not None:
-            # NOTE the process will die when we're done with tests anyway, because
-            # it's a child process. This is mostly to clean up in between different tests.
-            self._popen.kill()
+            self._popen.terminate()
+            try:
+                self._popen.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warn("failed to gracefully terminate proxy; killing")
+                self._popen.kill()
 
     @staticmethod
     async def activate_link_auth(
         local_vanilla_pg, proxy_with_metric_collector, psql_session_id, create_user=True
     ):
-
         pg_user = "proxy"
 
         if create_user:

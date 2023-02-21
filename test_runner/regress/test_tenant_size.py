@@ -1,13 +1,13 @@
-from typing import Any, List, Tuple
+from pathlib import Path
+from typing import List, Tuple
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.types import Lsn
 
 
-def test_empty_tenant_size(neon_simple_env: NeonEnv):
+def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
     http_client = env.pageserver.http_client()
@@ -17,6 +17,9 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
     assert initial_size > 0, "initial implementation returns ~initdb tenant_size"
 
     main_branch_name = "main"
+
+    branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
+    assert branch_name == main_branch_name
 
     with env.postgres.create_start(
         main_branch_name,
@@ -39,12 +42,44 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv):
     size, inputs = http_client.tenant_size_and_modelinputs(tenant_id)
     assert size == initial_size, "tenant_size should not be affected by shutdown of compute"
 
-    expected_commands: List[Any] = [{"branch_from": None}, "end_of_branch"]
-    actual_commands: List[Any] = list(map(lambda x: x["command"], inputs["updates"]))  # type: ignore
-    assert actual_commands == expected_commands
+    expected_inputs = {
+        "segments": [
+            {
+                "segment": {"parent": None, "lsn": 23694408, "size": 25362432, "needed": True},
+                "timeline_id": f"{main_timeline_id}",
+                "kind": "BranchStart",
+            },
+            {
+                "segment": {"parent": 0, "lsn": 23694528, "size": None, "needed": True},
+                "timeline_id": f"{main_timeline_id}",
+                "kind": "BranchEnd",
+            },
+        ],
+        "timeline_inputs": [
+            {
+                "timeline_id": f"{main_timeline_id}",
+                "ancestor_id": None,
+                "ancestor_lsn": "0/0",
+                "last_record": "0/1698CC0",
+                "latest_gc_cutoff": "0/1698C48",
+                "horizon_cutoff": "0/0",
+                "pitr_cutoff": "0/0",
+                "next_gc_cutoff": "0/0",
+                "retention_param_cutoff": None,
+            }
+        ],
+    }
+    expected_inputs = mask_model_inputs(expected_inputs)
+    actual_inputs = mask_model_inputs(inputs)
+
+    assert expected_inputs == actual_inputs
+
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
 
-def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
+def test_branched_empty_timeline_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     Issue found in production. Because the ancestor branch was under
     gc_horizon, the branchpoint was "dangling" and the computation could not be
@@ -75,8 +110,12 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv):
 
     assert size_after_branching > initial_size
 
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
-def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
+
+def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     More general version of test_branched_empty_timeline_size
 
@@ -128,9 +167,13 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv):
     size_after_writes = http_client.tenant_size(tenant_id)
     assert size_after_writes > initial_size
 
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
+
 
 @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
-def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
+def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 15
 
@@ -167,9 +210,13 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv):
 
     assert size_before_branching < size_after
 
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
+
 
 @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
-def test_parent_within_horizon(neon_simple_env: NeonEnv):
+def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = 5
 
@@ -179,7 +226,7 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv):
     """
 
     env = neon_simple_env
-    gc_horizon = 200_000
+    gc_horizon = 5_000
     (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
     http_client = env.pageserver.http_client()
 
@@ -212,9 +259,13 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv):
 
     assert size_before_branching < size_after
 
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
+
 
 @pytest.mark.skip("This should work, but is left out because assumed covered by other tests")
-def test_only_heads_within_horizon(neon_simple_env: NeonEnv):
+def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     """
     gc_horizon = small
 
@@ -253,8 +304,14 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv):
 
             latest_size = size_now
 
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
 
-def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
+
+def test_single_branch_get_tenant_size_grows(
+    neon_env_builder: NeonEnvBuilder, test_output_dir: Path
+):
     """
     Operate on single branch reading the tenants size after each transaction.
     """
@@ -279,7 +336,20 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
     collected_responses: List[Tuple[Lsn, int]] = []
 
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
+
+    def check_size_change(current_lsn: Lsn, initdb_lsn: Lsn, gc_horizon: int, size: int, prev: int):
+        if current_lsn - initdb_lsn > gc_horizon:
+            assert (
+                size >= prev
+            ), "tenant_size may grow or not grow, because we only add gc_horizon amount of WAL to initial snapshot size"
+        else:
+            assert (
+                size > prev
+            ), "tenant_size should grow, because we continue to add WAL to initial snapshot size"
+
     with env.postgres.create_start(branch_name, tenant_id=tenant_id) as pg:
+        initdb_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
         with pg.cursor() as cur:
             cur.execute("CREATE TABLE t0 (i BIGINT NOT NULL)")
 
@@ -297,13 +367,19 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size = http_client.tenant_size(tenant_id)
+            size, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+
+            size_debug = http_client.tenant_size_debug(tenant_id)
+            size_debug_file.write(size_debug)
 
             if len(collected_responses) > 0:
                 prev = collected_responses[-1][1]
                 if size == 0:
                     assert prev == 0
                 else:
+                    # branch start shouldn't be past gc_horizon yet
+                    # thus the size should grow as we insert more data
+                    assert current_lsn - initdb_lsn <= gc_horizon
                     assert size > prev
 
             collected_responses.append((current_lsn, size))
@@ -323,9 +399,15 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
             current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-            size = http_client.tenant_size(tenant_id)
+            size, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+
+            size_debug = http_client.tenant_size_debug(tenant_id)
+            size_debug_file.write(size_debug)
+
             prev = collected_responses[-1][1]
-            assert size > prev, "tenant_size should grow with updates"
+
+            check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev)
+
             collected_responses.append((current_lsn, size))
 
         while True:
@@ -340,9 +422,9 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
             size = http_client.tenant_size(tenant_id)
             prev = collected_responses[-1][1]
-            assert (
-                size > prev
-            ), "even though rows have been deleted, the tenant_size should increase"
+
+            check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev)
+
             collected_responses.append((current_lsn, size))
 
         with pg.cursor() as cur:
@@ -352,7 +434,9 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
 
         size = http_client.tenant_size(tenant_id)
         prev = collected_responses[-1][1]
-        assert size > prev, "dropping table grows tenant_size"
+
+        check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev)
+
         collected_responses.append((current_lsn, size))
 
     # this isn't too many lines to forget for a while. observed while
@@ -364,24 +448,17 @@ def test_single_branch_get_tenant_size_grows(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start()
 
+    size_debug_file.close()
+
     size_after = http_client.tenant_size(tenant_id)
     prev = collected_responses[-1][1]
 
     assert size_after == prev, "size after restarting pageserver should not have changed"
 
-    ps_metrics = parse_metrics(http_client.get_metrics(), "pageserver")
-    tenant_metric_filter = {
-        "tenant_id": str(tenant_id),
-    }
 
-    tenant_size_metric = int(
-        ps_metrics.query_one("pageserver_tenant_synthetic_size", filter=tenant_metric_filter).value
-    )
-
-    assert tenant_size_metric == size_after, "API size value should be equal to metric size value"
-
-
-def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder):
+def test_get_tenant_size_with_multiple_branches(
+    neon_env_builder: NeonEnvBuilder, test_output_dir: Path
+):
     """
     Reported size goes up while branches or rows are being added, goes down after removing branches.
     """
@@ -481,6 +558,10 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
     size_after = http_client.tenant_size(tenant_id)
     assert size_after == size_after_thinning_branch
 
+    size_debug_file_before = open(test_output_dir / "size_debug_before.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file_before.write(size_debug)
+
     # teardown, delete branches, and the size should be going down
     http_client.timeline_delete(tenant_id, first_branch_timeline_id)
 
@@ -493,3 +574,38 @@ def test_get_tenant_size_with_multiple_branches(neon_env_builder: NeonEnvBuilder
 
     assert size_after_deleting_second < size_after_continuing_on_main
     assert size_after_deleting_second > size_after_first_branch
+
+    size_debug_file = open(test_output_dir / "size_debug.html", "w")
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
+
+
+# Helper for tests that compare timeline_inputs
+# We don't want to compare the exact values, because they can be unstable
+# and cause flaky tests. So replace the values with useful invariants.
+def mask_model_inputs(x):
+    if isinstance(x, dict):
+        newx = {}
+        for k, v in x.items():
+            if k == "size":
+                if v is None or v == 0:
+                    # no change
+                    newx[k] = v
+                elif v < 0:
+                    newx[k] = "<0"
+                else:
+                    newx[k] = ">0"
+            elif k.endswith("lsn") or k.endswith("cutoff") or k == "last_record":
+                if v is None or v == 0 or v == "0/0":
+                    # no change
+                    newx[k] = v
+                else:
+                    newx[k] = "masked"
+            else:
+                newx[k] = mask_model_inputs(v)
+        return newx
+    elif isinstance(x, list):
+        newlist = [mask_model_inputs(v) for v in x]
+        return newlist
+    else:
+        return x

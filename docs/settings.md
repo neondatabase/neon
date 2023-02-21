@@ -16,7 +16,7 @@ listen_http_addr = '127.0.0.1:9898'
 checkpoint_distance = '268435456' # in bytes
 checkpoint_timeout = '10m'
 
-gc_period = '100 s'
+gc_period = '1 hour'
 gc_horizon = '67108864'
 
 max_file_descriptors = '100'
@@ -101,7 +101,7 @@ away.
 
 #### gc_period
 
-Interval at which garbage collection is triggered. Default is 100 s.
+Interval at which garbage collection is triggered. Default is 1 hour.
 
 #### image_creation_threshold
 
@@ -109,7 +109,7 @@ L0 delta layer threshold for L1 image layer creation. Default is 3.
 
 #### pitr_interval
 
-WAL retention duration for PITR branching. Default is 30 days.
+WAL retention duration for PITR branching. Default is 7 days.
 
 #### walreceiver_connect_timeout
 

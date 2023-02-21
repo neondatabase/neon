@@ -34,6 +34,11 @@ dnf install flex bison readline-devel zlib-devel openssl-devel \
   libseccomp-devel perl clang cmake postgresql postgresql-contrib protobuf-compiler \
   protobuf-devel
 ```
+* On Arch based systems, these packages are needed:
+```bash
+pacman -S base-devel readline zlib libseccomp openssl clang \
+postgresql-libs cmake postgresql protobuf
+```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
 ```
@@ -83,9 +88,10 @@ cd neon
 
 # The preferred and default is to make a debug build. This will create a
 # demonstrably slower build than a release build. For a release build,
-# use "BUILD_TYPE=release make -j`nproc`"
+# use "BUILD_TYPE=release make -j`nproc` -s"
+# Remove -s for the verbose build log
 
-make -j`nproc`
+make -j`nproc` -s
 ```
 
 #### Building on OSX
@@ -99,9 +105,10 @@ cd neon
 
 # The preferred and default is to make a debug build. This will create a
 # demonstrably slower build than a release build. For a release build,
-# use "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu`"
+# use "BUILD_TYPE=release make -j`sysctl -n hw.logicalcpu` -s"
+# Remove -s for the verbose build log
 
-make -j`sysctl -n hw.logicalcpu`
+make -j`sysctl -n hw.logicalcpu` -s
 ```
 
 #### Dependency installation notes

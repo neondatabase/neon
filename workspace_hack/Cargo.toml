@@ -38,14 +38,14 @@ prost = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
 regex-syntax = { version = "0.6" }
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 ring = { version = "0.16", features = ["std"] }
 rustls = { version = "0.20", features = ["dangerous_configuration"] }
 scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 socket2 = { version = "0.4", default-features = false, features = ["all"] }
-tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 tonic = { version = "0.8", features = ["tls-roots"] }
 tower = { version = "0.4", features = ["balance", "buffer", "limit", "retry", "timeout", "util"] }

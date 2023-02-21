@@ -41,9 +41,23 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
+        use crate::tenant::tasks::random_init_delay;
+        {
+            let policy = self.get_eviction_policy();
+            let period = match policy {
+                EvictionPolicy::LayerAccessThreshold(lat) => lat.period,
+                EvictionPolicy::NoEviction => Duration::from_secs(10),
+            };
+            if random_init_delay(period, &cancel).await.is_err() {
+                info!("shutting down");
+                return;
+            }
+        }
+
         loop {
             let policy = self.get_eviction_policy();
             let cf = self.eviction_iteration(&policy, cancel.clone()).await;
+
             match cf {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(sleep_until) => {
@@ -78,13 +92,7 @@ impl Timeline {
                     ControlFlow::Continue(()) => (),
                 }
                 let elapsed = start.elapsed();
-                if elapsed > p.period {
-                    warn!(
-                        configured_period = %humantime::format_duration(p.period),
-                        last_period = %humantime::format_duration(elapsed),
-                        "this eviction period took longer than the configured period"
-                    );
-                }
+                crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
                 ControlFlow::Continue(start + p.period)
             }
         }
@@ -100,7 +108,6 @@ impl Timeline {
         #[allow(dead_code)]
         #[derive(Debug, Default)]
         struct EvictionStats {
-            not_considered_due_to_clock_skew: usize,
             candidates: usize,
             evicted: usize,
             errors: usize,
@@ -129,9 +136,21 @@ impl Timeline {
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
                     Err(_e) => {
-                        // NB: don't log the error. If there are many layers and the system clock
-                        // is skewed, we'd be flooding the log.
-                        stats.not_considered_due_to_clock_skew += 1;
+                        // We reach here if `now` < `last_activity_ts`, which can legitimately
+                        // happen if there is an access between us getting `now`, and us getting
+                        // the access stats from the layer.
+                        //
+                        // The other reason why it can happen is system clock skew because
+                        // SystemTime::now() is not monotonic, so, even if there is no access
+                        // to the layer after we get `now` at the beginning of this function,
+                        // it could be that `now`  < `last_activity_ts`.
+                        //
+                        // To distinguish the cases, we would need to record `Instant`s in the
+                        // access stats (i.e., monotonic timestamps), but then, the timestamps
+                        // values in the access stats would need to be `Instant`'s, and hence
+                        // they would be meaningless outside of the pageserver process.
+                        // At the time of writing, the trade-off is that access stats are more
+                        // valuable than detecting clock skew.
                         continue;
                     }
                 };
@@ -188,8 +207,9 @@ impl Timeline {
                 }
             }
         }
-        if stats.not_considered_due_to_clock_skew > 0 || stats.errors > 0 || stats.not_evictable > 0
-        {
+        if stats.candidates == stats.not_evictable {
+            debug!(stats=?stats, "eviction iteration complete");
+        } else if stats.errors > 0 || stats.not_evictable > 0 {
             warn!(stats=?stats, "eviction iteration complete");
         } else {
             info!(stats=?stats, "eviction iteration complete");

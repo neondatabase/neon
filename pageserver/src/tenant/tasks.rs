@@ -3,7 +3,7 @@
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
@@ -11,6 +11,7 @@ use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::mgr;
 use crate::tenant::{Tenant, TenantState};
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::TenantId;
 
@@ -53,37 +54,55 @@ async fn compaction_loop(tenant_id: TenantId) {
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+        let cancel = task_mgr::shutdown_token();
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
+        let mut first = true;
         loop {
             trace!("waking up");
 
             let tenant = tokio::select! {
-                _ = task_mgr::shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     info!("received cancellation request");
-                return;
+                    return;
                 },
                 tenant_wait_result = wait_for_active_tenant(tenant_id, wait_duration) => match tenant_wait_result {
                     ControlFlow::Break(()) => return,
                     ControlFlow::Continue(tenant) => tenant,
                 },
-        };
+            };
 
-            let mut sleep_duration = tenant.get_compaction_period();
-            if sleep_duration == Duration::ZERO {
-                info!("automatic compaction is disabled");
-                // check again in 10 seconds, in case it's been enabled again.
-                sleep_duration = Duration::from_secs(10);
-            } else {
-                // Run compaction
-                if let Err(e) = tenant.compaction_iteration(&ctx).await {
-                    sleep_duration = wait_duration;
-                    error!("Compaction failed, retrying in {:?}: {e:?}", sleep_duration);
+            let period = tenant.get_compaction_period();
+
+            // TODO: we shouldn't need to await to find tenant and this could be moved outside of
+            // loop
+            if first {
+                first = false;
+                if random_init_delay(period, &cancel).await.is_err() {
+                    break;
                 }
             }
 
+            let started_at = Instant::now();
+
+            let sleep_duration = if period == Duration::ZERO {
+                info!("automatic compaction is disabled");
+                // check again in 10 seconds, in case it's been enabled again.
+                Duration::from_secs(10)
+            } else {
+                // Run compaction
+                if let Err(e) = tenant.compaction_iteration(&ctx).await {
+                    error!("Compaction failed, retrying in {:?}: {e:?}", wait_duration);
+                    wait_duration
+                } else {
+                    period
+                }
+            };
+
+            warn_when_period_overrun(started_at.elapsed(), period, "compaction");
+
             // Sleep
             tokio::select! {
-                _ = task_mgr::shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     info!("received cancellation request during idling");
                     break;
                 },
@@ -105,14 +124,16 @@ async fn gc_loop(tenant_id: TenantId) {
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+        let cancel = task_mgr::shutdown_token();
         // GC might require downloading, to find the cutoff LSN that corresponds to the
         // cutoff specified as time.
         let ctx = RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
+        let mut first = true;
         loop {
             trace!("waking up");
 
             let tenant = tokio::select! {
-                _ = task_mgr::shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     info!("received cancellation request");
                     return;
                 },
@@ -122,27 +143,38 @@ async fn gc_loop(tenant_id: TenantId) {
                 },
             };
 
-            let gc_period = tenant.get_gc_period();
-            let gc_horizon = tenant.get_gc_horizon();
-            let mut sleep_duration = gc_period;
-            if sleep_duration == Duration::ZERO {
-                info!("automatic GC is disabled");
-                // check again in 10 seconds, in case it's been enabled again.
-                sleep_duration = Duration::from_secs(10);
-            } else {
-                // Run gc
-                if gc_horizon > 0 {
-                    if let Err(e) = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx).await
-                    {
-                        sleep_duration = wait_duration;
-                        error!("Gc failed, retrying in {:?}: {e:?}", sleep_duration);
-                    }
+            let period = tenant.get_gc_period();
+
+            if first {
+                first = false;
+                if random_init_delay(period, &cancel).await.is_err() {
+                    break;
                 }
             }
 
+            let started_at = Instant::now();
+
+            let gc_horizon = tenant.get_gc_horizon();
+            let sleep_duration = if period == Duration::ZERO || gc_horizon == 0 {
+                info!("automatic GC is disabled");
+                // check again in 10 seconds, in case it's been enabled again.
+                Duration::from_secs(10)
+            } else {
+                // Run gc
+                let res = tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &ctx).await;
+                if let Err(e) = res {
+                    error!("Gc failed, retrying in {:?}: {e:?}", wait_duration);
+                    wait_duration
+                } else {
+                    period
+                }
+            };
+
+            warn_when_period_overrun(started_at.elapsed(), period, "gc");
+
             // Sleep
             tokio::select! {
-                _ = task_mgr::shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     info!("received cancellation request during idling");
                     break;
                 },
@@ -195,5 +227,51 @@ async fn wait_for_active_tenant(
                 }
             }
         }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("cancelled")]
+pub(crate) struct Cancelled;
+
+/// Provide a random delay for background task initialization.
+///
+/// This delay prevents a thundering herd of background tasks and will likely keep them running on
+/// different periods for more stable load.
+pub(crate) async fn random_init_delay(
+    period: Duration,
+    cancel: &CancellationToken,
+) -> Result<(), Cancelled> {
+    use rand::Rng;
+
+    let d = {
+        let mut rng = rand::thread_rng();
+
+        // gen_range asserts that the range cannot be empty, which it could be because period can
+        // be set to zero to disable gc or compaction, so lets set it to be at least 10s.
+        let period = std::cmp::max(period, Duration::from_secs(10));
+
+        // semi-ok default as the source of jitter
+        rng.gen_range(Duration::ZERO..=period)
+    };
+
+    tokio::select! {
+        _ = cancel.cancelled() => Err(Cancelled),
+        _ = tokio::time::sleep(d) => Ok(()),
+    }
+}
+
+pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task: &str) {
+    // Duration::ZERO will happen because it's the "disable [bgtask]" value.
+    if elapsed >= period && period != Duration::ZERO {
+        // humantime does no significant digits clamping whereas Duration's debug is a bit more
+        // intelligent. however it makes sense to keep the "configuration format" for period, even
+        // though there's no way to output the actual config value.
+        warn!(
+            ?elapsed,
+            period = %humantime::format_duration(period),
+            task,
+            "task iteration took longer than the configured period"
+        );
     }
 }

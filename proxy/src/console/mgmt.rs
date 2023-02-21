@@ -5,10 +5,7 @@ use crate::{
 use anyhow::Context;
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
-use std::{
-    net::{TcpListener, TcpStream},
-    thread,
-};
+use std::{net::TcpStream, thread};
 use tracing::{error, info, info_span};
 use utils::{
     postgres_backend::{self, AuthType, PostgresBackend},
@@ -34,22 +31,23 @@ pub fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), waiters::N
     CPLANE_WAITERS.notify(psql_session_id, msg)
 }
 
-/// Console management API listener thread.
+/// Console management API listener task.
 /// It spawns console response handlers needed for the link auth.
-pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
+pub async fn task_main(listener: tokio::net::TcpListener) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("mgmt has shut down");
     }
 
-    listener
-        .set_nonblocking(false)
-        .context("failed to set listener to blocking")?;
-
     loop {
-        let (socket, peer_addr) = listener.accept().context("failed to accept a new client")?;
+        let (socket, peer_addr) = listener.accept().await?;
         info!("accepted connection from {peer_addr}");
+
+        let socket = socket.into_std()?;
         socket
             .set_nodelay(true)
+            .context("failed to set client socket option")?;
+        socket
+            .set_nonblocking(false)
             .context("failed to set client socket option")?;
 
         // TODO: replace with async tasks.

@@ -186,8 +186,8 @@ async fn ws_handler(
 }
 
 pub async fn task_main(
-    ws_listener: TcpListener,
     config: &'static ProxyConfig,
+    ws_listener: TcpListener,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");

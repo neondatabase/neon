@@ -12,6 +12,7 @@ mod config;
 mod console;
 mod error;
 mod http;
+mod logging;
 mod metrics;
 mod parse;
 mod proxy;
@@ -27,7 +28,7 @@ use config::ProxyConfig;
 use futures::FutureExt;
 use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
-use tracing::{info, info_span, Instrument};
+use tracing::{info, warn};
 use utils::{project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
@@ -41,8 +42,8 @@ async fn flatten_err(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // First, initialize logging and troubleshooting subsystems.
-    init_tracing();
+    let _logging_guard = logging::init().await?;
+    let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     info!("Version: {GIT_VERSION}");
@@ -60,16 +61,17 @@ async fn main() -> anyhow::Result<()> {
 
     let mgmt_address: SocketAddr = args.get_one::<String>("mgmt").unwrap().parse()?;
     info!("Starting mgmt on {mgmt_address}");
-    let mgmt_listener = TcpListener::bind(mgmt_address).await?.into_std()?;
+    let mgmt_listener = TcpListener::bind(mgmt_address).await?;
 
     let proxy_address: SocketAddr = args.get_one::<String>("proxy").unwrap().parse()?;
     info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
     let mut tasks = vec![
+        tokio::spawn(handle_signals()),
         tokio::spawn(http::server::task_main(http_listener)),
         tokio::spawn(proxy::task_main(config, proxy_listener)),
-        tokio::task::spawn_blocking(move || console::mgmt::thread_main(mgmt_listener)),
+        tokio::spawn(console::mgmt::task_main(mgmt_listener)),
     ];
 
     if let Some(wss_address) = args.get_one::<String>("wss") {
@@ -78,48 +80,50 @@ async fn main() -> anyhow::Result<()> {
         let wss_listener = TcpListener::bind(wss_address).await?;
 
         tasks.push(tokio::spawn(http::websocket::task_main(
-            wss_listener,
             config,
+            wss_listener,
         )));
     }
 
-    // TODO: refactor.
-    if let Some(metric_collection) = &config.metric_collection {
-        let hostname = hostname::get()?
-            .into_string()
-            .map_err(|e| anyhow::anyhow!("failed to get hostname {e:?}"))?;
-
-        tasks.push(tokio::spawn(
-            metrics::collect_metrics(
-                &metric_collection.endpoint,
-                metric_collection.interval,
-                hostname,
-            )
-            .instrument(info_span!("collect_metrics")),
-        ));
+    if let Some(metrics_config) = &config.metric_collection {
+        tasks.push(tokio::spawn(metrics::task_main(metrics_config)));
     }
 
-    // This will block until all tasks have completed.
-    // Furthermore, the first one to fail will cancel the rest.
+    // This combinator will block until either all tasks complete or
+    // one of them finishes with an error (others will be cancelled).
     let tasks = tasks.into_iter().map(flatten_err);
     let _: Vec<()> = futures::future::try_join_all(tasks).await?;
 
     Ok(())
 }
 
-/// Tracing is used for logging and telemetry.
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter({
-            // This filter will examine the `RUST_LOG` env variable.
-            use tracing_subscriber::filter::{EnvFilter, LevelFilter};
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy()
-        })
-        .with_ansi(atty::is(atty::Stream::Stdout))
-        .with_target(false)
-        .init();
+/// Handle unix signals appropriately.
+async fn handle_signals() -> anyhow::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+
+    loop {
+        tokio::select! {
+            // Hangup is commonly used for config reload.
+            _ = hangup.recv() => {
+                warn!("received SIGHUP; config reload is not supported");
+            }
+            // Shut down the whole application.
+            _ = interrupt.recv() => {
+                warn!("received SIGINT, exiting immediately");
+                bail!("interrupted");
+            }
+            // TODO: Don't accept new proxy connections.
+            // TODO: Shut down once all exisiting connections have been closed.
+            _ = terminate.recv() => {
+                warn!("received SIGTERM, exiting immediately");
+                bail!("terminated");
+            }
+        }
+    }
 }
 
 /// ProxyConfig is created at proxy startup, and lives forever.
@@ -161,7 +165,7 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
             }));
 
             let url = args.get_one::<String>("auth-endpoint").unwrap().parse()?;
-            let endpoint = http::Endpoint::new(url, reqwest::Client::new());
+            let endpoint = http::Endpoint::new(url, http::new_client());
 
             let api = console::provider::neon::Api::new(endpoint, caches);
             auth::BackendType::Console(Cow::Owned(api), ())

@@ -11,12 +11,16 @@ pub enum ClientCredsParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
-    #[error("Inconsistent project name inferred from SNI ('{}') and project option ('{}').", .domain, .option)]
+    #[error(
+        "Inconsistent project name inferred from \
+         SNI ('{}') and project option ('{}').",
+        .domain, .option,
+    )]
     InconsistentProjectNames { domain: String, option: String },
 
     #[error(
         "SNI ('{}') inconsistently formatted with respect to common name ('{}'). \
-        SNI should be formatted as '<project-name>.{}'.",
+         SNI should be formatted as '<project-name>.{}'.",
         .sni, .cn, .cn,
     )]
     InconsistentSni { sni: String, cn: String },
@@ -34,9 +38,6 @@ pub struct ClientCredentials<'a> {
     pub user: &'a str,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<Cow<'a, str>>,
-    /// If `True`, we'll use the old cleartext password flow. This is used for
-    /// websocket connections, which want to minimize the number of round trips.
-    pub use_cleartext_password_flow: bool,
 }
 
 impl ClientCredentials<'_> {
@@ -51,7 +52,6 @@ impl<'a> ClientCredentials<'a> {
         params: &'a StartupMessageParams,
         sni: Option<&str>,
         common_name: Option<&str>,
-        use_cleartext_password_flow: bool,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
@@ -96,18 +96,9 @@ impl<'a> ClientCredentials<'a> {
         }
         .transpose()?;
 
-        info!(
-            user = user,
-            project = project.as_deref(),
-            use_cleartext_password_flow = use_cleartext_password_flow,
-            "credentials"
-        );
+        info!(user, project = project.as_deref(), "credentials");
 
-        Ok(Self {
-            user,
-            project,
-            use_cleartext_password_flow,
-        })
+        Ok(Self { user, project })
     }
 }
 
@@ -131,7 +122,7 @@ mod tests {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
 
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
 
@@ -146,7 +137,7 @@ mod tests {
             ("foo", "bar"),        // should be ignored
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
 
@@ -160,7 +151,7 @@ mod tests {
         let sni = Some("foo.localhost");
         let common_name = Some("localhost");
 
-        let creds = ClientCredentials::parse(&options, sni, common_name, false)?;
+        let creds = ClientCredentials::parse(&options, sni, common_name)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
 
@@ -174,7 +165,7 @@ mod tests {
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
 
@@ -188,7 +179,7 @@ mod tests {
         let sni = Some("baz.localhost");
         let common_name = Some("localhost");
 
-        let creds = ClientCredentials::parse(&options, sni, common_name, false)?;
+        let creds = ClientCredentials::parse(&options, sni, common_name)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("baz"));
 
@@ -203,8 +194,7 @@ mod tests {
         let sni = Some("second.localhost");
         let common_name = Some("localhost");
 
-        let err =
-            ClientCredentials::parse(&options, sni, common_name, false).expect_err("should fail");
+        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -221,8 +211,7 @@ mod tests {
         let sni = Some("project.localhost");
         let common_name = Some("example.com");
 
-        let err =
-            ClientCredentials::parse(&options, sni, common_name, false).expect_err("should fail");
+        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
         match err {
             InconsistentSni { sni, cn } => {
                 assert_eq!(sni, "project.localhost");

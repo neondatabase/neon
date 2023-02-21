@@ -11,8 +11,10 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 pub mod errors {
-    use crate::error::{io_error, UserFacingError};
-    use reqwest::StatusCode as HttpStatusCode;
+    use crate::{
+        error::{io_error, UserFacingError},
+        http,
+    };
     use thiserror::Error;
 
     /// A go-to error message which doesn't leak any detail.
@@ -24,7 +26,7 @@ pub mod errors {
         /// Error returned by the console itself.
         #[error("{REQUEST_FAILED} with {}: {}", .status, .text)]
         Console {
-            status: HttpStatusCode,
+            status: http::StatusCode,
             text: Box<str>,
         },
 
@@ -35,7 +37,7 @@ pub mod errors {
 
     impl ApiError {
         /// Returns HTTP status code if it's the reason for failure.
-        pub fn http_status_code(&self) -> Option<HttpStatusCode> {
+        pub fn http_status_code(&self) -> Option<http::StatusCode> {
             use ApiError::*;
             match self {
                 Console { status, .. } => Some(*status),
@@ -51,15 +53,15 @@ pub mod errors {
                 // To minimize risks, only select errors are forwarded to users.
                 // Ask @neondatabase/control-plane for review before adding more.
                 Console { status, .. } => match *status {
-                    HttpStatusCode::NOT_FOUND => {
+                    http::StatusCode::NOT_FOUND => {
                         // Status 404: failed to get a project-related resource.
                         format!("{REQUEST_FAILED}: endpoint cannot be found")
                     }
-                    HttpStatusCode::NOT_ACCEPTABLE => {
+                    http::StatusCode::NOT_ACCEPTABLE => {
                         // Status 406: endpoint is disabled (we don't allow connections).
                         format!("{REQUEST_FAILED}: endpoint is disabled")
                     }
-                    HttpStatusCode::LOCKED => {
+                    http::StatusCode::LOCKED => {
                         // Status 423: project might be in maintenance mode (or bad state).
                         format!("{REQUEST_FAILED}: endpoint is temporary unavailable")
                     }
@@ -70,9 +72,14 @@ pub mod errors {
         }
     }
 
-    // Helps eliminate graceless `.map_err` calls without introducing another ctor.
     impl From<reqwest::Error> for ApiError {
         fn from(e: reqwest::Error) -> Self {
+            io_error(e).into()
+        }
+    }
+
+    impl From<reqwest_middleware::Error> for ApiError {
+        fn from(e: reqwest_middleware::Error) -> Self {
             io_error(e).into()
         }
     }

@@ -6,11 +6,11 @@ image:
 
 settings:
   authBackend: "console"
-  authEndpoint: "http://console-staging.local/management/api/v2"
+  authEndpoint: "http://neon-internal-api.aws.neon.build/management/api/v2"
   domain: "*.cloud.stage.neon.tech"
   sentryEnvironment: "staging"
   wssPort: 8443
-  metricCollectionEndpoint: "http://console-staging.local/billing/api/v1/usage_events"
+  metricCollectionEndpoint: "http://neon-internal-api.aws.neon.build/billing/api/v1/usage_events"
   metricCollectionInterval: "1min"
 
 # -- Additional labels for neon-proxy pods

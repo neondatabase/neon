@@ -1,12 +1,11 @@
-//!
 //! Periodically collect proxy consumption metrics
 //! and push them to a HTTP endpoint.
-//!
+use crate::{config::MetricCollectionConfig, http};
 use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use serde::Serialize;
-use std::{collections::HashMap, time::Duration};
-use tracing::{debug, error, log::info, trace};
+use std::collections::HashMap;
+use tracing::{debug, error, info, instrument, trace};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
@@ -19,48 +18,41 @@ const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
 ///
-#[derive(Eq, Hash, PartialEq, Serialize)]
+#[derive(Eq, Hash, PartialEq, Serialize, Debug)]
 pub struct Ids {
     pub endpoint_id: String,
 }
 
-pub async fn collect_metrics(
-    metric_collection_endpoint: &reqwest::Url,
-    metric_collection_interval: Duration,
-    hostname: String,
-) -> anyhow::Result<()> {
+pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<()> {
+    info!("metrics collector config: {config:?}");
     scopeguard::defer! {
-        info!("collect_metrics has shut down");
+        info!("metrics collector has shut down");
     }
 
-    let mut ticker = tokio::time::interval(metric_collection_interval);
-
-    info!(
-        "starting collect_metrics. metric_collection_endpoint: {}",
-        metric_collection_endpoint
-    );
-
-    // define client here to reuse it for all requests
-    let client = reqwest::Client::new();
+    let http_client = http::new_client();
     let mut cached_metrics: HashMap<Ids, (u64, DateTime<Utc>)> = HashMap::new();
+    let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
 
+    let mut ticker = tokio::time::interval(config.interval);
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {
+        ticker.tick().await;
 
-                match collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, hostname.clone()).await
-                {
-                    Err(e) => {
-                        error!("Failed to send consumption metrics: {} ", e);
-                    },
-                    Ok(_) => { trace!("collect_metrics_iteration completed successfully") },
-                }
-            }
+        let res = collect_metrics_iteration(
+            &http_client,
+            &mut cached_metrics,
+            &config.endpoint,
+            &hostname,
+        )
+        .await;
+
+        match res {
+            Err(e) => error!("failed to send consumption metrics: {e} "),
+            Ok(_) => trace!("periodic metrics collection completed successfully"),
         }
     }
 }
 
-pub fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
+fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
     let mut current_metrics: Vec<(Ids, (u64, DateTime<Utc>))> = Vec::new();
     let metrics = prometheus::default_registry().gather();
 
@@ -99,11 +91,12 @@ pub fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
     current_metrics
 }
 
-pub async fn collect_metrics_iteration(
-    client: &reqwest::Client,
+#[instrument(skip_all)]
+async fn collect_metrics_iteration(
+    client: &http::ClientWithMiddleware,
     cached_metrics: &mut HashMap<Ids, (u64, DateTime<Utc>)>,
     metric_collection_endpoint: &reqwest::Url,
-    hostname: String,
+    hostname: &str,
 ) -> anyhow::Result<()> {
     info!(
         "starting collect_metrics_iteration. metric_collection_endpoint: {}",
@@ -134,7 +127,7 @@ pub async fn collect_metrics_iteration(
                     stop_time: *curr_time,
                 },
                 metric: PROXY_IO_BYTES_PER_CLIENT,
-                idempotency_key: idempotency_key(hostname.clone()),
+                idempotency_key: idempotency_key(hostname.to_owned()),
                 value,
                 extra: Ids {
                     endpoint_id: curr_key.endpoint_id.clone(),
@@ -190,6 +183,12 @@ pub async fn collect_metrics_iteration(
             }
         } else {
             error!("metrics endpoint refused the sent metrics: {:?}", res);
+            for metric in chunk.iter() {
+                // Report if the metric value is suspiciously large
+                if metric.value > (1u64 << 40) {
+                    error!("potentially abnormal metric value: {:?}", metric);
+                }
+            }
         }
     }
     Ok(())

@@ -75,27 +75,36 @@ impl StartupMessageParams {
     /// taking into account all escape sequences but leaving them as-is.
     /// [`None`] means that there's no `options` in [`Self`].
     pub fn options_raw(&self) -> Option<impl Iterator<Item = &str>> {
-        // See `postgres: pg_split_opts`.
-        let mut last_was_escape = false;
-        let iter = self
-            .get("options")?
-            .split(move |c: char| {
-                // We split by non-escaped whitespace symbols.
-                let should_split = c.is_ascii_whitespace() && !last_was_escape;
-                last_was_escape = c == '\\' && !last_was_escape;
-                should_split
-            })
-            .filter(|s| !s.is_empty());
-
-        Some(iter)
+        self.get("options").map(Self::parse_options_raw)
     }
 
     /// Split command-line options according to PostgreSQL's logic,
     /// applying all escape sequences (using owned strings as needed).
     /// [`None`] means that there's no `options` in [`Self`].
     pub fn options_escaped(&self) -> Option<impl Iterator<Item = Cow<'_, str>>> {
+        self.get("options").map(Self::parse_options_escaped)
+    }
+
+    /// Split command-line options according to PostgreSQL's logic,
+    /// taking into account all escape sequences but leaving them as-is.
+    pub fn parse_options_raw(input: &str) -> impl Iterator<Item = &str> {
         // See `postgres: pg_split_opts`.
-        let iter = self.options_raw()?.map(|s| {
+        let mut last_was_escape = false;
+        input
+            .split(move |c: char| {
+                // We split by non-escaped whitespace symbols.
+                let should_split = c.is_ascii_whitespace() && !last_was_escape;
+                last_was_escape = c == '\\' && !last_was_escape;
+                should_split
+            })
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Split command-line options according to PostgreSQL's logic,
+    /// applying all escape sequences (using owned strings as needed).
+    pub fn parse_options_escaped(input: &str) -> impl Iterator<Item = Cow<'_, str>> {
+        // See `postgres: pg_split_opts`.
+        Self::parse_options_raw(input).map(|s| {
             let mut preserve_next_escape = false;
             let escape = |c| {
                 // We should remove '\\' unless it's preceded by '\\'.
@@ -108,9 +117,12 @@ impl StartupMessageParams {
                 true => Cow::Owned(s.replace(escape, "")),
                 false => Cow::Borrowed(s),
             }
-        });
+        })
+    }
 
-        Some(iter)
+    /// Iterate through key-value pairs in an arbitrary order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.params.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
     // This function is mostly useful in tests.

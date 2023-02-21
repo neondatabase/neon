@@ -1,401 +1,70 @@
-use std::borrow::Cow;
-use std::collections::HashMap;
+//! Synthetic size calculation
 
-use anyhow::Context;
+mod calculation;
+pub mod svg;
 
-/// Pricing model or history size builder.
+/// StorageModel is the input to the synthetic size calculation. It represents
+/// a tree of timelines, with just the information that's needed for the
+/// calculation. This doesn't track timeline names or where each timeline
+/// begins and ends, for example. Instead, it consists of "points of interest"
+/// on the timelines. A point of interest could be the timeline start or end point,
+/// the oldest point on a timeline that needs to be retained because of PITR
+/// cutoff, or snapshot points named by the user. For each such point, and the
+/// edge connecting the points (implicit in Segment), we store information about
+/// whether we need to be able to recover to the point, and if known, the logical
+/// size at the point.
 ///
-/// Maintains knowledge of the branches and their modifications. Generic over the branch name key
-/// type.
-pub struct Storage<K: 'static> {
-    segments: Vec<Segment>,
-
-    /// Mapping from the branch name to the index of a segment describing it's latest state.
-    branches: HashMap<K, usize>,
+/// The segments must form a well-formed tree, with no loops.
+#[derive(serde::Serialize)]
+pub struct StorageModel {
+    pub segments: Vec<Segment>,
 }
 
-/// Snapshot of a branch.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Segment represents one point in the tree of branches, *and* the edge that leads
+/// to it (if any). We don't need separate structs for points and edges, because each
+/// point can have only one parent.
+///
+/// When 'needed' is true, it means that we need to be able to reconstruct
+/// any version between 'parent.lsn' and 'lsn'. If you want to represent that only
+/// a single point is needed, create two Segments with the same lsn, and mark only
+/// the child as needed.
+///
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     /// Previous segment index into ['Storage::segments`], if any.
-    parent: Option<usize>,
+    pub parent: Option<usize>,
 
-    /// Description of how did we get to this state.
-    ///
-    /// Mainly used in the original scenarios 1..=4 with insert, delete and update. Not used when
-    /// modifying a branch directly.
-    pub op: Cow<'static, str>,
+    /// LSN at this point
+    pub lsn: u64,
 
-    /// LSN before this state
-    start_lsn: u64,
+    /// Logical size at this node, if known.
+    pub size: Option<u64>,
 
-    /// LSN at this state
-    pub end_lsn: u64,
-
-    /// Logical size before this state
-    start_size: u64,
-
-    /// Logical size at this state. Can be None in the last Segment of a branch.
-    pub end_size: Option<u64>,
-
-    /// Indices to [`Storage::segments`]
-    ///
-    /// FIXME: this could be an Option<usize>
-    children_after: Vec<usize>,
-
-    /// Determined by `retention_period` given to [`Storage::calculate`]
+    /// If true, the segment from parent to this node is needed by `retention_period`
     pub needed: bool,
 }
 
-//
-//
-//
-//
-//                 *-g--*---D--->
-//                /
-//               /
-//              /                 *---b----*-B--->
-//             /                 /
-//            /                 /
-//      -----*--e---*-----f----* C
-//           E                  \
-//                               \
-//                                *--a---*---A-->
-//
-// If A and B need to be retained, is it cheaper to store
-// snapshot at C+a+b, or snapshots at A and B ?
-//
-// If D also needs to be retained, which is cheaper:
-//
-// 1. E+g+e+f+a+b
-// 2. D+C+a+b
-// 3. D+A+B
+/// Result of synthetic size calculation. Returned by StorageModel::calculate()
+pub struct SizeResult {
+    pub total_size: u64,
 
-/// [`Segment`] which has had it's size calculated.
-pub struct SegmentSize {
-    pub seg_id: usize,
-
-    pub method: SegmentMethod,
-
-    this_size: u64,
-
-    pub children: Vec<SegmentSize>,
+    // This has same length as the StorageModel::segments vector in the input.
+    // Each entry in this array corresponds to the entry with same index in
+    // StorageModel::segments.
+    pub segments: Vec<SegmentSizeResult>,
 }
 
-impl SegmentSize {
-    fn total(&self) -> u64 {
-        self.this_size + self.children.iter().fold(0, |acc, x| acc + x.total())
-    }
-
-    pub fn total_children(&self) -> u64 {
-        if self.method == SnapshotAfter {
-            self.this_size + self.children.iter().fold(0, |acc, x| acc + x.total())
-        } else {
-            self.children.iter().fold(0, |acc, x| acc + x.total())
-        }
-    }
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SegmentSizeResult {
+    pub method: SegmentMethod,
+    // calculated size of this subtree, using this method
+    pub accum_size: u64,
 }
 
 /// Different methods to retain history from a particular state
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SegmentMethod {
-    SnapshotAfter,
-    Wal,
-    WalNeeded,
+    SnapshotHere, // A logical snapshot is needed after this segment
+    Wal,          // Keep WAL leading up to this node
     Skipped,
-}
-
-use SegmentMethod::*;
-
-impl<K: std::hash::Hash + Eq + 'static> Storage<K> {
-    /// Creates a new storage with the given default branch name.
-    pub fn new(initial_branch: K) -> Storage<K> {
-        let init_segment = Segment {
-            op: "".into(),
-            needed: false,
-            parent: None,
-            start_lsn: 0,
-            end_lsn: 0,
-            start_size: 0,
-            end_size: Some(0),
-            children_after: Vec::new(),
-        };
-
-        Storage {
-            segments: vec![init_segment],
-            branches: HashMap::from([(initial_branch, 0)]),
-        }
-    }
-
-    /// Advances the branch with a new point, at given LSN.
-    pub fn insert_point<Q: ?Sized>(
-        &mut self,
-        branch: &Q,
-        op: Cow<'static, str>,
-        lsn: u64,
-        size: Option<u64>,
-    ) -> anyhow::Result<()>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + std::fmt::Debug,
-    {
-        let Some(lastseg_id) = self.branches.get(branch).copied() else { anyhow::bail!("branch not found: {branch:?}") };
-        let newseg_id = self.segments.len();
-        let lastseg = &mut self.segments[lastseg_id];
-
-        assert!(lsn > lastseg.end_lsn);
-
-        let Some(start_size) = lastseg.end_size else { anyhow::bail!("no end_size on latest segment for {branch:?}") };
-
-        let newseg = Segment {
-            op,
-            parent: Some(lastseg_id),
-            start_lsn: lastseg.end_lsn,
-            end_lsn: lsn,
-            start_size,
-            end_size: size,
-            children_after: Vec::new(),
-            needed: false,
-        };
-        lastseg.children_after.push(newseg_id);
-
-        self.segments.push(newseg);
-        *self.branches.get_mut(branch).expect("read already") = newseg_id;
-
-        Ok(())
-    }
-
-    /// Advances the branch with the named operation, by the relative LSN and logical size bytes.
-    pub fn modify_branch<Q: ?Sized>(
-        &mut self,
-        branch: &Q,
-        op: Cow<'static, str>,
-        lsn_bytes: u64,
-        size_bytes: i64,
-    ) -> anyhow::Result<()>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + std::fmt::Debug,
-    {
-        let Some(lastseg_id) = self.branches.get(branch).copied() else { anyhow::bail!("branch not found: {branch:?}") };
-        let newseg_id = self.segments.len();
-        let lastseg = &mut self.segments[lastseg_id];
-
-        let Some(last_end_size) = lastseg.end_size else { anyhow::bail!("no end_size on latest segment for {branch:?}") };
-
-        let newseg = Segment {
-            op,
-            parent: Some(lastseg_id),
-            start_lsn: lastseg.end_lsn,
-            end_lsn: lastseg.end_lsn + lsn_bytes,
-            start_size: last_end_size,
-            end_size: Some((last_end_size as i64 + size_bytes) as u64),
-            children_after: Vec::new(),
-            needed: false,
-        };
-        lastseg.children_after.push(newseg_id);
-
-        self.segments.push(newseg);
-        *self.branches.get_mut(branch).expect("read already") = newseg_id;
-        Ok(())
-    }
-
-    pub fn insert<Q: ?Sized>(&mut self, branch: &Q, bytes: u64) -> anyhow::Result<()>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + std::fmt::Debug,
-    {
-        self.modify_branch(branch, "insert".into(), bytes, bytes as i64)
-    }
-
-    pub fn update<Q: ?Sized>(&mut self, branch: &Q, bytes: u64) -> anyhow::Result<()>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + std::fmt::Debug,
-    {
-        self.modify_branch(branch, "update".into(), bytes, 0i64)
-    }
-
-    pub fn delete<Q: ?Sized>(&mut self, branch: &Q, bytes: u64) -> anyhow::Result<()>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + std::fmt::Debug,
-    {
-        self.modify_branch(branch, "delete".into(), bytes, -(bytes as i64))
-    }
-
-    pub fn branch<Q: ?Sized>(&mut self, parent: &Q, name: K) -> anyhow::Result<()>
-    where
-        K: std::borrow::Borrow<Q> + std::fmt::Debug,
-        Q: std::hash::Hash + Eq + std::fmt::Debug,
-    {
-        // Find the right segment
-        let branchseg_id = *self.branches.get(parent).with_context(|| {
-            format!(
-                "should had found the parent {:?} by key. in branches {:?}",
-                parent, self.branches
-            )
-        })?;
-
-        let _branchseg = &mut self.segments[branchseg_id];
-
-        // Create branch name for it
-        self.branches.insert(name, branchseg_id);
-        Ok(())
-    }
-
-    pub fn calculate(&mut self, retention_period: u64) -> anyhow::Result<SegmentSize> {
-        // Phase 1: Mark all the segments that need to be retained
-        for (_branch, &last_seg_id) in self.branches.iter() {
-            let last_seg = &self.segments[last_seg_id];
-            let cutoff_lsn = last_seg.start_lsn.saturating_sub(retention_period);
-            let mut seg_id = last_seg_id;
-            loop {
-                let seg = &mut self.segments[seg_id];
-                if seg.end_lsn < cutoff_lsn {
-                    break;
-                }
-                seg.needed = true;
-                if let Some(prev_seg_id) = seg.parent {
-                    seg_id = prev_seg_id;
-                } else {
-                    break;
-                }
-            }
-        }
-
-        // Phase 2: For each oldest segment in a chain that needs to be retained,
-        // calculate if we should store snapshot or WAL
-        self.size_from_snapshot_later(0)
-    }
-
-    fn size_from_wal(&self, seg_id: usize) -> anyhow::Result<SegmentSize> {
-        let seg = &self.segments[seg_id];
-
-        let this_size = seg.end_lsn - seg.start_lsn;
-
-        let mut children = Vec::new();
-
-        // try both ways
-        for &child_id in seg.children_after.iter() {
-            // try each child both ways
-            let child = &self.segments[child_id];
-            let p1 = self.size_from_wal(child_id)?;
-
-            let p = if !child.needed {
-                let p2 = self.size_from_snapshot_later(child_id)?;
-                if p1.total() < p2.total() {
-                    p1
-                } else {
-                    p2
-                }
-            } else {
-                p1
-            };
-            children.push(p);
-        }
-        Ok(SegmentSize {
-            seg_id,
-            method: if seg.needed { WalNeeded } else { Wal },
-            this_size,
-            children,
-        })
-    }
-
-    fn size_from_snapshot_later(&self, seg_id: usize) -> anyhow::Result<SegmentSize> {
-        // If this is needed, then it's time to do the snapshot and continue
-        // with wal method.
-        let seg = &self.segments[seg_id];
-        //eprintln!("snap: seg{}: {} needed: {}", seg_id, seg.children_after.len(), seg.needed);
-        if seg.needed {
-            let mut children = Vec::new();
-
-            for &child_id in seg.children_after.iter() {
-                // try each child both ways
-                let child = &self.segments[child_id];
-                let p1 = self.size_from_wal(child_id)?;
-
-                let p = if !child.needed {
-                    let p2 = self.size_from_snapshot_later(child_id)?;
-                    if p1.total() < p2.total() {
-                        p1
-                    } else {
-                        p2
-                    }
-                } else {
-                    p1
-                };
-                children.push(p);
-            }
-            Ok(SegmentSize {
-                seg_id,
-                method: WalNeeded,
-                this_size: seg.start_size,
-                children,
-            })
-        } else {
-            // If any of the direct children are "needed", need to be able to reconstruct here
-            let mut children_needed = false;
-            for &child in seg.children_after.iter() {
-                let seg = &self.segments[child];
-                if seg.needed {
-                    children_needed = true;
-                    break;
-                }
-            }
-
-            let method1 = if !children_needed {
-                let mut children = Vec::new();
-                for child in seg.children_after.iter() {
-                    children.push(self.size_from_snapshot_later(*child)?);
-                }
-                Some(SegmentSize {
-                    seg_id,
-                    method: Skipped,
-                    this_size: 0,
-                    children,
-                })
-            } else {
-                None
-            };
-
-            // If this a junction, consider snapshotting here
-            let method2 = if children_needed || seg.children_after.len() >= 2 {
-                let mut children = Vec::new();
-                for child in seg.children_after.iter() {
-                    children.push(self.size_from_wal(*child)?);
-                }
-                let Some(this_size) = seg.end_size else { anyhow::bail!("no end_size at junction {seg_id}") };
-                Some(SegmentSize {
-                    seg_id,
-                    method: SnapshotAfter,
-                    this_size,
-                    children,
-                })
-            } else {
-                None
-            };
-
-            Ok(match (method1, method2) {
-                (None, None) => anyhow::bail!(
-                    "neither method was applicable: children_after={}, children_needed={}",
-                    seg.children_after.len(),
-                    children_needed
-                ),
-                (Some(method), None) => method,
-                (None, Some(method)) => method,
-                (Some(method1), Some(method2)) => {
-                    if method1.total() < method2.total() {
-                        method1
-                    } else {
-                        method2
-                    }
-                }
-            })
-        }
-    }
-
-    pub fn into_segments(self) -> Vec<Segment> {
-        self.segments
-    }
 }

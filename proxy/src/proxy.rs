@@ -17,7 +17,7 @@ use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{error, info, warn};
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
 const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
@@ -91,13 +91,13 @@ pub async fn task_main(
             .unwrap_or_else(|e| {
                 // Acknowledge that the task has finished with an error.
                 error!("per-client task finished with an error: {e:#}");
-            })
-            .instrument(info_span!("client", session = format_args!("{session_id}"))),
+            }),
         );
     }
 }
 
 // TODO(tech debt): unite this with its twin below.
+#[tracing::instrument(fields(session_id), skip_all)]
 pub async fn handle_ws_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
@@ -127,7 +127,7 @@ pub async fn handle_ws_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name, true))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
@@ -135,10 +135,11 @@ pub async fn handle_ws_client(
 
     let client = Client::new(stream, creds, &params, session_id);
     cancel_map
-        .with_session(|session| client.connect_to_db(session))
+        .with_session(|session| client.connect_to_db(session, true))
         .await
 }
 
+#[tracing::instrument(fields(session_id), skip_all)]
 async fn handle_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
@@ -165,7 +166,7 @@ async fn handle_client(
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name, false))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
@@ -173,7 +174,7 @@ async fn handle_client(
 
     let client = Client::new(stream, creds, &params, session_id);
     cancel_map
-        .with_session(|session| client.connect_to_db(session))
+        .with_session(|session| client.connect_to_db(session, false))
         .await
 }
 
@@ -401,7 +402,11 @@ impl<'a, S> Client<'a, S> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
-    async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
+    async fn connect_to_db(
+        self,
+        session: cancellation::Session<'_>,
+        allow_cleartext: bool,
+    ) -> anyhow::Result<()> {
         let Self {
             mut stream,
             mut creds,
@@ -416,10 +421,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         let auth_result = async {
             // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds.authenticate(&extra, &mut stream).await;
+            let res = creds
+                .authenticate(&extra, &mut stream, allow_cleartext)
+                .await;
+
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
-        .instrument(info_span!("auth"))
         .await?;
 
         let AuthSuccess {
