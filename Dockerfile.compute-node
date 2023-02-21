@@ -200,8 +200,10 @@ USER nonroot
 WORKDIR /home/nonroot
 ARG PG_VERSION
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable && \
+RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
+    rm rustup-init && \
     cargo install --git https://github.com/vadim2404/pgx --branch neon_abi_v0.6.1 --locked cargo-pgx && \
     /bin/bash -c 'cargo pgx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
@@ -216,7 +218,7 @@ USER root
 
 FROM rust-extensions-build AS pg-jsonschema-pg-build
 
-RUN git clone --branch neon_abi_v0.1.4 https://github.com/vadim2404/pg_jsonschema/ && \
+RUN git clone --depth=1 --single-branch --branch neon_abi_v0.1.4 https://github.com/vadim2404/pg_jsonschema/ && \
     cd pg_jsonschema && \
     cargo pgx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
@@ -230,7 +232,7 @@ RUN git clone --branch neon_abi_v0.1.4 https://github.com/vadim2404/pg_jsonschem
 
 FROM rust-extensions-build AS pg-graphql-pg-build
 
-RUN git clone --branch neon_abi_v1.1.0 https://github.com/vadim2404/pg_graphql && \
+RUN git clone --depth=1 --single-branch --branch neon_abi_v1.1.0 https://github.com/vadim2404/pg_graphql && \
     cd pg_graphql && \  
     cargo pgx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_graphql.control
