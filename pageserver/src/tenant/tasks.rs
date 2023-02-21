@@ -210,8 +210,11 @@ async fn wait_for_active_tenant(
 pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task: &str) {
     // Duration::ZERO will happen because it's the "disable [bgtask]" value.
     if elapsed >= period && period != Duration::ZERO {
+        // humantime does no significant digits clamping whereas Duration's debug is a bit more
+        // intelligent. however it makes sense to keep the "configuration format" for period, even
+        // though there's no way to output the actual config value.
         warn!(
-            elapsed = %humantime::format_duration(elapsed),
+            ?elapsed,
             period = %humantime::format_duration(period),
             task,
             "task iteration took longer than the configured period"
