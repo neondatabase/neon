@@ -3745,6 +3745,7 @@ impl Timeline {
                     remote_layer.ongoing_download.close();
                 } else {
                     // Keep semaphore open. We'll drop the permit at the end of the function.
+                    info!("on-demand download failed: {:?}", result.as_ref().unwrap_err());
                 }
 
                 // Don't treat it as an error if the task that triggered the download
