@@ -68,6 +68,8 @@ async fn compaction_loop(tenant_id: TenantId) {
                 },
             };
 
+            let started_at = Instant::now();
+
             let period = tenant.get_compaction_period();
             let sleep_duration = if period == Duration::ZERO {
                 info!("automatic compaction is disabled");
@@ -82,6 +84,13 @@ async fn compaction_loop(tenant_id: TenantId) {
                     period
                 }
             };
+
+            {
+                let elapsed = started_at.elapsed();
+                if elapsed > period {
+                    warn!(?elapsed, ?period, "compaction loop took longer than configured period");
+                }
+            }
 
             // Sleep
             tokio::select! {
@@ -124,6 +133,8 @@ async fn gc_loop(tenant_id: TenantId) {
                 },
             };
 
+            let started_at = Instant::now();
+
             let period = tenant.get_gc_period();
             let gc_horizon = tenant.get_gc_horizon();
             let sleep_duration = if period == Duration::ZERO || gc_horizon == 0 {
@@ -140,6 +151,14 @@ async fn gc_loop(tenant_id: TenantId) {
                     period
                 }
             };
+
+            {
+                let elapsed = started_at.elapsed();
+
+                if elapsed > period {
+                    warn!(?elapsed, ?period, "gc loop took longer than configured period");
+                }
+            }
 
             // Sleep
             tokio::select! {

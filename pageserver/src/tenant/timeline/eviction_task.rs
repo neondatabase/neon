@@ -44,6 +44,7 @@ impl Timeline {
         loop {
             let policy = self.get_eviction_policy();
             let cf = self.eviction_iteration(&policy, cancel.clone()).await;
+
             match cf {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(sleep_until) => {
