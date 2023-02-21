@@ -1805,7 +1805,7 @@ impl Timeline {
         tokio::pin!(calculation);
         loop {
             tokio::select! {
-                res = &mut calculation =>  { return res }
+                res = &mut calculation => { return res }
                 reason = timeline_state_cancellation => {
                     debug!(reason = reason, "cancelling calculation");
                     cancel.cancel();
