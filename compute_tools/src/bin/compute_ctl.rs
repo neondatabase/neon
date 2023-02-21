@@ -73,28 +73,36 @@ fn main() -> Result<()> {
     let pgbin = matches.get_one::<String>("pgbin").unwrap();
 
     let spec: ComputeSpec = match spec {
-        // First, try to get cluster spec from the cli argument
-        Some(json) => serde_json::from_str(json)?,
-        None => {
-            // Second, try to read it from the file if path is provided
-            if let Some(sp) = spec_path {
-                let path = Path::new(sp);
-                let file = File::open(path)?;
-                serde_json::from_reader(file)?
-            } else if let Some(id) = compute_id {
-                if let Some(cp_base) = control_plane_uri {
-                    let cp_uri = cp_base.to_owned() + "/management/api/v1/" + id + "/spec";
-                    reqwest::blocking::get(cp_uri)?
-                        // TODO: fetch a jwt token from the environment
-                        // .header("Authorization", "JWT TOKEN")
-                        .json()?
-                } else {
-                    panic!("must specify --control-plane-uri with --compute-id");
-                }
-            } else {
-                panic!("cluster spec should be provided via --spec or --spec-path argument");
-            }
-        }
+	// First, try to get cluster spec from the cli argument
+	Some(json) => serde_json::from_str(json)?,
+	None => {
+	    // Second, try to read it from the file if path is provided
+	    if let Some(sp) = spec_path {
+		let path = Path::new(sp);
+		let file = File::open(path)?;
+		serde_json::from_reader(file)?
+	    } else if let Some(id) = compute_id {
+		if let Some(cp_base) = control_plane_uri {
+
+		    let cp_uri = format!("{cp_base}/management/api/v1/{id}/spec");
+		    let jwt: String = match std::env::var("NEON_CONSOLE_JWT") {
+			Ok(v, ) => v,
+			Err(_) => "".to_string(),
+		    };
+
+		    reqwest::blocking::Client::new()
+			.get(cp_uri)
+			.header("Authorization", jwt)
+			.send()?
+			.json()?
+		} else {
+		    panic!("must specify --control-plane-uri \"{:#?}\" and --compute-id \"{:#?}\"",
+			   control_plane_uri, compute_id);
+		}
+	    } else {
+		panic!("compute spec should be provided via --spec or --spec-path argument");
+	    }
+	}
     };
 
     // Extract OpenTelemetry context for the startup actions from the spec, and
