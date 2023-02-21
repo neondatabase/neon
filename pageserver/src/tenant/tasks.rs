@@ -60,13 +60,13 @@ async fn compaction_loop(tenant_id: TenantId) {
             let tenant = tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
                     info!("received cancellation request");
-                return;
+                    return;
                 },
                 tenant_wait_result = wait_for_active_tenant(tenant_id, wait_duration) => match tenant_wait_result {
                     ControlFlow::Break(()) => return,
                     ControlFlow::Continue(tenant) => tenant,
                 },
-        };
+            };
 
             let mut sleep_duration = tenant.get_compaction_period();
             if sleep_duration == Duration::ZERO {
