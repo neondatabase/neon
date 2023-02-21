@@ -247,8 +247,6 @@ impl S3Bucket {
 
 pin_project_lite::pin_project! {
     /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    ///
-    /// This allows extending the ratelimit until we have completed the response reading.
     struct RatelimitedAsyncRead<S> {
         permit: tokio::sync::OwnedSemaphorePermit,
         #[pin]
