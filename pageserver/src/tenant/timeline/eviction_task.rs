@@ -41,6 +41,19 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant_id = %self.tenant_id, timeline_id = %self.timeline_id))]
     async fn eviction_task(self: Arc<Self>, cancel: CancellationToken) {
+        use crate::tenant::tasks::random_init_delay;
+        {
+            let policy = self.get_eviction_policy();
+            let period = match policy {
+                EvictionPolicy::LayerAccessThreshold(lat) => lat.period,
+                EvictionPolicy::NoEviction => Duration::from_secs(10),
+            };
+            if random_init_delay(period, &cancel).await.is_err() {
+                info!("shutting down");
+                return;
+            }
+        }
+
         loop {
             let policy = self.get_eviction_policy();
             let cf = self.eviction_iteration(&policy, cancel.clone()).await;
