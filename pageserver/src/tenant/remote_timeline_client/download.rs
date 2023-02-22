@@ -87,7 +87,7 @@ pub async fn download_layer_file<'a>(
                 .with_context(|| {
                     format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
                 })
-                .map_err(|e| DownloadError::Other(e))?;
+                .map_err(DownloadError::Other)?;
 
             Ok((destination_file, bytes_amount))
 
