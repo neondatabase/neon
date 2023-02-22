@@ -60,10 +60,11 @@ RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar
     DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
     make clean && cp -R /sfcgal/* /
 
+ENV PATH "/usr/local/pgsql/bin:$PATH"
+
 RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postgis.tar.gz && \
     mkdir postgis-src && cd postgis-src && tar xvzf ../postgis.tar.gz --strip-components=1 -C . && \
     ./autogen.sh && \
-    export PATH="/usr/local/pgsql/bin:$PATH" && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     cd extensions/postgis && \
@@ -76,6 +77,15 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.3.2.tar.gz -O postg
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_topology.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/address_standardizer_data_us.control
+
+RUN wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
+    mkdir pgrouting-src && cd pgrouting-src && tar xvzf ../pgrouting.tar.gz --strip-components=1 -C . && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrouting.control
 
 #########################################################################################
 #
