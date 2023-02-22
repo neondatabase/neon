@@ -13,8 +13,6 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::time::timeout;
 
-use tracing::{error, info, warn};
-
 use crate::config::PageServerConf;
 use crate::tenant::storage_layer::LayerFileName;
 use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
