@@ -32,8 +32,6 @@ storage:
       hosts:
         safekeeper-0.ap-southeast-1.aws.neon.tech:
           ansible_host:  i-0d6f1dc5161eef894
-        safekeeper-1.ap-southeast-1.aws.neon.tech:
-          ansible_host:  i-0e338adda8eb2d19f
         safekeeper-2.ap-southeast-1.aws.neon.tech:
           ansible_host:  i-04fb63634e4679eb9
         safekeeper-3.ap-southeast-1.aws.neon.tech:

@@ -2080,6 +2080,8 @@ class NeonPageserver(PgProtocol):
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
             ".*task iteration took longer than the configured period.*",
+            # this is until #3501
+            ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
         ]
 
     def start(

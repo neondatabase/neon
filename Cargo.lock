@@ -3054,6 +3054,7 @@ dependencies = [
  "hyper",
  "metrics",
  "once_cell",
+ "pin-project-lite",
  "serde",
  "serde_json",
  "tempfile",
