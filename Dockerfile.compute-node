@@ -261,6 +261,8 @@ FROM rust-extensions-build AS pg-jsonschema-pg-build
 RUN git clone --depth=1 --single-branch --branch neon_abi_v0.1.4 https://github.com/vadim2404/pg_jsonschema/ && \
     cd pg_jsonschema && \
     cargo pgx install --release && \
+    # it's needed to enable extension because it uses untrusted C language
+    sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_jsonschema.control && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
 #########################################################################################
@@ -275,6 +277,8 @@ FROM rust-extensions-build AS pg-graphql-pg-build
 RUN git clone --depth=1 --single-branch --branch neon_abi_v1.1.0 https://github.com/vadim2404/pg_graphql && \
     cd pg_graphql && \  
     cargo pgx install --release && \
+    # it's needed to enable extension because it uses untrusted C language
+    sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_graphql.control && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_graphql.control
 
 #########################################################################################
