@@ -4,13 +4,14 @@ use anyhow::{anyhow, Context};
 use hyper::header::{HeaderName, AUTHORIZATION};
 use hyper::http::HeaderValue;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
+use hyper::{Method, StatusCode};
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
 use tokio::task::JoinError;
-use tracing::info;
+use tracing;
 
 use std::future::Future;
 use std::net::TcpListener;
@@ -27,7 +28,14 @@ static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
-    info!("{} {} {}", info.method(), info.uri().path(), res.status(),);
+    // cannot factor out the Level to avoid the repetition
+    // because tracing can only work with const Level
+    // which is not the case here
+    if info.method() == Method::GET && res.status() == StatusCode::OK {
+        tracing::debug!("{} {} {}", info.method(), info.uri().path(), res.status());
+    } else {
+        tracing::info!("{} {} {}", info.method(), info.uri().path(), res.status());
+    }
     Ok(res)
 }
 
@@ -203,7 +211,7 @@ pub fn serve_thread_main<S>(
 where
     S: Future<Output = ()> + Send + Sync,
 {
-    info!("Starting an HTTP endpoint at {}", listener.local_addr()?);
+    tracing::info!("Starting an HTTP endpoint at {}", listener.local_addr()?);
 
     // Create a Service from the router above to handle incoming requests.
     let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();
