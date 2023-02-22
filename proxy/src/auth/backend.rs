@@ -183,7 +183,9 @@ impl BackendType<'_, ClientCredentials<'_>> {
         info!("user successfully authenticated");
         Ok(res)
     }
+}
 
+impl BackendType<'_, ClientCredentials<'_>> {
     /// When applicable, wake the compute node, gaining its connection info in the process.
     /// The link auth flow doesn't support this, so we return [`None`] in that case.
     pub async fn wake_compute(

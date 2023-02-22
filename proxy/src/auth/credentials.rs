@@ -31,12 +31,22 @@ pub enum ClientCredsParseError {
 
 impl UserFacingError for ClientCredsParseError {}
 
+/// eSNI parameters which might contain endpoint/project name.
+#[derive(Default)]
+pub struct SniParams<'a> {
+    /// Server Name Indication (TLS jargon).
+    pub sni: Option<&'a str>,
+    /// Common Name from a TLS certificate.
+    pub common_name: Option<&'a str>,
+}
+
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientCredentials<'a> {
+    /// Name of postgres role.
     pub user: &'a str,
-    // TODO: this is a severe misnomer! We should think of a new name ASAP.
+    /// Also known as endpoint in the console.
     pub project: Option<Cow<'a, str>>,
 }
 
@@ -49,18 +59,17 @@ impl ClientCredentials<'_> {
 
 impl<'a> ClientCredentials<'a> {
     pub fn parse(
-        params: &'a StartupMessageParams,
-        sni: Option<&str>,
-        common_name: Option<&str>,
+        startup_params: &'a StartupMessageParams,
+        &SniParams { sni, common_name }: &SniParams<'_>,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
         // Some parameters are stored in the startup message.
-        let get_param = |key| params.get(key).ok_or(MissingKey(key));
+        let get_param = |key| startup_params.get(key).ok_or(MissingKey(key));
         let user = get_param("user")?;
 
         // Project name might be passed via PG's command-line options.
-        let project_option = params.options_raw().and_then(|mut options| {
+        let project_option = startup_params.options_raw().and_then(|mut options| {
             options
                 .find_map(|opt| opt.strip_prefix("project="))
                 .map(Cow::Borrowed)
@@ -122,7 +131,9 @@ mod tests {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
 
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let sni = SniParams::default();
+
+        let creds = ClientCredentials::parse(&options, &sni)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
 
@@ -131,13 +142,15 @@ mod tests {
 
     #[test]
     fn parse_excessive() -> anyhow::Result<()> {
-        let options = StartupMessageParams::new([
+        let startup = StartupMessageParams::new([
             ("user", "john_doe"),
             ("database", "world"), // should be ignored
             ("foo", "bar"),        // should be ignored
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let sni = SniParams::default();
+
+        let creds = ClientCredentials::parse(&startup, &sni)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project, None);
 
@@ -146,12 +159,14 @@ mod tests {
 
     #[test]
     fn parse_project_from_sni() -> anyhow::Result<()> {
-        let options = StartupMessageParams::new([("user", "john_doe")]);
+        let startup = StartupMessageParams::new([("user", "john_doe")]);
 
-        let sni = Some("foo.localhost");
-        let common_name = Some("localhost");
+        let sni = SniParams {
+            sni: Some("foo.localhost"),
+            common_name: Some("localhost"),
+        };
 
-        let creds = ClientCredentials::parse(&options, sni, common_name)?;
+        let creds = ClientCredentials::parse(&startup, &sni)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
 
@@ -160,12 +175,14 @@ mod tests {
 
     #[test]
     fn parse_project_from_options() -> anyhow::Result<()> {
-        let options = StartupMessageParams::new([
+        let startup = StartupMessageParams::new([
             ("user", "john_doe"),
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None)?;
+        let sni = SniParams::default();
+
+        let creds = ClientCredentials::parse(&startup, &sni)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
 
@@ -174,12 +191,17 @@ mod tests {
 
     #[test]
     fn parse_projects_identical() -> anyhow::Result<()> {
-        let options = StartupMessageParams::new([("user", "john_doe"), ("options", "project=baz")]);
+        let startup = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "project=baz"), // fmt
+        ]);
 
-        let sni = Some("baz.localhost");
-        let common_name = Some("localhost");
+        let sni = SniParams {
+            sni: Some("baz.localhost"),
+            common_name: Some("localhost"),
+        };
 
-        let creds = ClientCredentials::parse(&options, sni, common_name)?;
+        let creds = ClientCredentials::parse(&startup, &sni)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("baz"));
 
@@ -188,13 +210,17 @@ mod tests {
 
     #[test]
     fn parse_projects_different() {
-        let options =
-            StartupMessageParams::new([("user", "john_doe"), ("options", "project=first")]);
+        let startup = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "project=first"), // fmt
+        ]);
 
-        let sni = Some("second.localhost");
-        let common_name = Some("localhost");
+        let sni = SniParams {
+            sni: Some("second.localhost"),
+            common_name: Some("localhost"),
+        };
 
-        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
+        let err = ClientCredentials::parse(&startup, &sni).expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -206,12 +232,14 @@ mod tests {
 
     #[test]
     fn parse_inconsistent_sni() {
-        let options = StartupMessageParams::new([("user", "john_doe")]);
+        let startup = StartupMessageParams::new([("user", "john_doe")]);
 
-        let sni = Some("project.localhost");
-        let common_name = Some("example.com");
+        let sni = SniParams {
+            sni: Some("project.localhost"),
+            common_name: Some("example.com"),
+        };
 
-        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
+        let err = ClientCredentials::parse(&startup, &sni).expect_err("should fail");
         match err {
             InconsistentSni { sni, cn } => {
                 assert_eq!(sni, "project.localhost");

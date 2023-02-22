@@ -3,7 +3,7 @@
 pub mod backend;
 pub use backend::BackendType;
 
-mod credentials;
+pub mod credentials;
 pub use credentials::ClientCredentials;
 
 mod password_hack;
