@@ -314,8 +314,6 @@ where
                 warn!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
             Err(err @ DownloadError::Other(_) | err @ DownloadError::Timeout) => {
-                // Operation failed FAILED_DOWNLOAD_RETRIES times. Time to give up.
-                error!("{description} still failed after {attempts} retries, giving up: {err:?}");
                 return Err(err);
             }
         }
