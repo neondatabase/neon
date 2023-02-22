@@ -121,6 +121,14 @@ pub struct Timeline {
     pub pg_version: u32,
 
     pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
+
+    //
+    // Set of key ranges which should be covered by image layers to
+    // allow GC to remove old layers. BTreeMap key is start of range (inclusive),
+    // value - end of range (exclusive). This map is constructed by GC
+    // (when it can not remove layer because it is not covered by image layers)
+    // and used by compaction when it checks if new image layer should be created.
+    //
     wanted_image_layers: Mutex<Option<BTreeMap<Key, Key>>>,
 
     last_freeze_at: AtomicLsn,
