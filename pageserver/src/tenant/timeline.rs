@@ -22,8 +22,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::BinaryHeap;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, BTreeMap, HashMap};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -122,6 +121,7 @@ pub struct Timeline {
     pub pg_version: u32,
 
     pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
+    wanted_image_layers: Mutex<Option<BTreeMap<Key, Key>>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -1354,6 +1354,7 @@ impl Timeline {
                 tenant_id,
                 pg_version,
                 layers: RwLock::new(LayerMap::default()),
+                wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
                 walreceiver,
@@ -2904,6 +2905,7 @@ impl Timeline {
         let layers = self.layers.read().unwrap();
 
         let mut max_deltas = 0;
+        let wanted_image_layers = self.wanted_image_layers.lock().unwrap().take();
 
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
@@ -2936,6 +2938,13 @@ impl Timeline {
                             img_range.start, img_range.end, num_deltas, img_lsn, lsn
                         );
                         return Ok(true);
+                    }
+                    if let Some(wanted) = &wanted_image_layers {
+                        if let Some((_start, end)) = wanted.range(..img_range.end).next_back() {
+                            if *end > img_range.start {
+                                return Ok(true);
+                            }
+                        }
                     }
                 }
             }
@@ -3720,6 +3729,7 @@ impl Timeline {
         }
 
         let mut layers_to_remove = Vec::new();
+        let mut wanted_image_layers: BTreeMap<Key, Key> = BTreeMap::new();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -3803,6 +3813,40 @@ impl Timeline {
                     "keeping {} because it is the latest layer",
                     l.filename().file_name()
                 );
+                let mut to_remove: Vec<Key> = Vec::new();
+                let mut insert_new_range = true;
+                let start = l.get_key_range().start;
+                let mut end = l.get_key_range().end;
+
+                // check if this range overlaps with exited ranges
+                let mut iter = wanted_image_layers.range_mut(..end);
+                while let Some((prev_start, prev_end)) = iter.next_back() {
+                    if *prev_end >= start {
+                        // two ranges overlap
+                        if *prev_start <= start {
+                            // combine with prev range
+                            insert_new_range = false;
+                            if *prev_end < end {
+                                // extend prev range
+                                *prev_end = end;
+                            }
+                            break;
+                        } else {
+                            to_remove.push(*prev_start);
+                            if *prev_end > end {
+                                end = *prev_end;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                for key in to_remove {
+                    wanted_image_layers.remove(&key);
+                }
+                if insert_new_range {
+                    wanted_image_layers.insert(start, end);
+                }
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
@@ -3815,6 +3859,10 @@ impl Timeline {
             );
             layers_to_remove.push(Arc::clone(&l));
         }
+        self.wanted_image_layers
+            .lock()
+            .unwrap()
+            .replace(wanted_image_layers);
 
         let mut updates = layers.batch_update();
         if !layers_to_remove.is_empty() {
