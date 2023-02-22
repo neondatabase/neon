@@ -283,6 +283,7 @@ impl ComputeNode {
         handle_databases(&self.spec, &mut client)?;
         handle_role_deletions(self, &mut client)?;
         handle_grants(self, &mut client)?;
+        ensure_c_language_is_trusted(&mut client)?;
         create_writability_check_data(&mut client)?;
 
         // 'Close' connection

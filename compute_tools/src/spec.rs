@@ -515,3 +515,16 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
 
     Ok(())
 }
+
+/// Mark `C` language as trusted. `pgx` extensions pretend `Rust` as `C`.
+/// To be able to install such extensions, it's needed to mark `C` language as trusted or grant a superuser role to the user.
+/// Unfortunately, currently, we don't provide such privileges. Therefore need to opt for such a workaround.
+///
+/// This is the error example:
+/// `ERROR: permission denied for language c (SQLSTATE 42501)`
+#[instrument(skip_all)]
+pub fn ensure_c_language_is_trusted(client: &mut Client) -> Result<()> {
+    let _ =
+        client.simple_query("UPDATE pg_language SET lanpltrusted = true WHERE lanname = 'c';")?;
+    Ok(())
+}
