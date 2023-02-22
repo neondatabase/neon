@@ -330,7 +330,7 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
 
     let result = match result {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),
-        LsnForTimestamp::Future(_lsn) => "future".into(),
+        LsnForTimestamp::Future(lsn) => format!("{lsn}"),
         LsnForTimestamp::Past(_lsn) => "past".into(),
         LsnForTimestamp::NoData(_lsn) => "nodata".into(),
     };

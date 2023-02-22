@@ -17,7 +17,9 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
     cur = pgmain.connect().cursor()
     # Create table, and insert rows, each in a separate transaction
-    # Disable synchronous_commit to make this initialization go faster.
+    # Disable `synchronous_commit`` to make this initialization go faster.
+    # XXX: on my laptop this test takes 7s, and setting `synchronous_commit=off`
+    #      doesn't change anything.
     #
     # Each row contains current insert LSN and the current timestamp, when
     # the row was inserted.
@@ -32,20 +34,23 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
 
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
+    cur.execute("SET synchronous_commit=on")
     cur.execute("INSERT INTO foo VALUES (-1)")
 
     # Wait until WAL is received by pageserver
     wait_for_last_flush_lsn(env, pgmain, env.initial_tenant, new_timeline_id)
 
     with env.pageserver.http_client() as client:
-        # Check edge cases: timestamp in the future
+        # Check edge cases
+        # Timestamp is in the future
         probe_timestamp = tbl[-1][1] + timedelta(hours=1)
         result = client.timeline_get_lsn_by_timestamp(
             env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z"
         )
-        assert result == "future"
+        # We should still return LSN of the first commit before timestamp
+        assert result not in ["past", "nodata"]
 
-        # timestamp too the far history
+        # Timestamp is in the unreachable past
         probe_timestamp = tbl[0][1] - timedelta(hours=10)
         result = client.timeline_get_lsn_by_timestamp(
             env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z"
@@ -55,10 +60,12 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         # Probe a bunch of timestamps in the valid range
         for i in range(1, len(tbl), 100):
             probe_timestamp = tbl[i][1]
+            # Call get_lsn_by_timestamp to get the LSN
             lsn = client.timeline_get_lsn_by_timestamp(
                 env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z"
             )
-            # Call get_lsn_by_timestamp to get the LSN
+            assert lsn not in ["past", "nodata"]
+
             # Launch a new read-only node at that LSN, and check that only the rows
             # that were supposed to be committed at that point in time are visible.
             pg_here = env.postgres.create_start(

@@ -290,6 +290,7 @@ impl Timeline {
         }
     }
 
+    ///
     /// Locate LSN, such that all transactions that committed before
     /// 'search_timestamp' are visible, but nothing newer is.
     ///
@@ -303,7 +304,11 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
-        let min_lsn = *gc_cutoff_lsn_guard;
+        // We use this method to figure out the branching LSN for new branch, but
+        // GC cutoff could be before branching point and we cannot create new branch
+        // with LSN < `ancestor_lsn`. Thus, pick the maximum of these two just to be
+        // on the safe side.
+        let min_lsn = std::cmp::max(*gc_cutoff_lsn_guard, self.get_ancestor_lsn());
         let max_lsn = self.get_last_record_lsn();
 
         // LSNs are always 8-byte aligned. low/mid/high represent the
@@ -327,12 +332,22 @@ impl Timeline {
                 )
                 .await?;
 
-            if cmp {
-                high = mid;
-            } else {
+            if !cmp {
+                // We either 1) found commit with timestamp **before** `search_timestamp`;
+                // or 2) we haven't found any commit records at all.
+                // Search with a larger LSN, in case 1) to try to find a more recent commit
+                // (but still **before** target timestamp); and in case 2) to fetch more
+                // SLRU segments for `clog`.
                 low = mid + 1;
+            } else {
+                // We found only more recent commits, search in the older range.
+                high = mid;
             }
         }
+        // If `found_smaller == true`, `low` is the LSN of the first commit record
+        // **before** the `search_timestamp` + 1 (to hit the while loop exit condition).
+        // Substitute 1 to get exactly the commit LSN.
+        let commit_lsn = Lsn((low - 1) * 8);
         match (found_smaller, found_larger) {
             (false, false) => {
                 // This can happen if no commit records have been processed yet, e.g.
@@ -340,32 +355,26 @@ impl Timeline {
                 Ok(LsnForTimestamp::NoData(max_lsn))
             }
             (true, false) => {
-                // Didn't find any commit timestamps larger than the request
-                Ok(LsnForTimestamp::Future(max_lsn))
+                // Only found a commit with timestamp smaller than the request.
+                // It's still a valid case for branch creation, return it.
+                // And `update_gc_info()` ignores LSN for a `LsnForTimestamp::Future`
+                // case, anyway.
+                Ok(LsnForTimestamp::Future(commit_lsn))
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
                 Ok(LsnForTimestamp::Past(max_lsn))
             }
-            (true, true) => {
-                // low is the LSN of the first commit record *after* the search_timestamp,
-                // Back off by one to get to the point just before the commit.
-                //
-                // FIXME: it would be better to get the LSN of the previous commit.
-                // Otherwise, if you restore to the returned LSN, the database will
-                // include physical changes from later commits that will be marked
-                // as aborted, and will need to be vacuumed away.
-                Ok(LsnForTimestamp::Present(Lsn((low - 1) * 8)))
-            }
+            (true, true) => Ok(LsnForTimestamp::Present(commit_lsn)),
         }
     }
 
     ///
-    /// Subroutine of find_lsn_for_timestamp(). Returns true, if there are any
-    /// commits that committed after 'search_timestamp', at LSN 'probe_lsn'.
+    /// Subroutine of `find_lsn_for_timestamp()`. Returns `true`, if there are any
+    /// commits that committed after `search_timestamp`, at LSN `probe_lsn`.
     ///
-    /// Additionally, sets 'found_smaller'/'found_Larger, if encounters any commits
-    /// with a smaller/larger timestamp.
+    /// Additionally, sets `found_smaller` / `found_larger`, if encounters any commits
+    /// with a smaller / larger timestamp.
     ///
     pub async fn is_latest_commit_timestamp_ge_than(
         &self,
