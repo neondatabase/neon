@@ -59,8 +59,8 @@ impl std::fmt::Display for BackendType<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use BackendType::*;
         match self {
-            Console(endpoint, _) => fmt.debug_tuple("Console").field(&endpoint.url()).finish(),
-            Postgres(endpoint, _) => fmt.debug_tuple("Postgres").field(&endpoint.url()).finish(),
+            Console(api, _) => fmt.debug_tuple("Console").field(&api.url()).finish(),
+            Postgres(api, _) => fmt.debug_tuple("Postgres").field(&api.url()).finish(),
             Link(url) => fmt.debug_tuple("Link").field(&url.as_str()).finish(),
         }
     }

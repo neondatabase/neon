@@ -7,7 +7,35 @@ use crate::{
     stream::PqStream,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_postgres::config::AuthKeys;
 use tracing::info;
+
+async fn do_scram(
+    secret: scram::ServerSecret,
+    creds: &ClientCredentials<'_>,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+) -> auth::Result<compute::ScramKeys> {
+    let outcome = AuthFlow::new(client)
+        .begin(auth::Scram(&secret))
+        .await?
+        .authenticate()
+        .await?;
+
+    let client_key = match outcome {
+        sasl::Outcome::Success(key) => key,
+        sasl::Outcome::Failure(reason) => {
+            info!("auth backend failed with an error: {reason}");
+            return Err(auth::AuthError::auth_failed(creds.user));
+        }
+    };
+
+    let keys = compute::ScramKeys {
+        client_key: client_key.as_bytes(),
+        server_key: secret.server_key.as_bytes(),
+    };
+
+    Ok(keys)
+}
 
 pub(super) async fn authenticate(
     api: &impl console::Api,
@@ -24,7 +52,6 @@ pub(super) async fn authenticate(
         AuthInfo::Scram(scram::ServerSecret::mock(creds.user, rand::random()))
     });
 
-    let flow = AuthFlow::new(client);
     let scram_keys = match info {
         AuthInfo::Md5(_) => {
             info!("auth endpoint chooses MD5");
@@ -32,27 +59,12 @@ pub(super) async fn authenticate(
         }
         AuthInfo::Scram(secret) => {
             info!("auth endpoint chooses SCRAM");
-            let scram = auth::Scram(&secret);
-            let client_key = match flow.begin(scram).await?.authenticate().await? {
-                sasl::Outcome::Success(key) => key,
-                sasl::Outcome::Failure(reason) => {
-                    info!("auth backend failed with an error: {reason}");
-                    return Err(auth::AuthError::auth_failed(creds.user));
-                }
-            };
-
-            Some(compute::ScramKeys {
-                client_key: client_key.as_bytes(),
-                server_key: secret.server_key.as_bytes(),
-            })
+            do_scram(secret, creds, client).await?
         }
     };
 
     let mut node = api.wake_compute(extra, creds).await?;
-    if let Some(keys) = scram_keys {
-        use tokio_postgres::config::AuthKeys;
-        node.config.auth_keys(AuthKeys::ScramSha256(keys));
-    }
+    node.config.auth_keys(AuthKeys::ScramSha256(scram_keys));
 
     Ok(AuthSuccess {
         reported_auth_ok: false,
