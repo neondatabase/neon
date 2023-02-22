@@ -67,14 +67,14 @@ pub async fn download_layer_file<'a>(
             // TODO: this doesn't use the cached fd for some reason?
             let mut destination_file = fs::File::create(&temp_file_path).await.with_context(|| {
                 format!(
-                    "Failed to create a destination file for layer '{}'",
+                    "create a destination file for layer '{}'",
                     temp_file_path.display()
                 )
             })
             .map_err(DownloadError::Other)?;
             let mut download = storage.download(&remote_path).await.with_context(|| {
                 format!(
-                    "Failed to open a download stream for layer with remote storage path '{remote_path:?}'"
+                    "open a download stream for layer with remote storage path '{remote_path:?}'"
                 )
             })
             .map_err(DownloadError::Other)?;
@@ -85,7 +85,7 @@ pub async fn download_layer_file<'a>(
                 .await
                 .map_err(|_| DownloadError::Timeout)?
                 .with_context(|| {
-                    format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
+                    format!("download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
                 })
                 .map_err(DownloadError::Other)?;
 
