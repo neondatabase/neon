@@ -29,7 +29,6 @@ async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Er
     fs::File::open(path).await?.sync_all().await
 }
 
-
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
 /// in the metadata. (In the future, we might do more cross-checks, like CRC validation)
@@ -82,37 +81,16 @@ pub async fn download_layer_file<'a>(
 
             let fut = tokio::io::copy(&mut download.download_stream, &mut destination_file);
 
-            let fut = timeout(Duration::from_secs(120), fut);
+            let bytes_amount = timeout(Duration::from_secs(120), fut)
+                .await
+                .map_err(|_| DownloadError::Timeout)?
+                .with_context(|| {
+                    format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
+                })
+                .map_err(|e| DownloadError::Other(e))?;
 
-            let e = fut.await;
-
-            match e {
-                Ok(tokio_copy_res) =>{
-                    let tokio_copy_res = tokio_copy_res.with_context(|| {
-                        format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
-                    });
-
-                    match tokio_copy_res {
-                        Ok(bytes_amount) => {
-                            Ok((destination_file, bytes_amount))
-                        },
-                        Err(e) => {
-                            Err(DownloadError::Other(e))
-                        },
-                    }
-                },
-                Err(_) => {                    
-                    Err(DownloadError::Timeout)
-                },
-            }
-
-            /*
-            let bytes_amount = tokio::io::copy(&mut download.download_stream, &mut destination_file).await.with_context(|| {
-                format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
-            })
-            .map_err(|e| Err(DownloadError::Other(e)))?;
             Ok((destination_file, bytes_amount))
-            */
+
         },
         &format!("download {remote_path:?}"),
     ).await?;
@@ -325,13 +303,17 @@ where
             }
             // Assume that any other failure might be transient, and the operation might
             // succeed if we just keep trying.
-            Err(err@DownloadError::Other(_) | err@DownloadError::Timeout) if attempts < FAILED_DOWNLOAD_WARN_THRESHOLD => {
+            Err(err @ DownloadError::Other(_) | err @ DownloadError::Timeout)
+                if attempts < FAILED_DOWNLOAD_WARN_THRESHOLD =>
+            {
                 info!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
-            Err(err@DownloadError::Other(_) | err@DownloadError::Timeout) if attempts < FAILED_DOWNLOAD_RETRIES => {
+            Err(err @ DownloadError::Other(_) | err @ DownloadError::Timeout)
+                if attempts < FAILED_DOWNLOAD_RETRIES =>
+            {
                 warn!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
-            Err(err@DownloadError::Other(_) | err@DownloadError::Timeout) => {
+            Err(err @ DownloadError::Other(_) | err @ DownloadError::Timeout) => {
                 // Operation failed FAILED_DOWNLOAD_RETRIES times. Time to give up.
                 error!("{description} still failed after {attempts} retries, giving up: {err:?}");
                 return Err(err);
