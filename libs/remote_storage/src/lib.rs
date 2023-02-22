@@ -130,6 +130,8 @@ pub enum DownloadError {
     BadInput(anyhow::Error),
     /// The file was not found in the remote storage.
     NotFound,
+    /// The download timed out.
+    Timeout,
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
@@ -141,6 +143,7 @@ impl std::fmt::Display for DownloadError {
                 write!(f, "Failed to download a remote file due to user input: {e}")
             }
             DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
+            DownloadError::Timeout => write!(f, "The operation timed out"),
             DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
         }
     }
