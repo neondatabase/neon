@@ -94,15 +94,15 @@ pub async fn download_layer_file<'a>(
 
                     match tokio_copy_res {
                         Ok(bytes_amount) => {
-                            return Ok((destination_file, bytes_amount));
+                            Ok((destination_file, bytes_amount))
                         },
                         Err(e) => {
-                            return Err(DownloadError::Other(e));
+                            Err(DownloadError::Other(e))
                         },
                     }
                 },
                 Err(_) => {                    
-                    return Err(DownloadError::Timeout.into());
+                    Err(DownloadError::Timeout)
                 },
             }
 
