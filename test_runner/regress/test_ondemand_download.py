@@ -101,6 +101,9 @@ def test_ondemand_download_large_rel(
     # wait until pageserver receives that data
     wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
+    # stop pg before checkpoint to stop wal generation
+    endpoint.stop()
+
     # run checkpoint manually to be sure that data landed in remote storage
     client.timeline_checkpoint(tenant_id, timeline_id)
 
@@ -109,7 +112,6 @@ def test_ondemand_download_large_rel(
     log.info("uploads have finished")
 
     ##### Stop the first pageserver instance, erase all its data
-    endpoint.stop()
     env.pageserver.stop()
 
     # remove all the layer files
