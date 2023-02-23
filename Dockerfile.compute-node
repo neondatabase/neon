@@ -32,11 +32,15 @@ RUN cd postgres && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/include install && \
     make MAKELEVEL=0 -j $(getconf _NPROCESSORS_ONLN) -s -C src/interfaces/libpq install && \
     # Enable some of contrib extensions
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/autoinc.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/bloom.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/intagg.control && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/earthdistance.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/insert_username.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/intagg.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/moddatetime.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/refint.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/xml2.control
 
 #########################################################################################
