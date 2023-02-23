@@ -190,31 +190,52 @@ static void
 pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
+	bool retry = true;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
 		pageserver_disconnect();
 
-	if (!connected)
-		pageserver_connect();
 
 	req_buff = nm_pack_request(request);
 
 	/*
-	 * Send request.
-	 *
-	 * In principle, this could block if the output buffer is full, and we
-	 * should use async mode and check for interrupts while waiting. In
-	 * practice, our requests are small enough to always fit in the output and
-	 * TCP buffer.
+	 * If pageserver is stopped, the connections from compute node are broken.
+	 * The compute node doesn't notice that immediately, but it will cause the next request to fail, usually on the next query.
+	 * That causes user-visible errors if pageserver is restarted, or the tenant is moved from one pageserver to another.
+	 * See https://github.com/neondatabase/neon/issues/1138
+	 * So try to reestablish connection in case of failure.
 	 */
-	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+	while (true)
 	{
-		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+		if (!connected)
+			pageserver_connect();
 
-		pageserver_disconnect();
-		neon_log(ERROR, "failed to send page request: %s", msg);
+		/*
+		 * Send request.
+		 *
+		 * In principle, this could block if the output buffer is full, and we
+		 * should use async mode and check for interrupts while waiting. In
+		 * practice, our requests are small enough to always fit in the output and
+		 * TCP buffer.
+		 */
+		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+		{
+			if (retry)
+			{
+				retry = false; /* do just one reconnect attempt */
+				continue;
+			}
+			else
+			{
+				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+
+				pageserver_disconnect();
+				neon_log(ERROR, "failed to send page request: %s", msg);
+			}
+		}
 	}
+
 	pfree(req_buff.data);
 
 	n_unflushed_requests++;
