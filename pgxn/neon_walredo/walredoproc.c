@@ -65,6 +65,14 @@
 #include "rusagestub.h"
 #endif
 
+#include "access/clog.h"
+#include "access/commit_ts.h"
+#include "access/heapam.h"
+#include "access/multixact.h"
+#include "access/nbtree.h"
+#include "access/subtrans.h"
+#include "access/syncscan.h"
+#include "access/twophase.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #if PG_VERSION_NUM >= 150000
@@ -72,18 +80,36 @@
 #endif
 #include "access/xlogutils.h"
 #include "catalog/pg_class.h"
-#include "libpq/libpq.h"
+#include "commands/async.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "pgstat.h"
+#include "postmaster/autovacuum.h"
+#include "postmaster/bgworker_internals.h"
+#include "postmaster/bgwriter.h"
 #include "postmaster/postmaster.h"
+#include "replication/logicallauncher.h"
+#include "replication/origin.h"
+#include "replication/slot.h"
+#include "replication/walreceiver.h"
+#include "replication/walsender.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
+#include "storage/dsm.h"
 #include "storage/ipc.h"
+#include "storage/pg_shmem.h"
+#include "storage/pmsignal.h"
+#include "storage/predicate.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
+#include "storage/procsignal.h"
+#include "storage/sinvaladt.h"
 #include "storage/smgr.h"
+#include "storage/spin.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/snapmgr.h"
 
 #include "inmem_smgr.h"
 
@@ -101,6 +127,7 @@ static void apply_error_callback(void *arg);
 static bool redo_block_filter(XLogReaderState *record, uint8 block_id);
 static void GetPage(StringInfo input_message);
 static ssize_t buffered_read(void *buf, size_t count);
+static void CreateFakeSharedMemoryAndSemaphores();
 
 static BufferTag target_redo_tag;
 
@@ -141,7 +168,7 @@ enter_seccomp_mode(void)
 		PG_SCMP_ALLOW(shmctl),
 		PG_SCMP_ALLOW(shmdt),
 		PG_SCMP_ALLOW(unlink), // shm_unlink
-		*/
+	 */
 	};
 
 #ifdef MALLOC_NO_MMAP
@@ -177,6 +204,7 @@ WalRedoMain(int argc, char *argv[])
 	 * buffers. So let's keep it small (default value is 1024)
 	 */
 	num_temp_buffers = 4;
+	NBuffers = 4;
 
 	/*
 	 * install the simple in-memory smgr
@@ -184,49 +212,33 @@ WalRedoMain(int argc, char *argv[])
 	smgr_hook = smgr_inmem;
 	smgr_init_hook = smgr_init_inmem;
 
-	/*
-	 * Validate we have been given a reasonable-looking DataDir and change into it.
-	 */
-	checkDataDir();
-	ChangeToDataDir();
-
-	/*
-	 * Create lockfile for data directory.
-	 */
-	CreateDataDirLockFile(false);
-
-	/* read control file (error checking and contains config ) */
-	LocalProcessControlFile(false);
-
-	/*
-	 * process any libraries that should be preloaded at postmaster start
-	 */
-	process_shared_preload_libraries();
 
 	/* Initialize MaxBackends (if under postmaster, was done already) */
+	MaxConnections = 1;
+	max_worker_processes = 0;
+	max_parallel_workers = 0;
+	max_wal_senders = 0;
 	InitializeMaxBackends();
 
-#if PG_VERSION_NUM >= 150000
-	/*
-	 * Give preloaded libraries a chance to request additional shared memory.
-	 */
-	process_shmem_requests();
+	/* Disable lastWrittenLsnCache */
+	lastWrittenLsnCacheSize = 0;
 
-	/*
-	 * Now that loadable modules have had their chance to request additional
-	 * shared memory, determine the value of any runtime-computed GUCs that
-	 * depend on the amount of shared memory required.
-	 */
+#if PG_VERSION_NUM >= 150000
+	process_shmem_requests();
 	InitializeShmemGUCs();
 
 	/*
-	 * Now that modules have been loaded, we can process any custom resource
-	 * managers specified in the wal_consistency_checking GUC.
+	 * This will try to access data directory which we do not set.
+	 * Seems to be pretty safe to disable.
 	 */
-	InitializeWalConsistencyChecking();
+	/* InitializeWalConsistencyChecking(); */
 #endif
 
-	CreateSharedMemoryAndSemaphores();
+	/*
+	 * We have our own version of CreateSharedMemoryAndSemaphores() that
+	 * sets up local memory instead of shared one.
+	 */
+	CreateFakeSharedMemoryAndSemaphores();
 
 	/*
 	 * Remember stand-alone backend startup time,roughly at the same point
@@ -351,6 +363,172 @@ WalRedoMain(int argc, char *argv[])
 								firstchar)));
 		}
 	}							/* end of input-reading loop */
+}
+
+
+/*
+ * Initialize dummy shmem.
+ *
+ * This code follows CreateSharedMemoryAndSemaphores() but manually sets up
+ * the shmem header and skips few initialization steps that are not needed for
+ * WAL redo.
+ *
+ * I've also tried removing most of initialization functions that request some
+ * memory (like ApplyLauncherShmemInit and friends) but in reality it haven't had
+ * any sizeable effect on RSS, so probably such clean up not worth the risk of having
+ * half-initialized postgres.
+ */
+static void
+CreateFakeSharedMemoryAndSemaphores()
+{
+	PGShmemHeader *shim = NULL;
+	PGShmemHeader *hdr;
+	Size		size;
+	int			numSemas;
+	char		cwd[MAXPGPATH];
+
+#if PG_VERSION_NUM >= 150000
+	size = CalculateShmemSize(&numSemas);
+#else
+	/*
+	 * Postgres v14 doesn't have a separate CalculateShmemSize(). Use result of the
+	 * corresponging calculation in CreateSharedMemoryAndSemaphores()
+	 */
+	size = 1409024;
+	numSemas = 10;
+#endif
+
+	/* Dummy implementation of PGSharedMemoryCreate() */
+	{
+		hdr = (PGShmemHeader *) malloc(size);
+		if (!hdr)
+			ereport(FATAL,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("[neon-wal-redo] can not allocate (pseudo-) shared memory")));
+
+		hdr->creatorPID = getpid();
+		hdr->magic = PGShmemMagic;
+		hdr->dsm_control = 0;
+		hdr->device = 42; /* not relevant for non-shared memory */
+		hdr->inode = 43; /* not relevant for non-shared memory */
+		hdr->totalsize = size;
+		hdr->freeoffset = MAXALIGN(sizeof(PGShmemHeader));
+
+		shim = hdr;
+		UsedShmemSegAddr = hdr;
+		UsedShmemSegID = (unsigned long) 42; /* not relevant for non-shared memory */
+	}
+
+	InitShmemAccess(hdr);
+
+	/*
+	 * Reserve semaphores uses dir name as a source of entropy. Set it to cwd(). Rest
+	 * of the code does not need DataDir access so nullify DataDir after
+	 * PGReserveSemaphores() to error out if something will try to access it.
+	 */
+	if (!getcwd(cwd, MAXPGPATH))
+		ereport(FATAL,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("[neon-wal-redo] can not read current directory name")));
+	DataDir = cwd;
+	PGReserveSemaphores(numSemas);
+	DataDir = NULL;
+
+	/*
+	 * The rest of function follows CreateSharedMemoryAndSemaphores() closely,
+	 * skipped parts are marked with comments.
+	 */
+	InitShmemAllocation();
+
+	/*
+	 * Now initialize LWLocks, which do shared memory allocation and are
+	 * needed for InitShmemIndex.
+	 */
+	CreateLWLocks();
+
+	/*
+	 * Set up shmem.c index hashtable
+	 */
+	InitShmemIndex();
+
+	dsm_shmem_init();
+
+	/*
+	 * Set up xlog, clog, and buffers
+	 */
+	XLOGShmemInit();
+	CLOGShmemInit();
+	CommitTsShmemInit();
+	SUBTRANSShmemInit();
+	MultiXactShmemInit();
+	InitBufferPool();
+
+	/*
+	 * Set up lock manager
+	 */
+	InitLocks();
+
+	/*
+	 * Set up predicate lock manager
+	 */
+	InitPredicateLocks();
+
+	/*
+	 * Set up process table
+	 */
+	if (!IsUnderPostmaster)
+		InitProcGlobal();
+	CreateSharedProcArray();
+	CreateSharedBackendStatus();
+	TwoPhaseShmemInit();
+	BackgroundWorkerShmemInit();
+
+	/*
+	 * Set up shared-inval messaging
+	 */
+	CreateSharedInvalidationState();
+
+	/*
+	 * Set up interprocess signaling mechanisms
+	 */
+	PMSignalShmemInit();
+	ProcSignalShmemInit();
+	CheckpointerShmemInit();
+	AutoVacuumShmemInit();
+	ReplicationSlotsShmemInit();
+	ReplicationOriginShmemInit();
+	WalSndShmemInit();
+	WalRcvShmemInit();
+	PgArchShmemInit();
+	ApplyLauncherShmemInit();
+
+	/*
+	 * Set up other modules that need some shared memory space
+	 */
+	SnapMgrInit();
+	BTreeShmemInit();
+	SyncScanShmemInit();
+	/* Skip due to the 'pg_notify' directory check */
+	/* AsyncShmemInit(); */
+
+#ifdef EXEC_BACKEND
+
+	/*
+	 * Alloc the win32 shared backend array
+	 */
+	if (!IsUnderPostmaster)
+		ShmemBackendArrayAllocation();
+#endif
+
+	/* Initialize dynamic shared memory facilities. */
+	if (!IsUnderPostmaster)
+		dsm_postmaster_startup(shim);
+
+	/*
+	 * Now give loadable modules a chance to set up their shmem allocations
+	 */
+	if (shmem_startup_hook)
+		shmem_startup_hook();
 }
 
 
