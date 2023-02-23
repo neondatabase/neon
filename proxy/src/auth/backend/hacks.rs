@@ -5,10 +5,32 @@ use crate::{
         self,
         provider::{CachedNodeInfo, ConsoleReqExtra},
     },
-    stream,
+    stream::PqStream,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
+
+/// Wake the compute node, but only if the password is valid.
+async fn get_compute(
+    api: &impl console::Api,
+    extra: &ConsoleReqExtra<'_>,
+    creds: &mut ClientCredentials<'_>,
+    password: Vec<u8>,
+) -> auth::Result<CachedNodeInfo> {
+    // TODO: this will slow down both "hacks" below; we probably need a cache.
+    let info = console::get_auth_info(api, extra, creds).await?;
+
+    let secret = info.scram_or_goodbye()?;
+    if !secret.matches_password(&password) {
+        info!("our obscure magic indicates that the password doesn't match");
+        return Err(auth::AuthError::auth_failed(creds.user));
+    }
+
+    let mut node = api.wake_compute(extra, creds).await?;
+    node.config.password(password);
+
+    Ok(node)
+}
 
 /// Compared to [SCRAM](crate::scram), cleartext password auth saves
 /// one round trip and *expensive* computations (>= 4096 HMAC iterations).
@@ -18,7 +40,7 @@ pub async fn cleartext_hack(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
     warn!("cleartext auth flow override is enabled, proceeding");
     let password = AuthFlow::new(client)
@@ -27,8 +49,7 @@ pub async fn cleartext_hack(
         .authenticate()
         .await?;
 
-    let mut node = api.wake_compute(extra, creds).await?;
-    node.config.password(password);
+    let node = get_compute(api, extra, creds, password).await?;
 
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {
@@ -43,7 +64,7 @@ pub async fn password_hack(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &mut ClientCredentials<'_>,
-    client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
     warn!("project not specified, resorting to the password hack auth flow");
     let payload = AuthFlow::new(client)
@@ -55,8 +76,8 @@ pub async fn password_hack(
     info!(project = &payload.project, "received missing parameter");
     creds.project = Some(payload.project.into());
 
-    let mut node = api.wake_compute(extra, creds).await?;
-    node.config.password(payload.password);
+    let password = payload.password.into();
+    let node = get_compute(api, extra, creds, password).await?;
 
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {

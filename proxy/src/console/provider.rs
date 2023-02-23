@@ -9,6 +9,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::sync::Arc;
+use tracing::info;
 
 pub mod errors {
     use crate::{
@@ -175,6 +176,12 @@ pub struct NodeInfo {
 pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
 pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
 
+/// Various caches for [`console`].
+pub struct ApiCaches {
+    /// Cache for the `wake_compute` API method.
+    pub node_info: NodeInfoCache,
+}
+
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
 #[async_trait]
@@ -194,8 +201,21 @@ pub trait Api {
     ) -> Result<CachedNodeInfo, errors::WakeComputeError>;
 }
 
-/// Various caches for [`console`].
-pub struct ApiCaches {
-    /// Cache for the `wake_compute` API method.
-    pub node_info: NodeInfoCache,
+/// A more insightful version of [`Api::get_auth_info`] which
+/// knows what to do when we get [`None`] instead of [`AuthInfo`].
+pub async fn get_auth_info(
+    api: &impl Api,
+    extra: &ConsoleReqExtra<'_>,
+    creds: &ClientCredentials<'_>,
+) -> Result<AuthInfo, errors::GetAuthInfoError> {
+    info!("fetching user's authentication info");
+    let info = api.get_auth_info(extra, creds).await?.unwrap_or_else(|| {
+        // If we don't have an authentication secret, we mock one to
+        // prevent malicious probing (possible due to missing protocol steps).
+        // This mocked secret will never lead to successful authentication.
+        info!("authentication info not found, mocking it");
+        AuthInfo::Scram(scram::ServerSecret::mock(creds.user, rand::random()))
+    });
+
+    Ok(info)
 }

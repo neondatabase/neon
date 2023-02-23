@@ -92,10 +92,10 @@ impl TestAuth for NoAuth {}
 struct Scram(scram::ServerSecret);
 
 impl Scram {
-    fn new(password: &str) -> anyhow::Result<Self> {
+    fn new(password: &[u8]) -> anyhow::Result<Self> {
         let salt = rand::random::<[u8; 16]>();
-        let secret = scram::ServerSecret::build(password, &salt, 256)
-            .context("failed to generate scram secret")?;
+        let secret = scram::ServerSecret::build(password, &salt, 256);
+
         Ok(Scram(secret))
     }
 
@@ -230,11 +230,11 @@ async fn keepalive_is_inherited() -> anyhow::Result<()> {
 }
 
 #[rstest]
-#[case("password_foo")]
-#[case("pwd-bar")]
-#[case("")]
+#[case(b"password_foo")]
+#[case(b"pwd-bar")]
+#[case(b"")]
 #[tokio::test]
-async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
+async fn scram_auth_good(#[case] password: &[u8]) -> anyhow::Result<()> {
     let (client, server) = tokio::io::duplex(1024);
 
     let (client_config, server_config) =

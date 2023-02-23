@@ -1,6 +1,7 @@
 //! Password hashing routines.
 
 use super::key::ScramKey;
+use tracing::warn;
 
 pub const SALTED_PASSWORD_LEN: usize = 32;
 
@@ -13,7 +14,12 @@ pub struct SaltedPassword {
 impl SaltedPassword {
     /// See `scram-common.c : scram_SaltedPassword` for details.
     /// Further reading: <https://datatracker.ietf.org/doc/html/rfc2898> (see `PBKDF2`).
+    /// TODO: implement proper password normalization required by the RFC!
     pub fn new(password: &[u8], salt: &[u8], iterations: u32) -> SaltedPassword {
+        if !password.is_ascii() {
+            warn!("found non-ascii symbols in password! salted password might be broken");
+        }
+
         let one = 1_u32.to_be_bytes(); // magic
 
         let mut current = super::hmac_sha256(password, [salt, &one]);
@@ -30,6 +36,7 @@ impl SaltedPassword {
     }
 
     /// Derive `ClientKey` from a salted hashed password.
+    #[cfg(test)]
     pub fn client_key(&self) -> ScramKey {
         super::hmac_sha256(&self.bytes, [b"Client Key".as_ref()]).into()
     }

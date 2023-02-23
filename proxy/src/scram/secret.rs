@@ -1,15 +1,14 @@
 //! Tools for SCRAM server secret management.
 
-use super::base64_decode_array;
-use super::key::ScramKey;
+use super::{base64_decode_array, key::ScramKey, password::SaltedPassword};
 
-/// Server secret is produced from [password](super::password::SaltedPassword)
+/// Server secret is produced from [password](SaltedPassword)
 /// and is used throughout the authentication process.
 pub struct ServerSecret {
     /// Number of iterations for `PBKDF2` function.
     pub iterations: u32,
     /// Salt used to hash user's password.
-    pub salt_base64: String,
+    pub salt: Vec<u8>,
     /// Hashed `ClientKey`.
     pub stored_key: ScramKey,
     /// Used by client to verify server's signature.
@@ -30,7 +29,7 @@ impl ServerSecret {
 
         let secret = ServerSecret {
             iterations: iterations.parse().ok()?,
-            salt_base64: salt.to_owned(),
+            salt: base64::decode(salt).ok()?,
             stored_key: base64_decode_array(stored_key)?.into(),
             server_key: base64_decode_array(server_key)?.into(),
             doomed: false,
@@ -48,31 +47,31 @@ impl ServerSecret {
 
         Self {
             iterations: 4096,
-            salt_base64: base64::encode(mocked_salt),
+            salt: mocked_salt.into(),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
             doomed: true,
         }
     }
 
+    /// Check if this secret was derived from the given password.
+    pub fn matches_password(&self, password: &[u8]) -> bool {
+        let password = SaltedPassword::new(password, &self.salt, self.iterations);
+        self.server_key == password.server_key()
+    }
+
     /// Build a new server secret from the prerequisites.
-    /// XXX: We only use this function in tests.
     #[cfg(test)]
-    pub fn build(password: &str, salt: &[u8], iterations: u32) -> Option<Self> {
-        // TODO: implement proper password normalization required by the RFC
-        if !password.is_ascii() {
-            return None;
-        }
+    pub fn build(password: &[u8], salt: &[u8], iterations: u32) -> Self {
+        let password = SaltedPassword::new(password, salt, iterations);
 
-        let password = super::password::SaltedPassword::new(password.as_bytes(), salt, iterations);
-
-        Some(Self {
+        Self {
             iterations,
-            salt_base64: base64::encode(salt),
+            salt: salt.into(),
             stored_key: password.client_key().sha256(),
             server_key: password.server_key(),
             doomed: false,
-        })
+        }
     }
 }
 
@@ -87,17 +86,11 @@ mod tests {
         let stored_key = "D5h6KTMBlUvDJk2Y8ELfC1Sjtc6k9YHjRyuRZyBNJns=";
         let server_key = "Pi3QHbcluX//NDfVkKlFl88GGzlJ5LkyPwcdlN/QBvI=";
 
-        let secret = format!(
-            "SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}",
-            iterations = iterations,
-            salt = salt,
-            stored_key = stored_key,
-            server_key = server_key,
-        );
+        let secret = format!("SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}");
 
         let parsed = ServerSecret::parse(&secret).unwrap();
         assert_eq!(parsed.iterations, iterations);
-        assert_eq!(parsed.salt_base64, salt);
+        assert_eq!(base64::encode(parsed.salt), salt);
 
         assert_eq!(base64::encode(parsed.stored_key), stored_key);
         assert_eq!(base64::encode(parsed.server_key), server_key);
@@ -106,9 +99,9 @@ mod tests {
     #[test]
     fn build_scram_secret() {
         let salt = b"salt";
-        let secret = ServerSecret::build("password", salt, 4096).unwrap();
+        let secret = ServerSecret::build(b"password", salt, 4096);
         assert_eq!(secret.iterations, 4096);
-        assert_eq!(secret.salt_base64, base64::encode(salt));
+        assert_eq!(secret.salt, salt);
         assert_eq!(
             base64::encode(secret.stored_key.as_ref()),
             "lF4cRm/Jky763CN4HtxdHnjV4Q8AWTNlKvGmEFFU8IQ="
@@ -117,5 +110,13 @@ mod tests {
             base64::encode(secret.server_key.as_ref()),
             "ub8OgRsftnk2ccDMOt7ffHXNcikRkQkq1lh4xaAqrSw="
         );
+    }
+
+    #[test]
+    fn secret_match_password() {
+        let password = b"password";
+        let secret = ServerSecret::build(password, b"salt", 2);
+        assert!(secret.matches_password(password));
+        assert!(!secret.matches_password(b"different"));
     }
 }

@@ -75,19 +75,27 @@ impl<'a> ClientFirstMessage<'a> {
     pub fn build_server_first_message(
         &self,
         nonce: &[u8; SCRAM_RAW_NONCE_LEN],
-        salt_base64: &str,
+        salt: &[u8],
         iterations: u32,
     ) -> OwnedServerFirstMessage {
         use std::fmt::Write;
 
         let mut message = String::new();
+
+        // Write base64-encoded combined nonce.
         write!(&mut message, "r={}", self.nonce).unwrap();
         base64::encode_config_buf(nonce, base64::STANDARD, &mut message);
         let combined_nonce = 2..message.len();
-        write!(&mut message, ",s={},i={}", salt_base64, iterations).unwrap();
+
+        // Write base64-encoded salt.
+        write!(&mut message, ",s=").unwrap();
+        base64::encode_config_buf(salt, base64::STANDARD, &mut message);
+
+        // Write number of iterations.
+        write!(&mut message, ",i={iterations}").unwrap();
 
         // This design guarantees that it's impossible to create a
-        // server-first-message without receiving a client-first-message
+        // server-first-message without receiving a client-first-message.
         OwnedServerFirstMessage {
             message,
             nonce: combined_nonce,
@@ -227,6 +235,51 @@ mod tests {
         assert_eq!(
             base64::encode(msg.proof),
             "SRpfsIVS4Gk11w1LqQ4QvCUBZYQmqXNSDEcHqbQ3CHI="
+        );
+    }
+
+    #[test]
+    fn build_server_messages() {
+        let input = "n,,n=pepe,r=t8JwklwKecDLwSsA72rHmVju";
+        let client_first_message = ClientFirstMessage::parse(&input).unwrap();
+
+        let nonce = [0; 18];
+        let salt = [1, 2, 3];
+        let iterations = 4096;
+        let server_first_message =
+            client_first_message.build_server_first_message(&nonce, &salt, iterations);
+
+        assert_eq!(
+            server_first_message.message,
+            "r=t8JwklwKecDLwSsA72rHmVjuAAAAAAAAAAAAAAAAAAAAAAAA,s=AQID,i=4096"
+        );
+        assert_eq!(
+            server_first_message.nonce(),
+            "t8JwklwKecDLwSsA72rHmVjuAAAAAAAAAAAAAAAAAAAAAAAA"
+        );
+
+        let input = [
+            "c=eSws",
+            "r=iiYEfS3rOgn8S3rtpSdrOsHtPLWvIkdgmHxA0hf3JNOAG4dU",
+            "p=SRpfsIVS4Gk11w1LqQ4QvCUBZYQmqXNSDEcHqbQ3CHI=",
+        ]
+        .join(",");
+
+        let client_final_message = ClientFinalMessage::parse(&input).unwrap();
+
+        let signature_builder = SignatureBuilder {
+            client_first_message_bare: client_first_message.bare,
+            server_first_message: server_first_message.as_str(),
+            client_final_message_without_proof: &client_final_message.without_proof,
+        };
+
+        let server_key = ScramKey::default();
+        let server_final_message =
+            client_final_message.build_server_final_message(signature_builder, &server_key);
+
+        assert_eq!(
+            server_final_message,
+            "v=XEL4X1vy5LnqIgOo4hOjm7zd1Ceyo9+nBUE+/zVnqLE="
         );
     }
 }

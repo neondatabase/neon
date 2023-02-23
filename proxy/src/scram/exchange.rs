@@ -73,7 +73,7 @@ impl sasl::Mechanism for Exchange<'_> {
 
                 let server_first_message = client_first_message.build_server_first_message(
                     &(self.nonce)(),
-                    &self.secret.salt_base64,
+                    &self.secret.salt,
                     self.secret.iterations,
                 );
                 let msg = server_first_message.as_str().to_owned();

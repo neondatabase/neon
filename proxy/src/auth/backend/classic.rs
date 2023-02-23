@@ -2,7 +2,7 @@ use super::AuthSuccess;
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
     compute,
-    console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
+    console::{self, CachedNodeInfo, ConsoleReqExtra},
     sasl, scram,
     stream::PqStream,
 };
@@ -37,31 +37,16 @@ async fn do_scram(
     Ok(keys)
 }
 
-pub(super) async fn authenticate(
+pub async fn authenticate(
     api: &impl console::Api,
     extra: &ConsoleReqExtra<'_>,
     creds: &ClientCredentials<'_>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
-    info!("fetching user's authentication info");
-    let info = api.get_auth_info(extra, creds).await?.unwrap_or_else(|| {
-        // If we don't have an authentication secret, we mock one to
-        // prevent malicious probing (possible due to missing protocol steps).
-        // This mocked secret will never lead to successful authentication.
-        info!("authentication info not found, mocking it");
-        AuthInfo::Scram(scram::ServerSecret::mock(creds.user, rand::random()))
-    });
+    let info = console::get_auth_info(api, extra, creds).await?;
 
-    let scram_keys = match info {
-        AuthInfo::Md5(_) => {
-            info!("auth endpoint chooses MD5");
-            return Err(auth::AuthError::bad_auth_method("MD5"));
-        }
-        AuthInfo::Scram(secret) => {
-            info!("auth endpoint chooses SCRAM");
-            do_scram(secret, creds, client).await?
-        }
-    };
+    let secret = info.scram_or_goodbye()?;
+    let scram_keys = do_scram(secret, creds, client).await?;
 
     let mut node = api.wake_compute(extra, creds).await?;
     node.config.auth_keys(AuthKeys::ScramSha256(scram_keys));

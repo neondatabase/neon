@@ -11,7 +11,7 @@ use crate::{
         provider::{CachedNodeInfo, ConsoleReqExtra},
         Api,
     },
-    stream, url,
+    scram, stream, url,
 };
 use futures::TryFutureExt;
 use std::borrow::Cow;
@@ -102,6 +102,23 @@ impl<'a, T, E> BackendType<'a, Result<T, E>> {
             Console(c, x) => x.map(|x| Console(c, x)),
             Postgres(c, x) => x.map(|x| Postgres(c, x)),
             Link(c) => Ok(Link(c)),
+        }
+    }
+}
+
+impl console::AuthInfo {
+    /// Either it's our way ([SCRAM](crate::scram)) or the highway :)
+    /// But seriously, we don't aim to support anything but SCRAM for now.
+    fn scram_or_goodbye(self) -> auth::Result<scram::ServerSecret> {
+        match self {
+            Self::Md5(_) => {
+                info!("auth endpoint chooses MD5");
+                Err(auth::AuthError::bad_auth_method("MD5"))
+            }
+            Self::Scram(secret) => {
+                info!("auth endpoint chooses SCRAM");
+                Ok(secret)
+            }
         }
     }
 }

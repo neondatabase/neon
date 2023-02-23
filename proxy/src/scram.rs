@@ -12,7 +12,6 @@ mod messages;
 mod secret;
 mod signature;
 
-#[cfg(test)]
 mod password;
 
 pub use exchange::Exchange;
