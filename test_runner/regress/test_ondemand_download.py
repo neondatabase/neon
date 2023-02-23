@@ -192,11 +192,15 @@ def test_ondemand_download_timetravel(
         # wait until pageserver receives that data
         wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
-        # run checkpoint manually to be sure that data landed in remote storage
-        client.timeline_checkpoint(tenant_id, timeline_id)
+        if checkpoint_number < 19:
+            # run checkpoint manually to be sure that data landed in remote storage
+            client.timeline_checkpoint(tenant_id, timeline_id)
 
     ##### Stop the first pageserver instance, erase all its data
     env.postgres.stop_all()
+
+    # do the last checkpoint only after stopping pg
+    client.timeline_checkpoint(tenant_id, timeline_id)
 
     # wait until pageserver has successfully uploaded all the data to remote storage
     wait_for_sk_commit_lsn_to_reach_remote_storage(
