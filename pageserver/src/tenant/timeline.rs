@@ -1335,6 +1335,7 @@ impl Timeline {
             lagging_wal_timeout,
             max_lsn_wal_lag,
             crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
+            self.conf.availability_zone.clone(),
             background_ctx,
         );
     }

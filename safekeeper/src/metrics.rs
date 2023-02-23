@@ -1,11 +1,14 @@
 //! Global safekeeper mertics and per-timeline safekeeper metrics.
 
-use std::time::{Instant, SystemTime};
+use std::{
+    sync::{Arc, RwLock},
+    time::{Instant, SystemTime},
+};
 
 use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_WRITE_SECONDS_BUCKETS};
 use anyhow::Result;
 use metrics::{
-    core::{AtomicU64, Collector, Desc, GenericGaugeVec, Opts},
+    core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
     register_int_counter_vec, Gauge, IntCounterVec, IntGaugeVec,
 };
@@ -63,12 +66,119 @@ pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
 });
 pub static PG_IO_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "safekeeper_pg_io_bytes",
+        "safekeeper_pg_io_bytes_total",
         "Bytes read from or written to any PostgreSQL connection",
-        &["direction"]
+        &["client_az", "sk_az", "app_name", "dir", "same_az"]
     )
     .expect("Failed to register safekeeper_pg_io_bytes gauge")
 });
+
+pub const LABEL_UNKNOWN: &str = "unknown";
+
+/// Labels for traffic metrics.
+struct ConnectionLabels {
+    /// Availability zone of the connection origin.
+    client_az: String,
+    /// Availability zone of the current safekeeper.
+    sk_az: String,
+    /// Client application name.
+    app_name: String,
+    /// Total bytes read from this connection.
+    read: GenericCounter<metrics::core::AtomicU64>,
+    /// Total bytes written to this connection.
+    write: GenericCounter<metrics::core::AtomicU64>,
+}
+
+impl ConnectionLabels {
+    fn new() -> Self {
+        let mut this = Self {
+            client_az: LABEL_UNKNOWN.to_string(),
+            sk_az: LABEL_UNKNOWN.to_string(),
+            app_name: LABEL_UNKNOWN.to_string(),
+            // Fill in the metrics with dummy values, they will be updated later.
+            read: GenericCounter::new("_", "_").unwrap(),
+            write: GenericCounter::new("_", "_").unwrap(),
+        };
+        this.update_metrics();
+        this
+    }
+
+    fn update_metrics(&mut self) {
+        let same_az = match (self.client_az.as_str(), self.sk_az.as_str()) {
+            (LABEL_UNKNOWN, _) | (_, LABEL_UNKNOWN) => LABEL_UNKNOWN,
+            (client_az, sk_az) => {
+                if client_az == sk_az {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
+        };
+
+        self.read = PG_IO_BYTES.with_label_values(&[
+            &self.client_az,
+            &self.sk_az,
+            &self.app_name,
+            "read",
+            same_az,
+        ]);
+        self.write = PG_IO_BYTES.with_label_values(&[
+            &self.client_az,
+            &self.sk_az,
+            &self.app_name,
+            "write",
+            same_az,
+        ]);
+    }
+}
+
+/// Metrics for measuring traffic (r/w bytes) in a single PostgreSQL connection.
+#[derive(Clone)]
+pub struct TrafficMetrics {
+    labels: Arc<RwLock<ConnectionLabels>>,
+}
+
+impl Default for TrafficMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrafficMetrics {
+    pub fn new() -> Self {
+        Self {
+            labels: Arc::new(RwLock::new(ConnectionLabels::new())),
+        }
+    }
+
+    pub fn set_client_az(&self, value: &str) {
+        let mut labels = self.labels.write().unwrap();
+        labels.client_az = value.to_string();
+        labels.update_metrics();
+    }
+
+    pub fn set_sk_az(&self, value: &str) {
+        let mut labels = self.labels.write().unwrap();
+        labels.sk_az = value.to_string();
+        labels.update_metrics();
+    }
+
+    pub fn set_app_name(&self, value: &str) {
+        let mut labels = self.labels.write().unwrap();
+        labels.app_name = value.to_string();
+        labels.update_metrics();
+    }
+
+    pub fn observe_read(&self, cnt: usize) {
+        let labels = self.labels.read().unwrap();
+        labels.read.inc_by(cnt as u64)
+    }
+
+    pub fn observe_write(&self, cnt: usize) {
+        let labels = self.labels.read().unwrap();
+        labels.write.inc_by(cnt as u64)
+    }
+}
 
 /// Metrics for WalStorage in a single timeline.
 #[derive(Clone, Default)]

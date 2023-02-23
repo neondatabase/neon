@@ -3,6 +3,7 @@ import shutil
 import time
 from contextlib import closing
 from datetime import datetime
+from itertools import chain
 from pathlib import Path
 from typing import List
 
@@ -87,6 +88,7 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
 
 def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
+    neon_env_builder.pageserver_config_override = "availability_zone='test_ps_az'"
 
     env = neon_env_builder.init_start()
     tenant_1, _ = env.neon_cli.create_tenant()
@@ -161,6 +163,62 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         log.info(
             f"process_start_time_seconds (UTC): {datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)}"
         )
+
+    def query_all_safekeepers(name, filter):
+        return list(
+            chain.from_iterable(
+                map(
+                    lambda sk: sk.query_all(name, filter),
+                    sk_metrics,
+                )
+            )
+        )
+
+    crossaz_read_bytes = sum(
+        int(metric.value)
+        for metric in query_all_safekeepers(
+            "safekeeper_pg_io_bytes_total",
+            {
+                "app_name": "pageserver",
+                "client_az": "test_ps_az",
+                "dir": "read",
+                "same_az": "false",
+            },
+        )
+    )
+    log.info(f"crossaz_read_bytes: {crossaz_read_bytes}")
+    assert crossaz_read_bytes > 0
+
+    crossaz_write_bytes = sum(
+        int(metric.value)
+        for metric in query_all_safekeepers(
+            "safekeeper_pg_io_bytes_total",
+            {
+                "app_name": "pageserver",
+                "client_az": "test_ps_az",
+                "dir": "write",
+                "same_az": "false",
+            },
+        )
+    )
+    log.info(f"crossaz_write_bytes: {crossaz_write_bytes}")
+    assert crossaz_write_bytes > 0
+
+    # Test (a subset of) safekeeper global metrics
+    for sk_m in sk_metrics:
+        assert any(
+            map(
+                lambda x: x.value > 0,
+                sk_m.query_all("safekeeper_pg_io_bytes_total", {"dir": "read"}),
+            )
+        ), f"{sk_m.name} has not read bytes"
+
+        assert any(
+            map(
+                lambda x: x.value > 0,
+                sk_m.query_all("safekeeper_pg_io_bytes_total", {"dir": "write"}),
+            )
+        ), f"{sk_m.name} has not written bytes"
 
     # Test (a subset of) pageserver global metrics
     for metric in PAGESERVER_GLOBAL_METRICS:

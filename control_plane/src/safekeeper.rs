@@ -115,6 +115,8 @@ impl SafekeeperNode {
         let datadir = self.datadir_path();
 
         let id_string = id.to_string();
+        let availability_zone = format!("sk-{}", id_string);
+
         let mut args = vec![
             "-D",
             datadir.to_str().with_context(|| {
@@ -126,6 +128,8 @@ impl SafekeeperNode {
             &listen_pg,
             "--listen-http",
             &listen_http,
+            "--availability-zone",
+            &availability_zone,
         ];
         if !self.conf.sync {
             args.push("--no-sync");
