@@ -220,9 +220,12 @@ def prepare_snapshot(
     for tenant in (repo_dir / "pgdatadirs" / "tenants").glob("*"):
         shutil.rmtree(tenant)
 
-    # Remove wal-redo temp directory
+    # Remove wal-redo temp directory if it exists. Newer pageserver versions don't create
+    # them anymore, but old versions did.
     for tenant in (repo_dir / "tenants").glob("*"):
-        shutil.rmtree(tenant / "wal-redo-datadir.___temp")
+        wal_redo_dir = tenant / "wal-redo-datadir.___temp"
+        if wal_redo_dir.exists() and wal_redo_dir.is_dir():
+            shutil.rmtree(wal_redo_dir)
 
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
