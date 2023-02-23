@@ -186,6 +186,8 @@ def test_ondemand_download_timetravel(
     for checkpoint_number in range(1, 20):
         with pg.cursor() as cur:
             cur.execute(f"UPDATE testtab SET checkpoint_number = {checkpoint_number}")
+
+        with pg.cursor() as cur:
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
         lsns.append((checkpoint_number, current_lsn))
 
