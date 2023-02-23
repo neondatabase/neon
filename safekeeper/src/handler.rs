@@ -9,6 +9,7 @@ use tracing::{info, info_span, Instrument};
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
+use crate::metrics::TrafficMetrics;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_ffi::PG_TLI;
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
@@ -30,6 +31,7 @@ pub struct SafekeeperPostgresHandler {
     pub timeline_id: Option<TimelineId>,
     pub ttid: TenantTimelineId,
     claims: Option<Claims>,
+    io_metrics: Option<TrafficMetrics>,
 }
 
 /// Parsed Postgres command.
@@ -85,6 +87,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
+            info!("options: {:#?}", params.get("options"));
+
+            let mut client_az = "unknown";
+
             if let Some(options) = params.options_raw() {
                 for opt in options {
                     // FIXME `ztenantid` and `ztimelineid` left for compatibility during deploy,
@@ -196,7 +202,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf) -> Self {
+    pub fn new(conf: SafeKeeperConf, io_metrics: Option<TrafficMetrics>) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
@@ -204,6 +210,7 @@ impl SafekeeperPostgresHandler {
             timeline_id: None,
             ttid: TenantTimelineId::empty(),
             claims: None,
+            io_metrics,
         }
     }
 
