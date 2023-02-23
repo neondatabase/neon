@@ -234,6 +234,7 @@ pageserver_send(NeonRequest * request)
 				neon_log(ERROR, "failed to send page request: %s", msg);
 			}
 		}
+		break;
 	}
 
 	pfree(req_buff.data);
