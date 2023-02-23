@@ -67,8 +67,11 @@ def test_ondemand_download_large_rel(
             "gc_horizon": f"{10 * 1024 ** 3}",  # 10 GB
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{10 * 1024 ** 2}",  # 10 MB
+            # allow compaction with the checkpoint
             "compaction_threshold": "3",
             "compaction_target_size": f"{10 * 1024 ** 2}",  # 10 MB
+            # but don't run compaction in background or on restart
+            "compaction_period": "0s",
         }
     )
     env.initial_tenant = tenant
