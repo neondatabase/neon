@@ -1669,7 +1669,7 @@ class AbstractNeonCli(abc.ABC):
             timeout=timeout,
         )
         if not res.returncode:
-            log.info(f"Run success: {res.stdout}")
+            log.info(f"Run {res.args} success: {res.stdout}")
         elif check_return_code:
             # this way command output will be in recorded and shown in CI in failure message
             msg = f"""\
@@ -3460,6 +3460,14 @@ def wait_for_last_flush_lsn(
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
     last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
+
+
+def wait_for_wal_insert_lsn(
+    env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId
+) -> Lsn:
+    """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
+    last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
     return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
 
 

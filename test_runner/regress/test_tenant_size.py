@@ -3,8 +3,15 @@ from typing import List, Tuple
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, wait_for_last_flush_lsn
-from fixtures.types import Lsn
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PageserverHttpClient,
+    Postgres,
+    wait_for_last_flush_lsn,
+    wait_for_wal_insert_lsn,
+)
+from fixtures.types import Lsn, TenantId, TimelineId
 
 
 def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
@@ -324,7 +331,7 @@ def test_single_branch_get_tenant_size_grows(
     # inserts is larger than gc_horizon. for example 0x20000 here hid the fact
     # that there next_gc_cutoff could be smaller than initdb_lsn, which will
     # obviously lead to issues when calculating the size.
-    gc_horizon = 0x30000
+    gc_horizon = 0x38000
     neon_env_builder.pageserver_config_override = f"tenant_config={{compaction_period='0s', gc_period='0s', pitr_interval='0sec', gc_horizon={gc_horizon}}}"
 
     env = neon_env_builder.init_start()
@@ -334,29 +341,75 @@ def test_single_branch_get_tenant_size_grows(
 
     http_client = env.pageserver.http_client()
 
-    collected_responses: List[Tuple[Lsn, int]] = []
+    collected_responses: List[Tuple[str, Lsn, int]] = []
 
     size_debug_file = open(test_output_dir / "size_debug.html", "w")
 
-    def check_size_change(current_lsn: Lsn, initdb_lsn: Lsn, gc_horizon: int, size: int, prev: int):
-        if current_lsn - initdb_lsn > gc_horizon:
+    def check_size_change(
+        current_lsn: Lsn, initdb_lsn: Lsn, gc_horizon: int, size: int, prev_size: int
+    ):
+        if current_lsn - initdb_lsn >= gc_horizon:
             assert (
-                size >= prev
+                size >= prev_size
             ), "tenant_size may grow or not grow, because we only add gc_horizon amount of WAL to initial snapshot size"
         else:
             assert (
-                size > prev
+                size > prev_size
             ), "tenant_size should grow, because we continue to add WAL to initial snapshot size"
 
-    with env.postgres.create_start(branch_name, tenant_id=tenant_id) as pg:
-        initdb_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    def get_current_consistent_size(
+        env: NeonEnv,
+        pg: Postgres,
+        size_debug_file,  # apparently there is no public signature for open()...
+        http_client: PageserverHttpClient,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> Tuple[Lsn, int]:
+        consistent = False
+        size_debug = None
+
+        current_lsn = wait_for_wal_insert_lsn(env, pg, tenant_id, timeline_id)
+        # We want to make sure we have a self-consistent set of values.
+        # Size changes with WAL, so only if both before and after getting
+        # the size of the tenant reports the same WAL insert LSN, we're OK
+        # to use that (size, LSN) combination.
+        # Note that 'wait_for_wal_flush_lsn' is not accurate enough: There
+        # can be more wal after the flush LSN that can arrive on the
+        # pageserver before we're requesting the page size.
+        # Anyway, in general this is only one iteration, so in general
+        # this is fine.
+        while not consistent:
+            size, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+            size_debug = http_client.tenant_size_debug(tenant_id)
+
+            after_lsn = wait_for_wal_insert_lsn(env, pg, tenant_id, timeline_id)
+            consistent = current_lsn == after_lsn
+            current_lsn = after_lsn
+        size_debug_file.write(size_debug)
+        return (current_lsn, size)
+
+    with env.postgres.create_start(
+        branch_name,
+        tenant_id=tenant_id,
+        ### autovacuum is disabled to limit WAL logging.
+        config_lines=["autovacuum=off"],
+    ) as pg:
+        (initdb_lsn, size) = get_current_consistent_size(
+            env, pg, size_debug_file, http_client, tenant_id, timeline_id
+        )
+        collected_responses.append(("INITDB", initdb_lsn, size))
+
         with pg.cursor() as cur:
-            cur.execute("CREATE TABLE t0 (i BIGINT NOT NULL)")
+            cur.execute("CREATE TABLE t0 (i BIGINT NOT NULL) WITH (fillfactor = 40)")
+
+        (current_lsn, size) = get_current_consistent_size(
+            env, pg, size_debug_file, http_client, tenant_id, timeline_id
+        )
+        collected_responses.append(("CREATE", current_lsn, size))
 
         batch_size = 100
 
-        i = 0
-        while True:
+        for i in range(3):
             with pg.cursor() as cur:
                 cur.execute(
                     f"INSERT INTO t0(i) SELECT i FROM generate_series({batch_size} * %s, ({batch_size} * (%s + 1)) - 1) s(i)",
@@ -365,27 +418,24 @@ def test_single_branch_get_tenant_size_grows(
 
             i += 1
 
-            current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+            (current_lsn, size) = get_current_consistent_size(
+                env, pg, size_debug_file, http_client, tenant_id, timeline_id
+            )
 
-            size, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+            prev_size = collected_responses[-1][2]
+            if size == 0:
+                assert prev_size == 0
+            else:
+                # branch start shouldn't be past gc_horizon yet
+                # thus the size should grow as we insert more data
+                # "gc_horizon" is tuned so that it kicks in _after_ the
+                # insert phase, but before the update phase ends.
+                assert (
+                    current_lsn - initdb_lsn <= gc_horizon
+                ), "Tuning of GC window is likely out-of-date"
+                assert size > prev_size
 
-            size_debug = http_client.tenant_size_debug(tenant_id)
-            size_debug_file.write(size_debug)
-
-            if len(collected_responses) > 0:
-                prev = collected_responses[-1][1]
-                if size == 0:
-                    assert prev == 0
-                else:
-                    # branch start shouldn't be past gc_horizon yet
-                    # thus the size should grow as we insert more data
-                    assert current_lsn - initdb_lsn <= gc_horizon
-                    assert size > prev
-
-            collected_responses.append((current_lsn, size))
-
-            if len(collected_responses) > 2:
-                break
+            collected_responses.append(("INSERT", current_lsn, size))
 
         while True:
             with pg.cursor() as cur:
@@ -397,18 +447,15 @@ def test_single_branch_get_tenant_size_grows(
             if updated == 0:
                 break
 
-            current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+            (current_lsn, size) = get_current_consistent_size(
+                env, pg, size_debug_file, http_client, tenant_id, timeline_id
+            )
 
-            size, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
+            prev_size = collected_responses[-1][2]
 
-            size_debug = http_client.tenant_size_debug(tenant_id)
-            size_debug_file.write(size_debug)
+            check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
 
-            prev = collected_responses[-1][1]
-
-            check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev)
-
-            collected_responses.append((current_lsn, size))
+            collected_responses.append(("UPDATE", current_lsn, size))
 
         while True:
             with pg.cursor() as cur:
@@ -418,40 +465,47 @@ def test_single_branch_get_tenant_size_grows(
             if deleted == 0:
                 break
 
-            current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+            (current_lsn, size) = get_current_consistent_size(
+                env, pg, size_debug_file, http_client, tenant_id, timeline_id
+            )
 
-            size = http_client.tenant_size(tenant_id)
-            prev = collected_responses[-1][1]
+            prev_size = collected_responses[-1][2]
 
-            check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev)
+            check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
 
-            collected_responses.append((current_lsn, size))
+            collected_responses.append(("DELETE", current_lsn, size))
 
         with pg.cursor() as cur:
             cur.execute("DROP TABLE t0")
 
-        current_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        # The size of the tenant should still be as large as before we dropped
+        # the table, because the drop operation can still be undone in the PITR
+        # defined by gc_horizon.
+        (current_lsn, size) = get_current_consistent_size(
+            env, pg, size_debug_file, http_client, tenant_id, timeline_id
+        )
 
-        size = http_client.tenant_size(tenant_id)
-        prev = collected_responses[-1][1]
+        prev_size = collected_responses[-1][2]
 
-        check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev)
+        check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
 
-        collected_responses.append((current_lsn, size))
+        collected_responses.append(("DROP", current_lsn, size))
 
     # this isn't too many lines to forget for a while. observed while
     # developing these tests that locally the value is a bit more than what we
     # get in the ci.
-    for lsn, size in collected_responses:
-        log.info(f"collected: {lsn}, {size}")
+    for phase, lsn, size in collected_responses:
+        log.info(f"collected: {phase}, {lsn}, {size}")
 
     env.pageserver.stop()
     env.pageserver.start()
 
+    size_after = http_client.tenant_size(tenant_id)
+    size_debug = http_client.tenant_size_debug(tenant_id)
+    size_debug_file.write(size_debug)
     size_debug_file.close()
 
-    size_after = http_client.tenant_size(tenant_id)
-    prev = collected_responses[-1][1]
+    prev = collected_responses[-1][2]
 
     assert size_after == prev, "size after restarting pageserver should not have changed"
 
