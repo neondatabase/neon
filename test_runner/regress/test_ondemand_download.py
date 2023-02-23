@@ -247,10 +247,9 @@ def test_ondemand_download_timetravel(
     num_layers_downloaded = [0]
     resident_size = [get_resident_physical_size()]
     for (checkpoint_number, lsn) in lsns:
-        pg_old = env.postgres.create_start(
+        with env.postgres.create_start(
             branch_name="main", node_name=f"test_old_lsn_{checkpoint_number}", lsn=lsn
-        )
-        with pg_old.cursor() as cur:
+        ) as pg_old, pg_old.cursor() as cur:
             # assert query_scalar(cur, f"select count(*) from testtab where checkpoint_number={checkpoint_number}") == 100000
             assert (
                 query_scalar(
