@@ -13,6 +13,7 @@
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::{BufMut, BytesMut};
 use fail::fail_point;
+use postgres_ffi::relfile_utils::INIT_FORKNUM;
 use std::fmt::Write as FmtWrite;
 use std::time::SystemTime;
 use tokio::io;
@@ -191,12 +192,12 @@ where
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
             // Gather and send relational files in each database if full backup is requested.
-            if self.full_backup {
-                for rel in self
-                    .timeline
-                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
-                    .await?
-                {
+            for rel in self
+                .timeline
+                .list_rels(spcnode, dbnode, self.lsn, self.ctx)
+                .await?
+            {
+                if self.full_backup || rel.forknum == INIT_FORKNUM {
                     self.add_rel(rel).await?;
                 }
             }
