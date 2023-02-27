@@ -790,7 +790,7 @@ impl Timeline {
     pub fn memory_dump(&self) -> debug_dump::Memory {
         let state = self.write_shared_state();
 
-        let (write_lsn, write_record_lsn, flush_record_lsn, file_open) =
+        let (write_lsn, write_record_lsn, flush_lsn, file_open) =
             state.sk.wal_store.internal_state();
 
         debug_dump::Memory {
@@ -805,7 +805,7 @@ impl Timeline {
             mem_state: state.sk.inmem.clone(),
             write_lsn,
             write_record_lsn,
-            flush_record_lsn,
+            flush_lsn,
             file_open,
         }
     }

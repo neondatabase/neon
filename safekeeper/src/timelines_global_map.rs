@@ -159,6 +159,11 @@ impl GlobalTimelines {
         Ok(())
     }
 
+    /// Get the number of timelines in the map.
+    pub fn timelines_count() -> usize {
+        TIMELINES_STATE.lock().unwrap().timelines.len()
+    }
+
     /// Create a new timeline with the given id. If the timeline already exists, returns
     /// an existing timeline.
     pub fn create(

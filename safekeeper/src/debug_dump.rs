@@ -9,6 +9,7 @@ use postgres_ffi::XLogSegNo;
 use serde::Serialize;
 use serde::Serializer;
 
+use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -59,7 +60,7 @@ pub struct Response {
     pub start_time: DateTime<Utc>,
     pub finish_time: DateTime<Utc>,
     pub timelines: Vec<Timeline>,
-    pub usable_timelines_len: usize,
+    pub timelines_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,7 +89,7 @@ pub struct Memory {
     // PhysicalStorage state.
     pub write_lsn: Lsn,
     pub write_record_lsn: Lsn,
-    pub flush_record_lsn: Lsn,
+    pub flush_lsn: Lsn,
     pub file_open: bool,
 }
 
@@ -110,9 +111,23 @@ pub struct FileInfo {
 
 pub fn build(args: Args) -> Result<Response> {
     let start_time = Utc::now();
-    let ptrs_snapshot = GlobalTimelines::get_all();
-    let usable_timelines_len = ptrs_snapshot.len();
+    let timelines_count = GlobalTimelines::timelines_count();
 
+    let ptrs_snapshot = if args.tenant_id.is_some() && args.timeline_id.is_some() {
+        // If both tenant_id and timeline_id are specified, we can just get the
+        // timeline directly, without taking a snapshot of the whole list.
+        let ttid = TenantTimelineId::new(args.tenant_id.unwrap(), args.timeline_id.unwrap());
+        if let Ok(tli) = GlobalTimelines::get(ttid) {
+            vec![tli]
+        } else {
+            vec![]
+        }
+    } else {
+        // Otherwise, take a snapshot of the whole list.
+        GlobalTimelines::get_all()
+    };
+
+    // TODO: return Stream instead of Vec
     let mut timelines = Vec::new();
     for tli in ptrs_snapshot {
         let ttid = tli.ttid;
@@ -163,7 +178,7 @@ pub fn build(args: Args) -> Result<Response> {
         start_time,
         finish_time: Utc::now(),
         timelines,
-        usable_timelines_len,
+        timelines_count,
     })
 }
 

@@ -337,6 +337,8 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     })
     .await
     .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+
+    // TODO: use streaming response
     json_response(StatusCode::OK, resp)
 }
 
