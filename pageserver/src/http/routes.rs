@@ -1,9 +1,14 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use hyper::StatusCode;
+use futures::Future;
+use hyper::body::HttpBody;
+use hyper::header::HeaderName;
+use hyper::http::HeaderValue;
 use hyper::{Body, Request, Response, Uri};
+use hyper::{Method, StatusCode};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
@@ -1157,6 +1162,42 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
             evict_timeline_layer_handler,
         )
-        .get("/v1/panic", always_panic_handler)
+        .get(
+            "/v1/panic",
+            wrap_span("always_panic_handler", always_panic_handler),
+        )
         .any(handler_404))
+}
+
+fn wrap_span<H, R, B, E>(
+    handler_name: &'static str,
+    handler: H,
+) -> impl Fn(Request<hyper::Body>) -> R
+where
+    H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
+    B: HttpBody + Send + Sync + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    R: Future<Output = Result<Response<B>, E>> + Send + 'static,
+{
+    move |r| -> R {
+        async {
+            let headers = r.headers_mut();
+            let name = HeaderName::from_str("UUID").expect("created header name");
+            let request_id = "foo";
+            let value = HeaderValue::from_str(&request_id).unwrap();
+            headers.insert(name, value);
+            if r.method() == Method::GET {
+                tracing::debug!("{} {} {}", r.method(), r.uri().path(), request_id);
+            } else {
+                tracing::info!("{} {} {}", r.method(), r.uri().path(), request_id);
+            }
+            handler(r)
+                .instrument(info_span!(
+                    "request",
+                    handler = handler_name,
+                    request_id = request_id
+                ))
+                .await
+        }
+    }
 }
