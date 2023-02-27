@@ -39,7 +39,7 @@ pq_proto.workspace = true
 
 workspace_hack.workspace = true
 url.workspace = true
-
+uuid = { version = "1.2", features = ["v4", "serde"] }
 [dev-dependencies]
 byteorder.workspace = true
 bytes.workspace = true

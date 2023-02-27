@@ -4544,6 +4544,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "workspace_hack",
 ]
 

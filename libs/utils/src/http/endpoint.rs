@@ -11,7 +11,7 @@ use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
 use tokio::task::JoinError;
-use tracing;
+use tracing::{self};
 
 use std::future::Future;
 use std::net::TcpListener;
@@ -63,8 +63,20 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
     Ok(response)
 }
 
+pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
+) -> Middleware<B, ApiError> {
+    Middleware::pre(move |mut req| async move {
+        let headers = req.headers_mut();
+        let name = HeaderName::from_str("UUID").unwrap();
+        let value = HeaderValue::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
+        headers.insert(name, value);
+        Ok(req)
+    })
+}
+
 pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
     Router::builder()
+        .middleware(add_request_id_middleware())
         .middleware(Middleware::post_with_info(logger))
         .get("/metrics", prometheus_metrics_handler)
         .err_handler(error::handler)
