@@ -66,11 +66,22 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |mut req| async move {
+        let x_request_id = HeaderName::from_static("x-request-id");
+
         let headers = req.headers_mut();
-        let name = HeaderName::from_str("UUID").expect("created header name");
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let value = HeaderValue::from_str(&request_id).unwrap();
-        headers.insert(name, value);
+        let request_id = match headers.get(&x_request_id) {
+            Some(request_id) => request_id
+                .to_str()
+                .expect("extract request id value")
+                .to_owned(),
+            None => {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                let value = HeaderValue::from_str(&request_id).unwrap();
+                headers.insert(&x_request_id, value);
+                request_id
+            }
+        };
+
         if req.method() == Method::GET {
             tracing::debug!("{} {} {}", req.method(), req.uri().path(), request_id);
         } else {
