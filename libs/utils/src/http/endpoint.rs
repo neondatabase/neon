@@ -10,6 +10,7 @@ use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::RequestInfo;
 use routerify::{Middleware, Router, RouterBuilder, RouterService};
+use std::borrow::Cow;
 use tokio::task::JoinError;
 use tracing;
 
@@ -68,17 +69,15 @@ pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'stati
     Middleware::pre(move |mut req| async move {
         let x_request_id = HeaderName::from_static("x-request-id");
 
-        let headers = req.headers_mut();
-        let request_id = match headers.get(&x_request_id) {
-            Some(request_id) => request_id
-                .to_str()
-                .expect("extract request id value")
-                .to_owned(),
+        let request_id = match req.headers().get(&x_request_id) {
+            Some(request_id) => {
+                Cow::Borrowed(request_id.to_str().expect("extract request id value"))
+            }
             None => {
                 let request_id = uuid::Uuid::new_v4().to_string();
-                let value = HeaderValue::from_str(&request_id).unwrap();
-                headers.insert(&x_request_id, value);
-                request_id
+                let value = HeaderValue::from_str(&request_id).expect("extract request id value");
+                req.headers_mut().insert(&x_request_id, value);
+                Cow::Owned(request_id)
             }
         };
 
