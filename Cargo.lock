@@ -3307,6 +3307,7 @@ dependencies = [
  "async-trait",
  "byteorder",
  "bytes",
+ "chrono",
  "clap 4.1.4",
  "const_format",
  "crc32c",

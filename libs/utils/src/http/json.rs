@@ -21,6 +21,7 @@ pub fn json_response<T: Serialize>(
     status: StatusCode,
     data: T,
 ) -> Result<Response<Body>, ApiError> {
+    // TODO: use streaming serializer
     let json = serde_json::to_string(&data)
         .context("Failed to serialize JSON response")
         .map_err(ApiError::InternalServerError)?;
