@@ -150,7 +150,7 @@ workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 criterion = "0.4"
 rcgen = "0.10"
 rstest = "0.16"
-tempfile = "3.2"
+tempfile = "3.4"
 tonic-build = "0.8"
 
 # This is only needed for proxy's tests.
