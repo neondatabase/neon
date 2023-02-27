@@ -68,8 +68,10 @@ pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'stati
     Middleware::pre(move |mut req| async move {
         let headers = req.headers_mut();
         let name = HeaderName::from_str("UUID").unwrap();
-        let value = HeaderValue::from_str(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let value = HeaderValue::from_str(&request_id).unwrap();
         headers.insert(name, value);
+        tracing::info!("{} {} {}", req.method(), req.uri().path(), request_id);
         Ok(req)
     })
 }
