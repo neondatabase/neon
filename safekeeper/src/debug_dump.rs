@@ -1,7 +1,10 @@
 //! Utils for dumping full state of the safekeeper.
 
 use std::fmt::Display;
+use std::fs;
+use std::fs::DirEntry;
 use std::io::BufReader;
+use std::io::Read;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -109,6 +112,7 @@ pub struct FileInfo {
     // TODO: add sha256 checksum
 }
 
+/// Build debug dump response, using the provided [`Args`] filters.
 pub fn build(args: Args) -> Result<Response> {
     let start_time = Utc::now();
     let timelines_count = GlobalTimelines::timelines_count();
@@ -159,7 +163,9 @@ pub fn build(args: Args) -> Result<Response> {
         };
 
         let disk_content = if args.dump_disk_content {
-            Some(build_disk_content(&tli.timeline_dir)?)
+            // build_disk_content can fail, but we don't want to fail the whole
+            // request because of that.
+            build_disk_content(&tli.timeline_dir).ok()
         } else {
             None
         };
@@ -182,42 +188,54 @@ pub fn build(args: Args) -> Result<Response> {
     })
 }
 
+/// Builds DiskContent from a directory path. It can fail if the directory
+/// is deleted between the time we get the path and the time we try to open it.
 fn build_disk_content(path: &std::path::Path) -> Result<DiskContent> {
-    use std::fs;
-    use std::io::Read;
-
     let mut files = Vec::new();
     for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|x| x.to_str())
-            .unwrap_or("")
-            .to_owned();
-        let mut file = fs::File::open(path)?;
-        let mut reader = BufReader::new(&mut file).bytes().filter_map(|x| x.ok());
-
-        let start_zeroes = reader.by_ref().take_while(|&x| x == 0).count() as u64;
-        let mut end_zeroes = 0;
-        for b in reader {
-            if b == 0 {
-                end_zeroes += 1;
-            } else {
-                end_zeroes = 0;
-            }
+        if entry.is_err() {
+            continue;
         }
-
-        files.push(FileInfo {
-            name,
-            size: metadata.len(),
-            created: DateTime::from(metadata.created()?),
-            modified: DateTime::from(metadata.modified()?),
-            start_zeroes,
-            end_zeroes,
-        });
+        let file = build_file_info(entry?);
+        if file.is_err() {
+            continue;
+        }
+        files.push(file?);
     }
 
     Ok(DiskContent { files })
+}
+
+/// Builds FileInfo from DirEntry. Sometimes it can return an error
+/// if the file is deleted between the time we get the DirEntry
+/// and the time we try to open it.
+fn build_file_info(entry: DirEntry) -> Result<FileInfo> {
+    let metadata = entry.metadata()?;
+    let path = entry.path();
+    let name = path
+        .file_name()
+        .and_then(|x| x.to_str())
+        .unwrap_or("")
+        .to_owned();
+    let mut file = fs::File::open(path)?;
+    let mut reader = BufReader::new(&mut file).bytes().filter_map(|x| x.ok());
+
+    let start_zeroes = reader.by_ref().take_while(|&x| x == 0).count() as u64;
+    let mut end_zeroes = 0;
+    for b in reader {
+        if b == 0 {
+            end_zeroes += 1;
+        } else {
+            end_zeroes = 0;
+        }
+    }
+
+    Ok(FileInfo {
+        name,
+        size: metadata.len(),
+        created: DateTime::from(metadata.created()?),
+        modified: DateTime::from(metadata.modified()?),
+        start_zeroes,
+        end_zeroes,
+    })
 }
