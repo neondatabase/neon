@@ -212,6 +212,7 @@ pub struct SafekeeperMemState {
     pub backup_lsn: Lsn,
     pub peer_horizon_lsn: Lsn,
     pub remote_consistent_lsn: Lsn,
+    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
 }
 

@@ -1,6 +1,7 @@
 //! Utils for dumping full state of the safekeeper.
 
 use std::fmt::Display;
+use std::io::BufReader;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -58,6 +59,7 @@ pub struct Response {
     pub start_time: DateTime<Utc>,
     pub finish_time: DateTime<Utc>,
     pub timelines: Vec<Timeline>,
+    pub usable_timelines_len: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,11 +93,25 @@ pub struct Memory {
 }
 
 #[derive(Debug, Serialize)]
-pub struct DiskContent {}
+pub struct DiskContent {
+    pub files: Vec<FileInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileInfo {
+    pub name: String,
+    pub size: u64,
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+    pub start_zeroes: u64,
+    pub end_zeroes: u64,
+    // TODO: add sha256 checksum
+}
 
 pub fn build(args: Args) -> Result<Response> {
     let start_time = Utc::now();
     let ptrs_snapshot = GlobalTimelines::get_all();
+    let usable_timelines_len = ptrs_snapshot.len();
 
     let mut timelines = Vec::new();
     for tli in ptrs_snapshot {
@@ -127,12 +143,18 @@ pub fn build(args: Args) -> Result<Response> {
             None
         };
 
+        let disk_content = if args.dump_disk_content {
+            Some(build_disk_content(&tli.timeline_dir)?)
+        } else {
+            None
+        };
+
         let timeline = Timeline {
             tenant_id: ttid.tenant_id,
             timeline_id: ttid.timeline_id,
             control_file,
             memory,
-            disk_content: None,
+            disk_content,
         };
         timelines.push(timeline);
     }
@@ -141,5 +163,46 @@ pub fn build(args: Args) -> Result<Response> {
         start_time,
         finish_time: Utc::now(),
         timelines,
+        usable_timelines_len,
     })
+}
+
+fn build_disk_content(path: &std::path::Path) -> Result<DiskContent> {
+    use std::fs;
+    use std::io::Read;
+
+    let mut files = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or("")
+            .to_owned();
+        let mut file = fs::File::open(path)?;
+        let mut reader = BufReader::new(&mut file).bytes().filter_map(|x| x.ok());
+
+        let start_zeroes = reader.by_ref().take_while(|&x| x == 0).count() as u64;
+        let mut end_zeroes = 0;
+        for b in reader {
+            if b == 0 {
+                end_zeroes += 1;
+            } else {
+                end_zeroes = 0;
+            }
+        }
+
+        files.push(FileInfo {
+            name,
+            size: metadata.len(),
+            created: DateTime::from(metadata.created()?),
+            modified: DateTime::from(metadata.modified()?),
+            start_zeroes,
+            end_zeroes,
+        });
+    }
+
+    Ok(DiskContent { files })
 }
