@@ -8,6 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::compute::ComputeControlPlane;
+use control_plane::compute::Replication;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -472,7 +473,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             println!("Creating node for imported timeline ...");
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
-            cplane.new_node(tenant_id, name, timeline_id, None, None, pg_version)?;
+            cplane.new_node(tenant_id, name, timeline_id, None, None, pg_version, None)?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -558,19 +559,18 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .iter()
                 .filter(|((node_tenant_id, _), _)| node_tenant_id == &tenant_id)
             {
-                let lsn_str = match node.lsn {
-                    None => {
-                        // -> primary node
+                let lsn_str = match node.replication {
+                    Replication::Static(lsn) => {
+                        // -> read-only node
+                        // Use the node's LSN.
+                        lsn.to_string()
+                    }
+                    _ => {
                         // Use the LSN at the end of the timeline.
                         timeline_infos
                             .get(&node.timeline_id)
                             .map(|bi| bi.last_record_lsn.to_string())
                             .unwrap_or_else(|| "?".to_string())
-                    }
-                    Some(lsn) => {
-                        // -> read-only node
-                        // Use the node's LSN.
-                        lsn.to_string()
                     }
                 };
 
@@ -617,7 +617,17 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            cplane.new_node(tenant_id, &node_name, timeline_id, lsn, port, pg_version)?;
+            let replica = sub_args.get_one::<String>("replicates").map(|s| s.as_str());
+
+            cplane.new_node(
+                tenant_id,
+                &node_name,
+                timeline_id,
+                lsn,
+                port,
+                pg_version,
+                replica,
+            )?;
         }
         "start" => {
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
@@ -635,7 +645,20 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 None
             };
 
+            let replica = sub_args.get_one::<String>("replicates").map(|s| s.as_str());
+
             if let Some(node) = node {
+                if let Some(repl) = replica {
+                    if let Replication::Replica(source) = &node.replication {
+                        if source != repl {
+                            println!("replication ignored: node already has replica configured")
+                        }
+                    } else {
+                        println!(
+                            "replication ignored: pre-existing node was not configured as replica"
+                        )
+                    }
+                }
                 println!("Starting existing postgres {node_name}...");
                 node.start(&auth_token)?;
             } else {
@@ -664,8 +687,15 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 // start <-- will also use port X even without explicit port argument
                 println!("Starting new postgres (v{pg_version}) {node_name} on timeline {timeline_id} ...");
 
-                let node =
-                    cplane.new_node(tenant_id, node_name, timeline_id, lsn, port, pg_version)?;
+                let node = cplane.new_node(
+                    tenant_id,
+                    node_name,
+                    timeline_id,
+                    lsn,
+                    port,
+                    pg_version,
+                    replica,
+                )?;
                 node.start(&auth_token)?;
             }
         }
@@ -918,6 +948,12 @@ fn cli() -> Command {
         .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
         .required(false);
 
+    let replicates_arg = Arg::new("replicates")
+        .short('r')
+        .help("If configured, the node will be a hot replica of the node identified by the name")
+        .long("replicates")
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1042,6 +1078,7 @@ fn cli() -> Command {
                             .long("config-only")
                             .required(false))
                     .arg(pg_version_arg.clone())
+                    .arg(replicates_arg.clone())
                 )
                 .subcommand(Command::new("start")
                     .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
@@ -1052,6 +1089,7 @@ fn cli() -> Command {
                     .arg(lsn_arg)
                     .arg(port_arg)
                     .arg(pg_version_arg)
+                    .arg(replicates_arg.clone())
                 )
                 .subcommand(
                     Command::new("stop")

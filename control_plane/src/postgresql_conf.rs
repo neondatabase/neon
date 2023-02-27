@@ -13,7 +13,7 @@ use std::io::BufRead;
 use std::str::FromStr;
 
 /// In-memory representation of a postgresql.conf file
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct PostgresConf {
     lines: Vec<String>,
     hash: HashMap<String, String>,
