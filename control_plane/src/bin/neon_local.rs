@@ -8,6 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::endpoint::ComputeControlPlane;
+use control_plane::endpoint::Replication;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -474,7 +475,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
             println!("Creating endpoint for imported timeline ...");
-            cplane.new_endpoint(tenant_id, name, timeline_id, None, None, pg_version)?;
+            cplane.new_endpoint(tenant_id, name, timeline_id, None, None, pg_version, None)?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -560,19 +561,19 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .iter()
                 .filter(|(_, endpoint)| endpoint.tenant_id == tenant_id)
             {
-                let lsn_str = match endpoint.lsn {
-                    None => {
-                        // -> primary endpoint
+                let lsn_str = match endpoint.replication {
+                    Replication::Static(lsn) => {
+                        // -> read-only endpoint
+                        // Use the node's LSN.
+                        lsn.to_string()
+                    }
+                    _ => {
+                        // -> primary endpoint or hot replica
                         // Use the LSN at the end of the timeline.
                         timeline_infos
                             .get(&endpoint.timeline_id)
                             .map(|bi| bi.last_record_lsn.to_string())
                             .unwrap_or_else(|| "?".to_string())
-                    }
-                    Some(lsn) => {
-                        // -> read-only endpoint
-                        // Use the endpoint's LSN.
-                        lsn.to_string()
                     }
                 };
 
@@ -619,7 +620,17 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            cplane.new_endpoint(tenant_id, &endpoint_id, timeline_id, lsn, port, pg_version)?;
+            let replica = sub_args.get_one::<String>("replicates").map(|s| s.as_str());
+
+            cplane.new_endpoint(
+                tenant_id,
+                &endpoint_id,
+                timeline_id,
+                lsn,
+                port,
+                pg_version,
+                replica,
+            )?;
         }
         "start" => {
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
@@ -637,7 +648,20 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 None
             };
 
+            let replica = sub_args.get_one::<String>("replicates").map(|s| s.as_str());
+
             if let Some(endpoint) = endpoint {
+                if let Some(repl) = replica {
+                    if let Replication::Replica(source) = &endpoint.replication {
+                        if source != repl {
+                            println!("replication ignored: node already has replica configured")
+                        }
+                    } else {
+                        println!(
+                            "replication ignored: pre-existing node was not configured as replica"
+                        )
+                    }
+                }
                 println!("Starting existing endpoint {endpoint_id}...");
                 endpoint.start(&auth_token)?;
             } else {
@@ -673,6 +697,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     lsn,
                     port,
                     pg_version,
+                    replica,
                 )?;
                 ep.start(&auth_token)?;
             }
@@ -928,6 +953,12 @@ fn cli() -> Command {
         .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
         .required(false);
 
+    let replicates_arg = Arg::new("replicates")
+        .short('r')
+        .help("If configured, the node will be a hot replica of the replica identified by the given id")
+        .long("replicates")
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1052,6 +1083,7 @@ fn cli() -> Command {
                             .long("config-only")
                             .required(false))
                     .arg(pg_version_arg.clone())
+                    .arg(replicates_arg.clone())
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
@@ -1062,6 +1094,7 @@ fn cli() -> Command {
                     .arg(lsn_arg)
                     .arg(port_arg)
                     .arg(pg_version_arg)
+                    .arg(replicates_arg.clone())
                 )
                 .subcommand(
                     Command::new("stop")
