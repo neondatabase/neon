@@ -22,7 +22,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{BinaryHeap, BTreeMap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
