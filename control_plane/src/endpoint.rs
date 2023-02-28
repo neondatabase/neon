@@ -68,19 +68,11 @@ impl ComputeControlPlane {
         tenant_id: TenantId,
         name: &str,
         timeline_id: TimelineId,
-        lsn: Option<Lsn>,
         port: Option<u16>,
         pg_version: u32,
-        standby_of: Option<&str>,
+        replication: Replication,
     ) -> Result<Arc<Endpoint>> {
         let port = port.unwrap_or_else(|| self.get_port());
-
-        let replication = match (lsn, standby_of) {
-            (Some(lsn), None) => Replication::Static(lsn),
-            (None, Some(standby_of)) => Replication::Replica(standby_of.to_owned()),
-            (None, None) => Replication::Primary,
-            (Some(_), Some(_)) => anyhow::bail!("cannot specify both lsn and standby_of"),
-        };
 
         let ep = Arc::new(Endpoint {
             name: name.to_owned(),
@@ -111,7 +103,7 @@ pub enum Replication {
     // if recovery_target_lsn is provided
     Static(Lsn),
     // Hot standby running on a timleine
-    Replica(String),
+    Replica,
 }
 
 #[derive(Debug)]
@@ -179,7 +171,7 @@ impl Endpoint {
             let slot_name = slot_name.to_string();
             let prefix = format!("repl_{}_{}_", timeline_id, name);
             assert!(slot_name.starts_with(&prefix));
-            Replication::Replica(slot_name[prefix.len()..].to_owned())
+            Replication::Replica
         } else {
             Replication::Primary
         };
@@ -375,7 +367,7 @@ impl Endpoint {
             Replication::Static(lsn) => {
                 conf.append("recovery_target_lsn", &lsn.to_string());
             }
-            Replication::Replica(of) => {
+            Replication::Replica => {
                 assert!(!self.env.safekeepers.is_empty());
 
                 // TODO: use future host field from safekeeper spec
@@ -389,7 +381,7 @@ impl Endpoint {
                     &self.tenant_id.to_string(),
                 );
 
-                let slot_name = format!("repl_{}_{}_{}", self.timeline_id, self.name, of);
+                let slot_name = format!("repl_{}_", self.timeline_id);
                 conf.append("primary_conninfo", connstr.as_str());
                 conf.append("primary_slot_name", slot_name.as_str());
                 conf.append("hot_standby", "on");
@@ -424,7 +416,7 @@ impl Endpoint {
                 }
             }
             Replication::Static(lsn) => Some(*lsn),
-            Replication::Replica(_) => {
+            Replication::Replica => {
                 None // Take the latest snapshot available to start with
             }
         };
