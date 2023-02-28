@@ -111,10 +111,27 @@ pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'stati
     })
 }
 
+async fn add_request_id_header_to_response(
+    mut res: Response<Body>,
+    req_info: RequestInfo,
+) -> Result<Response<Body>, ApiError> {
+    let headers = req_info.headers();
+
+    if let Some(request_id) = headers.get(&X_REQUEST_ID_HEADER) {
+        res.headers_mut()
+            .insert(&X_REQUEST_ID_HEADER, request_id.into());
+    };
+
+    Ok(res)
+}
+
 pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
     Router::builder()
         .middleware(add_request_id_middleware())
         .middleware(Middleware::post_with_info(logger))
+        .middleware(Middleware::post_with_info(
+            add_request_id_header_to_response,
+        ))
         .get("/metrics", prometheus_metrics_handler)
         .err_handler(error::handler)
 }
