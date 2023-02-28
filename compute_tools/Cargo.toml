@@ -17,6 +17,7 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tokio-postgres.workspace = true
 tracing.workspace = true
