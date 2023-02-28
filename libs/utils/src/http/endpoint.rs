@@ -32,12 +32,13 @@ async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>
     // cannot factor out the Level to avoid the repetition
     // because tracing can only work with const Level
     // which is not the case here
-    let request_id = info
-        .headers()
-        .get(&X_REQUEST_ID_HEADER)
-        .expect("extract request id")
-        .to_str()
-        .unwrap_or_default();
+    let request_id_val = info.headers().get(&X_REQUEST_ID_HEADER);
+
+    let request_id = match request_id_val {
+        Some(request_val) => request_val.to_str().expect("request id as str"),
+        None => "",
+    };
+
     if info.method() == Method::GET && res.status() == StatusCode::OK {
         tracing::debug!(
             "{} {} {} {}",
