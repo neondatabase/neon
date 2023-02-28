@@ -32,10 +32,28 @@ async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>
     // cannot factor out the Level to avoid the repetition
     // because tracing can only work with const Level
     // which is not the case here
+    let request_id = info
+        .headers()
+        .get(&X_REQUEST_ID_HEADER)
+        .expect("extract request id")
+        .to_str()
+        .unwrap_or_default();
     if info.method() == Method::GET && res.status() == StatusCode::OK {
-        tracing::debug!("{} {} {}", info.method(), info.uri().path(), res.status());
+        tracing::debug!(
+            "{} {} {} {}",
+            info.method(),
+            info.uri().path(),
+            request_id,
+            res.status()
+        );
     } else {
-        tracing::info!("{} {} {}", info.method(), info.uri().path(), res.status());
+        tracing::info!(
+            "{} {} {} {}",
+            info.method(),
+            info.uri().path(),
+            request_id,
+            res.status()
+        );
     }
     Ok(res)
 }
@@ -64,19 +82,19 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
     Ok(response)
 }
 
+static X_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
+
 pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |mut req| async move {
-        let x_request_id = HeaderName::from_static("x-request-id");
-
-        let request_id = match req.headers().get(&x_request_id) {
+        let request_id = match req.headers().get(&X_REQUEST_ID_HEADER) {
             Some(request_id) => {
                 Cow::Borrowed(request_id.to_str().expect("extract request id value"))
             }
             None => {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let value = HeaderValue::from_str(&request_id).expect("extract request id value");
-                req.headers_mut().insert(&x_request_id, value);
+                req.headers_mut().insert(&X_REQUEST_ID_HEADER, value);
                 Cow::Owned(request_id)
             }
         };
