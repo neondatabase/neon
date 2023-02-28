@@ -28,6 +28,10 @@ static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static X_REQUEST_ID_HEADER_STR: &str = "x-request-id";
+
+static X_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static(X_REQUEST_ID_HEADER_STR);
+
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
     // cannot factor out the Level to avoid the repetition
     // because tracing can only work with const Level
@@ -82,8 +86,6 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
     Ok(response)
 }
-
-static X_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
 pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
 ) -> Middleware<B, ApiError> {
