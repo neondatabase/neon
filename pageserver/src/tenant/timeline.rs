@@ -1082,7 +1082,10 @@ impl Timeline {
                 }
 
                 if let Some(layer_size) = layer_size {
-                    self.metrics.resident_physical_size_gauge.sub(layer_size);
+                    let current_size = self.metrics.resident_physical_size_gauge.get();
+                    self.metrics
+                        .resident_physical_size_gauge
+                        .set(current_size.saturating_sub(layer_size));
                 }
 
                 true
@@ -1504,7 +1507,11 @@ impl Timeline {
                             assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
                             anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                         } else {
-                            self.metrics.resident_physical_size_gauge.sub(local_size);
+                            let current_size = self.metrics.resident_physical_size_gauge.get();
+                            self.metrics
+                                .resident_physical_size_gauge
+                                .set(current_size.saturating_sub(local_size));
+
                             updates.remove_historic(local_layer);
                             // fall-through to adding the remote layer
                         }
@@ -1946,7 +1953,10 @@ impl Timeline {
 
         layer.delete()?;
         if let Some(layer_size) = layer_size {
-            self.metrics.resident_physical_size_gauge.sub(layer_size);
+            let current_size = self.metrics.resident_physical_size_gauge.get();
+            self.metrics
+                .resident_physical_size_gauge
+                .set(current_size.saturating_sub(layer_size));
         }
 
         // TODO Removing from the bottom of the layer map is expensive.
