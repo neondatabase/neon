@@ -76,8 +76,7 @@ pub async fn password_hack(
     info!(project = &payload.project, "received missing parameter");
     creds.project = Some(payload.project.into());
 
-    let password = payload.password.into();
-    let node = get_compute(api, extra, creds, password).await?;
+    let node = get_compute(api, extra, creds, payload.password).await?;
 
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {

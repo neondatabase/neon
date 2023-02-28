@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn build_server_messages() {
         let input = "n,,n=pepe,r=t8JwklwKecDLwSsA72rHmVju";
-        let client_first_message = ClientFirstMessage::parse(&input).unwrap();
+        let client_first_message = ClientFirstMessage::parse(input).unwrap();
 
         let nonce = [0; 18];
         let salt = [1, 2, 3];
@@ -270,7 +270,7 @@ mod tests {
         let signature_builder = SignatureBuilder {
             client_first_message_bare: client_first_message.bare,
             server_first_message: server_first_message.as_str(),
-            client_final_message_without_proof: &client_final_message.without_proof,
+            client_final_message_without_proof: client_final_message.without_proof,
         };
 
         let server_key = ScramKey::default();
