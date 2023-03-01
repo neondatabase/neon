@@ -37,9 +37,11 @@ enum SafekeeperPostgresCommand {
     StartReplication { start_lsn: Lsn },
     IdentifySystem,
     JSONCtrl { cmd: AppendLogicalMessage },
+    Show { guc: String },
 }
 
 fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
+    let cmd_lowercase = cmd.to_ascii_lowercase();
     if cmd.starts_with("START_WAL_PUSH") {
         Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
@@ -58,6 +60,14 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::JSONCtrl {
             cmd: serde_json::from_str(cmd)?,
         })
+    } else if cmd_lowercase.starts_with("show") {
+        let re = Regex::new(r"show ((?:[[:alpha:]]|_)+)").unwrap();
+        let mut caps = re.captures_iter(&cmd_lowercase);
+        let guc = caps
+            .next()
+            .map(|cap| cap[1].parse::<String>())
+            .context("parse guc in SHOW command")??;
+        Ok(SafekeeperPostgresCommand::Show { guc })
     } else {
         anyhow::bail!("unsupported command {cmd}");
     }
@@ -173,6 +183,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
                     .await
             }
             SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
+            SafekeeperPostgresCommand::Show { guc } => self.handle_show(guc, pgb).await,
             SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
                 handle_json_ctrl(self, pgb, cmd).await
             }
@@ -266,6 +277,40 @@ impl SafekeeperPostgresHandler {
             None,
         ]))?
         .write_message_noflush(&BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"))?;
+        Ok(())
+    }
+
+    async fn handle_show(
+        &mut self,
+        guc: String,
+        pgb: &mut PostgresBackend,
+    ) -> Result<(), QueryError> {
+        match guc.as_str() {
+            // pg_receivewal wants it
+            "data_directory_mode" => {
+                pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::int8_col(
+                    b"data_directory_mode",
+                )]))?
+                // xxx we could return real one, not just 0700
+                .write_message_noflush(&BeMessage::DataRow(&[Some("0700".as_bytes())]))?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            }
+            // pg_receivewal wants it
+            "wal_segment_size" => {
+                let tli = GlobalTimelines::get(self.ttid)?;
+                let wal_seg_size = tli.get_state().1.server.wal_seg_size;
+                let wal_seg_size_mb = (wal_seg_size / 1024 / 1024).to_string() + "MB";
+
+                pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
+                    b"wal_segment_size",
+                )]))?
+                .write_message_noflush(&BeMessage::DataRow(&[Some(wal_seg_size_mb.as_bytes())]))?
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            }
+            _ => {
+                return Err(anyhow::anyhow!("SHOW of unknown setting").into());
+            }
+        }
         Ok(())
     }
 
