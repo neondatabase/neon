@@ -4505,6 +4505,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "criterion",
+ "futures",
  "git-version",
  "heapless",
  "hex",
@@ -4534,6 +4535,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "workspace_hack",
 ]
 
@@ -4840,7 +4842,6 @@ dependencies = [
  "either",
  "fail",
  "futures",
- "futures-channel",
  "futures-executor",
  "futures-util",
  "hashbrown 0.12.3",

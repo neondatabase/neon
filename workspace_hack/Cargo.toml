@@ -21,7 +21,6 @@ crossbeam-utils = { version = "0.8" }
 either = { version = "1" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
 futures = { version = "0.3" }
-futures-channel = { version = "0.3", features = ["sink"] }
 futures-executor = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 hashbrown = { version = "0.12", features = ["raw"] }

@@ -13,6 +13,7 @@ bincode.workspace = true
 bytes.workspace = true
 heapless.workspace = true
 hyper = { workspace = true, features = ["full"] }
+futures = { workspace = true}
 routerify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -39,7 +40,7 @@ pq_proto.workspace = true
 
 workspace_hack.workspace = true
 url.workspace = true
-
+uuid = { version = "1.2", features = ["v4", "serde"] }
 [dev-dependencies]
 byteorder.workspace = true
 bytes.workspace = true
