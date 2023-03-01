@@ -1076,7 +1076,7 @@ impl Timeline {
 
         let replaced = match batch_updates.replace_historic(local_layer, new_remote_layer)? {
             Replacement::Replaced { .. } => {
-                if let Err(e) = local_layer.delete() {
+                if let Err(e) = local_layer.delete_resident_layer_file() {
                     error!("failed to remove layer file on evict after replacement: {e:#?}");
                 }
                 // Always decrement the physical size gauge, even if we failed to delete the file.
@@ -1950,11 +1950,14 @@ impl Timeline {
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
     ) -> anyhow::Result<()> {
-        let layer_size = layer.file_size();
-
-        layer.delete()?;
-        if let Some(layer_size) = layer_size {
-            self.metrics.resident_physical_size_gauge.sub(layer_size);
+        if !layer.is_remote_layer() {
+            layer.delete_resident_layer_file()?;
+            let layer_file_size = layer
+                .file_size()
+                .expect("Local layer should have a file size");
+            self.metrics
+                .resident_physical_size_gauge
+                .sub(layer_file_size);
         }
 
         // TODO Removing from the bottom of the layer map is expensive.
