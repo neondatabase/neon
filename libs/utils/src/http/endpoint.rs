@@ -36,12 +36,9 @@ async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>
     // cannot factor out the Level to avoid the repetition
     // because tracing can only work with const Level
     // which is not the case here
-    let request_id_val = info.headers().get(&X_REQUEST_ID_HEADER);
+    let request_id_val = info.context::<String>();
 
-    let request_id = match request_id_val {
-        Some(request_val) => request_val.to_str().expect("request id as str"),
-        None => "",
-    };
+    let request_id = request_id_val.unwrap_or_default();
 
     if info.method() == Method::GET && res.status() == StatusCode::OK {
         tracing::debug!(
@@ -89,18 +86,18 @@ async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body
 
 pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>(
 ) -> Middleware<B, ApiError> {
-    Middleware::pre(move |mut req| async move {
+    Middleware::pre(move |req| async move {
         let request_id = match req.headers().get(&X_REQUEST_ID_HEADER) {
             Some(request_id) => {
                 Cow::Borrowed(request_id.to_str().expect("extract request id value"))
             }
             None => {
-                let request_id = uuid::Uuid::new_v4().to_string();
-                let value = HeaderValue::from_str(&request_id).expect("extract request id value");
-                req.headers_mut().insert(&X_REQUEST_ID_HEADER, value);
-                Cow::Owned(request_id)
+                let request_id = uuid::Uuid::new_v4();
+                Cow::Owned(request_id.to_string())
             }
         };
+
+        req.set_context(request_id.to_string());
 
         if req.method() == Method::GET {
             tracing::debug!("{} {} {}", req.method(), req.uri().path(), request_id);
@@ -115,11 +112,11 @@ async fn add_request_id_header_to_response(
     mut res: Response<Body>,
     req_info: RequestInfo,
 ) -> Result<Response<Body>, ApiError> {
-    let headers = req_info.headers();
-
-    if let Some(request_id) = headers.get(&X_REQUEST_ID_HEADER) {
-        res.headers_mut()
-            .insert(&X_REQUEST_ID_HEADER, request_id.into());
+    if let Some(request_id) = req_info.context::<String>() {
+        if let Ok(request_header_value) = HeaderValue::from_str(&request_id) {
+            res.headers_mut()
+                .insert(&X_REQUEST_ID_HEADER, request_header_value);
+        };
     };
 
     Ok(res)
