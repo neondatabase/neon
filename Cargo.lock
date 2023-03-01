@@ -4515,6 +4515,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "criterion",
+ "futures",
  "git-version",
  "heapless",
  "hex",

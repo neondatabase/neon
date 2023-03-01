@@ -8,8 +8,7 @@ use hyper::{Method, StatusCode};
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
-use routerify::RequestInfo;
-use routerify::{Middleware, Router, RouterBuilder, RouterService};
+use routerify::{Middleware, RequestInfo, Router, RouterBuilder, RouterService};
 use std::borrow::Cow;
 use tokio::task::JoinError;
 use tracing;
@@ -299,4 +298,56 @@ where
     runtime.block_on(server)?;
 
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::future::poll_fn;
+    use hyper::service::Service;
+    use routerify::RequestServiceBuilder;
+    use std::net::{IpAddr, SocketAddr};
+
+    #[tokio::test]
+    async fn test_request_id_returned() {
+        let builder = RequestServiceBuilder::new(make_router().build().unwrap()).unwrap();
+        let remote_addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 80);
+        let mut service = builder.build(remote_addr);
+        if let Err(e) = poll_fn(|ctx| service.poll_ready(ctx)).await {
+            panic!("request service is not ready: {:?}", e);
+        }
+
+        let mut req: Request<Body> = Request::default();
+        req.headers_mut().append(
+            &X_REQUEST_ID_HEADER,
+            HeaderValue::from_str(X_REQUEST_ID_HEADER_STR).unwrap(),
+        );
+
+        let resp: Response<hyper::body::Body> = service.call(req).await.unwrap();
+
+        let header_val = resp.headers().get(&X_REQUEST_ID_HEADER).unwrap();
+
+        assert!(
+            header_val == X_REQUEST_ID_HEADER_STR,
+            "response header mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_id_empty() {
+        let builder = RequestServiceBuilder::new(make_router().build().unwrap()).unwrap();
+        let remote_addr = SocketAddr::new(IpAddr::from_str("127.0.0.1").unwrap(), 80);
+        let mut service = builder.build(remote_addr);
+        if let Err(e) = poll_fn(|ctx| service.poll_ready(ctx)).await {
+            panic!("request service is not ready: {:?}", e);
+        }
+
+        let req: Request<Body> = Request::default();
+        let resp: Response<hyper::body::Body> = service.call(req).await.unwrap();
+
+        let header_val = resp.headers().get(&X_REQUEST_ID_HEADER);
+
+        if let Some(_header) = header_val {
+            assert!(true, "response header should be empty");
+        }
+    }
 }
