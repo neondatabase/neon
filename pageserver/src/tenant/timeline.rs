@@ -1079,7 +1079,16 @@ impl Timeline {
                 if let Err(e) = local_layer.delete() {
                     error!("failed to remove layer file on evict after replacement: {e:#?}");
                 }
-
+                // Always decrement the physical size gauge, even if we failed to delete the file.
+                // Rationale: we already replaced the layer with a remote layer in the layer map,
+                // and any subsequent download_remote_layer will
+                // 1. overwrite the file on disk and
+                // 2. add the downloaded size to the resident size gauge.
+                //
+                // If there is no re-download, and we restart the pageserver, then load_layer_map
+                // will treat the file as a local layer again, count it towards resident size,
+                // and it'll be like the layer removal never happened.
+                // The bump in resident size is perhaps unexpected but overall a robust behavior.
                 self.metrics
                     .resident_physical_size_gauge
                     .sub(layer_file_size);
