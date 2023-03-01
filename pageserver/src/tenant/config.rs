@@ -103,6 +103,7 @@ pub struct TenantConfOpt {
     pub checkpoint_distance: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub checkpoint_timeout: Option<Duration>,
 
