@@ -233,7 +233,7 @@ impl PostgresBackend {
     }
 
     /// Write message into internal output buffer.
-    pub fn write_message(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self> {
+    pub fn write_message_noflush(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self> {
         BeMessage::write(&mut self.buf_out, message)?;
         Ok(self)
     }
@@ -383,7 +383,7 @@ impl PostgresBackend {
                     FeStartupPacket::SslRequest => {
                         debug!("SSL requested");
 
-                        self.write_message(&BeMessage::EncryptionResponse(have_tls))?;
+                        self.write_message_noflush(&BeMessage::EncryptionResponse(have_tls))?;
                         if have_tls {
                             self.start_tls().await?;
                             self.state = ProtoState::Encrypted;
@@ -391,11 +391,11 @@ impl PostgresBackend {
                     }
                     FeStartupPacket::GssEncRequest => {
                         debug!("GSS requested");
-                        self.write_message(&BeMessage::EncryptionResponse(false))?;
+                        self.write_message_noflush(&BeMessage::EncryptionResponse(false))?;
                     }
                     FeStartupPacket::StartupMessage { .. } => {
                         if have_tls && !matches!(self.state, ProtoState::Encrypted) {
-                            self.write_message(&BeMessage::ErrorResponse(
+                            self.write_message_noflush(&BeMessage::ErrorResponse(
                                 "must connect with TLS",
                                 None,
                             ))?;
@@ -410,15 +410,17 @@ impl PostgresBackend {
 
                         match self.auth_type {
                             AuthType::Trust => {
-                                self.write_message(&BeMessage::AuthenticationOk)?
-                                    .write_message(&BeMessage::CLIENT_ENCODING)?
+                                self.write_message_noflush(&BeMessage::AuthenticationOk)?
+                                    .write_message_noflush(&BeMessage::CLIENT_ENCODING)?
                                     // The async python driver requires a valid server_version
-                                    .write_message(&BeMessage::server_version("14.1"))?
-                                    .write_message(&BeMessage::ReadyForQuery)?;
+                                    .write_message_noflush(&BeMessage::server_version("14.1"))?
+                                    .write_message_noflush(&BeMessage::ReadyForQuery)?;
                                 self.state = ProtoState::Established;
                             }
                             AuthType::NeonJWT => {
-                                self.write_message(&BeMessage::AuthenticationCleartextPassword)?;
+                                self.write_message_noflush(
+                                    &BeMessage::AuthenticationCleartextPassword,
+                                )?;
                                 self.state = ProtoState::Authentication;
                             }
                         }
@@ -441,7 +443,7 @@ impl PostgresBackend {
                         let (_, jwt_response) = m.split_last().context("protocol violation")?;
 
                         if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
-                            self.write_message(&BeMessage::ErrorResponse(
+                            self.write_message_noflush(&BeMessage::ErrorResponse(
                                 &e.to_string(),
                                 Some(e.pg_error_code()),
                             ))?;
@@ -449,9 +451,9 @@ impl PostgresBackend {
                         }
                     }
                 }
-                self.write_message(&BeMessage::AuthenticationOk)?
-                    .write_message(&BeMessage::CLIENT_ENCODING)?
-                    .write_message(&BeMessage::ReadyForQuery)?;
+                self.write_message_noflush(&BeMessage::AuthenticationOk)?
+                    .write_message_noflush(&BeMessage::CLIENT_ENCODING)?
+                    .write_message_noflush(&BeMessage::ReadyForQuery)?;
                 self.state = ProtoState::Established;
             }
 
@@ -486,30 +488,30 @@ impl PostgresBackend {
                 if let Err(e) = handler.process_query(self, query_string).await {
                     log_query_error(query_string, &e);
                     let short_error = short_error(&e);
-                    self.write_message(&BeMessage::ErrorResponse(
+                    self.write_message_noflush(&BeMessage::ErrorResponse(
                         &short_error,
                         Some(e.pg_error_code()),
                     ))?;
                 }
-                self.write_message(&BeMessage::ReadyForQuery)?;
+                self.write_message_noflush(&BeMessage::ReadyForQuery)?;
             }
 
             FeMessage::Parse(m) => {
                 *unnamed_query_string = m.query_string;
-                self.write_message(&BeMessage::ParseComplete)?;
+                self.write_message_noflush(&BeMessage::ParseComplete)?;
             }
 
             FeMessage::Describe(_) => {
-                self.write_message(&BeMessage::ParameterDescription)?
-                    .write_message(&BeMessage::NoData)?;
+                self.write_message_noflush(&BeMessage::ParameterDescription)?
+                    .write_message_noflush(&BeMessage::NoData)?;
             }
 
             FeMessage::Bind(_) => {
-                self.write_message(&BeMessage::BindComplete)?;
+                self.write_message_noflush(&BeMessage::BindComplete)?;
             }
 
             FeMessage::Close(_) => {
-                self.write_message(&BeMessage::CloseComplete)?;
+                self.write_message_noflush(&BeMessage::CloseComplete)?;
             }
 
             FeMessage::Execute(_) => {
@@ -517,7 +519,7 @@ impl PostgresBackend {
                 trace!("got execute {query_string:?}");
                 if let Err(e) = handler.process_query(self, query_string).await {
                     log_query_error(query_string, &e);
-                    self.write_message(&BeMessage::ErrorResponse(
+                    self.write_message_noflush(&BeMessage::ErrorResponse(
                         &e.to_string(),
                         Some(e.pg_error_code()),
                     ))?;
@@ -529,7 +531,7 @@ impl PostgresBackend {
             }
 
             FeMessage::Sync => {
-                self.write_message(&BeMessage::ReadyForQuery)?;
+                self.write_message_noflush(&BeMessage::ReadyForQuery)?;
             }
 
             FeMessage::Terminate => {
@@ -579,7 +581,7 @@ impl<'a> AsyncWrite for CopyDataWriter<'a> {
         // XXX: if the input is large, we should split it into multiple messages.
         // Not sure what the threshold should be, but the ultimate hard limit is that
         // the length cannot exceed u32.
-        this.pgb.write_message(&BeMessage::CopyData(buf))?;
+        this.pgb.write_message_noflush(&BeMessage::CopyData(buf))?;
 
         Poll::Ready(Ok(buf.len()))
     }
