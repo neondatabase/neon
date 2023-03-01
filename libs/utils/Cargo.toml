@@ -13,7 +13,7 @@ bincode.workspace = true
 bytes.workspace = true
 heapless.workspace = true
 hyper = { workspace = true, features = ["full"] }
-futures = { version = "0.3" }
+futures = { workspace = true}
 routerify.workspace = true
 serde.workspace = true
 serde_json.workspace = true

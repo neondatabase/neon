@@ -9,7 +9,6 @@ use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder, RouterService};
-use std::borrow::Cow;
 use tokio::task::JoinError;
 use tracing;
 
@@ -31,17 +30,14 @@ static X_REQUEST_ID_HEADER_STR: &str = "x-request-id";
 
 static X_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static(X_REQUEST_ID_HEADER_STR);
 #[derive(Debug, Default, Clone)]
-struct RequestId {
-    id: String,
-}
+struct RequestId(String);
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
+    let request_id = info.context::<RequestId>().unwrap_or_default().0;
+
     // cannot factor out the Level to avoid the repetition
     // because tracing can only work with const Level
     // which is not the case here
-    let request_id_val = info.context::<RequestId>();
-
-    let request_id = request_id_val.unwrap_or_default().id;
 
     if info.method() == Method::GET && res.status() == StatusCode::OK {
         tracing::debug!(
@@ -91,24 +87,23 @@ pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'stati
 ) -> Middleware<B, ApiError> {
     Middleware::pre(move |req| async move {
         let request_id = match req.headers().get(&X_REQUEST_ID_HEADER) {
-            Some(request_id) => {
-                Cow::Borrowed(request_id.to_str().expect("extract request id value"))
-            }
+            Some(request_id) => request_id
+                .to_str()
+                .expect("extract request id value")
+                .to_owned(),
             None => {
                 let request_id = uuid::Uuid::new_v4();
-                Cow::Owned(request_id.to_string())
+                request_id.to_string()
             }
         };
-
-        req.set_context(RequestId {
-            id: request_id.to_string(),
-        });
 
         if req.method() == Method::GET {
             tracing::debug!("{} {} {}", req.method(), req.uri().path(), request_id);
         } else {
             tracing::info!("{} {} {}", req.method(), req.uri().path(), request_id);
         }
+        req.set_context(RequestId(request_id));
+
         Ok(req)
     })
 }
@@ -118,7 +113,7 @@ async fn add_request_id_header_to_response(
     req_info: RequestInfo,
 ) -> Result<Response<Body>, ApiError> {
     if let Some(request_id) = req_info.context::<RequestId>() {
-        if let Ok(request_header_value) = HeaderValue::from_str(&request_id.id) {
+        if let Ok(request_header_value) = HeaderValue::from_str(&request_id.0) {
             res.headers_mut()
                 .insert(&X_REQUEST_ID_HEADER, request_header_value);
         };
@@ -317,19 +312,14 @@ mod tests {
         }
 
         let mut req: Request<Body> = Request::default();
-        req.headers_mut().append(
-            &X_REQUEST_ID_HEADER,
-            HeaderValue::from_str(X_REQUEST_ID_HEADER_STR).unwrap(),
-        );
+        req.headers_mut()
+            .append(&X_REQUEST_ID_HEADER, HeaderValue::from_str("42").unwrap());
 
         let resp: Response<hyper::body::Body> = service.call(req).await.unwrap();
 
         let header_val = resp.headers().get(&X_REQUEST_ID_HEADER).unwrap();
 
-        assert!(
-            header_val == X_REQUEST_ID_HEADER_STR,
-            "response header mismatch"
-        );
+        assert!(header_val == "42", "response header mismatch");
     }
 
     #[tokio::test]
@@ -346,8 +336,6 @@ mod tests {
 
         let header_val = resp.headers().get(&X_REQUEST_ID_HEADER);
 
-        if let Some(_header) = header_val {
-            assert!(true, "response header should be empty");
-        }
+        assert_ne!(header_val, None, "response header should NOT be empty");
     }
 }
