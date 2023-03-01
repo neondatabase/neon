@@ -155,8 +155,8 @@ impl PersistentLayer for RemoteLayer {
         bail!("cannot iterate a remote layer");
     }
 
-    fn delete(&self) -> Result<()> {
-        Ok(())
+    fn delete_resident_layer_file(&self) -> Result<()> {
+        bail!("remote layer has no layer file");
     }
 
     fn downcast_remote_layer<'a>(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {

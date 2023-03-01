@@ -14,6 +14,7 @@ import tempfile
 import textwrap
 import time
 import uuid
+from collections import defaultdict
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
@@ -1516,6 +1517,11 @@ class PageserverHttpClient(requests.Session):
 
         assert res.status_code == 200
 
+    def evict_all_layers(self, tenant_id: TenantId, timeline_id: TimelineId):
+        info = self.layer_map_info(tenant_id, timeline_id)
+        for layer in info.historic_layers:
+            self.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
+
 
 @dataclass
 class TenantConfig:
@@ -1551,6 +1557,14 @@ class LayerMapInfo:
 
         return info
 
+    def kind_count(self) -> Dict[str, int]:
+        counts: Dict[str, int] = defaultdict(int)
+        for inmem_layer in self.in_memory_layers:
+            counts[inmem_layer.kind] += 1
+        for hist_layer in self.historic_layers:
+            counts[hist_layer.kind] += 1
+        return counts
+
 
 @dataclass
 class InMemoryLayerInfo:
@@ -1567,7 +1581,7 @@ class InMemoryLayerInfo:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class HistoricLayerInfo:
     kind: str
     layer_file_name: str
