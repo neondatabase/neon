@@ -4852,7 +4852,6 @@ dependencies = [
  "either",
  "fail",
  "futures",
- "futures-channel",
  "futures-executor",
  "futures-util",
  "hashbrown 0.12.3",
