@@ -1,8 +1,13 @@
+import time
+
 import pytest
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
+    wait_for_last_flush_lsn,
     wait_for_last_record_lsn,
+    wait_for_sk_commit_lsn_to_reach_remote_storage,
     wait_for_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -138,3 +143,164 @@ def test_basic_eviction(
     assert (
         redownloaded_layer_map_info == initial_layer_map_info
     ), "Should have the same layer map after redownloading the evicted layers"
+
+
+def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
+        test_name="test_gc_of_remote_layers",
+    )
+
+    env = neon_env_builder.init_start()
+
+    tenant_config = {
+        "pitr_interval": "1s",  # set to non-zero, so GC actually does something
+        "gc_period": "0s",  # we want to control when GC runs
+        "compaction_period": "0s",  # we want to control when compaction runs
+        "checkpoint_timeout": "24h",  # something we won't reach
+        "checkpoint_distance": f"{50 * (1024**2)}",  # something we won't reach, we checkpoint manually
+        "compaction_threshold": "3",
+        # "image_creation_threshold": set at runtime
+        "compaction_target_size": f"{128 * (1024**2)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
+    }
+
+    def tenant_update_config(changes):
+        tenant_config.update(changes)
+        env.neon_cli.config_tenant(tenant_id, tenant_config)
+
+    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=tenant_config)
+    log.info("tenant id is %s", tenant_id)
+    env.initial_tenant = tenant_id  # update_and_gc relies on this
+    ps_http = env.pageserver.http_client()
+
+    pg = env.postgres.create_start("main")
+
+    log.info("fill with data, creating delta & image layers, some of which are GC'able after")
+    # no particular reason to create the layers like this, but we are sure
+    # not to hit the image_creation_threshold here.
+    with pg.cursor() as cur:
+        cur.execute("create table a (id bigserial primary key, some_value bigint not null)")
+        cur.execute("insert into a(some_value) select i from generate_series(1, 10000) s(i)")
+    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    ps_http.timeline_checkpoint(tenant_id, timeline_id)
+
+    # Create delta layers, then turn them into image layers.
+    # Do it multiple times so that there's something to GC.
+    for k in range(0, 2):
+        # produce delta layers => disable image layer creation by setting high threshold
+        tenant_update_config({"image_creation_threshold": "100"})
+        for i in range(0, 2):
+            for j in range(0, 3):
+                # create a minimal amount of "delta difficulty" for this table
+                with pg.cursor() as cur:
+                    cur.execute("update a set some_value = -some_value + %s", (j,))
+
+                with pg.cursor() as cur:
+                    # vacuuming should aid to reuse keys, though it's not really important
+                    # with image_creation_threshold=1 which we will use on the last compaction
+                    cur.execute("vacuum")
+
+                wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+
+                if i == 1 and j == 2 and k == 1:
+                    # last iteration; stop before checkpoint to avoid leaving an inmemory layer
+                    pg.stop_and_destroy()
+
+                ps_http.timeline_checkpoint(tenant_id, timeline_id)
+
+            # images should not yet be created, because threshold is too high,
+            # but these will be reshuffled to L1 layers
+            ps_http.timeline_compact(tenant_id, timeline_id)
+
+        for _ in range(0, 20):
+            # loop in case flushing is still in progress
+            layers = ps_http.layer_map_info(tenant_id, timeline_id)
+            if not layers.in_memory_layers:
+                break
+            time.sleep(0.2)
+
+        # now that we've grown some delta layers, turn them into image layers
+        tenant_update_config({"image_creation_threshold": "1"})
+        ps_http.timeline_compact(tenant_id, timeline_id)
+
+    # wait for all uploads to finish
+    wait_for_sk_commit_lsn_to_reach_remote_storage(
+        tenant_id, timeline_id, env.safekeepers, env.pageserver
+    )
+
+    # shutdown safekeepers to avoid on-demand downloads from walreceiver
+    for sk in env.safekeepers:
+        sk.stop()
+
+    ps_http.timeline_checkpoint(tenant_id, timeline_id)
+
+    log.info("ensure the code above produced image and delta layers")
+    pre_evict_info = ps_http.layer_map_info(tenant_id, timeline_id)
+    log.info("layer map dump: %s", pre_evict_info)
+    by_kind = pre_evict_info.kind_count()
+    log.info("by kind: %s", by_kind)
+    assert by_kind["Image"] > 0
+    assert by_kind["Delta"] > 0
+    assert by_kind["InMemory"] == 0
+    resident_layers = list(env.timeline_dir(tenant_id, timeline_id).glob("*-*_*"))
+    log.info("resident layers count before eviction: %s", len(resident_layers))
+
+    log.info("evict all layers")
+    ps_http.evict_all_layers(tenant_id, timeline_id)
+
+    def ensure_resident_and_remote_size_metrics():
+        log.info("ensure that all the layers are gone")
+        resident_layers = list(env.timeline_dir(tenant_id, timeline_id).glob("*-*_*"))
+        # we have disabled all background loops, so, this should hold
+        assert len(resident_layers) == 0
+
+        info = ps_http.layer_map_info(tenant_id, timeline_id)
+        log.info("layer map dump: %s", info)
+
+        log.info("ensure that resident_physical_size metric is zero")
+        resident_physical_size_metric = ps_http.get_timeline_metric(
+            tenant_id, timeline_id, "pageserver_resident_physical_size"
+        )
+        assert resident_physical_size_metric == 0
+        log.info("ensure that resident_physical_size metric corresponds to layer map dump")
+        assert resident_physical_size_metric == sum(
+            [layer.layer_file_size or 0 for layer in info.historic_layers if not layer.remote]
+        )
+
+        # TODO: the following would be nice to assert, but for some reason, the commented-out
+        # assert below fails with 113401856.0 != 140427264
+        # => https://github.com/neondatabase/neon/issues/3738
+        #
+        # log.info("ensure that remote_physical_size metric matches layer map")
+        # remote_physical_size_metric = ps_http.get_timeline_metric(
+        #    tenant_id, timeline_id, "pageserver_remote_physical_size"
+        # )
+        # log.info("ensure that remote_physical_size metric corresponds to layer map dump")
+        # assert remote_physical_size_metric == sum(
+        #    [layer.layer_file_size or 0 for layer in info.historic_layers if layer.remote]
+        # )
+
+    log.info("before runnning GC, ensure that remote_physical size is zero")
+    ensure_resident_and_remote_size_metrics()
+
+    log.info("run GC")
+    time.sleep(2)  # let pitr_interval + 1 second pass
+    ps_http.timeline_gc(tenant_id, timeline_id, 0)
+    time.sleep(1)
+    assert not env.pageserver.log_contains("Nothing to GC")
+
+    log.info("ensure GC deleted some layers, otherwise this test is pointless")
+    post_gc_info = ps_http.layer_map_info(tenant_id, timeline_id)
+    log.info("layer map dump: %s", post_gc_info)
+    log.info("by kind: %s", post_gc_info.kind_count())
+    pre_evict_layers = set([layer.layer_file_name for layer in pre_evict_info.historic_layers])
+    post_gc_layers = set([layer.layer_file_name for layer in post_gc_info.historic_layers])
+    assert post_gc_layers.issubset(pre_evict_layers)
+    assert len(post_gc_layers) < len(pre_evict_layers)
+
+    log.info("update_gc_info might download some layers. Evict them again.")
+    ps_http.evict_all_layers(tenant_id, timeline_id)
+
+    log.info("after running GC, ensure that resident size is still zero")
+    ensure_resident_and_remote_size_metrics()
