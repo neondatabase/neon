@@ -1047,11 +1047,12 @@ impl Timeline {
             return Ok(false);
         }
 
-        let layer_metadata = LayerFileMetadata::new(
-            local_layer
-                .file_size()
-                .expect("Local layer should have a file size"),
-        );
+        let layer_file_size = local_layer
+            .file_size()
+            .expect("Local layer should have a file size");
+
+        let layer_metadata = LayerFileMetadata::new(layer_file_size);
+
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
                 self.tenant_id,
@@ -1075,15 +1076,13 @@ impl Timeline {
 
         let replaced = match batch_updates.replace_historic(local_layer, new_remote_layer)? {
             Replacement::Replaced { .. } => {
-                let layer_size = local_layer.file_size();
-
                 if let Err(e) = local_layer.delete() {
                     error!("failed to remove layer file on evict after replacement: {e:#?}");
                 }
 
-                if let Some(layer_size) = layer_size {
-                    self.metrics.resident_physical_size_gauge.sub(layer_size);
-                }
+                self.metrics
+                    .resident_physical_size_gauge
+                    .sub(layer_file_size);
 
                 true
             }
