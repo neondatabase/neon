@@ -10,7 +10,6 @@ RUN set -e \
 	&& rm -f /etc/inittab \
 	&& touch /etc/inittab
 
-ADD vm-cgconfig.conf /etc/cgconfig.conf
 RUN set -e \
 	&& echo "::sysinit:cgconfigparser -l /etc/cgconfig.conf -s 1664" >> /etc/inittab \
 	&& echo "::respawn:su vm-informant -c '/usr/local/bin/vm-informant --auto-restart --cgroup=neon-postgres'" >> /etc/inittab
@@ -26,6 +25,7 @@ RUN apt update && \
 RUN adduser vm-informant --disabled-password --no-create-home
 USER postgres
 
+ADD vm-cgconfig.conf /etc/cgconfig.conf
 COPY --from=informant /etc/inittab /etc/inittab
 COPY --from=informant /usr/bin/vm-informant /usr/local/bin/vm-informant
 
