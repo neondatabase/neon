@@ -2479,7 +2479,7 @@ impl Timeline {
 
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now.
-        {
+       {
             let mut layers = self.layers.write().unwrap();
             let l = layers.frozen_layers.pop_front();
 
@@ -2489,6 +2489,43 @@ impl Timeline {
             assert!(LayerMap::compare_arced_layers(&l.unwrap(), &frozen_layer));
 
             // release lock on 'layers'
+            drop(layers);
+
+            // Only drop the ephemeral file after releasing the layer map lock.
+            // The reason is that the drop function needs to lock page cache slots.
+            // If there is another thread that is already holding a slot which we
+            // need to lock, and that thread is waiting for the layer map lock, we
+            // would have a deadlock:
+            //
+            //           wants               ┌─────────┐
+            //           us ────────────────►│  cache  │
+            //            ▲                  │  slot   │
+            //            │                  │    │    │
+            //   assigned │                  └────┼────┘
+            //            │                       │
+            //            │                       │assigned
+            //       ┌────┼───┐                   │
+            //       │    │   │                   ▼
+            //       │ layers │◄─────────────── them
+            //       │        │     wants
+            //       └────────┘
+            //
+            // How can this happen? I don't know. Basically we need to walk up
+            // the call graph for all PageCache::try_lock_for_read and PageCache::try_lock_for_write
+            // and check whether any of them holds onto the guard object that these methods return.
+            // The block_io::BlockReader trait implementations look like good candidates.
+            // For example, the BlockReader::read_blk impl for EphemeralFile returns the guard object
+            // for the cache slot straight to the caller.
+            // But, there's are many callers of BlockReader::read_blk, and rust-analyzer has no way
+            // to find just the <EphemeralFile as BlockReader>::read_blk callers.
+            //
+            // One obvious place is InMemoryLayer::get_value_reconstruct_data , which uses a BlockReader::block_cursor.
+            // That cursor object holds onto the most recently read page cache slot until cursor object is dropped.
+            // But, all relevant uses of InMemoryLayer::get_value_reconstruct_data are in Timeline::get_reconstruct_data,
+            // which already holds the layer map lock in shared mode. So, it can't cause this deadlock.
+            //
+            // Maybe this is a red herring?
+            drop(l);
         }
 
         fail_point!("checkpoint-after-sync");
