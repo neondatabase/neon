@@ -31,14 +31,18 @@ static SERVE_METRICS_COUNT: Lazy<IntCounter> = Lazy::new(|| {
 static X_REQUEST_ID_HEADER_STR: &str = "x-request-id";
 
 static X_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static(X_REQUEST_ID_HEADER_STR);
+#[derive(Debug, Default, Clone)]
+struct RequestId {
+    id: String,
+}
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
     // cannot factor out the Level to avoid the repetition
     // because tracing can only work with const Level
     // which is not the case here
-    let request_id_val = info.context::<String>();
+    let request_id_val = info.context::<RequestId>();
 
-    let request_id = request_id_val.unwrap_or_default();
+    let request_id = request_id_val.unwrap_or_default().id;
 
     if info.method() == Method::GET && res.status() == StatusCode::OK {
         tracing::debug!(
@@ -97,7 +101,9 @@ pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'stati
             }
         };
 
-        req.set_context(request_id.to_string());
+        req.set_context(RequestId {
+            id: request_id.to_string(),
+        });
 
         if req.method() == Method::GET {
             tracing::debug!("{} {} {}", req.method(), req.uri().path(), request_id);
@@ -112,8 +118,8 @@ async fn add_request_id_header_to_response(
     mut res: Response<Body>,
     req_info: RequestInfo,
 ) -> Result<Response<Body>, ApiError> {
-    if let Some(request_id) = req_info.context::<String>() {
-        if let Ok(request_header_value) = HeaderValue::from_str(&request_id) {
+    if let Some(request_id) = req_info.context::<RequestId>() {
+        if let Ok(request_header_value) = HeaderValue::from_str(&request_id.id) {
             res.headers_mut()
                 .insert(&X_REQUEST_ID_HEADER, request_header_value);
         };
