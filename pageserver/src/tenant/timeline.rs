@@ -662,8 +662,8 @@ impl Timeline {
             // update the index file on next flush iteration too. But it
             // could take a while until that happens.
             //
-            // Additionally, only do this on the terminal round before sleeping.
-            if last_round {
+            // Additionally, only do this once before we return from this function.
+            if last_round || res.is_ok() {
                 if let Some(remote_client) = &self.remote_client {
                     remote_client.schedule_index_upload_for_file_changes()?;
                 }

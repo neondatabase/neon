@@ -268,18 +268,14 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
             [layer.layer_file_size or 0 for layer in info.historic_layers if not layer.remote]
         )
 
-        # TODO: the following would be nice to assert, but for some reason, the commented-out
-        # assert below fails with 113401856.0 != 140427264
-        # => https://github.com/neondatabase/neon/issues/3738
-        #
-        # log.info("ensure that remote_physical_size metric matches layer map")
-        # remote_physical_size_metric = ps_http.get_timeline_metric(
-        #    tenant_id, timeline_id, "pageserver_remote_physical_size"
-        # )
-        # log.info("ensure that remote_physical_size metric corresponds to layer map dump")
-        # assert remote_physical_size_metric == sum(
-        #    [layer.layer_file_size or 0 for layer in info.historic_layers if layer.remote]
-        # )
+        log.info("ensure that remote_physical_size metric matches layer map")
+        remote_physical_size_metric = ps_http.get_timeline_metric(
+            tenant_id, timeline_id, "pageserver_remote_physical_size"
+        )
+        log.info("ensure that remote_physical_size metric corresponds to layer map dump")
+        assert remote_physical_size_metric == sum(
+            layer.layer_file_size or 0 for layer in info.historic_layers if layer.remote
+        )
 
     log.info("before runnning GC, ensure that remote_physical size is zero")
     ensure_resident_and_remote_size_metrics()
