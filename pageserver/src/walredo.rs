@@ -256,8 +256,9 @@ impl PostgresRedoManager {
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
-
+		const MAX_RETRY_ATTEMPTS = 1;
         let start_time = Instant::now();
+		let mut n_attempts = 0;
         loop {
             let mut proc = self.stdin.lock().unwrap();
             let lock_time = Instant::now();
@@ -291,12 +292,12 @@ impl PostgresRedoManager {
             WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
 
             debug!(
-            "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
-            len,
-            nbytes,
-            duration.as_micros(),
-            lsn
-        );
+				"postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
+				len,
+				nbytes,
+				duration.as_micros(),
+				lsn
+			);
 
             // If something went wrong, don't try to reuse the process. Kill it, and
             // next request will launch a new one.
@@ -327,8 +328,9 @@ impl PostgresRedoManager {
                     proc.child.kill_and_wait();
                 }
             }
-            if result.is_ok() {
-                return result;
+			n_attempts += 1;
+            if n_attempts > MAX_RETRY_ATTEMPT || result.is_ok() {
+				return result;
             }
         }
     }
