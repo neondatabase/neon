@@ -5,15 +5,14 @@ use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::SkTimelineInfo;
 use serde::Serialize;
-use serde::Serializer;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::task::JoinError;
+use utils::http::json::display_serialize;
 
 use crate::debug_dump;
 use crate::safekeeper::ServerInfo;
@@ -55,15 +54,6 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
         .data::<Arc<SafeKeeperConf>>()
         .expect("unknown state type")
         .as_ref()
-}
-
-/// Serialize through Display trait.
-fn display_serialize<S, F>(z: &F, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-    F: Display,
-{
-    s.serialize_str(&format!("{}", z))
 }
 
 /// Same as TermSwitchEntry, but serializes LSN using display serializer

@@ -1,6 +1,5 @@
 //! Utils for dumping full state of the safekeeper.
 
-use std::fmt::Display;
 use std::fs;
 use std::fs::DirEntry;
 use std::io::BufReader;
@@ -10,8 +9,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use postgres_ffi::XLogSegNo;
 use serde::Serialize;
-use serde::Serializer;
 
+use utils::http::json::display_serialize;
 use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -22,15 +21,6 @@ use crate::safekeeper::TermHistory;
 
 use crate::timeline::ReplicaState;
 use crate::GlobalTimelines;
-
-/// Serialize through Display trait.
-fn display_serialize<S, F>(z: &F, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-    F: Display,
-{
-    s.serialize_str(&format!("{}", z))
-}
 
 /// Various filters that influence the resulting JSON output.
 #[derive(Debug, Serialize)]

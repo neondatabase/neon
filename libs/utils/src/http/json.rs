@@ -1,7 +1,9 @@
+use std::fmt::Display;
+
 use anyhow::Context;
 use bytes::Buf;
 use hyper::{header, Body, Request, Response, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use super::error::ApiError;
 
@@ -30,4 +32,13 @@ pub fn json_response<T: Serialize>(
         .body(Body::from(json))
         .map_err(|e| ApiError::InternalServerError(e.into()))?;
     Ok(response)
+}
+
+/// Serialize through Display trait.
+pub fn display_serialize<S, F>(z: &F, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    F: Display,
+{
+    s.serialize_str(&format!("{}", z))
 }
