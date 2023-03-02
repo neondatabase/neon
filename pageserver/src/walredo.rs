@@ -256,9 +256,9 @@ impl PostgresRedoManager {
         pg_version: u32,
     ) -> Result<Bytes, WalRedoError> {
         let (rel, blknum) = key_to_rel_block(key).or(Err(WalRedoError::InvalidRecord))?;
-		const MAX_RETRY_ATTEMPTS = 1;
+        const MAX_RETRY_ATTEMPTS: u32 = 1;
         let start_time = Instant::now();
-		let mut n_attempts = 0;
+        let mut n_attempts = 0u32;
         loop {
             let mut proc = self.stdin.lock().unwrap();
             let lock_time = Instant::now();
@@ -328,9 +328,9 @@ impl PostgresRedoManager {
                     proc.child.kill_and_wait();
                 }
             }
-			n_attempts += 1;
-            if n_attempts > MAX_RETRY_ATTEMPT || result.is_ok() {
-				return result;
+            n_attempts += 1;
+            if n_attempts > MAX_RETRY_ATTEMPTS || result.is_ok() {
+                return result;
             }
         }
     }
