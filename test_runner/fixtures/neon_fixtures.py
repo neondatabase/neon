@@ -3542,3 +3542,23 @@ def wait_for_sk_commit_lsn_to_reach_remote_storage(
     ps_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(ps_http, tenant_id, timeline_id, lsn)
     return lsn
+
+
+def wait_for_upload_queue_empty(
+    pageserver: NeonPageserver, tenant_id: TenantId, timeline_id: TimelineId
+):
+    ps_http = pageserver.http_client()
+    while True:
+        all_metrics = ps_http.get_metrics()
+        tl = all_metrics.query_all(
+            "pageserver_remote_timeline_client_calls_unfinished",
+            {
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+            },
+        )
+        assert len(tl) > 0
+        log.info(f"upload queue for {tenant_id}/{timeline_id}: {tl}")
+        if all(m.value == 0 for m in tl):
+            return
+        time.sleep(0.2)
