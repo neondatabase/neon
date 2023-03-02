@@ -17,6 +17,8 @@ impl ScenarioBuilder {
         let init_segment = Segment {
             parent: None,
             lsn: 0,
+            parent_lsn: None,
+            wal_from_parent: None,
             size: Some(0),
             needed: false, // determined later
         };
@@ -36,6 +38,8 @@ impl ScenarioBuilder {
         let newseg = Segment {
             parent: Some(lastseg_id),
             lsn: lastseg.lsn + lsn_bytes,
+            parent_lsn: Some(lastseg.lsn),
+            wal_from_parent: Some(lsn_bytes),
             size: Some((lastseg.size.unwrap() as i64 + size_bytes) as u64),
             needed: false,
         };

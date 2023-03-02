@@ -37,10 +37,15 @@ pub struct Segment {
     /// LSN at this point
     pub lsn: u64,
 
+    pub parent_lsn: Option<u64>,
+
+    pub wal_from_parent: Option<u64>,
+
     /// Logical size at this node, if known.
     pub size: Option<u64>,
 
     /// If true, the segment from parent to this node is needed by `retention_period`
+    /// if wal_from_parent is needed by `retention_period`?
     pub needed: bool,
 }
 

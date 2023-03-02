@@ -85,23 +85,16 @@ pub struct TimelineInputs {
     #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     pub ancestor_id: Option<TimelineId>,
 
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     ancestor_lsn: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     last_record: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     latest_gc_cutoff: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     horizon_cutoff: Lsn,
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     pitr_cutoff: Lsn,
 
     /// Cutoff point based on GC settings
-    #[serde_as(as = "serde_with::DisplayFromStr")]
     next_gc_cutoff: Lsn,
 
     /// Cutoff point calculated from the user-supplied 'max_retention_period'
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
     retention_param_cutoff: Option<Lsn>,
 }
 
@@ -252,6 +245,8 @@ pub(super) async fn gather_inputs(
             segment: Segment {
                 parent: None, // filled in later
                 lsn: branch_start_lsn.0,
+                parent_lsn: None,
+                wal_from_parent: None,
                 size: None, // filled in later
                 needed: branch_start_needed,
             },
@@ -270,6 +265,8 @@ pub(super) async fn gather_inputs(
                 segment: Segment {
                     parent: Some(parent),
                     lsn: lsn.0,
+                    parent_lsn: Some(segments[parent].segment.lsn),
+                    wal_from_parent: Some(lsn.0 - segments[parent].segment.lsn),
                     size: None,
                     needed: lsn > next_gc_cutoff,
                 },
@@ -284,6 +281,8 @@ pub(super) async fn gather_inputs(
             segment: Segment {
                 parent: Some(parent),
                 lsn: last_record_lsn.0,
+                parent_lsn: Some(segments[parent].segment.lsn),
+                wal_from_parent: Some(last_record_lsn.0 - segments[parent].segment.lsn),
                 size: None, // Filled in later, if necessary
                 needed: true,
             },
@@ -613,32 +612,32 @@ fn verify_size_for_multiple_branches() {
   "timeline_inputs": [
     {
       "timeline_id": "20b129c9b50cff7213e6503a31b2a5ce",
-      "ancestor_lsn": "0/18D3D98",
-      "last_record": "0/2230CD0",
-      "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/2210CD0",
-      "pitr_cutoff": "0/2210CD0",
-      "next_gc_cutoff": "0/2210CD0",
+      "ancestor_lsn": 26033560,
+      "last_record": 35851472,
+      "latest_gc_cutoff": 23694408,
+      "horizon_cutoff": 35720400,
+      "pitr_cutoff": 35720400,
+      "next_gc_cutoff": 35720400,
       "retention_param_cutoff": null
     },
     {
       "timeline_id": "454626700469f0a9914949b9d018e876",
-      "ancestor_lsn": "0/176D998",
-      "last_record": "0/1837770",
-      "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/1817770",
-      "pitr_cutoff": "0/1817770",
-      "next_gc_cutoff": "0/1817770",
+      "ancestor_lsn": 24566168,
+      "last_record": 25393008,
+      "latest_gc_cutoff": 23694408,
+      "horizon_cutoff": 25261936,
+      "pitr_cutoff": 25261936,
+      "next_gc_cutoff": 25261936,
       "retention_param_cutoff": null
     },
     {
       "timeline_id": "cb5e3cbe60a4afc00d01880e1a37047f",
-      "ancestor_lsn": "0/0",
-      "last_record": "0/18D3D98",
-      "latest_gc_cutoff": "0/1698C48",
-      "horizon_cutoff": "0/18B3D98",
-      "pitr_cutoff": "0/18B3D98",
-      "next_gc_cutoff": "0/18B3D98",
+      "ancestor_lsn": 0,
+      "last_record": 26033560,
+      "latest_gc_cutoff": 23694408,
+      "horizon_cutoff":25902488,
+      "pitr_cutoff":25902488,
+      "next_gc_cutoff":25902488,
       "retention_param_cutoff": null
     }
   ]
@@ -688,13 +687,13 @@ fn verify_size_for_one_branch() {
   "timeline_inputs": [
     {
       "timeline_id": "f15ae0cf21cce2ba27e4d80c6709a6cd",
-      "ancestor_lsn": "0/0",
-      "last_record": "47/280A5860",
-      "latest_gc_cutoff": "47/240A5860",
-      "horizon_cutoff": "47/240A5860",
-      "pitr_cutoff": "47/240A5860",
-      "next_gc_cutoff": "47/240A5860",
-      "retention_param_cutoff": "0/0"
+      "ancestor_lsn": 0,
+      "last_record": 305547335776,
+      "latest_gc_cutoff": 305614444640,
+      "horizon_cutoff": 305614444640,
+      "pitr_cutoff": 305614444640,
+      "next_gc_cutoff": 305614444640,
+      "retention_param_cutoff": 0
     }
   ]
 }"#;
@@ -707,12 +706,15 @@ fn verify_size_for_one_branch() {
     println!("result: {:?}", serde_json::to_string(&res.segments));
 
     use utils::lsn::Lsn;
-    let latest_gc_cutoff_lsn: Lsn = "47/240A5860".parse().unwrap();
-    let last_lsn: Lsn = "47/280A5860".parse().unwrap();
+    let latest_gc_cutoff_lsn: Lsn = Lsn(305614444640);
+    let last_lsn: Lsn = Lsn(305547335776);
     println!(
-        "latest_gc_cutoff lsn 47/240A5860 is {}, last_lsn lsn 47/280A5860 is {}",
+        "latest_gc_cutoff lsn {} is {}, last_lsn lsn {} is {}",
+        latest_gc_cutoff_lsn,
         u64::from(latest_gc_cutoff_lsn),
+        last_lsn,
         u64::from(last_lsn)
     );
+
     assert_eq!(res.total_size, 220121784320);
 }

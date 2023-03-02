@@ -52,12 +52,26 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     expected_inputs = {
         "segments": [
             {
-                "segment": {"parent": None, "lsn": 23694408, "size": 25362432, "needed": True},
+                "segment": {
+                    "parent": None,
+                    "lsn": 23694408,
+                    "parent_lsn": None,
+                    "wal_from_parent": None,
+                    "size": 25362432,
+                    "needed": True,
+                },
                 "timeline_id": f"{main_timeline_id}",
                 "kind": "BranchStart",
             },
             {
-                "segment": {"parent": 0, "lsn": 23694528, "size": None, "needed": True},
+                "segment": {
+                    "parent": 0,
+                    "lsn": 23694528,
+                    "parent_lsn": 23694408,
+                    "wal_from_parent": 120,
+                    "size": None,
+                    "needed": True,
+                },
                 "timeline_id": f"{main_timeline_id}",
                 "kind": "BranchEnd",
             },
@@ -66,16 +80,17 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
             {
                 "timeline_id": f"{main_timeline_id}",
                 "ancestor_id": None,
-                "ancestor_lsn": "0/0",
-                "last_record": "0/1698CC0",
-                "latest_gc_cutoff": "0/1698C48",
-                "horizon_cutoff": "0/0",
-                "pitr_cutoff": "0/0",
-                "next_gc_cutoff": "0/0",
+                "ancestor_lsn": 0,
+                "last_record": 23694528,
+                "latest_gc_cutoff": 23694408,
+                "horizon_cutoff": 0,
+                "pitr_cutoff": 0,
+                "next_gc_cutoff": 0,
                 "retention_param_cutoff": None,
             }
         ],
     }
+
     expected_inputs = mask_model_inputs(expected_inputs)
     actual_inputs = mask_model_inputs(inputs)
 
@@ -641,7 +656,11 @@ def mask_model_inputs(x):
     if isinstance(x, dict):
         newx = {}
         for k, v in x.items():
-            if k == "size":
+            if (
+                k in ["size", "wal_from_parent", "last_record"]
+                or k.endswith("lsn")
+                or k.endswith("cutoff")
+            ):
                 if v is None or v == 0:
                     # no change
                     newx[k] = v
@@ -649,12 +668,6 @@ def mask_model_inputs(x):
                     newx[k] = "<0"
                 else:
                     newx[k] = ">0"
-            elif k.endswith("lsn") or k.endswith("cutoff") or k == "last_record":
-                if v is None or v == 0 or v == "0/0":
-                    # no change
-                    newx[k] = v
-                else:
-                    newx[k] = "masked"
             else:
                 newx[k] = mask_model_inputs(v)
         return newx
