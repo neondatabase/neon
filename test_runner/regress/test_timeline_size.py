@@ -1,7 +1,6 @@
 import math
 import queue
 import random
-import re
 import threading
 import time
 from contextlib import closing
@@ -11,6 +10,7 @@ import psycopg2.errors
 import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
+from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
@@ -464,27 +464,27 @@ def test_timeline_size_metrics(
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
     # get the metrics and parse the metric for the current timeline's physical size
-    metrics = env.pageserver.http_client().get_metrics()
-    matches = re.search(
-        f'^pageserver_resident_physical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
-        metrics,
-        re.MULTILINE,
-    )
-    assert matches
-    tl_physical_size_metric = int(matches.group(1))
+    metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+    tl_physical_size_metric = metrics.query_one(
+        name="pageserver_resident_physical_size",
+        filter={
+            "tenant_id": str(env.initial_tenant),
+            "timeline_id": str(new_timeline_id),
+        },
+    ).value
 
     # assert that the physical size metric matches the actual physical size on disk
     timeline_path = env.timeline_dir(env.initial_tenant, new_timeline_id)
     assert tl_physical_size_metric == get_timeline_dir_size(timeline_path)
 
     # Check that the logical size metric is sane, and matches
-    matches = re.search(
-        f'^pageserver_current_logical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
-        metrics,
-        re.MULTILINE,
-    )
-    assert matches
-    tl_logical_size_metric = int(matches.group(1))
+    tl_logical_size_metric = metrics.query_one(
+        name="pageserver_current_logical_size",
+        filter={
+            "tenant_id": str(env.initial_tenant),
+            "timeline_id": str(new_timeline_id),
+        },
+    ).value
 
     pgdatadir = test_output_dir / "pgdata-vanilla"
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)

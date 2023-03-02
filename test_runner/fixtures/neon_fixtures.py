@@ -28,7 +28,6 @@ import asyncpg
 import backoff  # type: ignore
 import boto3
 import jwt
-import prometheus_client
 import psycopg2
 import pytest
 import requests
@@ -45,7 +44,6 @@ from fixtures.utils import (
     get_self_dir,
     subprocess_capture,
 )
-from prometheus_client.parser import text_string_to_metric_families
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -1442,16 +1440,14 @@ class PageserverHttpClient(requests.Session):
         return res.text
 
     def get_timeline_metric(self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str):
-        raw = self.get_metrics()
-        family: List[prometheus_client.Metric] = list(text_string_to_metric_families(raw))
-        [metric] = [m for m in family if m.name == metric_name]
-        [sample] = [
-            s
-            for s in metric.samples
-            if s.labels["tenant_id"] == str(tenant_id)
-            and s.labels["timeline_id"] == str(timeline_id)
-        ]
-        return sample.value
+        metrics = parse_metrics(self.get_metrics())
+        return metrics.query_one(
+            metric_name,
+            filter={
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+            },
+        ).value
 
     def get_remote_timeline_client_metric(
         self,
@@ -1480,14 +1476,9 @@ class PageserverHttpClient(requests.Session):
             assert len(matches) < 2, "above filter should uniquely identify metric"
         return value
 
-    def get_metric_value(self, name: str) -> Optional[str]:
-        metrics = self.get_metrics()
-        relevant = [line for line in metrics.splitlines() if line.startswith(name)]
-        if len(relevant) == 0:
-            log.info(f'could not find metric "{name}"')
-            return None
-        assert len(relevant) == 1
-        return relevant[0].lstrip(name).strip()
+    def get_metric_value(self, name: str) -> Optional[float]:
+        metrics = parse_metrics(self.get_metrics())
+        return metrics.query_one(name).value
 
     def layer_map_info(
         self,
