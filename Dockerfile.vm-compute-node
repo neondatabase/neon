@@ -11,22 +11,15 @@ RUN set -e \
 	&& touch /etc/inittab
 
 RUN set -e \
-	&& echo "::sysinit:cgconfigparser -l /etc/cgconfig.conf -s 1664" >> /etc/inittab \
-	&& echo "::respawn:su vm-informant -c '/usr/local/bin/vm-informant --auto-restart --cgroup=neon-postgres'" >> /etc/inittab
+	&& echo "::respawn:su vm-informant -c '/usr/local/bin/vm-informant --auto-restart'" >> /etc/inittab
 
 # Combine, starting from non-VM compute node image.
 FROM $SRC_IMAGE as base
 
-# Temporarily set user back to root so we can run apt update and adduser
+# Temporarily set user back to root so we can run adduser
 USER root
-RUN apt update && \
-	apt install --no-install-recommends -y \
-        cgroup-tools
 RUN adduser vm-informant --disabled-password --no-create-home
 USER postgres
 
-ADD vm-cgconfig.conf /etc/cgconfig.conf
 COPY --from=informant /etc/inittab /etc/inittab
 COPY --from=informant /usr/bin/vm-informant /usr/local/bin/vm-informant
-
-ENTRYPOINT ["/usr/sbin/cgexec", "-g", "*:neon-postgres", "/usr/local/bin/compute_ctl"]
