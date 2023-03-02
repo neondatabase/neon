@@ -107,7 +107,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
                 assert cur.fetchone() == (5000050000,)
 
     collected_metrics = {
-        "pageserver": env.pageserver.http_client().get_metrics(),
+        "pageserver": env.pageserver.http_client().get_metrics_str(),
     }
     for sk in env.safekeepers:
         collected_metrics[f"safekeeper{sk.id}"] = sk.http_client().get_metrics_str()
@@ -207,7 +207,7 @@ def test_pageserver_metrics_removed_after_detach(
                 assert cur.fetchone() == (5000050000,)
 
     def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
-        ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+        ps_metrics = env.pageserver.http_client().get_metrics()
         samples = []
         for metric_name in ps_metrics.metrics:
             for sample in ps_metrics.query_all(
@@ -307,7 +307,7 @@ def test_pageserver_with_empty_tenants(
 
     time.sleep(1)  # to allow metrics propagation
 
-    ps_metrics = parse_metrics(client.get_metrics(), "pageserver")
+    ps_metrics = client.get_metrics()
     broken_tenants_metric_filter = {
         "tenant_id": str(tenant_without_timelines_dir),
         "state": "broken",

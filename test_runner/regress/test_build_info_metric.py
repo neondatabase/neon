@@ -8,7 +8,7 @@ def test_build_info_metric(neon_env_builder: NeonEnvBuilder, link_proxy: NeonPro
 
     parsed_metrics = {}
 
-    parsed_metrics["pageserver"] = parse_metrics(env.pageserver.http_client().get_metrics())
+    parsed_metrics["pageserver"] = parse_metrics(env.pageserver.http_client().get_metrics_str())
     parsed_metrics["safekeeper"] = parse_metrics(env.safekeepers[0].http_client().get_metrics_str())
     parsed_metrics["proxy"] = parse_metrics(link_proxy.get_metrics())
 

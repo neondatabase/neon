@@ -35,7 +35,7 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
+from fixtures.metrics import Metrics, parse_metrics
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -1434,13 +1434,20 @@ class PageserverHttpClient(requests.Session):
                 assert completed["successful_download_count"] > 0
             return completed
 
-    def get_metrics(self) -> str:
+    def get_metrics_str(self) -> str:
+        """You probably want to use get_metrics() instead."""
         res = self.get(f"http://localhost:{self.port}/metrics")
         self.verbose_error(res)
         return res.text
 
-    def get_timeline_metric(self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str):
-        metrics = parse_metrics(self.get_metrics())
+    def get_metrics(self) -> Metrics:
+        res = self.get_metrics_str()
+        return parse_metrics(res)
+
+    def get_timeline_metric(
+        self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str
+    ) -> float:
+        metrics = self.get_metrics()
         return metrics.query_one(
             metric_name,
             filter={
@@ -1457,7 +1464,7 @@ class PageserverHttpClient(requests.Session):
         file_kind: str,
         op_kind: str,
     ) -> Optional[float]:
-        metrics = parse_metrics(self.get_metrics(), "pageserver")
+        metrics = self.get_metrics()
         matches = metrics.query_all(
             name=metric_name,
             filter={
@@ -1477,8 +1484,13 @@ class PageserverHttpClient(requests.Session):
         return value
 
     def get_metric_value(self, name: str) -> Optional[float]:
-        metrics = parse_metrics(self.get_metrics())
-        return metrics.query_one(name).value
+        metrics = self.get_metrics()
+        results = metrics.query_all(name)
+        if len(results) == 0:
+            log.info(f'could not find metric "{name}"')
+            return None
+        assert len(results) == 1, f"metric {name} is not unique"
+        return results[0].value
 
     def layer_map_info(
         self,

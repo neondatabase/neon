@@ -10,7 +10,6 @@ import psycopg2.errors
 import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
@@ -464,7 +463,7 @@ def test_timeline_size_metrics(
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
     # get the metrics and parse the metric for the current timeline's physical size
-    metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+    metrics = env.pageserver.http_client().get_metrics()
     tl_physical_size_metric = metrics.query_one(
         name="pageserver_resident_physical_size",
         filter={
@@ -575,8 +574,8 @@ def get_physical_size_values(
 
     client = env.pageserver.http_client()
 
-    res.prometheus_resident_physical = client.get_timeline_metric(
-        tenant_id, timeline_id, "pageserver_resident_physical_size"
+    res.prometheus_resident_physical = int(
+        client.get_timeline_metric(tenant_id, timeline_id, "pageserver_resident_physical_size")
     )
 
     detail = client.timeline_detail(

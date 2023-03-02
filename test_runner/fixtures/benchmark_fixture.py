@@ -17,7 +17,6 @@ import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.terminal import TerminalReporter
-from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import NeonPageserver
 from fixtures.types import TenantId, TimelineId
 
@@ -367,10 +366,7 @@ class NeonBenchmarker:
 
     def get_int_counter_value(self, pageserver: NeonPageserver, metric_name: str) -> int:
         """Fetch the value of given int counter from pageserver metrics."""
-        # The metric should be an integer, as it's a number of bytes. But in general
-        # all prometheus metrics are floats. So to be pedantic, read it as a float
-        # and round to integer.
-        all_metrics = parse_metrics(pageserver.http_client().get_metrics())
+        all_metrics = pageserver.http_client().get_metrics()
         sample = all_metrics.query_one(metric_name)
         return int(round(sample.value))
 
