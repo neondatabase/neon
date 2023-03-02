@@ -2988,6 +2988,13 @@ class SafekeeperHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def debug_dump(self, params: Dict[str, str] = {}) -> Dict[str, Any]:
+        res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def timeline_create(
         self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
     ):

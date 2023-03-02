@@ -4,6 +4,7 @@ use std::fs;
 use std::fs::DirEntry;
 use std::io::BufReader;
 use std::io::Read;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -11,6 +12,7 @@ use postgres_ffi::XLogSegNo;
 use serde::Serialize;
 
 use utils::http::json::display_serialize;
+use utils::id::NodeId;
 use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
@@ -18,6 +20,7 @@ use utils::lsn::Lsn;
 use crate::safekeeper::SafeKeeperState;
 use crate::safekeeper::SafekeeperMemState;
 use crate::safekeeper::TermHistory;
+use crate::SafeKeeperConf;
 
 use crate::timeline::ReplicaState;
 use crate::GlobalTimelines;
@@ -54,6 +57,19 @@ pub struct Response {
     pub finish_time: DateTime<Utc>,
     pub timelines: Vec<Timeline>,
     pub timelines_count: usize,
+    pub config: Config,
+}
+
+/// Safekeeper configuration.
+#[derive(Debug, Serialize)]
+pub struct Config {
+    pub id: NodeId,
+    pub workdir: PathBuf,
+    pub listen_pg_addr: String,
+    pub listen_http_addr: String,
+    pub no_sync: bool,
+    pub max_offloader_lag_bytes: u64,
+    pub wal_backup_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,11 +186,14 @@ pub fn build(args: Args) -> Result<Response> {
         timelines.push(timeline);
     }
 
+    let config = GlobalTimelines::get_global_config();
+
     Ok(Response {
         start_time,
         finish_time: Utc::now(),
         timelines,
         timelines_count,
+        config: build_config(config),
     })
 }
 
@@ -228,4 +247,18 @@ fn build_file_info(entry: DirEntry) -> Result<FileInfo> {
         start_zeroes,
         end_zeroes,
     })
+}
+
+/// Converts SafeKeeperConf to Config, filtering out the fields that are not
+/// supposed to be exposed.
+fn build_config(config: SafeKeeperConf) -> Config {
+    Config {
+        id: config.my_id,
+        workdir: config.workdir,
+        listen_pg_addr: config.listen_pg_addr,
+        listen_http_addr: config.listen_http_addr,
+        no_sync: config.no_sync,
+        max_offloader_lag_bytes: config.max_offloader_lag_bytes,
+        wal_backup_enabled: config.wal_backup_enabled,
+    }
 }
