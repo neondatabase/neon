@@ -399,12 +399,21 @@ impl PostgresNode {
                 assert!(!self.env.safekeepers.is_empty());
 
                 // TODO: use future host field from safekeeper spec
-                // Q: What component should be responsible for providing the connection string?
-                // Q: How to handle the case when safekeeper failed / restarted?
+                // Pass the list of safekeepers to the replica so that it can connect to any of them,
+                // whichever is alailiable.
+                let sk_ports = self
+                    .env
+                    .safekeepers
+                    .iter()
+                    .map(|x| x.pg_port.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sk_hosts = vec!["localhost"; self.env.safekeepers.len()].join(",");
+
                 let connstr = format!(
                     "host={} port={} options='-c timeline_id={} tenant_id={}' application_name=replica replication=true",
-                    "localhost",
-                    self.env.safekeepers[0].pg_port,
+                    sk_hosts,
+                    sk_ports,
                     &self.timeline_id.to_string(),
                     &self.tenant_id.to_string(),
                 );
