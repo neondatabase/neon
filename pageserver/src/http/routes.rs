@@ -971,19 +971,22 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
+    async {
+        let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+        let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
+        timeline
+            .freeze_and_flush()
+            .await
+            .map_err(ApiError::InternalServerError)?;
+        timeline
+            .compact(&ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
-    timeline
-        .freeze_and_flush()
-        .await
-        .map_err(ApiError::InternalServerError)?;
-    timeline
-        .compact(&ctx)
-        .await
-        .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, ())
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("manual_checkpoint", tenant_id = %tenant_id, timeline_id = %timeline_id))
+    .await
 }
 
 async fn timeline_download_remote_layers_handler_post(
