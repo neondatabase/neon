@@ -11,8 +11,9 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tokio_io_timeout::{TimeoutReader, TimeoutWriter};
 use tokio::pin;
+use tokio_io_timeout::{TimeoutReader, TimeoutWriter};
+
 use tracing::{info, warn};
 
 use crate::config::PageServerConf;
@@ -79,22 +80,19 @@ pub async fn download_layer_file<'a>(
             })
             .map_err(DownloadError::Other)?;
 
-
             let mut reader = TimeoutReader::new(download.download_stream);
             reader.set_timeout(Some(Duration::from_secs(120)));
             pin!(reader);
-        
+
             let mut writer = TimeoutWriter::new(&mut destination_file);
             writer.set_timeout(Some(Duration::from_secs(120)));
             pin!(writer);
-
 
             let bytes_amount = tokio::io::copy(&mut reader, &mut writer)
                 .await.with_context(|| {
                     format!("download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
                 })
                 .map_err(DownloadError::Other)?;
-                
 
             Ok((destination_file, bytes_amount))
 
