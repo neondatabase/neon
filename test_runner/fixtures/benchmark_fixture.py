@@ -366,17 +366,9 @@ class NeonBenchmarker:
 
     def get_int_counter_value(self, pageserver: NeonPageserver, metric_name: str) -> int:
         """Fetch the value of given int counter from pageserver metrics."""
-        # TODO: If we start to collect more of the prometheus metrics in the
-        # performance test suite like this, we should refactor this to load and
-        # parse all the metrics into a more convenient structure in one go.
-        #
-        # The metric should be an integer, as it's a number of bytes. But in general
-        # all prometheus metrics are floats. So to be pedantic, read it as a float
-        # and round to integer.
         all_metrics = pageserver.http_client().get_metrics()
-        matches = re.search(rf"^{metric_name} (\S+)$", all_metrics, re.MULTILINE)
-        assert matches, f"metric {metric_name} not found"
-        return int(round(float(matches.group(1))))
+        sample = all_metrics.query_one(metric_name)
+        return int(round(sample.value))
 
     def get_timeline_size(
         self, repo_dir: Path, tenant_id: TenantId, timeline_id: TimelineId

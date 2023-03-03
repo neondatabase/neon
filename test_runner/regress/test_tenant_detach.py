@@ -6,7 +6,6 @@ from threading import Thread
 import asyncpg
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
@@ -79,7 +78,7 @@ def test_tenant_reattach(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
-    ps_metrics = parse_metrics(pageserver_http.get_metrics(), "pageserver")
+    ps_metrics = pageserver_http.get_metrics()
     tenant_metric_filter = {
         "tenant_id": str(tenant_id),
         "timeline_id": str(timeline_id),
@@ -93,7 +92,7 @@ def test_tenant_reattach(
 
     time.sleep(1)  # for metrics propagation
 
-    ps_metrics = parse_metrics(pageserver_http.get_metrics(), "pageserver")
+    ps_metrics = pageserver_http.get_metrics()
     pageserver_last_record_lsn = int(
         ps_metrics.query_one("pageserver_last_record_lsn", filter=tenant_metric_filter).value
     )

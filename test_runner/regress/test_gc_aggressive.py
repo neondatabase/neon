@@ -4,7 +4,6 @@ import random
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
@@ -134,7 +133,7 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
 
     # Helper function that gets the number of given kind of remote ops from the metrics
     def get_num_remote_ops(file_kind: str, op_kind: str) -> int:
-        ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+        ps_metrics = env.pageserver.http_client().get_metrics()
         total = 0.0
         for sample in ps_metrics.query_all(
             name="pageserver_remote_operation_seconds_count",
