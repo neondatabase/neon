@@ -204,7 +204,7 @@ pub struct SafeKeeperState {
     pub peers: PersistedPeers,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 // In memory safekeeper state. Fields mirror ones in `SafeKeeperState`; values
 // are not flushed yet.
 pub struct SafekeeperMemState {
@@ -212,6 +212,7 @@ pub struct SafekeeperMemState {
     pub backup_lsn: Lsn,
     pub peer_horizon_lsn: Lsn,
     pub remote_consistent_lsn: Lsn,
+    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
 }
 

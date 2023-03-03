@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use parking_lot::{Mutex, MutexGuard};
 use postgres_ffi::XLogSegNo;
 use pq_proto::ReplicationFeedback;
+use serde::Serialize;
 use std::cmp::{max, min};
 use std::path::PathBuf;
 use tokio::{
@@ -28,9 +29,9 @@ use crate::send_wal::HotStandbyFeedback;
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
 use crate::metrics::FullTimelineInfo;
-use crate::wal_storage;
 use crate::wal_storage::Storage as wal_storage_iface;
 use crate::SafeKeeperConf;
+use crate::{debug_dump, wal_storage};
 
 /// Things safekeeper should know about timeline state on peers.
 #[derive(Debug, Clone)]
@@ -80,7 +81,7 @@ impl PeersInfo {
 }
 
 /// Replica status update + hot standby feedback
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct ReplicaState {
     /// last known lsn received by replica
     pub last_received_lsn: Lsn, // None means we don't know
@@ -381,7 +382,7 @@ pub struct Timeline {
     cancellation_rx: watch::Receiver<bool>,
 
     /// Directory where timeline state is stored.
-    timeline_dir: PathBuf,
+    pub timeline_dir: PathBuf,
 }
 
 impl Timeline {
@@ -588,38 +589,6 @@ impl Timeline {
         self.write_shared_state().wal_backup_attend()
     }
 
-    /// Returns full timeline info, required for the metrics. If the timeline is
-    /// not active, returns None instead.
-    pub fn info_for_metrics(&self) -> Option<FullTimelineInfo> {
-        if self.is_cancelled() {
-            return None;
-        }
-
-        let state = self.write_shared_state();
-        if state.active {
-            Some(FullTimelineInfo {
-                ttid: self.ttid,
-                replicas: state
-                    .replicas
-                    .iter()
-                    .filter_map(|r| r.as_ref())
-                    .copied()
-                    .collect(),
-                wal_backup_active: state.wal_backup_active,
-                timeline_is_active: state.active,
-                num_computes: state.num_computes,
-                last_removed_segno: state.last_removed_segno,
-                epoch_start_lsn: state.sk.epoch_start_lsn,
-                mem_state: state.sk.inmem.clone(),
-                persisted_state: state.sk.state.clone(),
-                flush_lsn: state.sk.wal_store.flush_lsn(),
-                wal_storage: state.sk.wal_store.get_metrics(),
-            })
-        } else {
-            None
-        }
-    }
-
     /// Returns commit_lsn watch channel.
     pub fn get_commit_lsn_watch_rx(&self) -> watch::Receiver<Lsn> {
         self.commit_lsn_watch_rx.clone()
@@ -783,6 +752,62 @@ impl Timeline {
         let mut shared_state = self.write_shared_state();
         shared_state.last_removed_segno = horizon_segno;
         Ok(())
+    }
+
+    /// Returns full timeline info, required for the metrics. If the timeline is
+    /// not active, returns None instead.
+    pub fn info_for_metrics(&self) -> Option<FullTimelineInfo> {
+        if self.is_cancelled() {
+            return None;
+        }
+
+        let state = self.write_shared_state();
+        if state.active {
+            Some(FullTimelineInfo {
+                ttid: self.ttid,
+                replicas: state
+                    .replicas
+                    .iter()
+                    .filter_map(|r| r.as_ref())
+                    .copied()
+                    .collect(),
+                wal_backup_active: state.wal_backup_active,
+                timeline_is_active: state.active,
+                num_computes: state.num_computes,
+                last_removed_segno: state.last_removed_segno,
+                epoch_start_lsn: state.sk.epoch_start_lsn,
+                mem_state: state.sk.inmem.clone(),
+                persisted_state: state.sk.state.clone(),
+                flush_lsn: state.sk.wal_store.flush_lsn(),
+                wal_storage: state.sk.wal_store.get_metrics(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Returns in-memory timeline state to build a full debug dump.
+    pub fn memory_dump(&self) -> debug_dump::Memory {
+        let state = self.write_shared_state();
+
+        let (write_lsn, write_record_lsn, flush_lsn, file_open) =
+            state.sk.wal_store.internal_state();
+
+        debug_dump::Memory {
+            is_cancelled: self.is_cancelled(),
+            peers_info_len: state.peers_info.0.len(),
+            replicas: state.replicas.clone(),
+            wal_backup_active: state.wal_backup_active,
+            active: state.active,
+            num_computes: state.num_computes,
+            last_removed_segno: state.last_removed_segno,
+            epoch_start_lsn: state.sk.epoch_start_lsn,
+            mem_state: state.sk.inmem.clone(),
+            write_lsn,
+            write_record_lsn,
+            flush_lsn,
+            file_open,
+        }
     }
 }
 
