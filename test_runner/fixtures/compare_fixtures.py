@@ -144,12 +144,12 @@ class NeonCompare(PgCompare):
             "size", timeline_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
 
-        params = f'{{tenant_id="{self.tenant}",timeline_id="{self.timeline}"}}'
+        metric_filters = {"tenant_id": str(self.tenant), "timeline_id": str(self.timeline)}
         total_files = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_created_persistent_files_total" + params
+            self.env.pageserver, "pageserver_created_persistent_files_total", metric_filters
         )
         total_bytes = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_written_persistent_bytes_total" + params
+            self.env.pageserver, "pageserver_written_persistent_bytes_total", metric_filters
         )
         self.zenbenchmark.record(
             "data_uploaded", total_bytes / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER

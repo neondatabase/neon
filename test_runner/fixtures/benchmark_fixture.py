@@ -354,20 +354,25 @@ class NeonBenchmarker:
         """
         Fetch the "cumulative # of bytes written" metric from the pageserver
         """
-        metric_name = r'libmetrics_disk_io_bytes_total{io_operation="write"}'
-        return self.get_int_counter_value(pageserver, metric_name)
+        return self.get_int_counter_value(
+            pageserver, "libmetrics_disk_io_bytes_total", {"io_operation": "write"}
+        )
 
     def get_peak_mem(self, pageserver: NeonPageserver) -> int:
         """
         Fetch the "maxrss" metric from the pageserver
         """
-        metric_name = r"libmetrics_maxrss_kb"
-        return self.get_int_counter_value(pageserver, metric_name)
+        return self.get_int_counter_value(pageserver, "libmetrics_maxrss_kb")
 
-    def get_int_counter_value(self, pageserver: NeonPageserver, metric_name: str) -> int:
+    def get_int_counter_value(
+        self,
+        pageserver: NeonPageserver,
+        metric_name: str,
+        label_filters: Optional[Dict[str, str]] = None,
+    ) -> int:
         """Fetch the value of given int counter from pageserver metrics."""
         all_metrics = pageserver.http_client().get_metrics()
-        sample = all_metrics.query_one(metric_name)
+        sample = all_metrics.query_one(metric_name, label_filters)
         return int(round(sample.value))
 
     def get_timeline_size(
