@@ -792,7 +792,7 @@ impl PostgresRedoManager {
         let mut writebuf: Vec<u8> = Vec::with_capacity((BLCKSZ as usize) * 3);
         build_begin_redo_for_block_msg(tag, &mut writebuf);
         if let Some(img) = base_img {
-            build_push_page_msg(tag, &img, &mut writebuf);
+            build_push_page_msg(tag, img, &mut writebuf);
         }
         for (lsn, rec) in records.iter() {
             if let NeonWalRecord::Postgres {
