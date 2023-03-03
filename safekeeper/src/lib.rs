@@ -13,6 +13,7 @@ pub mod control_file_upgrade;
 pub mod debug_dump;
 pub mod handler;
 pub mod http;
+pub mod sim;
 pub mod json_ctrl;
 pub mod metrics;
 pub mod receive_wal;
