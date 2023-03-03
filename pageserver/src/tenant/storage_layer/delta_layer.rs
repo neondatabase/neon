@@ -438,7 +438,7 @@ impl PersistentLayer for DeltaLayer {
         ))
     }
 
-    fn delete(&self) -> Result<()> {
+    fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
         Ok(())

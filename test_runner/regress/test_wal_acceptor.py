@@ -775,6 +775,9 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     if not auth_enabled:
         wa_http_cli = wa.http_client()
         wa_http_cli.check_status()
+
+        wa_http_cli_debug = wa.http_client()
+        wa_http_cli_debug.check_status()
     else:
         wa_http_cli = wa.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
         wa_http_cli.check_status()
@@ -785,6 +788,10 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         wa_http_cli_noauth = wa.http_client()
         wa_http_cli_noauth.check_status()
 
+        # debug endpoint requires safekeeper scope
+        wa_http_cli_debug = wa.http_client(auth_token=env.auth_keys.generate_safekeeper_token())
+        wa_http_cli_debug.check_status()
+
     # fetch something sensible from status
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
     epoch = tli_status.acceptor_epoch
@@ -794,6 +801,12 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
         for cli in [wa_http_cli_bad, wa_http_cli_noauth]:
             with pytest.raises(cli.HTTPError, match="Forbidden|Unauthorized"):
                 cli.timeline_status(tenant_id, timeline_id)
+
+    # fetch debug_dump endpoint
+    debug_dump_0 = wa_http_cli_debug.debug_dump({"dump_all": "true"})
+    log.info(f"debug_dump before reboot {debug_dump_0}")
+    assert debug_dump_0["timelines_count"] == 1
+    assert debug_dump_0["timelines"][0]["timeline_id"] == str(timeline_id)
 
     pg.safe_psql("create table t(i int)")
 
@@ -807,6 +820,25 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # and timeline_start_lsn stays the same
     assert tli_status.timeline_start_lsn == timeline_start_lsn
+
+    # fetch debug_dump after reboot
+    debug_dump_1 = wa_http_cli_debug.debug_dump({"dump_all": "true"})
+    log.info(f"debug_dump after reboot {debug_dump_1}")
+    assert debug_dump_1["timelines_count"] == 1
+    assert debug_dump_1["timelines"][0]["timeline_id"] == str(timeline_id)
+
+    # check that commit_lsn and flush_lsn not decreased
+    assert (
+        debug_dump_1["timelines"][0]["memory"]["mem_state"]["commit_lsn"]
+        >= debug_dump_0["timelines"][0]["memory"]["mem_state"]["commit_lsn"]
+    )
+    assert (
+        debug_dump_1["timelines"][0]["memory"]["flush_lsn"]
+        >= debug_dump_0["timelines"][0]["memory"]["flush_lsn"]
+    )
+
+    # check .config in response
+    assert debug_dump_1["config"]["id"] == env.safekeepers[0].id
 
 
 class SafekeeperEnv:

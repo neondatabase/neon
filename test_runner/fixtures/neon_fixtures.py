@@ -14,6 +14,7 @@ import tempfile
 import textwrap
 import time
 import uuid
+from collections import defaultdict
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from enum import Flag, auto
@@ -28,7 +29,6 @@ import asyncpg
 import backoff  # type: ignore
 import boto3
 import jwt
-import prometheus_client
 import psycopg2
 import pytest
 import requests
@@ -36,7 +36,7 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
+from fixtures.metrics import Metrics, parse_metrics
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -45,7 +45,6 @@ from fixtures.utils import (
     get_self_dir,
     subprocess_capture,
 )
-from prometheus_client.parser import text_string_to_metric_families
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
@@ -1436,22 +1435,27 @@ class PageserverHttpClient(requests.Session):
                 assert completed["successful_download_count"] > 0
             return completed
 
-    def get_metrics(self) -> str:
+    def get_metrics_str(self) -> str:
+        """You probably want to use get_metrics() instead."""
         res = self.get(f"http://localhost:{self.port}/metrics")
         self.verbose_error(res)
         return res.text
 
-    def get_timeline_metric(self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str):
-        raw = self.get_metrics()
-        family: List[prometheus_client.Metric] = list(text_string_to_metric_families(raw))
-        [metric] = [m for m in family if m.name == metric_name]
-        [sample] = [
-            s
-            for s in metric.samples
-            if s.labels["tenant_id"] == str(tenant_id)
-            and s.labels["timeline_id"] == str(timeline_id)
-        ]
-        return sample.value
+    def get_metrics(self) -> Metrics:
+        res = self.get_metrics_str()
+        return parse_metrics(res)
+
+    def get_timeline_metric(
+        self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str
+    ) -> float:
+        metrics = self.get_metrics()
+        return metrics.query_one(
+            metric_name,
+            filter={
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+            },
+        ).value
 
     def get_remote_timeline_client_metric(
         self,
@@ -1461,7 +1465,7 @@ class PageserverHttpClient(requests.Session):
         file_kind: str,
         op_kind: str,
     ) -> Optional[float]:
-        metrics = parse_metrics(self.get_metrics(), "pageserver")
+        metrics = self.get_metrics()
         matches = metrics.query_all(
             name=metric_name,
             filter={
@@ -1480,14 +1484,16 @@ class PageserverHttpClient(requests.Session):
             assert len(matches) < 2, "above filter should uniquely identify metric"
         return value
 
-    def get_metric_value(self, name: str) -> Optional[str]:
+    def get_metric_value(
+        self, name: str, filter: Optional[Dict[str, str]] = None
+    ) -> Optional[float]:
         metrics = self.get_metrics()
-        relevant = [line for line in metrics.splitlines() if line.startswith(name)]
-        if len(relevant) == 0:
+        results = metrics.query_all(name, filter=filter)
+        if not results:
             log.info(f'could not find metric "{name}"')
             return None
-        assert len(relevant) == 1
-        return relevant[0].lstrip(name).strip()
+        assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
+        return results[0].value
 
     def layer_map_info(
         self,
@@ -1515,6 +1521,11 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
 
         assert res.status_code == 200
+
+    def evict_all_layers(self, tenant_id: TenantId, timeline_id: TimelineId):
+        info = self.layer_map_info(tenant_id, timeline_id)
+        for layer in info.historic_layers:
+            self.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
 
 
 @dataclass
@@ -1551,6 +1562,14 @@ class LayerMapInfo:
 
         return info
 
+    def kind_count(self) -> Dict[str, int]:
+        counts: Dict[str, int] = defaultdict(int)
+        for inmem_layer in self.in_memory_layers:
+            counts[inmem_layer.kind] += 1
+        for hist_layer in self.historic_layers:
+            counts[hist_layer.kind] += 1
+        return counts
+
 
 @dataclass
 class InMemoryLayerInfo:
@@ -1567,7 +1586,7 @@ class InMemoryLayerInfo:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class HistoricLayerInfo:
     kind: str
     layer_file_name: str
@@ -2988,6 +3007,13 @@ class SafekeeperHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def debug_dump(self, params: Dict[str, str] = {}) -> Dict[str, Any]:
+        res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def timeline_create(
         self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
     ):
@@ -3516,3 +3542,23 @@ def wait_for_sk_commit_lsn_to_reach_remote_storage(
     ps_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(ps_http, tenant_id, timeline_id, lsn)
     return lsn
+
+
+def wait_for_upload_queue_empty(
+    pageserver: NeonPageserver, tenant_id: TenantId, timeline_id: TimelineId
+):
+    ps_http = pageserver.http_client()
+    while True:
+        all_metrics = ps_http.get_metrics()
+        tl = all_metrics.query_all(
+            "pageserver_remote_timeline_client_calls_unfinished",
+            {
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+            },
+        )
+        assert len(tl) > 0
+        log.info(f"upload queue for {tenant_id}/{timeline_id}: {tl}")
+        if all(m.value == 0 for m in tl):
+            return
+        time.sleep(0.2)

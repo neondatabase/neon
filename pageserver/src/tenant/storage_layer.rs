@@ -364,7 +364,7 @@ pub trait PersistentLayer: Layer {
     }
 
     /// Permanently remove this layer from disk.
-    fn delete(&self) -> Result<()>;
+    fn delete_resident_layer_file(&self) -> Result<()>;
 
     fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
         None

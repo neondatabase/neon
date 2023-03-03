@@ -662,8 +662,8 @@ impl Timeline {
             // update the index file on next flush iteration too. But it
             // could take a while until that happens.
             //
-            // Additionally, only do this on the terminal round before sleeping.
-            if last_round {
+            // Additionally, only do this once before we return from this function.
+            if last_round || res.is_ok() {
                 if let Some(remote_client) = &self.remote_client {
                     remote_client.schedule_index_upload_for_file_changes()?;
                 }
@@ -1047,11 +1047,12 @@ impl Timeline {
             return Ok(false);
         }
 
-        let layer_metadata = LayerFileMetadata::new(
-            local_layer
-                .file_size()
-                .expect("Local layer should have a file size"),
-        );
+        let layer_file_size = local_layer
+            .file_size()
+            .expect("Local layer should have a file size");
+
+        let layer_metadata = LayerFileMetadata::new(layer_file_size);
+
         let new_remote_layer = Arc::new(match local_layer.filename() {
             LayerFileName::Image(image_name) => RemoteLayer::new_img(
                 self.tenant_id,
@@ -1075,15 +1076,22 @@ impl Timeline {
 
         let replaced = match batch_updates.replace_historic(local_layer, new_remote_layer)? {
             Replacement::Replaced { .. } => {
-                let layer_size = local_layer.file_size();
-
-                if let Err(e) = local_layer.delete() {
+                if let Err(e) = local_layer.delete_resident_layer_file() {
                     error!("failed to remove layer file on evict after replacement: {e:#?}");
                 }
-
-                if let Some(layer_size) = layer_size {
-                    self.metrics.resident_physical_size_gauge.sub(layer_size);
-                }
+                // Always decrement the physical size gauge, even if we failed to delete the file.
+                // Rationale: we already replaced the layer with a remote layer in the layer map,
+                // and any subsequent download_remote_layer will
+                // 1. overwrite the file on disk and
+                // 2. add the downloaded size to the resident size gauge.
+                //
+                // If there is no re-download, and we restart the pageserver, then load_layer_map
+                // will treat the file as a local layer again, count it towards resident size,
+                // and it'll be like the layer removal never happened.
+                // The bump in resident size is perhaps unexpected but overall a robust behavior.
+                self.metrics
+                    .resident_physical_size_gauge
+                    .sub(layer_file_size);
 
                 true
             }
@@ -1942,11 +1950,14 @@ impl Timeline {
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
     ) -> anyhow::Result<()> {
-        let layer_size = layer.file_size();
-
-        layer.delete()?;
-        if let Some(layer_size) = layer_size {
-            self.metrics.resident_physical_size_gauge.sub(layer_size);
+        if !layer.is_remote_layer() {
+            layer.delete_resident_layer_file()?;
+            let layer_file_size = layer
+                .file_size()
+                .expect("Local layer should have a file size");
+            self.metrics
+                .resident_physical_size_gauge
+                .sub(layer_file_size);
         }
 
         // TODO Removing from the bottom of the layer map is expensive.

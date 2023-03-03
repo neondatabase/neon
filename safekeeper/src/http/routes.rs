@@ -5,14 +5,16 @@ use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::SkTimelineInfo;
 use serde::Serialize;
-use serde::Serializer;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::task::JoinError;
+use utils::http::json::display_serialize;
 
+use crate::debug_dump;
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
 
@@ -52,15 +54,6 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
         .data::<Arc<SafeKeeperConf>>()
         .expect("unknown state type")
         .as_ref()
-}
-
-/// Serialize through Display trait.
-fn display_serialize<S, F>(z: &F, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-    F: Display,
-{
-    s.serialize_str(&format!("{}", z))
 }
 
 /// Same as TermSwitchEntry, but serializes LSN using display serializer
@@ -276,6 +269,69 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
     json_response(StatusCode::OK, ())
 }
 
+fn parse_kv_str<E: fmt::Display, T: FromStr<Err = E>>(k: &str, v: &str) -> Result<T, ApiError> {
+    v.parse()
+        .map_err(|e| ApiError::BadRequest(anyhow::anyhow!("cannot parse {k}: {e}")))
+}
+
+/// Dump debug info about all available safekeeper state.
+async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    ensure_no_body(&mut request).await?;
+
+    let mut dump_all: Option<bool> = None;
+    let mut dump_control_file: Option<bool> = None;
+    let mut dump_memory: Option<bool> = None;
+    let mut dump_disk_content: Option<bool> = None;
+    let mut dump_term_history: Option<bool> = None;
+    let mut tenant_id: Option<TenantId> = None;
+    let mut timeline_id: Option<TimelineId> = None;
+
+    let query = request.uri().query().unwrap_or("");
+    let mut values = url::form_urlencoded::parse(query.as_bytes());
+
+    for (k, v) in &mut values {
+        match k.as_ref() {
+            "dump_all" => dump_all = Some(parse_kv_str(&k, &v)?),
+            "dump_control_file" => dump_control_file = Some(parse_kv_str(&k, &v)?),
+            "dump_memory" => dump_memory = Some(parse_kv_str(&k, &v)?),
+            "dump_disk_content" => dump_disk_content = Some(parse_kv_str(&k, &v)?),
+            "dump_term_history" => dump_term_history = Some(parse_kv_str(&k, &v)?),
+            "tenant_id" => tenant_id = Some(parse_kv_str(&k, &v)?),
+            "timeline_id" => timeline_id = Some(parse_kv_str(&k, &v)?),
+            _ => Err(ApiError::BadRequest(anyhow::anyhow!(
+                "Unknown query parameter: {}",
+                k
+            )))?,
+        }
+    }
+
+    let dump_all = dump_all.unwrap_or(false);
+    let dump_control_file = dump_control_file.unwrap_or(dump_all);
+    let dump_memory = dump_memory.unwrap_or(dump_all);
+    let dump_disk_content = dump_disk_content.unwrap_or(dump_all);
+    let dump_term_history = dump_term_history.unwrap_or(true);
+
+    let args = debug_dump::Args {
+        dump_all,
+        dump_control_file,
+        dump_memory,
+        dump_disk_content,
+        dump_term_history,
+        tenant_id,
+        timeline_id,
+    };
+
+    let resp = tokio::task::spawn_blocking(move || {
+        debug_dump::build(args).map_err(ApiError::InternalServerError)
+    })
+    .await
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+
+    // TODO: use streaming response
+    json_response(StatusCode::OK, resp)
+}
+
 /// Safekeeper http router.
 pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
     let mut router = endpoint::make_router();
@@ -316,6 +372,7 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             "/v1/record_safekeeper_info/:tenant_id/:timeline_id",
             record_safekeeper_info,
         )
+        .get("/v1/debug_dump", dump_debug_handler)
 }
 
 #[cfg(test)]

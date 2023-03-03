@@ -10,6 +10,7 @@ mod auth;
 pub mod broker;
 pub mod control_file;
 pub mod control_file_upgrade;
+pub mod debug_dump;
 pub mod handler;
 pub mod http;
 pub mod json_ctrl;

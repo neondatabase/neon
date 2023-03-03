@@ -226,6 +226,36 @@ RUN wget https://github.com/iCyberon/pg_hashids/archive/refs/tags/v1.2.1.tar.gz 
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_hashids.control
 
 #########################################################################################
+#
+# Layer "rum-pg-build"
+# compile rum extension
+#
+#########################################################################################
+FROM build-deps AS rum-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN wget https://github.com/postgrespro/rum/archive/refs/tags/1.3.13.tar.gz -O rum.tar.gz && \
+    mkdir rum-src && cd rum-src && tar xvzf ../rum.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/rum.control
+
+#########################################################################################
+#
+# Layer "pgtap-pg-build"
+# compile pgTAP extension
+#
+#########################################################################################
+FROM build-deps AS pgtap-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN wget https://github.com/theory/pgtap/archive/refs/tags/v1.2.0.tar.gz -O pgtap.tar.gz && \
+    mkdir pgtap-src && cd pgtap-src && tar xvzf ../pgtap.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgtap.control
+
+#########################################################################################
 # 
 # Layer "rust extensions"
 # This layer is used to build `pgx` deps
@@ -304,6 +334,8 @@ COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgtap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \

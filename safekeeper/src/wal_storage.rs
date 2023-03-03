@@ -165,6 +165,16 @@ impl PhysicalStorage {
         })
     }
 
+    /// Get all known state of the storage.
+    pub fn internal_state(&self) -> (Lsn, Lsn, Lsn, bool) {
+        (
+            self.write_lsn,
+            self.write_record_lsn,
+            self.flush_record_lsn,
+            self.file.is_some(),
+        )
+    }
+
     /// Call fdatasync if config requires so.
     fn fdatasync_file(&mut self, file: &mut File) -> Result<()> {
         if !self.conf.no_sync {
