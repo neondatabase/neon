@@ -11,6 +11,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PageserverApiException,
+    PageserverHttpClient,
     RemoteStorageKind,
     assert_tenant_status,
     available_remote_storages,
@@ -25,9 +26,16 @@ from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
 
-def get_num_downloaded_layers(client, tenant_id, timeline_id):
+def get_num_downloaded_layers(client: PageserverHttpClient, tenant_id, timeline_id):
     value = client.get_metric_value(
-        f'pageserver_remote_operation_seconds_count{{file_kind="layer",op_kind="download",status="success",tenant_id="{tenant_id}",timeline_id="{timeline_id}"}}'
+        "pageserver_remote_operation_seconds_count",
+        {
+            "file_kind": "layer",
+            "op_kind": "download",
+            "status": "success",
+            "tenant_id": tenant_id,
+            "timeline_id": timeline_id,
+        },
     )
     if value is None:
         return 0

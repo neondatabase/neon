@@ -1483,9 +1483,11 @@ class PageserverHttpClient(requests.Session):
             assert len(matches) < 2, "above filter should uniquely identify metric"
         return value
 
-    def get_metric_value(self, name: str) -> Optional[float]:
+    def get_metric_value(
+        self, name: str, filter: Optional[Dict[str, str]] = None
+    ) -> Optional[float]:
         metrics = self.get_metrics()
-        results = metrics.query_all(name)
+        results = metrics.query_all(name, filter=filter)
         if len(results) == 0:
             log.info(f'could not find metric "{name}"')
             return None
