@@ -1,7 +1,6 @@
 import math
 import queue
 import random
-import re
 import threading
 import time
 from contextlib import closing
@@ -465,26 +464,26 @@ def test_timeline_size_metrics(
 
     # get the metrics and parse the metric for the current timeline's physical size
     metrics = env.pageserver.http_client().get_metrics()
-    matches = re.search(
-        f'^pageserver_resident_physical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
-        metrics,
-        re.MULTILINE,
-    )
-    assert matches
-    tl_physical_size_metric = int(matches.group(1))
+    tl_physical_size_metric = metrics.query_one(
+        name="pageserver_resident_physical_size",
+        filter={
+            "tenant_id": str(env.initial_tenant),
+            "timeline_id": str(new_timeline_id),
+        },
+    ).value
 
     # assert that the physical size metric matches the actual physical size on disk
     timeline_path = env.timeline_dir(env.initial_tenant, new_timeline_id)
     assert tl_physical_size_metric == get_timeline_dir_size(timeline_path)
 
     # Check that the logical size metric is sane, and matches
-    matches = re.search(
-        f'^pageserver_current_logical_size{{tenant_id="{env.initial_tenant}",timeline_id="{new_timeline_id}"}} (\\S+)$',
-        metrics,
-        re.MULTILINE,
-    )
-    assert matches
-    tl_logical_size_metric = int(matches.group(1))
+    tl_logical_size_metric = metrics.query_one(
+        name="pageserver_current_logical_size",
+        filter={
+            "tenant_id": str(env.initial_tenant),
+            "timeline_id": str(new_timeline_id),
+        },
+    ).value
 
     pgdatadir = test_output_dir / "pgdata-vanilla"
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
@@ -575,8 +574,8 @@ def get_physical_size_values(
 
     client = env.pageserver.http_client()
 
-    res.prometheus_resident_physical = client.get_timeline_metric(
-        tenant_id, timeline_id, "pageserver_resident_physical_size"
+    res.prometheus_resident_physical = int(
+        client.get_timeline_metric(tenant_id, timeline_id, "pageserver_resident_physical_size")
     )
 
     detail = client.timeline_detail(

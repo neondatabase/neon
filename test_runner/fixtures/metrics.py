@@ -13,7 +13,8 @@ class Metrics:
         self.metrics = defaultdict(list)
         self.name = name
 
-    def query_all(self, name: str, filter: Dict[str, str]) -> List[Sample]:
+    def query_all(self, name: str, filter: Optional[Dict[str, str]] = None) -> List[Sample]:
+        filter = filter or {}
         res = []
         for sample in self.metrics[name]:
             try:
