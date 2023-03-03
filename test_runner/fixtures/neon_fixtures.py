@@ -1488,7 +1488,7 @@ class PageserverHttpClient(requests.Session):
     ) -> Optional[float]:
         metrics = self.get_metrics()
         results = metrics.query_all(name, filter=filter)
-        if len(results) == 0:
+        if not results:
             log.info(f'could not find metric "{name}"')
             return None
         assert len(results) == 1, f"metric {name} is not unique"
