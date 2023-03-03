@@ -4,7 +4,7 @@
 use crate::config::PageServerConf;
 use crate::page_cache::{self, ReadBufResult, WriteBufResult, PAGE_SZ};
 use crate::tenant::blob_io::BlobWriter;
-use crate::tenant::block_io::{BlockLease, BlockReader};
+use crate::tenant::block_io::BlockReader;
 use crate::virtual_file::VirtualFile;
 use once_cell::sync::Lazy;
 use std::cmp::min;
@@ -297,7 +297,9 @@ pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), io::Error> 
 }
 
 impl BlockReader for EphemeralFile {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
+    type BlockLease = page_cache::PageReadGuard<'static>;
+
+    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {
@@ -423,7 +425,6 @@ mod tests {
             let actual = cursor.read_blob(pos)?;
             assert_eq!(actual, expected);
         }
-        drop(cursor);
 
         // Test a large blob that spans multiple pages
         let mut large_data = Vec::new();

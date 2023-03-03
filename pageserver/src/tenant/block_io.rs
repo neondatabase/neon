@@ -5,7 +5,7 @@
 use crate::page_cache;
 use crate::page_cache::{ReadBufResult, PAGE_SZ};
 use bytes::Bytes;
-use std::ops::DerefMut;
+use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::AtomicU64;
 
@@ -15,12 +15,14 @@ use std::sync::atomic::AtomicU64;
 /// There are currently two implementations: EphemeralFile, and FileBlockReader
 /// below.
 pub trait BlockReader {
+    type BlockLease: Deref<Target = [u8; PAGE_SZ]> + 'static;
+
     ///
     /// Read a block. Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     ///
-    fn read_blk(&self, blknum: u32) -> Result<page_cache::PageReadGuard<'static>, std::io::Error>;
+    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error>;
 
     ///
     /// Create a new "cursor" for reading from this reader.
@@ -39,7 +41,9 @@ impl<B> BlockReader for &B
 where
     B: BlockReader,
 {
-    fn read_blk(&self, blknum: u32) -> Result<page_cache::PageReadGuard<'static>, std::io::Error> {
+    type BlockLease = B::BlockLease;
+
+    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
         (*self).read_blk(blknum)
     }
 }
@@ -71,8 +75,6 @@ where
     reader: R,
 }
 
-pub type BlockLease = page_cache::PageReadGuard<'static>;
-
 impl<R> BlockCursor<R>
 where
     R: BlockReader,
@@ -81,7 +83,7 @@ where
         BlockCursor { reader }
     }
 
-    pub fn read_blk(&mut self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    pub fn read_blk(&mut self, blknum: u32) -> Result<R::BlockLease, std::io::Error> {
         self.reader.read_blk(blknum)
     }
 }
@@ -119,7 +121,9 @@ impl<F> BlockReader for FileBlockReader<F>
 where
     F: FileExt,
 {
-    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
+    type BlockLease = page_cache::PageReadGuard<'static>;
+
+    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {
