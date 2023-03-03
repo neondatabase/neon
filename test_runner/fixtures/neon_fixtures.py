@@ -1491,7 +1491,7 @@ class PageserverHttpClient(requests.Session):
         if not results:
             log.info(f'could not find metric "{name}"')
             return None
-        assert len(results) == 1, f"metric {name} is not unique"
+        assert len(results) == 1, f"metric {name} with given filters is not unique, got: {results}"
         return results[0].value
 
     def layer_map_info(

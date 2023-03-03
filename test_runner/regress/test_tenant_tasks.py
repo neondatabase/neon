@@ -50,17 +50,21 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         wait_until(10, 0.2, lambda: assert_active(tenant_id))
 
     # Assert that all tasks finish quickly after tenant is detached
-    task_starts = client.get_metric_value("pageserver_tenant_task_events", {"event": "start"})
+    task_starts = client.get_metric_value("pageserver_tenant_task_events_total", {"event": "start"})
     assert task_starts is not None
     assert int(task_starts) > 0
     client.tenant_detach(tenant)
     client.tenant_detach(env.initial_tenant)
 
     def assert_tasks_finish():
-        tasks_started = client.get_metric_value("pageserver_tenant_task_events", {"event": "start"})
-        tasks_ended = client.get_metric_value("pageserver_tenant_task_events", {"event": "stop"})
+        tasks_started = client.get_metric_value(
+            "pageserver_tenant_task_events_total", {"event": "start"}
+        )
+        tasks_ended = client.get_metric_value(
+            "pageserver_tenant_task_events_total", {"event": "stop"}
+        )
         tasks_panicked = client.get_metric_value(
-            "pageserver_tenant_task_events", {"event": "panic"}
+            "pageserver_tenant_task_events_total", {"event": "panic"}
         )
         log.info(f"started {tasks_started}, ended {tasks_ended}, panicked {tasks_panicked}")
         assert tasks_started == tasks_ended
