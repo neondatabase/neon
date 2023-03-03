@@ -71,6 +71,8 @@ where
     reader: R,
 }
 
+pub type BlockLease = page_cache::PageReadGuard<'static>;
+
 impl<R> BlockCursor<R>
 where
     R: BlockReader,
@@ -79,10 +81,7 @@ where
         BlockCursor { reader }
     }
 
-    pub fn read_blk(
-        &mut self,
-        blknum: u32,
-    ) -> Result<page_cache::PageReadGuard<'static>, std::io::Error> {
+    pub fn read_blk(&mut self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         self.reader.read_blk(blknum)
     }
 }
@@ -120,7 +119,7 @@ impl<F> BlockReader for FileBlockReader<F>
 where
     F: FileExt,
 {
-    fn read_blk(&self, blknum: u32) -> Result<page_cache::PageReadGuard<'static>, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, std::io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {

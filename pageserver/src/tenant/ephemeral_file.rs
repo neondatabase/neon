@@ -2,11 +2,9 @@
 //! used to keep in-memory layers spilled on disk.
 
 use crate::config::PageServerConf;
-use crate::page_cache;
-use crate::page_cache::PAGE_SZ;
-use crate::page_cache::{ReadBufResult, WriteBufResult};
+use crate::page_cache::{self, ReadBufResult, WriteBufResult, PAGE_SZ};
 use crate::tenant::blob_io::BlobWriter;
-use crate::tenant::block_io::BlockReader;
+use crate::tenant::block_io::{BlockLease, BlockReader};
 use crate::virtual_file::VirtualFile;
 use once_cell::sync::Lazy;
 use std::cmp::min;
@@ -299,7 +297,7 @@ pub fn writeback(file_id: u64, blkno: u32, buf: &[u8]) -> Result<(), io::Error> 
 }
 
 impl BlockReader for EphemeralFile {
-    fn read_blk(&self, blknum: u32) -> Result<page_cache::PageReadGuard<'static>, io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<BlockLease, io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {
