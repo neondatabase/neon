@@ -5,7 +5,7 @@
 use crate::page_cache;
 use crate::page_cache::{ReadBufResult, PAGE_SZ};
 use bytes::Bytes;
-use std::ops::{Deref, DerefMut};
+use std::ops::DerefMut;
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::AtomicU64;
 
@@ -15,14 +15,12 @@ use std::sync::atomic::AtomicU64;
 /// There are currently two implementations: EphemeralFile, and FileBlockReader
 /// below.
 pub trait BlockReader {
-    type BlockLease: Deref<Target = [u8; PAGE_SZ]> + 'static;
-
     ///
     /// Read a block. Returns a "lease" object that can be used to
     /// access to the contents of the page. (For the page cache, the
     /// lease object represents a lock on the buffer.)
     ///
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error>;
+    fn read_blk(&self, blknum: u32) -> Result<page_cache::PageReadGuard<'static>, std::io::Error>;
 
     ///
     /// Create a new "cursor" for reading from this reader.
@@ -41,9 +39,7 @@ impl<B> BlockReader for &B
 where
     B: BlockReader,
 {
-    type BlockLease = B::BlockLease;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<page_cache::PageReadGuard<'static>, std::io::Error> {
         (*self).read_blk(blknum)
     }
 }
@@ -73,8 +69,6 @@ where
     R: BlockReader,
 {
     reader: R,
-    /// last accessed page
-    cache: Option<(u32, R::BlockLease)>,
 }
 
 impl<R> BlockCursor<R>
@@ -82,40 +76,16 @@ where
     R: BlockReader,
 {
     pub fn new(reader: R) -> Self {
-        BlockCursor {
-            reader,
-            cache: None,
-        }
+        BlockCursor { reader }
     }
 
-    pub fn read_blk(&mut self, blknum: u32) -> Result<&Self, std::io::Error> {
-        // Fast return if this is the same block as before
-        if let Some((cached_blk, _buf)) = &self.cache {
-            if *cached_blk == blknum {
-                return Ok(self);
-            }
-        }
-
-        // Read the block from the underlying reader, and cache it
-        self.cache = None;
-        let buf = self.reader.read_blk(blknum)?;
-        self.cache = Some((blknum, buf));
-
-        Ok(self)
+    pub fn read_blk(
+        &mut self,
+        blknum: u32,
+    ) -> Result<page_cache::PageReadGuard<'static>, std::io::Error> {
+        self.reader.read_blk(blknum)
     }
 }
-
-impl<R> Deref for BlockCursor<R>
-where
-    R: BlockReader,
-{
-    type Target = [u8; PAGE_SZ];
-
-    fn deref(&self) -> &<Self as Deref>::Target {
-        &self.cache.as_ref().unwrap().1
-    }
-}
-
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// An adapter for reading a (virtual) file using the page cache.
@@ -150,9 +120,7 @@ impl<F> BlockReader for FileBlockReader<F>
 where
     F: FileExt,
 {
-    type BlockLease = page_cache::PageReadGuard<'static>;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<page_cache::PageReadGuard<'static>, std::io::Error> {
         // Look up the right page
         let cache = page_cache::get();
         loop {

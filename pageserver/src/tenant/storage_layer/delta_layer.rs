@@ -952,9 +952,7 @@ struct DeltaValueIter<'a> {
 struct Adapter<'a>(RwLockReadGuard<'a, DeltaLayerInner>);
 
 impl<'a> BlockReader for Adapter<'a> {
-    type BlockLease = PageReadGuard<'static>;
-
-    fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
+    fn read_blk(&self, blknum: u32) -> Result<PageReadGuard<'static>, std::io::Error> {
         self.0.file.as_ref().unwrap().read_blk(blknum)
     }
 }
