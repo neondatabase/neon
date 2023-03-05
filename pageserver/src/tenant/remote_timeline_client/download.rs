@@ -316,9 +316,7 @@ where
             }
             Err(DownloadError::Other(ref err)) => {
                 // Operation failed FAILED_DOWNLOAD_RETRIES times. Time to give up.
-                tracing::error!(
-                    "{description} still failed after {attempts} retries, giving up: {err:?}"
-                );
+                warn!("{description} still failed after {attempts} retries, giving up: {err:?}");
                 return result;
             }
         }
