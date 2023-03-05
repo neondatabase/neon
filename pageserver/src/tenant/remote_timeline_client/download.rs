@@ -308,18 +308,18 @@ where
             }
             // Assume that any other failure might be transient, and the operation might
             // succeed if we just keep trying.
-            Err(err @ DownloadError::Other(_) | err @ DownloadError::Timeout)
-                if attempts < FAILED_DOWNLOAD_WARN_THRESHOLD =>
-            {
+            Err(DownloadError::Other(err)) if attempts < FAILED_DOWNLOAD_WARN_THRESHOLD => {
                 info!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
-            Err(err @ DownloadError::Other(_) | err @ DownloadError::Timeout)
-                if attempts < FAILED_DOWNLOAD_RETRIES =>
-            {
+            Err(DownloadError::Other(err)) if attempts < FAILED_DOWNLOAD_RETRIES => {
                 warn!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
-            Err(err @ DownloadError::Other(_) | err @ DownloadError::Timeout) => {
-                return Err(err);
+            Err(DownloadError::Other(ref err)) => {
+                // Operation failed FAILED_DOWNLOAD_RETRIES times. Time to give up.
+                tracing::error!(
+                    "{description} still failed after {attempts} retries, giving up: {err:?}"
+                );
+                return result;
             }
         }
         // sleep and retry
