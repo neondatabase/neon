@@ -11,8 +11,6 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tokio::pin;
-use tokio_io_timeout::{TimeoutReader, TimeoutWriter};
 
 use tracing::{info, warn};
 
@@ -73,24 +71,18 @@ pub async fn download_layer_file<'a>(
                 )
             })
             .map_err(DownloadError::Other)?;
-            let download = storage.download(&remote_path).await.with_context(|| {
+            let mut download = storage.download(&remote_path).await.with_context(|| {
                 format!(
                     "open a download stream for layer with remote storage path '{remote_path:?}'"
                 )
             })
             .map_err(DownloadError::Other)?;
 
-            let mut reader = TimeoutReader::new(download.download_stream);
-            reader.set_timeout(Some(Duration::from_secs(120)));
-            pin!(reader);
-
-            let mut writer = TimeoutWriter::new(&mut destination_file);
-            writer.set_timeout(Some(Duration::from_secs(120)));
-            pin!(writer);
-
-            let bytes_amount = tokio::io::copy(&mut reader, &mut writer)
-                .await.with_context(|| {
-                    format!("download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
+            let bytes_amount = tokio::time::timeout(Duration::from_secs(120), tokio::io::copy(&mut download.download_stream, &mut destination_file))
+                .await
+                .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
+                .with_context(|| {
+                    format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
                 })
                 .map_err(DownloadError::Other)?;
 

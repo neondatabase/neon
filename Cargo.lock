@@ -2475,7 +2475,6 @@ dependencies = [
  "tenant_size_model",
  "thiserror",
  "tokio",
- "tokio-io-timeout",
  "tokio-postgres",
  "tokio-tar",
  "tokio-util",
