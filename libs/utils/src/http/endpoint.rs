@@ -10,7 +10,7 @@ use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder, RouterService};
 use tokio::task::JoinError;
-use tracing;
+use tracing::{self, info_span, Instrument};
 
 use std::future::Future;
 use std::net::TcpListener;
@@ -31,6 +31,36 @@ static X_REQUEST_ID_HEADER_STR: &str = "x-request-id";
 static X_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static(X_REQUEST_ID_HEADER_STR);
 #[derive(Debug, Default, Clone)]
 struct RequestId(String);
+
+/// Adds a tracing info_span! instrumentation around the handler events.
+/// Use this to distinguish between logs of different HTTP requests.
+pub struct RequestSpan<B, E, R, H>(pub H)
+where
+    B: hyper::body::HttpBody + Send + Sync + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
+    R: Future<Output = Result<Response<B>, E>> + Send + 'static,
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static;
+
+impl<B, E, R, H> RequestSpan<B, E, R, H>
+where
+    B: hyper::body::HttpBody + Send + Sync + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
+    R: Future<Output = Result<Response<B>, E>> + Send + 'static,
+    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+{
+    /// Creates a tracing span around inner request handler and executes the request handler in the contex of that span.
+    /// Use as `|r| RequestSpan(my_handler).handle(r)` instead of `my_handler` as the request handler to get the span enabled.
+    pub async fn handle(self, request: Request<Body>) -> Result<Response<B>, E> {
+        let request_id = request.context::<RequestId>().unwrap_or_default().0;
+
+        let method = request.method().to_owned();
+        let path = request.uri().path().to_owned();
+
+        (self.0)(request)
+            .instrument(info_span!("request", %method, %path, %request_id))
+            .await
+    }
+}
 
 async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
     let request_id = info.context::<RequestId>().unwrap_or_default().0;
@@ -129,7 +159,9 @@ pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
         .middleware(Middleware::post_with_info(
             add_request_id_header_to_response,
         ))
-        .get("/metrics", prometheus_metrics_handler)
+        .get("/metrics", |r| {
+            RequestSpan(prometheus_metrics_handler).handle(r)
+        })
         .err_handler(error::handler)
 }
 
@@ -139,40 +171,43 @@ pub fn attach_openapi_ui(
     spec_mount_path: &'static str,
     ui_mount_path: &'static str,
 ) -> RouterBuilder<hyper::Body, ApiError> {
-    router_builder.get(spec_mount_path, move |_| async move {
-        Ok(Response::builder().body(Body::from(spec)).unwrap())
-    }).get(ui_mount_path, move |_| async move {
-        Ok(Response::builder().body(Body::from(format!(r#"
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-            <title>rweb</title>
-            <link href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@3/swagger-ui.css" rel="stylesheet">
-            </head>
-            <body>
-                <div id="swagger-ui"></div>
-                <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@3/swagger-ui-bundle.js" charset="UTF-8"> </script>
-                <script>
-                    window.onload = function() {{
-                    const ui = SwaggerUIBundle({{
-                        "dom_id": "\#swagger-ui",
-                        presets: [
-                        SwaggerUIBundle.presets.apis,
-                        SwaggerUIBundle.SwaggerUIStandalonePreset
-                        ],
-                        layout: "BaseLayout",
-                        deepLinking: true,
-                        showExtensions: true,
-                        showCommonExtensions: true,
-                        url: "{}",
-                    }})
-                    window.ui = ui;
-                }};
-            </script>
-            </body>
-            </html>
-        "#, spec_mount_path))).unwrap())
-    })
+    router_builder
+        .get(spec_mount_path, move |r| {
+            RequestSpan(move |_| async move { Ok(Response::builder().body(Body::from(spec)).unwrap()) })
+                .handle(r)
+        })
+        .get(ui_mount_path, move |r| RequestSpan( move |_| async move {
+            Ok(Response::builder().body(Body::from(format!(r#"
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                <title>rweb</title>
+                <link href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@3/swagger-ui.css" rel="stylesheet">
+                </head>
+                <body>
+                    <div id="swagger-ui"></div>
+                    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@3/swagger-ui-bundle.js" charset="UTF-8"> </script>
+                    <script>
+                        window.onload = function() {{
+                        const ui = SwaggerUIBundle({{
+                            "dom_id": "\#swagger-ui",
+                            presets: [
+                            SwaggerUIBundle.presets.apis,
+                            SwaggerUIBundle.SwaggerUIStandalonePreset
+                            ],
+                            layout: "BaseLayout",
+                            deepLinking: true,
+                            showExtensions: true,
+                            showCommonExtensions: true,
+                            url: "{}",
+                        }})
+                        window.ui = ui;
+                    }};
+                </script>
+                </body>
+                </html>
+            "#, spec_mount_path))).unwrap())
+        }).handle(r))
 }
 
 fn parse_token(header_value: &str) -> Result<&str, ApiError> {

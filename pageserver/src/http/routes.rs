@@ -10,6 +10,7 @@ use remote_storage::GenericRemoteStorage;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::http::endpoint::RequestSpan;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use super::models::{
@@ -1091,7 +1092,8 @@ pub fn make_router(
             let handler = $handler;
             #[cfg(not(feature = "testing"))]
             let handler = cfg_disabled;
-            handler
+
+            move |r| RequestSpan(handler).handle(r)
         }};
     }
 
@@ -1099,35 +1101,55 @@ pub fn make_router(
         .data(Arc::new(
             State::new(conf, auth, remote_storage).context("Failed to initialize router state")?,
         ))
-        .get("/v1/status", status_handler)
+        .get("/v1/status", |r| RequestSpan(status_handler).handle(r))
         .put(
             "/v1/failpoints",
             testing_api!("manage failpoints", failpoints_handler),
         )
-        .get("/v1/tenant", tenant_list_handler)
-        .post("/v1/tenant", tenant_create_handler)
-        .get("/v1/tenant/:tenant_id", tenant_status)
-        .get("/v1/tenant/:tenant_id/synthetic_size", tenant_size_handler)
-        .put("/v1/tenant/config", update_tenant_config_handler)
-        .get("/v1/tenant/:tenant_id/config", get_tenant_config_handler)
-        .get("/v1/tenant/:tenant_id/timeline", timeline_list_handler)
-        .post("/v1/tenant/:tenant_id/timeline", timeline_create_handler)
-        .post("/v1/tenant/:tenant_id/attach", tenant_attach_handler)
-        .post("/v1/tenant/:tenant_id/detach", tenant_detach_handler)
-        .post("/v1/tenant/:tenant_id/load", tenant_load_handler)
-        .post("/v1/tenant/:tenant_id/ignore", tenant_ignore_handler)
-        .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_detail_handler,
-        )
+        .get("/v1/tenant", |r| RequestSpan(tenant_list_handler).handle(r))
+        .post("/v1/tenant", |r| {
+            RequestSpan(tenant_create_handler).handle(r)
+        })
+        .get("/v1/tenant/:tenant_id", |r| {
+            RequestSpan(tenant_status).handle(r)
+        })
+        .get("/v1/tenant/:tenant_id/synthetic_size", |r| {
+            RequestSpan(tenant_size_handler).handle(r)
+        })
+        .put("/v1/tenant/config", |r| {
+            RequestSpan(update_tenant_config_handler).handle(r)
+        })
+        .get("/v1/tenant/:tenant_id/config", |r| {
+            RequestSpan(get_tenant_config_handler).handle(r)
+        })
+        .get("/v1/tenant/:tenant_id/timeline", |r| {
+            RequestSpan(timeline_list_handler).handle(r)
+        })
+        .post("/v1/tenant/:tenant_id/timeline", |r| {
+            RequestSpan(timeline_create_handler).handle(r)
+        })
+        .post("/v1/tenant/:tenant_id/attach", |r| {
+            RequestSpan(tenant_attach_handler).handle(r)
+        })
+        .post("/v1/tenant/:tenant_id/detach", |r| {
+            RequestSpan(tenant_detach_handler).handle(r)
+        })
+        .post("/v1/tenant/:tenant_id/load", |r| {
+            RequestSpan(tenant_load_handler).handle(r)
+        })
+        .post("/v1/tenant/:tenant_id/ignore", |r| {
+            RequestSpan(tenant_ignore_handler).handle(r)
+        })
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            RequestSpan(timeline_detail_handler).handle(r)
+        })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/get_lsn_by_timestamp",
-            get_lsn_by_timestamp_handler,
+            |r| RequestSpan(get_lsn_by_timestamp_handler).handle(r),
         )
-        .put(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc",
-            timeline_gc_handler,
-        )
+        .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
+            RequestSpan(timeline_gc_handler).handle(r)
+        })
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/compact",
             testing_api!("run timeline compaction", timeline_compact_handler),
@@ -1138,28 +1160,26 @@ pub fn make_router(
         )
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
-            timeline_download_remote_layers_handler_post,
+            |r| RequestSpan(timeline_download_remote_layers_handler_post).handle(r),
         )
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
-            timeline_download_remote_layers_handler_get,
+            |r| RequestSpan(timeline_download_remote_layers_handler_get).handle(r),
         )
-        .delete(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_delete_handler,
-        )
-        .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/layer",
-            layer_map_info_handler,
-        )
+        .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            RequestSpan(timeline_delete_handler).handle(r)
+        })
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id/layer", |r| {
+            RequestSpan(layer_map_info_handler).handle(r)
+        })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
-            layer_download_handler,
+            |r| RequestSpan(layer_download_handler).handle(r),
         )
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
-            evict_timeline_layer_handler,
+            |r| RequestSpan(evict_timeline_layer_handler).handle(r),
         )
-        .get("/v1/panic", always_panic_handler)
+        .get("/v1/panic", |r| RequestSpan(always_panic_handler).handle(r))
         .any(handler_404))
 }
