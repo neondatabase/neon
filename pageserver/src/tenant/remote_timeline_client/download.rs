@@ -28,6 +28,8 @@ async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Er
     fs::File::open(path).await?.sync_all().await
 }
 
+static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
+
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
 /// in the metadata. (In the future, we might do more cross-checks, like CRC validation)
@@ -78,7 +80,7 @@ pub async fn download_layer_file<'a>(
             })
             .map_err(DownloadError::Other)?;
 
-            let bytes_amount = tokio::time::timeout(Duration::from_secs(120), tokio::io::copy(&mut download.download_stream, &mut destination_file))
+            let bytes_amount = tokio::time::timeout(MAX_DOWNLOAD_DURATION, tokio::io::copy(&mut download.download_stream, &mut destination_file))
                 .await
                 .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
                 .with_context(|| {
