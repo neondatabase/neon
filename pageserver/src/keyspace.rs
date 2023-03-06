@@ -10,6 +10,7 @@ pub struct KeySpace {
     /// Contiguous ranges of keys that belong to the key space. In key order,
     /// and with no overlap.
     pub ranges: Vec<Range<Key>>,
+    pub start: Key,
 }
 
 impl KeySpace {
@@ -22,16 +23,20 @@ impl KeySpace {
         let target_nblocks = (target_size / BLCKSZ as u64) as usize;
 
         let mut parts = Vec::new();
-        let mut current_part = Vec::new();
+        let mut current_part: Vec<Range<Key>> = Vec::new();
         let mut current_part_size: usize = 0;
+        let mut part_start = Key::MIN;
         for range in &self.ranges {
             // If appending the next contiguous range in the keyspace to the current
             // partition would cause it to be too large, start a new partition.
             let this_size = key_range_size(range) as usize;
             if current_part_size + this_size > target_nblocks && !current_part.is_empty() {
+                let part_end = current_part.last().unwrap().end;
                 parts.push(KeySpace {
                     ranges: current_part,
+                    start: part_start,
                 });
+                part_start = part_end;
                 current_part = Vec::new();
                 current_part_size = 0;
             }
@@ -44,8 +49,10 @@ impl KeySpace {
                 let next = start.add(target_nblocks as u32);
                 parts.push(KeySpace {
                     ranges: vec![start..next],
+                    start: part_start,
                 });
                 start = next;
+                part_start = next;
                 remain_size -= target_nblocks
             }
             current_part.push(start..range.end);
@@ -56,6 +63,7 @@ impl KeySpace {
         if !current_part.is_empty() {
             parts.push(KeySpace {
                 ranges: current_part,
+                start: part_start,
             });
         }
 
@@ -126,6 +134,7 @@ impl KeySpaceAccum {
         }
         KeySpace {
             ranges: self.ranges,
+            start: Key::MIN,
         }
     }
 }

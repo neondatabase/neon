@@ -2914,7 +2914,18 @@ impl Timeline {
 
         let mut max_deltas = 0;
         let wanted_image_layers = self.wanted_image_layers.lock().unwrap();
-
+        if let Some(wanted) = &*wanted_image_layers {
+            let img_range = partition.start..partition.ranges.last().unwrap().end;
+            if let Some((_start, end)) = wanted.range(..img_range.end).next_back() {
+                if *end > img_range.start {
+                    info!(
+                        "Force generation of layer {}-{} wanted by GC)",
+                        img_range.start, img_range.end
+                    );
+                    return Ok(true);
+                }
+            }
+        }
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
             for (img_range, last_img) in image_coverage {
@@ -2946,26 +2957,6 @@ impl Timeline {
                             img_range.start, img_range.end, num_deltas, img_lsn, lsn
                         );
                         return Ok(true);
-                    }
-                    if num_deltas > 0 {
-                        if let Some(wanted) = &*wanted_image_layers {
-                            if let Some((_start, end)) = wanted.range(..img_range.end).next_back() {
-                                if *end > img_range.start {
-                                    info!(
-                                        "Force generation of layer {}-{} wanted by GC ({} deltas)",
-                                        img_range.start, img_range.end, num_deltas
-                                    );
-                                    return Ok(true);
-                                } else {
-                                    info!(
-                                        "Image {}-{} is not wanted",
-                                        img_range.start, img_range.end
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        info!("No deltas for range  {}-{}", img_range.start, img_range.end);
                     }
                 }
             }
@@ -3003,6 +2994,7 @@ impl Timeline {
             let img_range = start..partition.ranges.last().unwrap().end;
             start = img_range.end;
             if force || self.time_for_new_image_layer(partition, lsn)? {
+                let img_range = partition.start..partition.ranges.last().unwrap().end;
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
@@ -3053,6 +3045,8 @@ impl Timeline {
                 image_layers.push(image_layer);
             }
         }
+        // All wanted layers are taken in account
+        *self.wanted_image_layers.lock().unwrap() = None;
 
         // Sync the new layer to disk before adding it to the layer map, to make sure
         // we don't garbage collect something based on the new layer, before it has
@@ -3834,43 +3828,45 @@ impl Timeline {
                     "keeping {} because it is the latest layer",
                     l.filename().file_name()
                 );
-                let mut to_remove: Vec<Key> = Vec::new();
-                let mut insert_new_range = true;
-                let start = l.get_key_range().start;
-                let mut end = l.get_key_range().end;
+                if l.is_incremental() {
+                    let mut to_remove: Vec<Key> = Vec::new();
+                    let mut insert_new_range = true;
+                    let start = l.get_key_range().start;
+                    let mut end = l.get_key_range().end;
 
-                if start != Key::MIN || end != Key::MAX {
                     // ignore L0 layers
-                    // check if this range overlaps with exited ranges
-                    let mut iter = wanted_image_layers.range_mut(..end);
-                    while let Some((prev_start, prev_end)) = iter.next_back() {
-                        if *prev_end >= start {
-                            // two ranges overlap
-                            if *prev_start <= start {
-                                // combine with prev range
-                                insert_new_range = false;
-                                if *prev_end < end {
-                                    // extend prev range
-                                    *prev_end = end;
-                                    info!("Extend wanted image {}..{}", *prev_start, end);
+                    if start != Key::MIN || end != Key::MAX {
+                        // check if this range overlaps with exited ranges
+                        let mut iter = wanted_image_layers.range_mut(..end);
+                        while let Some((prev_start, prev_end)) = iter.next_back() {
+                            if *prev_end >= start {
+                                // two ranges overlap
+                                if *prev_start <= start {
+                                    // combine with prev range
+                                    insert_new_range = false;
+                                    if *prev_end < end {
+                                        // extend prev range
+                                        *prev_end = end;
+                                        info!("Extend wanted image {}..{}", *prev_start, end);
+                                    }
+                                    break;
+                                } else {
+                                    to_remove.push(*prev_start);
+                                    if *prev_end > end {
+                                        end = *prev_end;
+                                    }
                                 }
-                                break;
                             } else {
-                                to_remove.push(*prev_start);
-                                if *prev_end > end {
-                                    end = *prev_end;
-                                }
+                                break;
                             }
-                        } else {
-                            break;
                         }
-                    }
-                    for key in to_remove {
-                        wanted_image_layers.remove(&key);
-                    }
-                    if insert_new_range {
-                        info!("Wanted image {}..{}", start, end);
-                        wanted_image_layers.insert(start, end);
+                        for key in to_remove {
+                            wanted_image_layers.remove(&key);
+                        }
+                        if insert_new_range {
+                            info!("Wanted image {}..{}", start, end);
+                            wanted_image_layers.insert(start, end);
+                        }
                     }
                 }
                 result.layers_not_updated += 1;
