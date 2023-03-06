@@ -218,7 +218,7 @@ impl SafekeeperPostgresHandler {
     /// Handle IDENTIFY_SYSTEM replication command
     ///
     fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<(), QueryError> {
-        let tli = GlobalTimelines::get(self.ttid)?;
+        let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
 
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn

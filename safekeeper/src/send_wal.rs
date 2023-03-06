@@ -164,7 +164,7 @@ impl ReplicationConn {
     ) -> Result<(), QueryError> {
         let _enter = info_span!("WAL sender", ttid = %spg.ttid).entered();
 
-        let tli = GlobalTimelines::get(spg.ttid)?;
+        let tli = GlobalTimelines::get(spg.ttid).map_err(|e| QueryError::Other(e.into()))?;
 
         // spawn the background thread which receives HotStandbyFeedback messages.
         let bg_timeline = Arc::clone(&tli);

@@ -1,7 +1,7 @@
 //! This module implements Timeline lifecycle management and has all neccessary code
 //! to glue together SafeKeeper and all other background services.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use parking_lot::{Mutex, MutexGuard};
 use postgres_ffi::XLogSegNo;
 use pq_proto::ReplicationFeedback;
@@ -13,6 +13,7 @@ use tokio::{
     time::Instant,
 };
 use tracing::*;
+use utils::http::error::ApiError;
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
@@ -354,6 +355,18 @@ pub enum TimelineError {
     UninitializedWalSegSize(TenantTimelineId),
     #[error("Timeline {0} is not initialized, pg_version is unknown")]
     UninitialinzedPgVersion(TenantTimelineId),
+}
+
+// Convert to HTTP API error.
+impl From<TimelineError> for ApiError {
+    fn from(te: TimelineError) -> ApiError {
+        match te {
+            TimelineError::NotFound(ttid) => {
+                ApiError::NotFound(anyhow!("timeline {} not found", ttid))
+            }
+            _ => ApiError::InternalServerError(anyhow!("{}", te)),
+        }
+    }
 }
 
 /// Timeline struct manages lifecycle (creation, deletion, restore) of a safekeeper timeline.
