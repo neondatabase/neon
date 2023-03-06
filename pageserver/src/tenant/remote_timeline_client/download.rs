@@ -6,11 +6,13 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{error, info, warn};
+
+use tracing::{info, warn};
 
 use crate::config::PageServerConf;
 use crate::tenant::storage_layer::LayerFileName;
@@ -25,6 +27,8 @@ use super::{FAILED_DOWNLOAD_RETRIES, FAILED_DOWNLOAD_WARN_THRESHOLD};
 async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
     fs::File::open(path).await?.sync_all().await
 }
+
+static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -64,22 +68,28 @@ pub async fn download_layer_file<'a>(
             // TODO: this doesn't use the cached fd for some reason?
             let mut destination_file = fs::File::create(&temp_file_path).await.with_context(|| {
                 format!(
-                    "Failed to create a destination file for layer '{}'",
+                    "create a destination file for layer '{}'",
                     temp_file_path.display()
                 )
             })
             .map_err(DownloadError::Other)?;
             let mut download = storage.download(&remote_path).await.with_context(|| {
                 format!(
-                    "Failed to open a download stream for layer with remote storage path '{remote_path:?}'"
+                    "open a download stream for layer with remote storage path '{remote_path:?}'"
                 )
             })
             .map_err(DownloadError::Other)?;
-            let bytes_amount = tokio::io::copy(&mut download.download_stream, &mut destination_file).await.with_context(|| {
-                format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
-            })
-            .map_err(DownloadError::Other)?;
+
+            let bytes_amount = tokio::time::timeout(MAX_DOWNLOAD_DURATION, tokio::io::copy(&mut download.download_stream, &mut destination_file))
+                .await
+                .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
+                .with_context(|| {
+                    format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
+                })
+                .map_err(DownloadError::Other)?;
+
             Ok((destination_file, bytes_amount))
+
         },
         &format!("download {remote_path:?}"),
     ).await?;
@@ -300,7 +310,7 @@ where
             }
             Err(DownloadError::Other(ref err)) => {
                 // Operation failed FAILED_DOWNLOAD_RETRIES times. Time to give up.
-                error!("{description} still failed after {attempts} retries, giving up: {err:?}");
+                warn!("{description} still failed after {attempts} retries, giving up: {err:?}");
                 return result;
             }
         }
