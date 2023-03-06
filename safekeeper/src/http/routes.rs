@@ -1,6 +1,5 @@
 use hyper::{Body, Request, Response, StatusCode, Uri};
 
-use anyhow::Context;
 use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::SkTimelineInfo;
@@ -112,12 +111,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid)
-        // FIXME: Currently, the only errors from `GlobalTimelines::get` will be client errors
-        // because the provided timeline isn't there. However, the method can in theory change and
-        // fail from internal errors later. Remove this comment once it the method returns
-        // something other than `anyhow::Result`.
-        .map_err(ApiError::InternalServerError)?;
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
     let (inmem, state) = tli.get_state();
     let flush_lsn = tli.get_flush_lsn();
 
@@ -253,15 +247,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         local_start_lsn: sk_info.local_start_lsn.0,
     };
 
-    let tli = GlobalTimelines::get(ttid)
-        // `GlobalTimelines::get` returns an error when it can't find the timeline.
-        .with_context(|| {
-            format!(
-                "Couldn't get timeline {} for tenant {}",
-                ttid.timeline_id, ttid.tenant_id
-            )
-        })
-        .map_err(ApiError::NotFound)?;
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
     tli.record_safekeeper_info(&proto_sk_info)
         .await
         .map_err(ApiError::InternalServerError)?;

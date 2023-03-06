@@ -5,7 +5,7 @@
 use crate::safekeeper::ServerInfo;
 use crate::timeline::{Timeline, TimelineError};
 use crate::SafeKeeperConf;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -50,11 +50,11 @@ impl GlobalTimelinesState {
     }
 
     /// Get timeline from the map. Returns error if timeline doesn't exist.
-    fn get(&self, ttid: &TenantTimelineId) -> Result<Arc<Timeline>> {
+    fn get(&self, ttid: &TenantTimelineId) -> Result<Arc<Timeline>, TimelineError> {
         self.timelines
             .get(ttid)
             .cloned()
-            .ok_or_else(|| anyhow!(TimelineError::NotFound(*ttid)))
+            .ok_or(TimelineError::NotFound(*ttid))
     }
 }
 
@@ -240,17 +240,17 @@ impl GlobalTimelines {
     /// Get a timeline from the global map. If it's not present, it doesn't exist on disk,
     /// or was corrupted and couldn't be loaded on startup. Returned timeline is always valid,
     /// i.e. loaded in memory and not cancelled.
-    pub fn get(ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+    pub fn get(ttid: TenantTimelineId) -> Result<Arc<Timeline>, TimelineError> {
         let res = TIMELINES_STATE.lock().unwrap().get(&ttid);
 
         match res {
             Ok(tli) => {
                 if tli.is_cancelled() {
-                    anyhow::bail!(TimelineError::Cancelled(ttid));
+                    return Err(TimelineError::Cancelled(ttid));
                 }
                 Ok(tli)
             }
-            Err(e) => Err(e),
+            _ => res,
         }
     }
 
