@@ -10,8 +10,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use once_cell::sync::Lazy;
 
 use utils::{
+    postgres_backend::QueryError,
     postgres_backend::{AuthType, Handler, PostgresBackend},
-    postgres_backend_async::QueryError,
 };
 
 fn make_tcp_pair() -> (TcpStream, TcpStream) {

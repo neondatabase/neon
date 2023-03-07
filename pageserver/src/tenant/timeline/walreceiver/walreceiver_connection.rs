@@ -33,10 +33,11 @@ use crate::{
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
+use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
-use utils::{lsn::Lsn, postgres_backend_async::is_expected_io_error};
+use utils::lsn::Lsn;
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]

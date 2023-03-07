@@ -20,6 +20,7 @@ use pageserver_api::models::{
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
     PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
+use postgres_backend::{self, is_expected_io_error, PostgresBackend, QueryError};
 use pq_proto::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
@@ -36,7 +37,6 @@ use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
     postgres_backend::AuthType,
-    postgres_backend_async::{self, is_expected_io_error, PostgresBackend, QueryError},
     simple_rcu::RcuReadGuard,
 };
 
@@ -721,7 +721,7 @@ impl PageServerHandler {
 }
 
 #[async_trait::async_trait]
-impl postgres_backend_async::Handler for PageServerHandler {
+impl postgres_backend::Handler for PageServerHandler {
     fn check_auth_jwt(
         &mut self,
         _pgb: &mut PostgresBackend,

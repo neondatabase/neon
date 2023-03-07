@@ -2454,6 +2454,7 @@ dependencies = [
  "postgres",
  "postgres-protocol",
  "postgres-types",
+ "postgres_backend",
  "postgres_connection",
  "postgres_ffi",
  "pq_proto",
@@ -2674,6 +2675,29 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+]
+
+[[package]]
+name = "postgres_backend"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "futures",
+ "once_cell",
+ "pq_proto",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tokio-rustls",
+ "tracing",
+ "utils",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -4507,7 +4531,6 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
- "git-version",
  "heapless",
  "hex",
  "hex-literal",
@@ -4532,7 +4555,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-rustls",
  "tracing",
  "tracing-subscriber",
  "url",
