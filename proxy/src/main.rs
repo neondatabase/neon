@@ -116,11 +116,10 @@ async fn handle_signals() -> anyhow::Result<()> {
                 warn!("received SIGINT, exiting immediately");
                 bail!("interrupted");
             }
-            // TODO: Don't accept new proxy connections.
-            // TODO: Shut down once all exisiting connections have been closed.
             _ = terminate.recv() => {
-                warn!("received SIGTERM, exiting immediately");
-                bail!("terminated");
+                warn!("received SIGTERM, shutting down once all existing connections have closed");
+                proxy::set_exit_on_connections_closed();
+                proxy::exit_if_needed();
             }
         }
     }

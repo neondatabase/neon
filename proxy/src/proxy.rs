@@ -15,6 +15,8 @@ use futures::TryFutureExt;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
+use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{error, info, warn};
@@ -59,6 +61,23 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+static EXIT_ON_ALL_CONNECTIONS_CLOSED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_exit_on_connections_closed() {
+    EXIT_ON_ALL_CONNECTIONS_CLOSED.store(true, Ordering::Release);
+}
+
+pub fn exit_if_needed() {
+    if EXIT_ON_ALL_CONNECTIONS_CLOSED.load(Ordering::Acquire) {
+        let num_accepted = NUM_CONNECTIONS_ACCEPTED_COUNTER.get();
+        let num_closed = NUM_CONNECTIONS_CLOSED_COUNTER.get();
+        if num_accepted == num_closed {
+            info!("All connections closed, terminating");
+            process::exit(0);
+        }
+    }
+}
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -110,6 +129,7 @@ pub async fn handle_ws_client(
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
     scopeguard::defer! {
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
+        exit_if_needed();
     }
 
     let tls = config.tls_config.as_ref();
@@ -151,6 +171,7 @@ async fn handle_client(
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
     scopeguard::defer! {
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
+        exit_if_needed();
     }
 
     let tls = config.tls_config.as_ref();
