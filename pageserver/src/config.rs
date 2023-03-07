@@ -698,6 +698,11 @@ impl PageServerConf {
                 Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
         }
 
+        if let Some(image_creation_threshold) = item.get("image_creation_threshold") {
+            t_conf.image_creation_threshold =
+                Some(parse_toml_u64("image_creation_threshold", image_creation_threshold)?.try_into()?);
+        }
+
         if let Some(gc_horizon) = item.get("gc_horizon") {
             t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
         }

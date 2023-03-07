@@ -129,6 +129,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
         "checkpoint_distance": "15000",
         "gc_period": "80sec",
         "compaction_period": "80sec",
+        "image_creation_threshold": 2,
     }
     env.neon_cli.config_tenant(
         tenant_id=tenant,
@@ -149,7 +150,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
                     "gc_period": 80,
-                    "image_creation_threshold": 3,
+                    "image_creation_threshold": 2,
                     "pitr_interval": 604800,
                 }.items()
             ), f"Unexpected res: {res}"
@@ -174,7 +175,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
     assert updated_effective_config["compaction_target_size"] == 1048576
     assert updated_effective_config["compaction_threshold"] == 10
     assert updated_effective_config["gc_horizon"] == 67108864
-    assert updated_effective_config["image_creation_threshold"] == 3
+    assert updated_effective_config["image_creation_threshold"] == 2
     assert updated_effective_config["pitr_interval"] == "7days"
 
     # restart the pageserver and ensure that the config is still correct
@@ -195,7 +196,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
                     "compaction_threshold": 10,
                     "gc_horizon": 67108864,
                     "gc_period": 80,
-                    "image_creation_threshold": 3,
+                    "image_creation_threshold": 2,
                     "pitr_interval": 604800,
                 }.items()
             ), f"Unexpected res: {res}"
