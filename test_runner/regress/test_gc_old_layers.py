@@ -64,6 +64,3 @@ def test_gc_old_layers(neon_env_builder: NeonEnvBuilder):
 
             physical_size = client.timeline_detail(tenant_id, timeline_id)["current_physical_size"]
             log.info(f"Physical storage size {physical_size}")
-
-    log.info("Done")
-    time.sleep(10000)
