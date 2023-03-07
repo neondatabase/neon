@@ -21,6 +21,7 @@ const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 #[derive(Eq, Hash, PartialEq, Serialize, Debug)]
 pub struct Ids {
     pub endpoint_id: String,
+    pub branch_id: String,
 }
 
 pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<()> {
@@ -74,12 +75,23 @@ fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
                         .find(|l| l.get_name() == "endpoint_id")
                         .unwrap()
                         .get_value();
+                    let branch_id = ms
+                        .get_label()
+                        .iter()
+                        .find(|l| l.get_name() == "branch_id")
+                        .unwrap()
+                        .get_value();
+
                     let value = ms.get_counter().get_value() as u64;
 
-                    debug!("endpoint_id:val - {}: {}", endpoint_id, value);
+                    debug!(
+                        "branch_id {} endpoint_id {} val: {}",
+                        branch_id, endpoint_id, value
+                    );
                     current_metrics.push((
                         Ids {
                             endpoint_id: endpoint_id.to_string(),
+                            branch_id: "".to_string(),
                         },
                         (value, Utc::now()),
                     ));
@@ -131,6 +143,7 @@ async fn collect_metrics_iteration(
                 value,
                 extra: Ids {
                     endpoint_id: curr_key.endpoint_id.clone(),
+                    branch_id: curr_key.branch_id.clone(),
                 },
             })
         })
@@ -172,6 +185,7 @@ async fn collect_metrics_iteration(
                 cached_metrics
                     .entry(Ids {
                         endpoint_id: send_metric.extra.endpoint_id.clone(),
+                        branch_id: send_metric.extra.branch_id.clone(),
                     })
                     // update cached value (add delta) and time
                     .and_modify(|e| {
