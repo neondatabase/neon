@@ -16,7 +16,7 @@ use std::net::Shutdown;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{io, str, thread};
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::QueryError;
 
 use pq_proto::{BeMessage, FeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
 use tokio::sync::watch::Receiver;

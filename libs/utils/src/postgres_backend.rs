@@ -3,11 +3,10 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
-use crate::postgres_backend_async::{log_query_error, short_error, QueryError};
 use crate::sock_split::{BidiStream, ReadStream, WriteStream};
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
-use pq_proto::{BeMessage, FeMessage, FeStartupPacket};
+use pq_proto::{BeMessage, ConnectionError, FeMessage, FeStartupPacket, SQLSTATE_INTERNAL_ERROR};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Write};
@@ -16,6 +15,41 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::*;
+
+pub fn is_expected_io_error(e: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        ConnectionRefused | ConnectionAborted | ConnectionReset
+    )
+}
+
+/// An error, occurred during query processing:
+/// either during the connection ([`ConnectionError`]) or before/after it.
+#[derive(thiserror::Error, Debug)]
+pub enum QueryError {
+    /// The connection was lost while processing the query.
+    #[error(transparent)]
+    Disconnected(#[from] ConnectionError),
+    /// Some other error
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<io::Error> for QueryError {
+    fn from(e: io::Error) -> Self {
+        Self::Disconnected(ConnectionError::Socket(e))
+    }
+}
+
+impl QueryError {
+    pub fn pg_error_code(&self) -> &'static [u8; 5] {
+        match self {
+            Self::Disconnected(_) => b"08006",         // connection failure
+            Self::Other(_) => SQLSTATE_INTERNAL_ERROR, // internal error
+        }
+    }
+}
 
 pub trait Handler {
     /// Handle single query.
@@ -481,5 +515,30 @@ impl PostgresBackend {
         }
 
         Ok(ProcessMsgResult::Continue)
+    }
+}
+
+pub fn short_error(e: &QueryError) -> String {
+    match e {
+        QueryError::Disconnected(connection_error) => connection_error.to_string(),
+        QueryError::Other(e) => format!("{e:#}"),
+    }
+}
+
+pub(super) fn log_query_error(query: &str, e: &QueryError) {
+    match e {
+        QueryError::Disconnected(ConnectionError::Socket(io_error)) => {
+            if is_expected_io_error(io_error) {
+                info!("query handler for '{query}' failed with expected io error: {io_error}");
+            } else {
+                error!("query handler for '{query}' failed with io error: {io_error}");
+            }
+        }
+        QueryError::Disconnected(other_connection_error) => {
+            error!("query handler for '{query}' failed with connection error: {other_connection_error:?}")
+        }
+        QueryError::Other(e) => {
+            error!("query handler for '{query}' failed: {e:?}");
+        }
     }
 }

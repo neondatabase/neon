@@ -14,7 +14,6 @@ pub mod vec_map;
 
 pub mod bin_ser;
 pub mod postgres_backend;
-pub mod postgres_backend_async;
 
 // helper functions for creating and fsyncing
 pub mod crashsafe;

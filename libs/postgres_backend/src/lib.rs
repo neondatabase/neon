@@ -3,7 +3,6 @@
 //! implementation determining how to process the queries. Currently its API
 //! is rather narrow, but we can extend it once required.
 
-use crate::postgres_backend::AuthType;
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use pq_proto::{BeMessage, ConnectionError, FeMessage, FeStartupPacket, SQLSTATE_INTERNAL_ERROR};
@@ -14,6 +13,7 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::{future::Future, task::ready};
 use tracing::{debug, error, info, trace};
+use utils::postgres_backend::AuthType;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_rustls::TlsAcceptor;
@@ -617,7 +617,7 @@ pub fn short_error(e: &QueryError) -> String {
     }
 }
 
-pub(super) fn log_query_error(query: &str, e: &QueryError) {
+pub fn log_query_error(query: &str, e: &QueryError) {
     match e {
         QueryError::Disconnected(ConnectionError::Socket(io_error)) => {
             if is_expected_io_error(io_error) {

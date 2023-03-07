@@ -8,8 +8,8 @@ use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::{net::TcpStream, thread};
 use tracing::{error, info, info_span};
 use utils::{
+    postgres_backend::QueryError,
     postgres_backend::{self, AuthType, PostgresBackend},
-    postgres_backend_async::QueryError,
 };
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);

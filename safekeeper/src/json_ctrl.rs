@@ -13,7 +13,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::id::TenantTimelineId;
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};

@@ -6,7 +6,7 @@ use regex::Regex;
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use tracing::*;
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;

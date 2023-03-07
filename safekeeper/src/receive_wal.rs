@@ -8,7 +8,7 @@ use anyhow::Context;
 use bytes::BytesMut;
 use tracing::*;
 use utils::lsn::Lsn;
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::QueryError;
 
 use crate::safekeeper::ServerInfo;
 use crate::timeline::Timeline;

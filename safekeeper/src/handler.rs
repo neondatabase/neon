@@ -17,7 +17,7 @@ use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use std::str;
 use tracing::info;
 use utils::auth::{Claims, Scope};
-use utils::postgres_backend_async::QueryError;
+use utils::postgres_backend::QueryError;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
