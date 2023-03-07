@@ -95,7 +95,7 @@ fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, _lsn: Lsn) ->
     for key in keys {
         parts.push(KeySpace {
             ranges: vec![current_key..key],
-			start: current_key,
+            start: current_key,
         });
         current_key = key;
     }
