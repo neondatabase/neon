@@ -191,7 +191,8 @@ pub struct SafeKeeperState {
     /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
     /// of last record streamed to everyone). Persisting it helps skipping
     /// recovery in walproposer, generally we compute it from peers. In
-    /// walproposer proto called 'truncate_lsn'.
+    /// walproposer proto called 'truncate_lsn'. Updates are currently drived
+    /// only by walproposer.
     pub peer_horizon_lsn: Lsn,
     /// LSN of the oldest known checkpoint made by pageserver and successfully
     /// pushed to s3. We don't remove WAL beyond it. Persisted only for
@@ -682,7 +683,7 @@ where
             term: self.state.acceptor_state.term,
             vote_given: false as u64,
             flush_lsn: self.flush_lsn(),
-            truncate_lsn: self.state.peer_horizon_lsn,
+            truncate_lsn: self.inmem.peer_horizon_lsn,
             term_history: self.get_term_history(),
             timeline_start_lsn: self.state.timeline_start_lsn,
         };
@@ -878,7 +879,13 @@ where
         if msg.h.commit_lsn != Lsn(0) {
             self.update_commit_lsn(msg.h.commit_lsn)?;
         }
-        self.inmem.peer_horizon_lsn = msg.h.truncate_lsn;
+        // Value calculated by walproposer can always lag:
+        // - safekeepers can forget inmem value and send to proposer lower
+        //   persisted one on restart;
+        // - if we make safekeepers always send persistent value,
+        //   any compute restart would pull it down.
+        // Thus, take max before adopting.
+        self.inmem.peer_horizon_lsn = max(self.inmem.peer_horizon_lsn, msg.h.truncate_lsn);
 
         // Update truncate and commit LSN in control file.
         // To avoid negative impact on performance of extra fsync, do it only
