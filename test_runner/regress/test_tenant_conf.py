@@ -129,7 +129,7 @@ tenant_config={checkpoint_distance = 10000, compaction_target_size = 1048576}"""
         "checkpoint_distance": "15000",
         "gc_period": "80sec",
         "compaction_period": "80sec",
-        "image_creation_threshold": 2,
+        "image_creation_threshold": "2",
     }
     env.neon_cli.config_tenant(
         tenant_id=tenant,
