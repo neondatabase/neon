@@ -2,7 +2,13 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
-
+#
+# Test that GC is able to collect all old layers even if them are forming
+# "stairs" and there are not three delta layers since last image layer.
+# Information about image layers needed to collect old layers should
+# be propagated by GC to compaction task which should take in in account
+# when make a decision which new image layers needs to be created
+#
 @pytest.mark.timeout(10000)
 def test_gc_old_layers(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
