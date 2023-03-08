@@ -3836,8 +3836,7 @@ impl Timeline {
                     let start = l.get_key_range().start;
                     let mut end = l.get_key_range().end;
 
-                    // ignore L0 layers
-                    if start != Key::MIN || end != Key::MAX {
+                    if !LayerMap::is_l0(&*l) {
                         // check if this range overlaps with exited ranges
                         let mut iter = wanted_image_layers.range_mut(..end);
                         while let Some((prev_start, prev_end)) = iter.next_back() {
