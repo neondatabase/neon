@@ -551,6 +551,47 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
+  neon-image-depot:
+    runs-on: [ self-hosted, gen3, small ]
+    needs: [ tag ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Setup go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.19'
+
+      - name: Set up Depot CLI
+        uses: depot/setup-action@v1
+
+      - name: Install Crane & ECR helper
+        run: |
+          go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
+          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
+
+      - name: Configure ECR login
+        run: |
+          mkdir /github/home/.docker/
+          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
+
+      - name: Build and push
+        uses: depot/build-push-action@v1
+        with:
+          # if no depot.json file is at the root of your repo, you must specify the project id
+          project: nrdv0s4kcs
+          push: true
+          tags: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:depot-test
+
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
