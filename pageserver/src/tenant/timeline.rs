@@ -3828,8 +3828,12 @@ impl Timeline {
                     "keeping {} because it is the latest layer",
                     l.filename().file_name()
                 );
-                // collect delta key ranges that need image layers to allow garbage
-                // collecting the layers
+                // Collect delta key ranges that need image layers to allow garbage
+                // collecting the layers.
+                // It is not so obvious whether we need to propagate information only about
+                // delta layers. Image layers can form "stairs" preventing old image from been deleted.
+                // But image layers are in any case less sparse than delta layers. Also we need some
+                // protection from replacing recent image layers with new one after each GC iteration.
                 if l.is_incremental() {
                     let mut to_remove: Vec<Key> = Vec::new();
                     let mut insert_new_range = true;
