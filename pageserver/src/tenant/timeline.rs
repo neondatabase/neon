@@ -3828,6 +3828,8 @@ impl Timeline {
                     "keeping {} because it is the latest layer",
                     l.filename().file_name()
                 );
+                // collect delta key ranges that need image layers to allow garbage
+                // collecting the layers
                 if l.is_incremental() {
                     let mut to_remove: Vec<Key> = Vec::new();
                     let mut insert_new_range = true;
