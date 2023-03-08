@@ -42,8 +42,11 @@ remote_storage.workspace = true
 safekeeper_api.workspace = true
 storage_broker.workspace = true
 utils.workspace = true
+scopeguard.workspace = true
 
 workspace_hack.workspace = true
+crossbeam = "0.8.2"
+rand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

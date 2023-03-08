@@ -8,3 +8,4 @@ pub mod tcp;
 pub mod chan;
 pub mod sync;
 pub mod start_test;
+pub mod wait_group;

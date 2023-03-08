@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, backtrace::Backtrace, io::{self, Write}};
 
 pub type Mutex<T> = parking_lot::Mutex<T>;
 
@@ -60,13 +60,17 @@ pub struct Park {
 
 struct ParkState {
     finished: bool,
+    dbg_signal: u8,
 }
 
 impl Park {
     pub fn new() -> Arc<Park> {
         Arc::new(
             Park {
-                lock: Mutex::new(ParkState { finished: false }),
+                lock: Mutex::new(ParkState {
+                    finished: false,
+                    dbg_signal: 0,
+                }),
                 cvar: parking_lot::Condvar::new(),
             }
         )
@@ -80,6 +84,17 @@ impl Park {
         let mut state = self.lock.lock();
         while !state.finished {
             self.cvar.wait(&mut state);
+
+            // check if debug info was requested
+            if state.dbg_signal != 0 {
+                let bt = Backtrace::capture();
+                println!("DEBUG: thread {:?} is parked at {:?}", std::thread::current().id(), bt);
+                // TODO: fix bad ordering of output
+                io::stdout().flush().unwrap();
+                state.dbg_signal = 0;
+                // trigger a notification to wake up the caller thread
+                self.cvar.notify_all();
+            }
         }
         // finish parking
     }
@@ -89,5 +104,16 @@ impl Park {
         let mut state = self.lock.lock();
         state.finished = true;
         self.cvar.notify_all();
+    }
+
+    /// Send a signal to the thread that is currently parked to print debug info.
+    pub fn debug_print(&self) {
+        let mut state = self.lock.lock();
+        state.dbg_signal = 1;
+        self.cvar.notify_all();
+
+        while !state.dbg_signal == 0 && !state.finished {
+            self.cvar.wait(&mut state);
+        }
     }
 }

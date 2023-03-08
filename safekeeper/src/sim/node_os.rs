@@ -16,10 +16,15 @@ impl NodeOs {
         }
     }
 
+    /// Get the node id.
+    pub fn id(&self) -> NodeId {
+        self.internal.id
+    }
+
     /// Returns a writable pipe. All incoming messages should be polled
     /// with [`network_epoll`]. Always successful.
     pub fn open_tcp(&self, dst: NodeId) -> Tcp {
-        self.world.open_tcp(self.internal, dst)
+        self.world.open_tcp(&self.internal, dst)
     }
 
     /// Returns a channel to receive events from the network.
