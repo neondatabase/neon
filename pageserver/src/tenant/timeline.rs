@@ -2914,18 +2914,7 @@ impl Timeline {
 
         let mut max_deltas = 0;
         let wanted_image_layers = self.wanted_image_layers.lock().unwrap();
-        if let Some(wanted) = &*wanted_image_layers {
-            let img_range = partition.start..partition.ranges.last().unwrap().end;
-            if let Some((_start, end)) = wanted.range(..img_range.end).next_back() {
-                if *end > img_range.start {
-                    info!(
-                        "Force generation of layer {}-{} wanted by GC)",
-                        img_range.start, img_range.end
-                    );
-                    return Ok(true);
-                }
-            }
-        }
+
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
             for (img_range, last_img) in image_coverage {
@@ -2957,6 +2946,26 @@ impl Timeline {
                             img_range.start, img_range.end, num_deltas, img_lsn, lsn
                         );
                         return Ok(true);
+                    }
+                    if num_deltas > 0 {
+                        if let Some(wanted) = &*wanted_image_layers {
+                            if let Some((_start, end)) = wanted.range(..img_range.end).next_back() {
+                                if *end > img_range.start {
+                                    info!(
+                                        "Force generation of layer {}-{} wanted by GC ({} deltas)",
+                                        img_range.start, img_range.end, num_deltas
+                                    );
+                                    return Ok(true);
+                                } else {
+                                    info!(
+                                        "Image {}-{} is not wanted",
+                                        img_range.start, img_range.end
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        info!("No deltas for range  {}-{}", img_range.start, img_range.end);
                     }
                 }
             }
@@ -2994,7 +3003,8 @@ impl Timeline {
             let img_range = start..partition.ranges.last().unwrap().end;
             start = img_range.end;
             if force || self.time_for_new_image_layer(partition, lsn)? {
-                let img_range = partition.start..partition.ranges.last().unwrap().end;
+                let img_range =
+                    partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
@@ -3861,17 +3871,23 @@ impl Timeline {
                                         end = *prev_end;
                                     }
                                 }
-                            } else {
                                 break;
+                            } else {
+                                to_remove.push(*prev_start);
+                                if *prev_end > end {
+                                    end = *prev_end;
+                                }
                             }
+                        } else {
+                            break;
                         }
-                        for key in to_remove {
-                            wanted_image_layers.remove(&key);
-                        }
-                        if insert_new_range {
-                            info!("Wanted image {}..{}", start, end);
-                            wanted_image_layers.insert(start, end);
-                        }
+                    }
+                    for key in to_remove {
+                        wanted_image_layers.remove(&key);
+                    }
+                    if insert_new_range {
+                        info!("Wanted image {}..{}", start, end);
+                        wanted_image_layers.insert(start, end);
                     }
                 }
                 result.layers_not_updated += 1;
