@@ -2,6 +2,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
+
 #
 # Test that GC is able to collect all old layers even if them are forming
 # "stairs" and there are not three delta layers since last image layer.
