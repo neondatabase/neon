@@ -3,12 +3,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-# Test gc_old_layers
-#
-# This test sets fail point at the end of GC, and checks that pageserver
-# normally restarts after it. Also, there should be GC ERRORs in the log,
-# but the fixture checks the log for any unexpected ERRORs after every
-# test anyway, so it doesn't need any special attention here.
 @pytest.mark.timeout(10000)
 def test_gc_old_layers(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
