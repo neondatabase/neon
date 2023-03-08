@@ -32,8 +32,28 @@ static X_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static(X_REQUEST_ID_HE
 #[derive(Debug, Default, Clone)]
 struct RequestId(String);
 
-/// Adds a tracing info_span! instrumentation around the handler events.
-/// Use this to distinguish between logs of different HTTP requests.
+/// Adds a tracing info_span! instrumentation around the handler events,
+/// logs the request start and end events for non-GET requests and non-200 responses.
+///
+/// Use this to distinguish between logs of different HTTP requests: every request handler wrapped
+/// in this type will get request info logged in the wrapping span, including the unique request ID.
+///
+/// There could be other ways to implement similar functionality:
+///
+/// * procmacros placed on top of all handler methods
+/// With all the drawbacks of procmacros, brings no difference implementation-wise,
+/// and little code reduction compared to the existing approach.
+///
+/// * Another `TraitExt` with e.g. the `get_with_span`, `post_with_span` methods to do similar logic,
+/// implemented for [`RouterBuilder`].
+/// Could be simpler, but we don't want to depend on [`routerify`] more, targeting to use other library later.
+///
+/// * In theory, a span guard could've been created in a pre-request middleware and placed into a global collection, to be dropped
+/// later, in a post-response middleware.
+/// Due to suspendable nature of the futures, would give contradictive results which is exactly the opposite of what `tracing-futures`
+/// tries to achive with its `.instrument` used in the current approach.
+///
+/// If needed, a declarative macro to substitute the |r| ... closure boilerplate could be introduced.
 pub struct RequestSpan<B, E, R, H>(pub H)
 where
     B: hyper::body::HttpBody + Send + Sync + 'static,
