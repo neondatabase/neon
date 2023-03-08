@@ -200,11 +200,11 @@ pageserver_send(NeonRequest * request)
 	req_buff = nm_pack_request(request);
 
 	/*
-	 * If pageserver is stopped, the connections from compute node are broken.
-	 * The compute node doesn't notice that immediately, but it will cause the next request to fail, usually on the next query.
-	 * That causes user-visible errors if pageserver is restarted, or the tenant is moved from one pageserver to another.
-	 * See https://github.com/neondatabase/neon/issues/1138
-	 * So try to reestablish connection in case of failure.
+	 * If the pageserver is stopped, the connections from compute node are broken.
+	 * We won't notice that immediately, but it will cause the next request to fail.
+	 * Try to re-establish the connection and retry, before propagating the error to the user, to
+	 * avoid causing query failures for transient network glitches, or if the pageserver is restarted
+	 * or moved.
 	 */
 	while (true)
 	{
