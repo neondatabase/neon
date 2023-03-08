@@ -85,6 +85,8 @@ where
             // Note that we reuse `error::handler` here and not returning and error at all,
             // yet cannot use `!` directly in the method signature due to `routerify::RouterBuilder` limitation.
             // Usage of the error handler also means that we expect only the `ApiError` errors to be raised in this call.
+            //
+            // Panics are not handled separately, there's a `tracing_panic_hook` from another module to do that globally.
             match (self.0)(request).await {
                 Ok(response) => {
                     let response_status = response.status();
