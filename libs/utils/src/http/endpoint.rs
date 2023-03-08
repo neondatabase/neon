@@ -83,6 +83,8 @@ where
             } else {
                 info!("Handling request");
             }
+
+            // note that we have an `err_handler` set below, that would log any `?`
             let response = (self.0)(request).await?;
 
             let response_status = response.status();
