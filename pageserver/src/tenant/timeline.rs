@@ -2728,9 +2728,9 @@ impl Timeline {
         let mut start_lsn = Key::MIN;
 
         for partition in partitioning.parts.iter() {
+            let img_range = start_lsn..partition.ranges.last().unwrap().end;
+            start_lsn = img_range.end;
             if force || self.time_for_new_image_layer(partition, lsn)? {
-                let img_range = start_lsn..partition.ranges.last().unwrap().end;
-                start_lsn = img_range.end;
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
