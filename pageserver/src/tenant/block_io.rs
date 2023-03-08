@@ -51,9 +51,6 @@ where
 ///
 /// A "cursor" for efficiently reading multiple pages from a BlockReader
 ///
-/// A cursor caches the last accessed page, allowing for faster access if the
-/// same block is accessed repeatedly.
-///
 /// You can access the last page with `*cursor`. 'read_blk' returns 'self', so
 /// that in many cases you can use a BlockCursor as a drop-in replacement for
 /// the underlying BlockReader. For example:
