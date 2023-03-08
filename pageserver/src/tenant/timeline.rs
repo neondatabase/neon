@@ -2715,10 +2715,22 @@ impl Timeline {
     ) -> Result<HashMap<LayerFileName, LayerFileMetadata>, PageReconstructError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
+
+        // We need to avoid holes between generated image layers.
+        // Otherwise LayerMap::image_layer_exists will return false if key range of some layer is covered by more than one
+        // image layer with hole between them. In this case such layer can not be utilized by GC.
+        //
+        // How such hole between partitions can appear?
+        // if we have relation with relid=1 and size 100 and relation with relid=2 with size 200 then result of
+        // KeySpace::partition may contain partitions <100000000..100000099> and <200000000..200000199>.
+        // If there is delta layer <100000000..300000000> then it never be garbage collected because
+        // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
+        let mut start_lsn = Key::MIN;
+
         for partition in partitioning.parts.iter() {
             if force || self.time_for_new_image_layer(partition, lsn)? {
-                let img_range =
-                    partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
+                let img_range = start_lsn..partition.ranges.last().unwrap().end;
+                start_lsn = img_range.end;
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
@@ -2732,7 +2744,6 @@ impl Timeline {
                         "failpoint image-layer-writer-fail-before-finish"
                     )))
                 });
-
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
