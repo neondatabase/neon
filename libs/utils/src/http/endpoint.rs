@@ -54,23 +54,21 @@ struct RequestId(String);
 /// tries to achive with its `.instrument` used in the current approach.
 ///
 /// If needed, a declarative macro to substitute the |r| ... closure boilerplate could be introduced.
-pub struct RequestSpan<B, E, R, H>(pub H)
+pub struct RequestSpan<E, R, H>(pub H)
 where
-    B: hyper::body::HttpBody + Send + Sync + 'static,
     E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
-    R: Future<Output = Result<Response<B>, E>> + Send + 'static,
+    R: Future<Output = Result<Response<Body>, E>> + Send + 'static,
     H: Fn(Request<Body>) -> R + Send + Sync + 'static;
 
-impl<B, E, R, H> RequestSpan<B, E, R, H>
+impl<E, R, H> RequestSpan<E, R, H>
 where
-    B: hyper::body::HttpBody + Send + Sync + 'static,
     E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
-    R: Future<Output = Result<Response<B>, E>> + Send + 'static,
+    R: Future<Output = Result<Response<Body>, E>> + Send + 'static,
     H: Fn(Request<Body>) -> R + Send + Sync + 'static,
 {
     /// Creates a tracing span around inner request handler and executes the request handler in the contex of that span.
     /// Use as `|r| RequestSpan(my_handler).handle(r)` instead of `my_handler` as the request handler to get the span enabled.
-    pub async fn handle(self, request: Request<Body>) -> Result<Response<B>, E> {
+    pub async fn handle(self, request: Request<Body>) -> Result<Response<Body>, E> {
         let request_id = request.context::<RequestId>().unwrap_or_default().0;
         let method = request.method();
         let path = request.uri().path();
@@ -84,17 +82,21 @@ where
                 info!("Handling request");
             }
 
-            // note that we have an `err_handler` set below, that would log any `?`
-            let response = (self.0)(request).await?;
-
-            let response_status = response.status();
-            if log_quietly && response_status.is_success() {
-                debug!("Request handled, status: {response_status}");
-            } else {
-                info!("Request handled, status: {response_status}");
+            // Note that we reuse `error::handler` here and not returning and error at all,
+            // yet cannot use `!` directly in the method signature due to `routerify::RouterBuilder` limitation.
+            // Usage of the error handler also means that we expect only the `ApiError` errors to be raised in this call.
+            match (self.0)(request).await {
+                Ok(response) => {
+                    let response_status = response.status();
+                    if log_quietly && response_status.is_success() {
+                        debug!("Request handled, status: {response_status}");
+                    } else {
+                        info!("Request handled, status: {response_status}");
+                    }
+                    Ok(response)
+                }
+                Err(e) => Ok(error::handler(e.into()).await),
             }
-
-            Ok(response)
         }
         .instrument(request_span)
         .await
