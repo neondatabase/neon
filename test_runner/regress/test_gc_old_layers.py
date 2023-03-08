@@ -8,7 +8,6 @@ def test_gc_old_layers(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
-    # Use aggressive GC and checkpoint settings, so that we also exercise GC during the test
     tenant_id, _ = env.neon_cli.create_tenant(
         conf={
             # disable default GC and compaction
