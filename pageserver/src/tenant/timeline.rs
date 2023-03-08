@@ -3045,7 +3045,7 @@ impl Timeline {
                 image_layers.push(image_layer);
             }
         }
-        // All wanted layers are taken in account
+        // All wanted layers are taken in account by time_for_new_image_layer
         *self.wanted_image_layers.lock().unwrap() = None;
 
         // Sync the new layer to disk before adding it to the layer map, to make sure
