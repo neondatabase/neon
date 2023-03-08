@@ -1,5 +1,6 @@
 import psycopg2
 import pytest
+import subprocess
 from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
 
 
@@ -134,3 +135,10 @@ def test_forward_params_to_client(static_proxy: NeonProxy):
             for name, value in cur.fetchall():
                 # Check that proxy has forwarded this parameter.
                 assert conn.get_parameter_status(name) == value
+
+def test_close_on_connections_exit(static_proxy: NeonProxy):
+    with static_proxy.connect(options="project=irrelevant") as conn1:
+        with static_proxy.connect(options="project=irrelevant") as conn2:
+            static_proxy._popen.terminate()
+            with pytest.raises(subprocess.TimeoutExpired):
+                static_proxy._popen.wait(timeout=2)
