@@ -3,14 +3,14 @@ use crate::http::error;
 use anyhow::{anyhow, Context};
 use hyper::header::{HeaderName, AUTHORIZATION};
 use hyper::http::HeaderValue;
+use hyper::Method;
 use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
-use hyper::{Method, StatusCode};
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
 use routerify::{Middleware, RequestInfo, Router, RouterBuilder, RouterService};
 use tokio::task::JoinError;
-use tracing::{self, info_span, Instrument};
+use tracing::{self, debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
 use std::net::TcpListener;
@@ -52,41 +52,31 @@ where
     /// Use as `|r| RequestSpan(my_handler).handle(r)` instead of `my_handler` as the request handler to get the span enabled.
     pub async fn handle(self, request: Request<Body>) -> Result<Response<B>, E> {
         let request_id = request.context::<RequestId>().unwrap_or_default().0;
+        let method = request.method();
+        let path = request.uri().path();
+        let request_span = info_span!("request", %method, %path, %request_id);
 
-        let method = request.method().to_owned();
-        let path = request.uri().path().to_owned();
+        let log_quietly = method == Method::GET;
+        async move {
+            if log_quietly {
+                debug!("Handling request");
+            } else {
+                info!("Handling request");
+            }
+            let response = (self.0)(request).await?;
 
-        (self.0)(request)
-            .instrument(info_span!("request", %method, %path, %request_id))
-            .await
+            let response_status = response.status();
+            if log_quietly && response_status.is_success() {
+                debug!("Request handled, status: {response_status}");
+            } else {
+                info!("Request handled, status: {response_status}");
+            }
+
+            Ok(response)
+        }
+        .instrument(request_span)
+        .await
     }
-}
-
-async fn logger(res: Response<Body>, info: RequestInfo) -> Result<Response<Body>, ApiError> {
-    let request_id = info.context::<RequestId>().unwrap_or_default().0;
-
-    // cannot factor out the Level to avoid the repetition
-    // because tracing can only work with const Level
-    // which is not the case here
-
-    if info.method() == Method::GET && res.status() == StatusCode::OK {
-        tracing::debug!(
-            "{} {} {} {}",
-            info.method(),
-            info.uri().path(),
-            request_id,
-            res.status()
-        );
-    } else {
-        tracing::info!(
-            "{} {} {} {}",
-            info.method(),
-            info.uri().path(),
-            request_id,
-            res.status()
-        );
-    }
-    Ok(res)
 }
 
 async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -126,12 +116,6 @@ pub fn add_request_id_middleware<B: hyper::body::HttpBody + Send + Sync + 'stati
                 request_id.to_string()
             }
         };
-
-        if req.method() == Method::GET {
-            tracing::debug!("{} {} {}", req.method(), req.uri().path(), request_id);
-        } else {
-            tracing::info!("{} {} {}", req.method(), req.uri().path(), request_id);
-        }
         req.set_context(RequestId(request_id));
 
         Ok(req)
@@ -155,7 +139,6 @@ async fn add_request_id_header_to_response(
 pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
     Router::builder()
         .middleware(add_request_id_middleware())
-        .middleware(Middleware::post_with_info(logger))
         .middleware(Middleware::post_with_info(
             add_request_id_header_to_response,
         ))
@@ -269,7 +252,7 @@ where
             async move {
                 let headers = response.headers_mut();
                 if headers.contains_key(&name) {
-                    tracing::warn!(
+                    warn!(
                         "{} response already contains header {:?}",
                         request_info.uri(),
                         &name,
@@ -309,7 +292,7 @@ pub fn serve_thread_main<S>(
 where
     S: Future<Output = ()> + Send + Sync,
 {
-    tracing::info!("Starting an HTTP endpoint at {}", listener.local_addr()?);
+    info!("Starting an HTTP endpoint at {}", listener.local_addr()?);
 
     // Create a Service from the router above to handle incoming requests.
     let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();
