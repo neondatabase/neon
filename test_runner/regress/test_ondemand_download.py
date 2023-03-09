@@ -528,7 +528,7 @@ def test_compaction_downloads_on_demand_without_image_creation(
 
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     assert not layers.in_memory_layers, "no inmemory layers expected after post-commit checkpoint"
-    assert len(layers.historic_layers) == 1 + 2, "should have inidb layer and 2 deltas"
+    assert len(layers.historic_layers) == 1 + 2, "should have initdb layer and 2 deltas"
 
     layer_sizes = 0
 
