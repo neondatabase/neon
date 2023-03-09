@@ -7,10 +7,10 @@ use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::safekeeper::ServerInfo;
 use crate::timeline::Timeline;
+use crate::wal_service::ConnectionId;
 use crate::GlobalTimelines;
 use anyhow::{anyhow, Context};
 use bytes::BytesMut;
-use nix::unistd::gettid;
 use postgres_backend::CopyStreamHandlerEnd;
 use postgres_backend::PostgresBackend;
 use postgres_backend::PostgresBackendReader;
@@ -70,7 +70,7 @@ impl SafekeeperPostgresHandler {
         let peer_addr = *pgb.get_peer_addr();
         let res = tokio::select! {
             // todo: add read|write .context to these errors
-            r = read_network(self.ttid, &mut pgb_reader, peer_addr, msg_tx, &mut acceptor_handle, msg_rx, reply_tx) => r,
+            r = read_network(self.ttid, self.conn_id, &mut pgb_reader, peer_addr, msg_tx, &mut acceptor_handle, msg_rx, reply_tx) => r,
             r = write_network(pgb, reply_rx) => r,
         };
 
@@ -119,6 +119,7 @@ async fn read_message(
 /// tell the error.
 async fn read_network(
     ttid: TenantTimelineId,
+    conn_id: ConnectionId,
     pgb_reader: &mut PostgresBackendReader,
     peer_addr: SocketAddr,
     msg_tx: Sender<ProposerAcceptorMessage>,
@@ -151,7 +152,8 @@ async fn read_network(
     };
 
     *acceptor_handle = Some(
-        WalAcceptor::spawn(tli.clone(), msg_rx, reply_tx).context("spawn WalAcceptor thread")?,
+        WalAcceptor::spawn(tli.clone(), msg_rx, reply_tx, conn_id)
+            .context("spawn WalAcceptor thread")?,
     );
 
     // Forward all messages to WalAcceptor
@@ -205,6 +207,7 @@ impl WalAcceptor {
         tli: Arc<Timeline>,
         msg_rx: Receiver<ProposerAcceptorMessage>,
         reply_tx: Sender<AcceptorProposerMessage>,
+        conn_id: ConnectionId,
     ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
         let thread_name = format!("WAL acceptor {}", tli.ttid);
         thread::Builder::new()
@@ -223,7 +226,7 @@ impl WalAcceptor {
                 let span_ttid = wa.tli.ttid; // satisfy borrow checker
                 runtime.block_on(
                     wa.run()
-                        .instrument(info_span!("WAL acceptor", tid = %gettid(), ttid = %span_ttid)),
+                        .instrument(info_span!("WAL acceptor", cid = %conn_id, ttid = %span_ttid)),
                 )
             })
             .map_err(anyhow::Error::from)

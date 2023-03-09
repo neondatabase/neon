@@ -3,7 +3,6 @@
 //!   receive WAL from wal_proposer and send it to WAL receivers
 //!
 use anyhow::{Context, Result};
-use nix::unistd::gettid;
 use postgres_backend::QueryError;
 use std::{future, thread};
 use tokio::net::TcpStream;
@@ -27,17 +26,19 @@ pub fn thread_main(conf: SafeKeeperConf, pg_listener: std::net::TcpListener) {
             // Tokio's from_std won't do this for us, per its comment.
             pg_listener.set_nonblocking(true)?;
             let listener = tokio::net::TcpListener::from_std(pg_listener)?;
+            let mut connection_count: ConnectionCount = 0;
 
             loop {
                 match listener.accept().await {
                     Ok((socket, peer_addr)) => {
                         debug!("accepted connection from {}", peer_addr);
                         let conf = conf.clone();
+                        let conn_id = issue_connection_id(&mut connection_count);
 
                         let _ = thread::Builder::new()
                             .name("WAL service thread".into())
                             .spawn(move || {
-                                if let Err(err) = handle_socket(socket, conf) {
+                                if let Err(err) = handle_socket(socket, conf, conn_id) {
                                     error!("connection handler exited: {}", err);
                                 }
                             })
@@ -54,8 +55,12 @@ pub fn thread_main(conf: SafeKeeperConf, pg_listener: std::net::TcpListener) {
 
 /// This is run by `thread_main` above, inside a background thread.
 ///
-fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryError> {
-    let _enter = info_span!("", tid = %gettid()).entered();
+fn handle_socket(
+    socket: TcpStream,
+    conf: SafeKeeperConf,
+    conn_id: ConnectionId,
+) -> Result<(), QueryError> {
+    let _enter = info_span!("", cid = %conn_id).entered();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -68,7 +73,7 @@ fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryErr
         None => AuthType::Trust,
         Some(_) => AuthType::NeonJWT,
     };
-    let mut conn_handler = SafekeeperPostgresHandler::new(conf);
+    let mut conn_handler = SafekeeperPostgresHandler::new(conf, conn_id);
     let pgbackend = PostgresBackend::new(socket, auth_type, None)?;
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.
@@ -78,4 +83,13 @@ fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryErr
     )?;
 
     Ok(())
+}
+
+/// Unique WAL service connection ids are logged in spans for observability.
+pub type ConnectionId = u32;
+pub type ConnectionCount = u32;
+
+pub fn issue_connection_id(count: &mut ConnectionCount) -> ConnectionId {
+    *count = count.wrapping_add(1);
+    *count
 }

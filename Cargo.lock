@@ -3333,7 +3333,6 @@ dependencies = [
  "humantime",
  "hyper",
  "metrics",
- "nix",
  "once_cell",
  "parking_lot",
  "postgres",

@@ -8,6 +8,7 @@ use tracing::{info, info_span, Instrument};
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
+use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::QueryError;
 use postgres_backend::{self, PostgresBackend};
@@ -28,6 +29,8 @@ pub struct SafekeeperPostgresHandler {
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
     pub ttid: TenantTimelineId,
+    /// Unique connection id is logged in spans for observability.
+    pub conn_id: ConnectionId,
     claims: Option<Claims>,
 }
 
@@ -181,13 +184,14 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf) -> Self {
+    pub fn new(conf: SafeKeeperConf, conn_id: u32) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
             tenant_id: None,
             timeline_id: None,
             ttid: TenantTimelineId::empty(),
+            conn_id,
             claims: None,
         }
     }
