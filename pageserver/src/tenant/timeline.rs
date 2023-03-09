@@ -71,7 +71,7 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use walreceiver::spawn_connection_manager_task;
 
-use super::layer_map::BatchedUpdates;
+use super::measured_layer_map::{BatchedUpdates, MeasuredLayerMap};
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset};
@@ -113,7 +113,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
+    pub(super) layers: RwLock<MeasuredLayerMap>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -1039,7 +1039,7 @@ impl Timeline {
         &self,
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
-        batch_updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+        batch_updates: &mut BatchedUpdates<'_>,
     ) -> anyhow::Result<bool> {
         use super::layer_map::Replacement;
 
@@ -1189,7 +1189,7 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: RwLock::new(LayerMap::default()),
+                layers: RwLock::new(MeasuredLayerMap::default()),
 
                 walredo_mgr,
 
@@ -1948,7 +1948,7 @@ impl Timeline {
         // we cannot remove layers otherwise, since gc and compaction will race
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         layer: Arc<dyn PersistentLayer>,
-        updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
+        updates: &mut BatchedUpdates<'_>,
     ) -> anyhow::Result<()> {
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
