@@ -1243,11 +1243,11 @@ impl Tenant {
             "Cannot run GC iteration on inactive tenant"
         );
 
-        let gc_result = self
-            .gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
-            .await;
+        
 
-        gc_result
+        self
+            .gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
+            .await
     }
 
     /// Perform one compaction iteration.
