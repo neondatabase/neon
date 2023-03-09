@@ -611,13 +611,24 @@ def test_compaction_downloads_on_demand_with_image_creation(
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     assert not layers.in_memory_layers, "no inmemory layers expected after post-commit checkpoint"
 
+    total_populated_layers = (
+        pageserver_http.get_metrics().query_one("pageserver_ondisk_layers").value
+    )
     kinds_before: DefaultDict[str, int] = defaultdict(int)
+    remotes_before = 0
 
     for layer in layers.historic_layers:
         kinds_before[layer.kind] += 1
+        if layer.remote:
+            remotes_before += 1
         pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
 
     assert dict(kinds_before) == {"Delta": 4}
+    assert remotes_before == 0
+
+    post_eviction_total_layers = (
+        pageserver_http.get_metrics().query_one("pageserver_ondisk_layers").value
+    )
 
     # now having evicted all layers, reconfigure to have lower image creation
     # threshold to expose image creation to downloading all of the needed
@@ -628,10 +639,25 @@ def test_compaction_downloads_on_demand_with_image_creation(
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     kinds_after: DefaultDict[str, int] = defaultdict(int)
+    remotes_after = 0
     for layer in layers.historic_layers:
         kinds_after[layer.kind] += 1
+        if layer.remote:
+            remotes_after += 1
+        log.info(layer)
 
     assert dict(kinds_after) == {"Delta": 4, "Image": 1}
+
+    post_compaction_total_layers = (
+        pageserver_http.get_metrics().query_one("pageserver_ondisk_layers").value
+    )
+
+    # assumption: floats here are small enough to compare with integers safely
+    # writing a separate test to check these seems overkill
+    assert total_populated_layers == post_eviction_total_layers + 4
+    # corrected with remotes_after because only 3 out of 4 seem to be usually
+    # required for layer creation
+    assert post_compaction_total_layers == total_populated_layers + 1 - remotes_after
 
 
 def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
