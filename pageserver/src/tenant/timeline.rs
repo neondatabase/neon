@@ -3762,7 +3762,7 @@ impl Timeline {
         }
 
         let mut layers_to_remove = Vec::new();
-        let mut wanted_image_layers = KeySpace::new();
+        let mut wanted_image_layers = KeySpace::default();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
