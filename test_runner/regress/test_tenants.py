@@ -55,10 +55,10 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
 
 
 def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
+    """Tests tenants with and without wal acceptors"""
     neon_env_builder.num_safekeepers = 3
 
     env = neon_env_builder.init_start()
-    """Tests tenants with and without wal acceptors"""
     tenant_1, _ = env.neon_cli.create_tenant()
     tenant_2, _ = env.neon_cli.create_tenant()
 
