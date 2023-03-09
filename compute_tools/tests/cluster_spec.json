@@ -178,6 +178,11 @@
                 "name": "neon.pageserver_connstring",
                 "value": "host=127.0.0.1 port=6400",
                 "vartype": "string"
+            },
+            {
+                "name": "test.escaping",
+                "value": "here's a backslash \\ and a quote ' and a double-quote \" hooray",
+                "vartype": "string"
             }
         ]
     },
