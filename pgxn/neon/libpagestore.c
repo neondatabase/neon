@@ -32,6 +32,9 @@
 
 #define PageStoreTrace DEBUG5
 
+#define MAX_RECONNECT_ATTEMPTS 5
+#define RECONNECT_INTERVAL_USEC 1000000
+
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
 
@@ -190,7 +193,7 @@ static void
 pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
-	bool retry = true;
+	int n_reconnect_attempts = 0;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
@@ -200,11 +203,11 @@ pageserver_send(NeonRequest * request)
 	req_buff = nm_pack_request(request);
 
 	/*
-	 * If the pageserver is stopped, the connections from compute node are broken.
-	 * We won't notice that immediately, but it will cause the next request to fail.
-	 * Try to re-establish the connection and retry, before propagating the error to the user, to
-	 * avoid causing query failures for transient network glitches, or if the pageserver is restarted
-	 * or moved.
+	 * If pageserver is stopped, the connections from compute node are broken.
+	 * The compute node doesn't notice that immediately, but it will cause the next request to fail, usually on the next query.
+	 * That causes user-visible errors if pageserver is restarted, or the tenant is moved from one pageserver to another.
+	 * See https://github.com/neondatabase/neon/issues/1138
+	 * So try to reestablish connection in case of failure.
 	 */
 	while (true)
 	{
@@ -222,10 +225,12 @@ pageserver_send(NeonRequest * request)
 		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-			if (retry)
+			if (n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
 			{
 				neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
-				retry = false; /* do just one reconnect attempt */
+				if (n_reconnect_attempts != 0) /* do not sleep before first reconnect attempt, assuming that pageserver is already restarted */
+					pg_usleep(RECONNECT_INTERVAL_USEC);
+				n_reconnect_attempts += 1;
 				continue;
 			}
 			else
