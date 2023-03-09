@@ -1,12 +1,12 @@
 # This test spawns pgbench in a thread in the background and concurrently restarts pageserver,
 # checking how client is able to transparently restore connection to pageserver
 #
-import pytest
 import threading
 import time
+
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, PgBin, Postgres
-
 
 
 # Test restarting page server, while safekeeper and compute node keep
