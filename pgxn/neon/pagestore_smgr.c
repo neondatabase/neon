@@ -1832,6 +1832,14 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	};
 
 	/*
+	 * It is possible that we need to read a page through the neon SMgr
+	 * in the backend that is replaying the WAL. In that case, we can't
+	 * wait for that page to be replayed.
+	 */
+	if (RecoveryInProgress())
+		XLogWaitForReplayOf(request_lsn);
+
+	/*
 	 * Try to find prefetched page in the list of received pages.
 	 */
 	entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
@@ -2583,4 +2591,63 @@ smgr_init_neon(void)
 
 	smgr_init_standard();
 	neon_init();
+}
+
+
+/*
+ * Return whether we can skip the redo for this block.
+ * 
+ * The conditions for skipping the IO are:
+ *
+ * - The block is not in the shared buffers
+ * - The block is not in the file cache (or is evicted from that cache)
+ */
+static bool
+neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
+{
+	XLogRecPtr	end_recptr = record->EndRecPtr;
+	XLogRecPtr	prev_end_recptr = record->ReadRecPtr - 1;
+	RelFileNode	rnode;
+	ForkNumber	forknum;
+	BlockNumber	blkno;
+	BufferTag	tag;
+	uint32		hash;
+	LWLock	   *partitionLock;
+	Buffer		buffer;
+	bool		filter_redo;
+
+#if PG_VERSION_NUM < 150000
+	if (!XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blkno))
+		elog(PANIC, "failed to locate backup block with ID %d", block_id);
+#else
+	XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blkno);
+#endif
+
+	INIT_BUFFERTAG(tag, rnode, forknum, blkno);
+	hash = BufTableHashCode(&tag);
+	partitionLock = BufMappingPartitionLock(hash);
+
+	/*
+	 * Lock the partition of shared_buffers so that it can't be updated
+	 * concurrently.
+	 */
+	LWLockAcquire(partitionLock, LW_SHARED);
+
+	/* Try to find the relevant buffer */
+	buffer = BufTableLookup(&tag, hash);
+
+	filter_redo = buffer <= 0;
+
+	/* we don't have the buffer in memory, update lwLsn past this record */
+	if (filter_redo)
+	{
+		SetLastWrittenLSNForBlock(end_recptr, rnode, forknum, blkno);
+		lfc_evict(rnode, forknum, blkno);
+	}
+	else
+	{
+		SetLastWrittenLSNForBlock(prev_end_recptr, rnode, forknum, blkno);
+	}
+
+	LWLockRelease(partitionLock);
 }

@@ -371,6 +371,71 @@ lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 }
 
 /*
+ * Evict a page (if present) from the local file cache
+ */
+void
+lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
+{
+	BufferTag tag;
+	FileCacheEntry* entry;
+	ssize_t rc;
+	bool found;
+	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
+	uint32 hash;
+
+	if (lfc_size_limit == 0) /* fast exit if file cache is disabled */
+		return;
+
+	INIT_BUFFERTAG(tag, rnode, forkNum, (blkno & ~(BLOCKS_PER_CHUNK-1)));
+
+	hash = get_hash_value(lfc_hash, &tag);
+
+	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
+	entry = hash_search_with_hash_value(lfc_hash, &tag, hash, HASH_FIND, &found);
+
+	if (!found)
+	{
+		/* nothing to do */
+		LWLockRelease(lfc_lock);
+		return;
+	}
+
+	/* remove the page from the cache */
+	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
+
+	/*
+	 * If the chunk has no live entries, we can position the chunk to be
+	 * recycled first.
+	 */
+	if (entry->bitmap[chunk_offs >> 5] == 0)
+	{
+		bool has_remaining_pages;
+
+		for (int i = 0; i < (BLOCKS_PER_CHUNK / 32); i++) {
+			if (entry->bitmap[i] != 0)
+				has_remaining_pages = true;
+		}
+
+		/*
+		 * Put the entry at the position that is first to be reclaimed when
+		 * we have no cached pages remaining in the chunk
+		 */
+		if (!has_remaining_pages)
+		{
+			dlist_delete(&entry->lru_node);
+			dlist_push_head(&lfc_ctl->lru, &entry->lru_node);
+		}
+	}
+
+	/*
+	 * Done: apart from empty chunks, we don't move chunks in the LRU when
+	 * they're empty because eviction isn't usage.
+	 */
+
+	LWLockRelease(lfc_lock);
+}
+
+/*
  * Try to read page from local cache.
  * Returns true if page is found in local cache.
  * In case of error lfc_size_limit is set to zero to disable any further opera-tins with cache.
@@ -527,7 +592,6 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		entry->bitmap[chunk_offs >> 5] |= (1 << (chunk_offs & 31));
 	LWLockRelease(lfc_lock);
 }
-
 
 /*
  * Record structure holding the to be exposed cache data.
