@@ -6,7 +6,7 @@ use tracing::debug;
 ///
 /// Represents a set of Keys, in a compact form.
 ///
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct KeySpace {
     /// Contiguous ranges of keys that belong to the key space. In key order,
     /// and with no overlap.
@@ -115,13 +115,6 @@ impl KeySpace {
             Err(0) => false,
             Err(index) => self.ranges[index - 1].end > range.start,
         }
-    }
-
-    ///
-    /// Construct empty key space
-    ///
-    pub fn new() -> Self {
-        KeySpace { ranges: Vec::new() }
     }
 }
 
