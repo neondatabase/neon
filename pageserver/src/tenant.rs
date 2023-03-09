@@ -1243,10 +1243,7 @@ impl Tenant {
             "Cannot run GC iteration on inactive tenant"
         );
 
-        
-
-        self
-            .gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
+        self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
             .await
     }
 

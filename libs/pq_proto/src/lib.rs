@@ -312,11 +312,9 @@ impl FeMessage {
                 b'c' => Ok(Some(FeMessage::CopyDone)),
                 b'f' => Ok(Some(FeMessage::CopyFail)),
                 b'p' => Ok(Some(FeMessage::PasswordMessage(body))),
-                tag => {
-                    Err(ConnectionError::Protocol(format!(
-                        "unknown message tag: {tag},'{body:?}'"
-                    )))
-                }
+                tag => Err(ConnectionError::Protocol(format!(
+                    "unknown message tag: {tag},'{body:?}'"
+                ))),
             }
         })
     }
