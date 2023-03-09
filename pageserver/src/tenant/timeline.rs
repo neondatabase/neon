@@ -3061,7 +3061,7 @@ impl Timeline {
             }
         }
         // All wanted layers are taken in account by time_for_new_image_layer.
-        // The watend_image_layers could get updated out of turn and we could
+        // The wanted_image_layers could get updated out of turn and we could
         // clear something which hasn't been looked at all. This is fine, because
         // next gc round any wanted would get added back in.
         *self.wanted_image_layers.lock().unwrap() = None;
