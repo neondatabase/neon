@@ -13,7 +13,7 @@
 # script that checks every feature.
 #
 # manual-range-contains wants
-#   !(8..=MAX_STARTUP_PACKET_LENGTH).contains(&len)
+#   !(4..=MAX_STARTUP_PACKET_LENGTH).contains(&len)
 # instead of
 #   len < 4 || len > MAX_STARTUP_PACKET_LENGTH
 # , let's disagree.
