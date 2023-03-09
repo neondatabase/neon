@@ -28,7 +28,28 @@ mod pg_helpers_tests {
 
         assert_eq!(
             spec.cluster.settings.as_pg_settings(),
-            "fsync = off\nwal_level = replica\nhot_standby = on\nneon.safekeepers = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'\nwal_log_hints = on\nlog_connections = on\nshared_buffers = 32768\nport = 55432\nmax_connections = 100\nmax_wal_senders = 10\nlisten_addresses = '0.0.0.0'\nwal_sender_timeout = 0\npassword_encryption = md5\nmaintenance_work_mem = 65536\nmax_parallel_workers = 8\nmax_worker_processes = 8\nneon.tenant_id = 'b0554b632bd4d547a63b86c3630317e8'\nmax_replication_slots = 10\nneon.timeline_id = '2414a61ffc94e428f14b5758fe308e13'\nshared_preload_libraries = 'neon'\nsynchronous_standby_names = 'walproposer'\nneon.pageserver_connstring = 'host=127.0.0.1 port=6400'"
+            r#"fsync = off
+wal_level = replica
+hot_standby = on
+neon.safekeepers = '127.0.0.1:6502,127.0.0.1:6503,127.0.0.1:6501'
+wal_log_hints = on
+log_connections = on
+shared_buffers = 32768
+port = 55432
+max_connections = 100
+max_wal_senders = 10
+listen_addresses = '0.0.0.0'
+wal_sender_timeout = 0
+password_encryption = md5
+maintenance_work_mem = 65536
+max_parallel_workers = 8
+max_worker_processes = 8
+neon.tenant_id = 'b0554b632bd4d547a63b86c3630317e8'
+max_replication_slots = 10
+neon.timeline_id = '2414a61ffc94e428f14b5758fe308e13'
+shared_preload_libraries = 'neon'
+synchronous_standby_names = 'walproposer'
+neon.pageserver_connstring = 'host=127.0.0.1 port=6400'"#
         );
     }
 
