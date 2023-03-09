@@ -112,14 +112,14 @@ impl Park {
 
         if state.can_continue {
             // unconditional parking
-            println!("YIELD PARKING: node {:?}", node.id);
+            // println!("YIELD PARKING: node {:?}", node.id);
 
             parking_lot::MutexGuard::unlocked(&mut state, || {
                 // first put to world parking, then decrease the running threads counter
                 node.internal_parking_middle(self.clone());
             });
         } else {
-            println!("AWAIT PARKING: node {:?}", node.id);
+            // println!("AWAIT PARKING: node {:?}", node.id);
 
             parking_lot::MutexGuard::unlocked(&mut state, || {
                 // conditional parking, decrease the running threads counter without parking
@@ -131,7 +131,7 @@ impl Park {
                 self.cvar.wait(&mut state);
             }
 
-            println!("CONDITION MET: node {:?}", node.id);
+            // println!("CONDITION MET: node {:?}", node.id);
             // condition is met, we are now running instead of the waker thread.
             // the next thing is to park the thread in the world, then decrease
             // the running threads counter
@@ -147,7 +147,7 @@ impl Park {
             self.cvar.wait(state);
         }
 
-        println!("PARKING ENDED: node {:?}", node.id);
+        // println!("PARKING ENDED: node {:?}", node.id);
 
         // We are the only running thread now, we just need to update the state,
         // and continue the execution.
@@ -159,7 +159,7 @@ impl Park {
         let park = Park::new(true);
         let node = Node::current();
         Self::init_state(&mut park.lock.lock(), &node);
-        println!("PARKING MIDDLE alt: node {:?}", node.id);
+        // println!("PARKING MIDDLE alt: node {:?}", node.id);
         node.internal_parking_ahead(park.clone());
         park
     }
@@ -203,7 +203,7 @@ impl Park {
     /// Print debug info about the parked thread.
     pub fn debug_print(&self) {
         let state = self.lock.lock();
-        println!("PARK: node {:?} wake1={} wake2={}", state.node_id, state.can_continue, state.finished);
+        // println!("PARK: node {:?} wake1={} wake2={}", state.node_id, state.can_continue, state.finished);
         // println!("DEBUG: node {:?} wake1={} wake2={}, trace={:?}", state.node_id, state.can_continue, state.finished, state.backtrace);
     }
 

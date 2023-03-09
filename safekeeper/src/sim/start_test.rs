@@ -28,7 +28,6 @@ fn start_simulation() {
 
     while world.step() {
         println!("made a step!");
-        std::thread::sleep(Duration::from_millis(200));
         world.debug_print_state();
     }
 }
