@@ -63,6 +63,8 @@ impl GenericOption {
     /// Represent `GenericOption` as configuration option.
     pub fn to_pg_setting(&self) -> String {
         if let Some(val) = &self.value {
+            // TODO: check in the console DB that we don't have these settings
+            // set for any non-deleted project and drop this override.
             let name = match self.name.as_str() {
                 "safekeepers" => "neon.safekeepers",
                 "wal_acceptor_reconnect" => "neon.safekeeper_reconnect_timeout",
