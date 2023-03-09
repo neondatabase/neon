@@ -3,7 +3,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-
 @pytest.mark.timeout(10000)
 def test_gc_old_layers(neon_env_builder: NeonEnvBuilder):
     """
