@@ -221,15 +221,15 @@ pageserver_send(NeonRequest * request)
 		 */
 		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 		{
+			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 			if (retry)
 			{
+				neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
 				retry = false; /* do just one reconnect attempt */
 				continue;
 			}
 			else
 			{
-				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-
 				pageserver_disconnect();
 				neon_log(ERROR, "failed to send page request: %s", msg);
 			}
