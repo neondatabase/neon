@@ -32,6 +32,9 @@
 
 #define PageStoreTrace DEBUG5
 
+#define MAX_RECONNECT_ATTEMPTS 5
+#define RECONNECT_INTERVAL_USEC 1000000
+
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
 
@@ -52,8 +55,8 @@ int			readahead_buffer_size = 128;
 
 static void pageserver_flush(void);
 
-static void
-pageserver_connect()
+static bool
+pageserver_connect(int elevel)
 {
 	char	   *query;
 	int			ret;
@@ -69,10 +72,11 @@ pageserver_connect()
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 
-		ereport(ERROR,
+		ereport(elevel,
 				(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
 				 errmsg(NEON_TAG "could not establish connection to pageserver"),
 				 errdetail_internal("%s", msg)));
+		return false;
 	}
 
 	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
@@ -81,7 +85,8 @@ pageserver_connect()
 	{
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
-		neon_log(ERROR, "could not send pagestream command to pageserver");
+		neon_log(elevel, "could not send pagestream command to pageserver");
+		return false;
 	}
 
 	pageserver_conn_wes = CreateWaitEventSet(TopMemoryContext, 3);
@@ -113,8 +118,9 @@ pageserver_connect()
 				FreeWaitEventSet(pageserver_conn_wes);
 				pageserver_conn_wes = NULL;
 
-				neon_log(ERROR, "could not complete handshake with pageserver: %s",
+				neon_log(elevel, "could not complete handshake with pageserver: %s",
 						 msg);
+				return false;
 			}
 		}
 	}
@@ -122,6 +128,7 @@ pageserver_connect()
 	neon_log(LOG, "libpagestore: connected to '%s'", page_server_connstring_raw);
 
 	connected = true;
+	return true;
 }
 
 /*
@@ -149,8 +156,11 @@ retry:
 		if (event.events & WL_SOCKET_READABLE)
 		{
 			if (!PQconsumeInput(pageserver_conn))
-				neon_log(ERROR, "could not get response from pageserver: %s",
+			{
+				neon_log(LOG, "could not get response from pageserver: %s",
 						 PQerrorMessage(pageserver_conn));
+				return -1;
+			}
 		}
 
 		goto retry;
@@ -190,31 +200,62 @@ static void
 pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
+	int n_reconnect_attempts = 0;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
 		pageserver_disconnect();
 
-	if (!connected)
-		pageserver_connect();
 
 	req_buff = nm_pack_request(request);
 
 	/*
-	 * Send request.
-	 *
-	 * In principle, this could block if the output buffer is full, and we
-	 * should use async mode and check for interrupts while waiting. In
-	 * practice, our requests are small enough to always fit in the output and
-	 * TCP buffer.
+	 * If pageserver is stopped, the connections from compute node are broken.
+	 * The compute node doesn't notice that immediately, but it will cause the next request to fail, usually on the next query.
+	 * That causes user-visible errors if pageserver is restarted, or the tenant is moved from one pageserver to another.
+	 * See https://github.com/neondatabase/neon/issues/1138
+	 * So try to reestablish connection in case of failure.
 	 */
-	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+	while (true)
 	{
-		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+		if (!connected)
+		{
+			if (!pageserver_connect(n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS ? LOG : ERROR))
+			{
+				n_reconnect_attempts += 1;
+				pg_usleep(RECONNECT_INTERVAL_USEC);
+				continue;
+			}
+		}
 
-		pageserver_disconnect();
-		neon_log(ERROR, "failed to send page request: %s", msg);
+		/*
+		 * Send request.
+		 *
+		 * In principle, this could block if the output buffer is full, and we
+		 * should use async mode and check for interrupts while waiting. In
+		 * practice, our requests are small enough to always fit in the output and
+		 * TCP buffer.
+		 */
+		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+		{
+			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+			if (n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
+			{
+				neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
+				if (n_reconnect_attempts != 0) /* do not sleep before first reconnect attempt, assuming that pageserver is already restarted */
+					pg_usleep(RECONNECT_INTERVAL_USEC);
+				n_reconnect_attempts += 1;
+				continue;
+			}
+			else
+			{
+				pageserver_disconnect();
+				neon_log(ERROR, "failed to send page request: %s", msg);
+			}
+		}
+		break;
 	}
+
 	pfree(req_buff.data);
 
 	n_unflushed_requests++;
