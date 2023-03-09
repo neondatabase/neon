@@ -544,7 +544,7 @@ def test_compaction_downloads_on_demand_with_image_creation(
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_compaction_downloads_on_demand",
+        test_name="test_compaction_downloads_on_demand_with_image_creation",
     )
 
     env = neon_env_builder.init_start()
