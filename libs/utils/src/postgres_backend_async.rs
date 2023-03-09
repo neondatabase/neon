@@ -276,7 +276,10 @@ impl PostgresBackend {
         S: Future,
     {
         let ret = self.run_message_loop(handler, shutdown_watcher).await;
-        let _ = self.stream.shutdown();
+        let ignored = self.stream.shutdown().await;
+        if let Err(e) = ignored {
+            tracing::warn!("socket shutdown failed: {e:?}");
+        }
         ret
     }
 
