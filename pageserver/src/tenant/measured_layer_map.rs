@@ -58,6 +58,7 @@ impl BatchedUpdates<'_> {
             NUM_ONDISK_LAYERS.inc();
         }
     }
+
     /// See [layer_map::BatchedUpdates::remove_historic].
     pub fn remove_historic(&mut self, layer: Arc<dyn PersistentLayer>) {
         let is_remote = layer.is_remote_layer();
@@ -68,6 +69,7 @@ impl BatchedUpdates<'_> {
             NUM_ONDISK_LAYERS.dec();
         }
     }
+
     /// See [layer_map::BatchedUpdates::replace_historic].
     pub fn replace_historic(
         &mut self,
@@ -95,6 +97,7 @@ impl BatchedUpdates<'_> {
 
         Ok(res)
     }
+
     /// See [layer_map::BatchedUpdates::flush].
     pub fn flush(self) {
         self.inner.flush()
