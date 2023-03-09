@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use super::sync::{Mutex, Condvar};
+use super::sync::{Mutex, Condvar, Park};
 
 /// FIFO channel with blocking send and receive. Can be cloned and shared between threads.
 #[derive(Clone)]
@@ -31,6 +31,9 @@ impl<T: Clone> Chan<T> {
 
     /// Get a message from the front of the queue, or block if the queue is empty.
     pub fn recv(&self) -> T {
+        // interrupt the receiver to prevent consuming everything at once
+        Park::yield_thread();
+
         let mut queue = self.shared.queue.lock();
         loop {
             if let Some(t) = queue.pop_front() {

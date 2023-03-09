@@ -79,7 +79,10 @@ impl World {
 
         println!("Waking up park at node {:?}", park.node_id());
 
-        // wake up the chosen thread
+        // Wake up the chosen thread. To do that:
+        // 1. Increment the counter of running threads.
+        // 2. Send a singal to continue the thread.
+        self.wait_group.add(1);
         park.internal_world_wake();
 
         // to have a clean state after each step, wait for all threads to finish
@@ -93,10 +96,9 @@ impl World {
         for node in self.nodes.lock().iter() {
             println!("[DEBUG] node id={:?} status={:?}", node.id, node.status.lock());
         }
-        // for park in self.unconditional_parking.lock().iter() {
-        //     println!("[DEBUG] parked thread, stacktrace:");
-        //     park.debug_print();
-        // }
+        for park in self.unconditional_parking.lock().iter() {
+            park.debug_print();
+        }
     }
 }
 
@@ -157,7 +159,7 @@ impl Node {
             *status = NodeStatus::Running;
             drop(status);
 
-            // block on the world simulation
+            // park the current thread, [`launch`] will wait until it's parked
             Park::yield_thread();
             // TODO: recover from panic (update state, log the error)
             f(NodeOs::new(world, node.clone()));
@@ -167,6 +169,10 @@ impl Node {
             // TODO: log the thread is finished
         });
         *self.join_handle.lock() = Some(join_handle);
+
+        // we need to wait for the thread to park, to assure that threads
+        // are parked in deterministic order
+        self.world.wait_group.wait();
     }
 
     /// Returns a channel to receive events from the network.
@@ -175,20 +181,40 @@ impl Node {
     }
 
     pub fn internal_parking_start(&self) {
-        // node started parking (waiting for condition)
+        // Node started parking (waiting for condition), and the current thread
+        // is the only one running, so we need to do:
+        // 1. Change the node status to Waiting
+        // 2. Decrease the running threads counter
+        // 3. Block the current thread until it's woken up (outside this function)
         *self.status.lock() = NodeStatus::Waiting;
         self.world.wait_group.done();
     }
 
     pub fn internal_parking_middle(&self, park: Arc<Park>) {
-        // this park entered the unconditional_parking state
+        // [`park`] entered the unconditional_parking state, and the current thread
+        // is the only one running, so we need to do:
+        // 1. Change the node status to Parked
+        // 2. Park in the world list
+        // 3. Decrease the running threads counter
+        // 4. Block the current thread until it's woken up (outside this function)
+        *self.status.lock() = NodeStatus::Parked;
+        self.world.unconditional_parking.lock().push(park);
+        self.world.wait_group.done();
+    }
+
+    pub fn internal_parking_ahead(&self, park: Arc<Park>) {
+        // [`park`] entered the unconditional_parking state, and the current thread
+        // wants to transfer control to another thread, so we need to do:
+        // 1. Change the node status to Parked
+        // 2. Park in the world list
+        // 3. Notify the other thread to continue
+        // 4. Block the current thread until it's woken up (outside this function)
         *self.status.lock() = NodeStatus::Parked;
         self.world.unconditional_parking.lock().push(park);
     }
 
     pub fn internal_parking_end(&self) {
-        // node finished parking, increase the running threads counter
-        self.world.wait_group.add(1);
+        // node finished parking, now it's running again
         *self.status.lock() = NodeStatus::Running;
     }
 
