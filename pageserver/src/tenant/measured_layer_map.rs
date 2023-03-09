@@ -74,7 +74,26 @@ impl BatchedUpdates<'_> {
         expected: &Arc<dyn PersistentLayer>,
         new: Arc<dyn PersistentLayer>,
     ) -> anyhow::Result<Replacement<Arc<dyn PersistentLayer>>> {
-        self.inner.replace_historic(expected, new)
+        use Replacement::*;
+
+        let is_remote = new.is_remote_layer();
+
+        let res = self.inner.replace_historic(expected, new)?;
+
+        match &res {
+            Replaced { .. } => {
+                if is_remote != expected.is_remote_layer() {
+                    if is_remote {
+                        NUM_ONDISK_LAYERS.dec();
+                    } else {
+                        NUM_ONDISK_LAYERS.inc();
+                    }
+                }
+            }
+            NotFound | RemovalBuffered | Unexpected(_) => {}
+        }
+
+        Ok(res)
     }
     /// See [layer_map::BatchedUpdates::flush].
     pub fn flush(self) {
