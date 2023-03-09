@@ -265,11 +265,9 @@ impl FeMessage {
             b'c' => Ok(Some(FeMessage::CopyDone)),
             b'f' => Ok(Some(FeMessage::CopyFail)),
             b'p' => Ok(Some(FeMessage::PasswordMessage(msg))),
-            tag => {
-                return Err(ProtocolError::Protocol(format!(
-                    "unknown message tag: {tag},'{msg:?}'"
-                )))
-            }
+            tag => Err(ProtocolError::Protocol(format!(
+                "unknown message tag: {tag},'{msg:?}'"
+            ))),
         }
     }
 }
@@ -295,7 +293,7 @@ impl FeStartupPacket {
         // We shouldn't advance `buf` as probably full message is not there yet,
         // so can't directly use Bytes::get_u32 etc.
         let len = (&buf[0..4]).read_u32::<BigEndian>().unwrap() as usize;
-        if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
+        if !(4..=MAX_STARTUP_PACKET_LENGTH).contains(&len) {
             return Err(ProtocolError::Protocol(format!(
                 "invalid startup packet message length {}",
                 len

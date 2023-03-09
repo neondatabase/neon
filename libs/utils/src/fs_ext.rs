@@ -11,7 +11,7 @@ where
     P: AsRef<Path>,
 {
     fn is_empty_dir(&self) -> io::Result<bool> {
-        Ok(fs::read_dir(self)?.into_iter().next().is_none())
+        Ok(fs::read_dir(self)?.next().is_none())
     }
 }
 
