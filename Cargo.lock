@@ -851,6 +851,7 @@ dependencies = [
  "futures",
  "hyper",
  "notify",
+ "num_cpus",
  "opentelemetry",
  "postgres",
  "regex",

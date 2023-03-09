@@ -404,8 +404,8 @@ impl ComputeNode {
     }
 
     /// Select `pg_stat_statements` data and return it as a stringified JSON
-    pub async fn collect_insights(&self) -> String {
-        let mut result_rows: Vec<String> = Vec::new();
+    pub async fn collect_insights(&self) -> Vec<String> {
+        let mut result_rows = vec![];
         let connect_result = tokio_postgres::connect(self.connstr.as_str(), NoTls).await;
         let (client, connection) = connect_result.unwrap();
         tokio::spawn(async move {
@@ -435,10 +435,7 @@ LIMIT 100",
                     }
                 }
             }
-
-            format!("{{\"pg_stat_statements\": [{}]}}", result_rows.join(","))
-        } else {
-            "{{\"pg_stat_statements\": []}}".to_string()
         }
+        result_rows
     }
 }

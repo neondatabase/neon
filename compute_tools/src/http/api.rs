@@ -7,6 +7,7 @@ use crate::compute::ComputeNode;
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use num_cpus;
 use serde_json;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
@@ -37,7 +38,12 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::GET, "/insights") => {
             info!("serving /insights GET request");
             let insights = compute.collect_insights().await;
-            Response::new(Body::from(insights))
+            Response::new(Body::from(
+                serde_json::json!({
+                    "pg_stat_statements": insights,
+                })
+                .to_string(),
+            ))
         }
 
         (&Method::POST, "/check_writability") => {
@@ -47,6 +53,17 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Ok(_) => Response::new(Body::from("true")),
                 Err(e) => Response::new(Body::from(e.to_string())),
             }
+        }
+
+        (&Method::GET, "/num_cpus") => {
+            let num_cpus = num_cpus::get();
+            info!("serving /num_cpus GET request. Response: {}", num_cpus);
+            Response::new(Body::from(
+                serde_json::json!({
+                    "num_cpus": num_cpus,
+                })
+                .to_string(),
+            ))
         }
 
         // Return the `404 Not Found` for any other routes.

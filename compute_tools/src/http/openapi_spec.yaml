@@ -53,6 +53,21 @@ paths:
               schema:
                 $ref: "#/components/schemas/ComputeInsights"
 
+  /num_cpus:
+    get:
+      tags:
+      - "info"
+      summary: Get number of CPUs from this Pod/VM
+      description: ""
+      operationId: getNumCPUs
+      responses:
+        "200":
+          description: NumCPUs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NumCPUs"
+
   /check_writability:
     post:
       tags:
@@ -94,6 +109,15 @@ components:
         config_ms:
           type: integer
         total_startup_ms:
+          type: integer
+
+    NumCPUs:
+      type: object
+      description: How many CPUs does pod/VM have?
+      required:
+        - num_cpus
+      properties:
+        num_cpus:
           type: integer
 
     ComputeState:
