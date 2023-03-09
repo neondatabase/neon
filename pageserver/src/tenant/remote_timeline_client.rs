@@ -218,9 +218,10 @@ use tracing::{debug, info, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
-use crate::metrics::RemoteOpFileKind;
-use crate::metrics::RemoteOpKind;
-use crate::metrics::{MeasureRemoteOp, RemoteTimelineClientMetrics};
+use crate::metrics::{
+    MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
+    REMOTE_ONDEMAND_DOWNLOADED_BYTES, REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
+};
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::{
     config::PageServerConf,
@@ -446,6 +447,10 @@ impl RemoteTimelineClient {
                 );
             }
         }
+
+        REMOTE_ONDEMAND_DOWNLOADED_LAYERS.inc();
+        REMOTE_ONDEMAND_DOWNLOADED_BYTES.inc_by(downloaded_size);
+
         Ok(downloaded_size)
     }
 
