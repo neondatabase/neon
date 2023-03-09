@@ -154,11 +154,7 @@ where
         expected: &Arc<L>,
         new: Arc<L>,
     ) -> anyhow::Result<Replacement<Arc<L>>> {
-        fail::fail_point!("layermap-replace-notfound", |_| Ok(
-            // this is not what happens if an L0 layer was not found a anyhow error but perhaps
-            // that should be changed. this is good enough to show a replacement failure.
-            Replacement::NotFound
-        ));
+        fail::fail_point!("layermap-replace-notfound", |_| Ok(Replacement::NotFound));
 
         self.layer_map.replace_historic_noflush(expected, new)
     }
@@ -340,12 +336,15 @@ where
 
         let l0_index = if expected_l0 {
             // find the index in case replace worked, we need to replace that as well
-            Some(
-                self.l0_delta_layers
-                    .iter()
-                    .position(|slot| Self::compare_arced_layers(slot, expected))
-                    .ok_or_else(|| anyhow::anyhow!("existing l0 delta layer was not found"))?,
-            )
+            let pos = self
+                .l0_delta_layers
+                .iter()
+                .position(|slot| Self::compare_arced_layers(slot, expected));
+
+            if pos.is_none() {
+                return Ok(Replacement::NotFound);
+            }
+            pos
         } else {
             None
         };
