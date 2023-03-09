@@ -55,8 +55,8 @@ int			readahead_buffer_size = 128;
 
 static void pageserver_flush(void);
 
-static void
-pageserver_connect()
+static bool
+pageserver_connect(int elevel)
 {
 	char	   *query;
 	int			ret;
@@ -72,10 +72,11 @@ pageserver_connect()
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 
-		ereport(ERROR,
+		ereport(elevel,
 				(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
 				 errmsg(NEON_TAG "could not establish connection to pageserver"),
 				 errdetail_internal("%s", msg)));
+		return false;
 	}
 
 	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
@@ -84,7 +85,8 @@ pageserver_connect()
 	{
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
-		neon_log(ERROR, "could not send pagestream command to pageserver");
+		neon_log(elevel, "could not send pagestream command to pageserver");
+		return false;
 	}
 
 	pageserver_conn_wes = CreateWaitEventSet(TopMemoryContext, 3);
@@ -116,8 +118,9 @@ pageserver_connect()
 				FreeWaitEventSet(pageserver_conn_wes);
 				pageserver_conn_wes = NULL;
 
-				neon_log(ERROR, "could not complete handshake with pageserver: %s",
+				neon_log(elevel, "could not complete handshake with pageserver: %s",
 						 msg);
+				return false;
 			}
 		}
 	}
@@ -125,6 +128,7 @@ pageserver_connect()
 	neon_log(LOG, "libpagestore: connected to '%s'", page_server_connstring_raw);
 
 	connected = true;
+	return true;
 }
 
 /*
@@ -152,8 +156,11 @@ retry:
 		if (event.events & WL_SOCKET_READABLE)
 		{
 			if (!PQconsumeInput(pageserver_conn))
-				neon_log(ERROR, "could not get response from pageserver: %s",
+			{
+				neon_log(LOG, "could not get response from pageserver: %s",
 						 PQerrorMessage(pageserver_conn));
+				return -1;
+			}
 		}
 
 		goto retry;
@@ -212,7 +219,14 @@ pageserver_send(NeonRequest * request)
 	while (true)
 	{
 		if (!connected)
-			pageserver_connect();
+		{
+			if (!pageserver_connect(n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS ? LOG : ERROR))
+			{
+				n_reconnect_attempts += 1;
+				pg_usleep(RECONNECT_INTERVAL_USEC);
+				continue;
+			}
+		}
 
 		/*
 		 * Send request.
