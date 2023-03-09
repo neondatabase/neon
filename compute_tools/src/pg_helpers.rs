@@ -109,6 +109,7 @@ impl PgOptionsSerialize for GenericOptions {
                 .map(|op| op.to_pg_setting())
                 .collect::<Vec<String>>()
                 .join("\n")
+                + "\n" // newline after last setting
         } else {
             "".to_string()
         }
