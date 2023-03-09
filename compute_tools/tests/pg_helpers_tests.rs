@@ -50,6 +50,7 @@ neon.timeline_id = '2414a61ffc94e428f14b5758fe308e13'
 shared_preload_libraries = 'neon'
 synchronous_standby_names = 'walproposer'
 neon.pageserver_connstring = 'host=127.0.0.1 port=6400'
+test.escaping = 'here''s a backslash \\ and a quote '' and a double-quote " hooray'
 "#
         );
     }

@@ -47,12 +47,23 @@ pub struct GenericOption {
 /// declare a `trait` on it.
 pub type GenericOptions = Option<Vec<GenericOption>>;
 
+/// Escape a string for including it in a SQL literal
+fn escape_literal(s: &str) -> String {
+    s.replace('\'', "''").replace('\\', "\\\\")
+}
+
+/// Escape a string so that it can be used in postgresql.conf.
+/// Same as escape_literal, currently.
+fn escape_conf_value(s: &str) -> String {
+    s.replace('\'', "''").replace('\\', "\\\\")
+}
+
 impl GenericOption {
     /// Represent `GenericOption` as SQL statement parameter.
     pub fn to_pg_option(&self) -> String {
         if let Some(val) = &self.value {
             match self.vartype.as_ref() {
-                "string" => format!("{} '{}'", self.name, val),
+                "string" => format!("{} '{}'", self.name, escape_literal(val)),
                 _ => format!("{} {}", self.name, val),
             }
         } else {
@@ -73,7 +84,7 @@ impl GenericOption {
             };
 
             match self.vartype.as_ref() {
-                "string" => format!("{} = '{}'", name, val),
+                "string" => format!("{} = '{}'", name, escape_conf_value(val)),
                 _ => format!("{} = {}", name, val),
             }
         } else {
