@@ -3837,44 +3837,41 @@ impl Timeline {
                 // delta layers. Image layers can form "stairs" preventing old image from been deleted.
                 // But image layers are in any case less sparse than delta layers. Also we need some
                 // protection from replacing recent image layers with new one after each GC iteration.
-                if l.is_incremental() {
+                if l.is_incremental() && !LayerMap::is_l0(&*l) {
                     let mut to_remove: Vec<Key> = Vec::new();
                     let mut insert_new_range = true;
                     let start = l.get_key_range().start;
                     let mut end = l.get_key_range().end;
 
-                    if !LayerMap::is_l0(&*l) {
-                        // check if this range overlaps with exited ranges
-                        let mut iter = wanted_image_layers.range_mut(..end);
-                        while let Some((prev_start, prev_end)) = iter.next_back() {
-                            if *prev_end >= start {
-                                // two ranges overlap
-                                if *prev_start <= start {
-                                    // combine with prev range
-                                    insert_new_range = false;
-                                    if *prev_end < end {
-                                        // extend prev range
-                                        *prev_end = end;
-                                        info!("Extend wanted image {}..{}", *prev_start, end);
-                                    }
-                                    break;
-                                } else {
-                                    to_remove.push(*prev_start);
-                                    if *prev_end > end {
-                                        end = *prev_end;
-                                    }
+                    // check if this range overlaps with existing ranges
+                    let mut iter = wanted_image_layers.range_mut(..end);
+                    while let Some((prev_start, prev_end)) = iter.next_back() {
+                        if *prev_end >= start {
+                            // two ranges overlap
+                            if *prev_start <= start {
+                                // combine with prev range
+                                insert_new_range = false;
+                                if *prev_end < end {
+                                    *prev_end = end;
+                                    info!("Extend wanted image {}..{}", *prev_start, end);
                                 }
-                            } else {
                                 break;
+                            } else {
+                                to_remove.push(*prev_start);
+                                if *prev_end > end {
+                                    end = *prev_end;
+                                }
                             }
+                        } else {
+                            break;
                         }
-                        for key in to_remove {
-                            wanted_image_layers.remove(&key);
-                        }
-                        if insert_new_range {
-                            info!("Wanted image {}..{}", start, end);
-                            wanted_image_layers.insert(start, end);
-                        }
+                    }
+                    for key in to_remove {
+                        wanted_image_layers.remove(&key);
+                    }
+                    if insert_new_range {
+                        info!("Wanted image {}..{}", start, end);
+                        wanted_image_layers.insert(start, end);
                     }
                 }
                 result.layers_not_updated += 1;
