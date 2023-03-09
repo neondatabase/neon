@@ -1,6 +1,7 @@
+import subprocess
+
 import psycopg2
 import pytest
-import subprocess
 from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
 
 
