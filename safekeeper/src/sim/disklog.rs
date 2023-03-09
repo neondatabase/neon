@@ -23,9 +23,12 @@ impl DiskLog {
 }
 
 pub fn run_server(os: NodeOs, mut storage: Box<dyn Storage<u32>>) {
+    println!("started server");
+
     let epoll = os.network_epoll();
     loop {
         let event = epoll.recv();
+        println!("got event: {:?}", event);
         match event {
             NetworkEvent::Message(msg) => {
                 match msg {

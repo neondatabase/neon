@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicI32, Arc};
+use std::{sync::{atomic::AtomicI32, Arc}, cell::RefCell};
 use rand::{rngs::StdRng, SeedableRng, Rng};
 
 use super::{tcp::Tcp, sync::{Mutex, Park}, chan::Chan, proto::AnyMessage, node_os::NodeOs, wait_group::WaitGroup};
@@ -77,8 +77,10 @@ impl World {
         let park = parking.swap_remove(chosen_one);
         drop(parking);
 
+        println!("Waking up park at node {:?}", park.node_id());
+
         // wake up the chosen thread
-        park.wake();
+        park.internal_world_wake();
 
         // to have a clean state after each step, wait for all threads to finish
         self.await_all();
@@ -98,6 +100,10 @@ impl World {
     }
 }
 
+thread_local! {
+    pub static CURRENT_NODE: RefCell<Option<Arc<Node>>> = RefCell::new(None);
+}
+
 /// Internal node state.
 pub struct Node {
     pub id: NodeId,
@@ -111,6 +117,7 @@ pub struct Node {
 pub enum NodeStatus {
     NotStarted,
     Running,
+    Waiting,
     Parked,
     Finished,
     Failed,
@@ -133,6 +140,10 @@ impl Node {
         let world = self.world.clone();
         world.wait_group.add(1);
         let join_handle = std::thread::spawn(move || {
+            CURRENT_NODE.with(|current_node| {
+                *current_node.borrow_mut() = Some(node.clone());
+            });
+
             let wg = world.wait_group.clone();
             scopeguard::defer! {
                 wg.done();
@@ -146,7 +157,8 @@ impl Node {
             *status = NodeStatus::Running;
             drop(status);
 
-            node.park_me();
+            // block on the world simulation
+            Park::yield_thread();
             // TODO: recover from panic (update state, log the error)
             f(NodeOs::new(world, node.clone()));
 
@@ -162,26 +174,33 @@ impl Node {
         self.network.clone()
     }
 
-    /// Park the node current thread until world simulation will decide to continue.
-    pub fn park_me(&self) {
-        // TODO: try to rewrite this function
-        let park = Park::new();
-        let mut parking = self.world.unconditional_parking.lock();
-        parking.push(park.clone());
-        drop(parking);
-
-        // decrease the running threads counter, because current thread is parked
+    pub fn internal_parking_start(&self) {
+        // node started parking (waiting for condition)
+        *self.status.lock() = NodeStatus::Waiting;
         self.world.wait_group.done();
-        // and increase it once it will wake up
-        scopeguard::defer!(self.world.wait_group.add(1));
+    }
 
+    pub fn internal_parking_middle(&self, park: Arc<Park>) {
+        // this park entered the unconditional_parking state
         *self.status.lock() = NodeStatus::Parked;
-        park.park();
+        self.world.unconditional_parking.lock().push(park);
+    }
+
+    pub fn internal_parking_end(&self) {
+        // node finished parking, increase the running threads counter
+        self.world.wait_group.add(1);
         *self.status.lock() = NodeStatus::Running;
+    }
+
+    /// Get the current node, panics if called from outside of a node thread.
+    pub fn current() -> Arc<Node> {
+        CURRENT_NODE.with(|current_node| {
+            current_node.borrow().clone().unwrap()
+        })
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum NetworkEvent {
     Accept,
     Message(AnyMessage),

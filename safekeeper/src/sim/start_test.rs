@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, thread::sleep_ms, time::Duration};
 
 use super::{world::World, client::run_client, disklog::run_server, disk::SharedStorage};
 
@@ -22,11 +22,13 @@ fn start_simulation() {
         run_server(os, Box::new(server_storage))
     });
 
+    world.debug_print_state();
     world.await_all();
     world.debug_print_state();
 
     while world.step() {
         println!("made a step!");
+        std::thread::sleep(Duration::from_millis(200));
         world.debug_print_state();
     }
 }
