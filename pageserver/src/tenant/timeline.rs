@@ -22,7 +22,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -124,18 +124,14 @@ pub struct Timeline {
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
-    ///
-    /// BTreeMap key is start of range (inclusive),
-    /// value - end of range (exclusive). This map is constructed by GC
-    /// (when it can not remove layer because it is not covered by image layers)
-    /// and used by compaction when it checks if new image layer should be created.
+    /// It is used by compaction task when it checks if new image layer should be created.
     /// Newly created image layer doesn't help to remove the delta layer, until the
     /// newly created image layer falls off the PITR horizon. So on next GC cycle,
     /// gc_timeline may still want the new image layer to be created. To avoid redundant
     /// image layers creation we should check if image layer exists but beyond PITR horizon.
     /// This is why we need remember GC cutoff LSN.
     ///
-    wanted_image_layers: Mutex<Option<(Lsn, BTreeMap<Key, Key>)>>,
+    wanted_image_layers: Mutex<Option<(Lsn, KeySpace)>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -2923,25 +2919,23 @@ impl Timeline {
         if let Some((cutoff_lsn, wanted)) = &*wanted_image_layers {
             let img_range =
                 partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
-            if let Some((_start, end)) = wanted.range(..img_range.end).next_back() {
-                if *end > img_range.start {
-                    //
-                    // gc_timeline only pays attention to image layers that are older than the GC cutoff,
-                    // but create_image_layers creates image layers at last-record-lsn.
-                    // So it's possible that gc_timeline decides that it wants new image layer to be created for a key range,
-                    // and on next compcation create_image_layers creates the image layer.
-                    // But on next GC cycle, gc_timeline still wantes the new image layer to be created,
-                    // because the newly created image layer doesn't help to remove the delta layer,
-                    // until the newly created image layer falls off the PITR horizon.
-                    //
-                    // So we should check if image layer beyond cutoff LSN already exists.
-                    if !layers.image_layer_exists(&img_range, &(*cutoff_lsn..lsn))? {
-                        debug!(
-                            "Force generation of layer {}-{} wanted by GC)",
-                            img_range.start, img_range.end
-                        );
-                        return Ok(true);
-                    }
+            if wanted.overlaps(&img_range) {
+                //
+                // gc_timeline only pays attention to image layers that are older than the GC cutoff,
+                // but create_image_layers creates image layers at last-record-lsn.
+                // So it's possible that gc_timeline decides that it wants new image layer to be created for a key range,
+                // and on next compcation create_image_layers creates the image layer.
+                // But on next GC cycle, gc_timeline still wantes the new image layer to be created,
+                // because the newly created image layer doesn't help to remove the delta layer,
+                // until the newly created image layer falls off the PITR horizon.
+                //
+                // So we should check if image layer beyond cutoff LSN already exists.
+                if !layers.image_layer_exists(&img_range, &(*cutoff_lsn..lsn))? {
+                    debug!(
+                        "Force generation of layer {}-{} wanted by GC)",
+                        img_range.start, img_range.end
+                    );
+                    return Ok(true);
                 }
             }
         }
@@ -3768,7 +3762,7 @@ impl Timeline {
         }
 
         let mut layers_to_remove = Vec::new();
-        let mut wanted_image_layers: BTreeMap<Key, Key> = BTreeMap::new();
+        let mut wanted_image_layers = KeySpace::new();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -3859,41 +3853,7 @@ impl Timeline {
                 // But image layers are in any case less sparse than delta layers. Also we need some
                 // protection from replacing recent image layers with new one after each GC iteration.
                 if l.is_incremental() && !LayerMap::is_l0(&*l) {
-                    let mut to_remove: Vec<Key> = Vec::new();
-                    let mut insert_new_range = true;
-                    let start = l.get_key_range().start;
-                    let mut end = l.get_key_range().end;
-
-                    // check if this range overlaps with existing ranges
-                    let mut iter = wanted_image_layers.range_mut(..end);
-                    while let Some((prev_start, prev_end)) = iter.next_back() {
-                        if *prev_end >= start {
-                            // two ranges overlap
-                            if *prev_start <= start {
-                                // combine with prev range
-                                insert_new_range = false;
-                                if *prev_end < end {
-                                    *prev_end = end;
-                                    debug!("Extend wanted image {}..{}", *prev_start, end);
-                                }
-                                break;
-                            } else {
-                                to_remove.push(*prev_start);
-                                if *prev_end > end {
-                                    end = *prev_end;
-                                }
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    for key in to_remove {
-                        wanted_image_layers.remove(&key);
-                    }
-                    if insert_new_range {
-                        debug!("Wanted image {}..{}", start, end);
-                        wanted_image_layers.insert(start, end);
-                    }
+                    wanted_image_layers.add_range(l.get_key_range());
                 }
                 result.layers_not_updated += 1;
                 continue 'outer;

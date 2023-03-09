@@ -1,6 +1,7 @@
 use crate::repository::{key_range_size, singleton_range, Key};
 use postgres_ffi::BLCKSZ;
 use std::ops::Range;
+use tracing::debug;
 
 ///
 /// Represents a set of Keys, in a compact form.
@@ -60,6 +61,67 @@ impl KeySpace {
         }
 
         KeyPartitioning { parts }
+    }
+
+    ///
+    /// Add range to keyspace. Unlike KeySpaceAccum, it accepts key ranges in any order and overlappig ranges.
+    ///
+    pub fn add_range(&mut self, range: Range<Key>) {
+        let start = range.start;
+        let mut end = range.end;
+        let mut prev_index = match self.ranges.binary_search_by_key(&end, |r| r.start) {
+            Ok(index) => index,
+            Err(0) => {
+                self.ranges.insert(0, range);
+                return;
+            }
+            Err(index) => index - 1,
+        };
+        loop {
+            let mut prev = &mut self.ranges[prev_index];
+            if prev.end >= start {
+                // two ranges overlap
+                if prev.start <= start {
+                    // combine with prev range
+                    if prev.end < end {
+                        prev.end = end;
+                        debug!("Extend wanted image {}..{}", prev.start, end);
+                    }
+                    return;
+                } else {
+                    if prev.end > end {
+                        end = prev.end;
+                    }
+                    self.ranges.remove(prev_index);
+                }
+            } else {
+                break;
+            }
+            if prev_index == 0 {
+                break;
+            }
+            prev_index -= 1;
+        }
+        debug!("Wanted image {}..{}", start, end);
+        self.ranges.insert(prev_index, start..end);
+    }
+
+    ///
+    /// Check if key space contains overlapping range
+    ///
+    pub fn overlaps(&self, range: &Range<Key>) -> bool {
+        match self.ranges.binary_search_by_key(&range.end, |r| r.start) {
+            Ok(_) => false,
+            Err(0) => false,
+            Err(index) => self.ranges[index - 1].end > range.start,
+        }
+    }
+
+    ///
+    /// Construct empty key space
+    ///
+    pub fn new() -> Self {
+        KeySpace { ranges: Vec::new() }
     }
 }
 
