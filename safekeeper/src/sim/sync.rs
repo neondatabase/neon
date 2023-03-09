@@ -55,6 +55,7 @@ impl Condvar {
         if let Some(waiter) = state.waiters.pop() {
             waiter.wake();
         }
+        drop(state);
 
         // yield the current thread to the scheduler
         Park::yield_thread();

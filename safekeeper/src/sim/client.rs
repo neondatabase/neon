@@ -6,7 +6,9 @@ pub fn run_client(os: NodeOs, data: &[u32], dst: NodeId) {
     
     let sock = os.open_tcp(dst);
     for num in data {
+        println!("start send data from client");
         sock.send(AnyMessage::Just32(num.clone()));
+        println!("finish send data from client");
     }
 
     println!("sent all data and finished client");
