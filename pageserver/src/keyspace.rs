@@ -63,9 +63,9 @@ impl KeySpace {
         KeyPartitioning { parts }
     }
 
+    /// Add range to keyspace.
     ///
-    /// Add range to keyspace. Unlike KeySpaceAccum, it accepts key ranges in any order and overlappig ranges.
-    ///
+    /// Unlike KeySpaceAccum, it accepts key ranges in any order and overlapping ranges.
     pub fn add_range(&mut self, range: Range<Key>) {
         let start = range.start;
         let mut end = range.end;
