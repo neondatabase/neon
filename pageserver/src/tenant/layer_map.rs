@@ -269,6 +269,8 @@ where
 
     /// Start a batch of updates, applied on drop
     pub fn batch_update(&mut self) -> BatchedUpdates<'_, L> {
+        // Note: MeasuredLayerMap::batch_update wraps this, when extending or changing batched
+        // updates, make changes there as well
         BatchedUpdates { layer_map: self }
     }
 
