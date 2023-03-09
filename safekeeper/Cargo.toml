@@ -19,7 +19,6 @@ git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
 hyper.workspace = true
-nix.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 postgres.workspace = true
