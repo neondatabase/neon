@@ -123,13 +123,19 @@ pub struct Timeline {
     pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
 
     /// Set of key ranges which should be covered by image layers to
-    /// allow GC to remove old layers.
+    /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
     ///
     /// BTreeMap key is start of range (inclusive),
     /// value - end of range (exclusive). This map is constructed by GC
     /// (when it can not remove layer because it is not covered by image layers)
     /// and used by compaction when it checks if new image layer should be created.
-    wanted_image_layers: Mutex<Option<BTreeMap<Key, Key>>>,
+    /// Newly created image layer doesn't help to remove the delta layer, until the
+    /// newly created image layer falls off the PITR horizon. So on next GC cycle,
+    /// gc_timeline may still want the new image layer to be created. To avoid redundant
+    /// image layers creation we should check if image layer exists but beyond PITR horizon.
+    /// This is why we need remember GC cutoff LSN.
+    ///
+    wanted_image_layers: Mutex<Option<(Lsn, BTreeMap<Key, Key>)>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -2914,16 +2920,28 @@ impl Timeline {
 
         let mut max_deltas = 0;
         let wanted_image_layers = self.wanted_image_layers.lock().unwrap();
-        if let Some(wanted) = &*wanted_image_layers {
+        if let Some((cutoff_lsn, wanted)) = &*wanted_image_layers {
             let img_range =
                 partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
             if let Some((_start, end)) = wanted.range(..img_range.end).next_back() {
                 if *end > img_range.start {
-                    info!(
-                        "Force generation of layer {}-{} wanted by GC)",
-                        img_range.start, img_range.end
-                    );
-                    return Ok(true);
+                    //
+                    // gc_timeline only pays attention to image layers that are older than the GC cutoff,
+                    // but create_image_layers creates image layers at last-record-lsn.
+                    // So it's possible that gc_timeline decides that it wants new image layer to be created for a key range,
+                    // and on next compcation create_image_layers creates the image layer.
+                    // But on next GC cycle, gc_timeline still wantes the new image layer to be created,
+                    // because the newly created image layer doesn't help to remove the delta layer,
+                    // until the newly created image layer falls off the PITR horizon.
+                    //
+                    // So we should check if image layer beyond cutoff LSN already exists.
+                    if !layers.image_layer_exists(&img_range, &(*cutoff_lsn..lsn))? {
+                        debug!(
+                            "Force generation of layer {}-{} wanted by GC)",
+                            img_range.start, img_range.end
+                        );
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -3856,7 +3874,7 @@ impl Timeline {
                                 insert_new_range = false;
                                 if *prev_end < end {
                                     *prev_end = end;
-                                    info!("Extend wanted image {}..{}", *prev_start, end);
+                                    debug!("Extend wanted image {}..{}", *prev_start, end);
                                 }
                                 break;
                             } else {
@@ -3873,7 +3891,7 @@ impl Timeline {
                         wanted_image_layers.remove(&key);
                     }
                     if insert_new_range {
-                        info!("Wanted image {}..{}", start, end);
+                        debug!("Wanted image {}..{}", start, end);
                         wanted_image_layers.insert(start, end);
                     }
                 }
@@ -3892,7 +3910,7 @@ impl Timeline {
         self.wanted_image_layers
             .lock()
             .unwrap()
-            .replace(wanted_image_layers);
+            .replace((new_gc_cutoff, wanted_image_layers));
 
         let mut updates = layers.batch_update();
         if !layers_to_remove.is_empty() {
