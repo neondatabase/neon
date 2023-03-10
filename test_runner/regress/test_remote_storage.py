@@ -619,7 +619,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     log.info("sending delete request")
     checkpoint_allowed_to_fail.set()
     env.pageserver.allowed_errors.append(
-        ".+ERROR Error processing HTTP request: InternalServerError\\(timeline is Stopping"
+        ".+: Error processing HTTP request: InternalServerError\\(timeline is Stopping"
     )
     client.timeline_delete(tenant_id, timeline_id)
 
