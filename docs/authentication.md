@@ -29,6 +29,41 @@ These components should not have access to the private key and may only get toke
 The key pair is generated once for an installation of compute/pageserver/safekeeper, e.g. by `neon_local init`.
 There is currently no way to rotate the key without bringing down all components.
 
+### Token format
+
+The JWT tokens in Neon use RSA as the algorithm. Example:
+
+Header:
+
+```
+{
+  "alg": "RS512",     # RS256, RS384, or RS512
+  "typ": "JWT"
+}
+```
+
+Payload:
+
+```
+{
+  "scope": "tenant",  # "tenant", "pageserverapi", or "safekeeperdata"
+  "tenant_id": "5204921ff44f09de8094a1390a6a50f6",
+}
+```
+
+
+Meanings of scope:
+
+"tenant": Provides access to all data for a specific tenant
+
+"pageserverapi": Provides blanket access to all tenants on the pageserver plus pageserver-wide APIs.
+Should only be used e.g. for status check/tenant creation/list.
+
+"safekeeperdata": Provides blanket access to all data on the safekeeper plus safekeeper-wide APIs.
+Should only be used e.g. for status check.
+Currently also used for connection from any pageserver to any safekeeper.
+
+
 ### CLI
 CLI generates a key pair during call to `neon_local init` with the following commands:
 
