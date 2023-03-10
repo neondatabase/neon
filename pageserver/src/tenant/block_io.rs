@@ -74,7 +74,7 @@ where
 {
     reader: R,
     /// last accessed page
-    cache: Option<(u32, R::BlockLease)>,
+    cache: (u32, [u8; PAGE_SZ]),
 }
 
 impl<R> BlockCursor<R>
@@ -84,22 +84,20 @@ where
     pub fn new(reader: R) -> Self {
         BlockCursor {
             reader,
-            cache: None,
+            cache: (u32::MAX, [0u8; PAGE_SZ]),
         }
     }
 
     pub fn read_blk(&mut self, blknum: u32) -> Result<&Self, std::io::Error> {
         // Fast return if this is the same block as before
-        if let Some((cached_blk, _buf)) = &self.cache {
-            if *cached_blk == blknum {
-                return Ok(self);
-            }
+        if self.cache.0 == blknum {
+            return Ok(self);
         }
 
         // Read the block from the underlying reader, and cache it
-        self.cache = None;
         let buf = self.reader.read_blk(blknum)?;
-        self.cache = Some((blknum, buf));
+        self.cache.0 = blknum;
+        self.cache.1[..].copy_from_slice(&buf[..]);
 
         Ok(self)
     }
@@ -112,7 +110,7 @@ where
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &<Self as Deref>::Target {
-        &self.cache.as_ref().unwrap().1
+        &self.cache.1
     }
 }
 
