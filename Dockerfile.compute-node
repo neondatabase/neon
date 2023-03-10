@@ -362,6 +362,20 @@ RUN git clone --depth=1 --single-branch --branch neon_abi_v1.1.0 https://github.
 
 #########################################################################################
 #
+# Layer "pg-tiktoken-build"
+# Compile "pg_tiktoken" extension
+#
+#########################################################################################
+
+FROM rust-extensions-build AS pg-tiktoken-pg-build
+
+RUN git clone --depth=1 --single-branch --branch neon_abi https://github.com/vadim2404/pg_tiktoken && \
+    cd pg_tiktoken && \
+    cargo pgx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_tiktoken.control
+
+#########################################################################################
+#
 # Layer "neon-pg-ext-build"
 # compile neon extensions
 #
@@ -377,6 +391,7 @@ COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
