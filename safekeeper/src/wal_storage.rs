@@ -491,20 +491,24 @@ impl WalReader {
         start_pos: Lsn,
         enable_remote_read: bool,
     ) -> Result<Self> {
-        if state.server.wal_seg_size == 0 ||
-            state.local_start_lsn == Lsn(0) ||
-            state.timeline_start_lsn == Lsn(0) {
+        if state.server.wal_seg_size == 0
+            || state.local_start_lsn == Lsn(0)
+            || state.timeline_start_lsn == Lsn(0)
+        {
             bail!("state uninitialized, no data to read");
         }
 
-        if start_pos < state.timeline_start_lsn.segment_lsn(state.server.wal_seg_size as usize) {
+        if start_pos
+            < state
+                .timeline_start_lsn
+                .segment_lsn(state.server.wal_seg_size as usize)
+        {
             bail!(
                 "Requested streaming from {}, which is before the start of the timeline {}",
                 start_pos,
                 state.timeline_start_lsn
             );
         }
-
 
         Ok(Self {
             workdir,
@@ -521,8 +525,9 @@ impl WalReader {
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         // If this timeline is new, we may not have a full segment yet, so
         // we pad the first bytes of the timeline's first WAL segment with 0s
-        if self.pos < self.timeline_start_lsn &&
-            self.pos >= self.timeline_start_lsn.segment_lsn(self.wal_seg_size) {
+        if self.pos < self.timeline_start_lsn
+            && self.pos >= self.timeline_start_lsn.segment_lsn(self.wal_seg_size)
+        {
             let len = min(buf.len(), (self.timeline_start_lsn.0 - self.pos.0) as usize);
 
             buf[0..len].fill(0);

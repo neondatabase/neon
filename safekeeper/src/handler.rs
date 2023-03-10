@@ -50,8 +50,10 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
     if cmd.starts_with("START_WAL_PUSH") {
         Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
-        let re =
-            Regex::new(r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)").unwrap();
+        let re = Regex::new(
+            r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)",
+        )
+        .unwrap();
         let mut caps = re.captures_iter(cmd);
         let start_lsn = caps
             .next()

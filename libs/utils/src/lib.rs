@@ -48,7 +48,6 @@ pub mod signals;
 pub mod fs_ext;
 
 pub mod history_buffer;
-// mod heaps;
 
 pub mod measured_stream;
 
