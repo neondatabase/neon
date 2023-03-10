@@ -528,8 +528,5 @@ pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         }
     }
 
-    info!("installing extension: neon_utils");
-    client.simple_query("CREATE EXTENSION IF NOT EXISTS neon_utils")?;
-
     Ok(())
 }
