@@ -53,6 +53,21 @@ paths:
               schema:
                 $ref: "#/components/schemas/ComputeInsights"
 
+  /info:
+    get:
+      tags:
+      - "info"
+      summary: Get info about the compute Pod/VM
+      description: ""
+      operationId: getInfo
+      responses:
+        "200":
+          description: Info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Info"
+
   /check_writability:
     post:
       tags:
@@ -94,6 +109,15 @@ components:
         config_ms:
           type: integer
         total_startup_ms:
+          type: integer
+
+    Info:
+      type: object
+      description: Information about VM/Pod
+      required:
+        - num_cpus
+      properties:
+        num_cpus:
           type: integer
 
     ComputeState:

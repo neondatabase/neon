@@ -409,6 +409,10 @@ COPY pgxn/ pgxn/
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
         PG_CONFIG=/usr/local/pgsql/bin/pg_config \
         -C pgxn/neon \
+        -s install && \
+    make -j $(getconf _NPROCESSORS_ONLN) \
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/neon_utils \
         -s install
 
 #########################################################################################
