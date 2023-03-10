@@ -51,7 +51,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         }
 
         (&Method::GET, "/info") => {
-            let num_cpus = num_cpus::get();
+            let num_cpus = num_cpus::get_physical();
             info!("serving /info GET request. num_cpus: {}", num_cpus);
             Response::new(Body::from(
                 serde_json::json!({
