@@ -38,12 +38,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::GET, "/insights") => {
             info!("serving /insights GET request");
             let insights = compute.collect_insights().await;
-            Response::new(Body::from(
-                serde_json::json!({
-                    "pg_stat_statements": insights,
-                })
-                .to_string(),
-            ))
+            Response::new(Body::from(insights))
         }
 
         (&Method::POST, "/check_writability") => {
@@ -55,9 +50,9 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
-        (&Method::GET, "/num_cpus") => {
+        (&Method::GET, "/info") => {
             let num_cpus = num_cpus::get();
-            info!("serving /num_cpus GET request. Response: {}", num_cpus);
+            info!("serving /info GET request. num_cpus: {}", num_cpus);
             Response::new(Body::from(
                 serde_json::json!({
                     "num_cpus": num_cpus,
