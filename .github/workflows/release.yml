@@ -31,3 +31,4 @@ jobs:
         head: releases/${{ steps.date.outputs.date }}
         base: release
         title: Release ${{ steps.date.outputs.date }}
+        team_reviewers: release
