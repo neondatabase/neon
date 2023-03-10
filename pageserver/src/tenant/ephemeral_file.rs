@@ -427,7 +427,6 @@ mod tests {
             let actual = cursor.read_blob(pos)?;
             assert_eq!(actual, expected);
         }
-        drop(cursor);
 
         // Test a large blob that spans multiple pages
         let mut large_data = Vec::new();
