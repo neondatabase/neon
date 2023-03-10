@@ -39,7 +39,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
-COPY . .
+COPY --chown=nonroot . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
