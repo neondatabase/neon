@@ -169,7 +169,7 @@ impl Endpoint {
             Replication::Static(Lsn::from_str(lsn_str)?)
         } else if let Some(slot_name) = conf.get("primary_slot_name") {
             let slot_name = slot_name.to_string();
-            let prefix = format!("repl_{}_{}_", timeline_id, name);
+            let prefix = format!("repl_{}_", timeline_id);
             assert!(slot_name.starts_with(&prefix));
             Replication::Replica
         } else {

@@ -1209,6 +1209,9 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 
 	if (ShutdownRequestPending)
 		return;
+	/* Don't log any pages if we're not allowed to do so. duh! */
+	if (!XLogInsertAllowed())
+		return;
 
 	/*
 	 * Whenever a VM or FSM page is evicted, WAL-log it. FSM and (some) VM
@@ -1559,6 +1562,15 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	/*
 	 * Newly created relation is empty, remember that in the relsize cache.
 	 *
+	 * Note that in REDO, this is called to make sure the relation fork exists,
+	 * but it does not truncate the relation. So, we can only update the
+	 * relsize if it didn't exist before.
+	 * 
+	 * Also, in redo, we must make sure to update the cached size of the
+	 * relation, as that is the primary source of truth for REDO's
+	 * file length considerations, and as file extension isn't (perfectly)
+	 * logged, we need to take care of that before we hit file size checks.
+	 *
 	 * FIXME: This is currently not just an optimization, but required for
 	 * correctness. Postgres can call smgrnblocks() on the newly-created
 	 * relation. Currently, we don't call SetLastWrittenLSN() when a new
@@ -1566,7 +1578,14 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	 * cache, we might call smgrnblocks() on the newly-created relation before
 	 * the creation WAL record hass been received by the page server.
 	 */
-	set_cached_relsize(reln->smgr_rnode.node, forkNum, 0);
+	if (isRedo)
+	{
+		update_cached_relsize(reln->smgr_rnode.node, forkNum, 0);
+		get_cached_relsize(reln->smgr_rnode.node, forkNum,
+						   &reln->smgr_cached_nblocks[forkNum]);
+	}
+	else
+		set_cached_relsize(reln->smgr_rnode.node, forkNum, 0);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -2602,7 +2621,7 @@ smgr_init_neon(void)
  * - The block is not in the shared buffers
  * - The block is not in the file cache (or is evicted from that cache)
  */
-static bool
+bool
 neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 {
 	XLogRecPtr	end_recptr = record->EndRecPtr;
@@ -2615,6 +2634,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	LWLock	   *partitionLock;
 	Buffer		buffer;
 	bool		filter_redo;
+	BlockNumber relsize;
 
 #if PG_VERSION_NUM < 150000
 	if (!XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blkno))
@@ -2636,7 +2656,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	/* Try to find the relevant buffer */
 	buffer = BufTableLookup(&tag, hash);
 
-	filter_redo = buffer <= 0;
+	filter_redo = buffer < 0;
 
 	/* we don't have the buffer in memory, update lwLsn past this record */
 	if (filter_redo)
@@ -2650,4 +2670,46 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	}
 
 	LWLockRelease(partitionLock);
+
+	/* Extend the relation if we know its size */
+	if (get_cached_relsize(rnode, forknum, &relsize))
+	{
+		if (relsize < blkno + 1)
+			update_cached_relsize(rnode, forknum, blkno + 1);
+	}
+	else
+	{
+		/*
+		 * Size was not cached. We populate the cache now, with the size of the
+		 * relation measured after this WAL record is applied.
+		 *
+		 * This length is later reused when we open the smgr to read the block,
+		 * which is fine and expected.
+		 */
+
+		NeonResponse *response;
+		NeonNblocksResponse *nbresponse;
+		NeonNblocksRequest request = {
+			.req = (NeonRequest) {
+				.lsn = end_recptr,
+				.latest = false,
+				.tag = T_NeonNblocksRequest,
+			},
+			.rnode = rnode,
+			.forknum = forknum,
+		};
+
+		response = page_server_request(&request);
+
+		Assert(response->tag == T_NeonNblocksResponse);
+		nbresponse = (NeonNblocksResponse *) response;
+
+		Assert(nbresponse->n_blocks > blkno);
+
+		set_cached_relsize(rnode, forknum, nbresponse->n_blocks);
+
+		elog(LOG, "Set length to %d", nbresponse->n_blocks);
+	}
+
+	return filter_redo;
 }

@@ -478,6 +478,9 @@ pub struct WalReader {
 
     // We don't have WAL locally if LSN is less than local_start_lsn
     local_start_lsn: Lsn,
+    // We will respond with zero-ed bytes before this Lsn as long as
+    // pos is in the same segment as timeline_start_lsn.
+    timeline_start_lsn: Lsn,
 }
 
 impl WalReader {
@@ -488,7 +491,13 @@ impl WalReader {
         start_pos: Lsn,
         enable_remote_read: bool,
     ) -> Result<Self> {
-        if start_pos < state.timeline_start_lsn {
+        if state.server.wal_seg_size == 0 ||
+            state.local_start_lsn == Lsn(0) ||
+            state.timeline_start_lsn == Lsn(0) {
+            bail!("state uninitialized, no data to read");
+        }
+
+        if start_pos < state.timeline_start_lsn.segment_lsn(state.server.wal_seg_size as usize) {
             bail!(
                 "Requested streaming from {}, which is before the start of the timeline {}",
                 start_pos,
@@ -496,10 +505,6 @@ impl WalReader {
             );
         }
 
-        // TODO: add state.timeline_start_lsn == Lsn(0) check
-        if state.server.wal_seg_size == 0 || state.local_start_lsn == Lsn(0) {
-            bail!("state uninitialized, no data to read");
-        }
 
         Ok(Self {
             workdir,
@@ -509,10 +514,22 @@ impl WalReader {
             wal_segment: None,
             enable_remote_read,
             local_start_lsn: state.local_start_lsn,
+            timeline_start_lsn: state.timeline_start_lsn,
         })
     }
 
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        // If this timeline is new, we may not have a full segment yet, so
+        // we pad the first bytes of the timeline's first WAL segment with 0s
+        if self.pos < self.timeline_start_lsn &&
+            self.pos >= self.timeline_start_lsn.segment_lsn(self.wal_seg_size) {
+            let len = min(buf.len(), (self.timeline_start_lsn.0 - self.pos.0) as usize);
+
+            buf[0..len].fill(0);
+            self.pos += len as u64;
+            return Ok(len);
+        }
+
         let mut wal_segment = match self.wal_segment.take() {
             Some(reader) => reader,
             None => self.open_segment().await?,

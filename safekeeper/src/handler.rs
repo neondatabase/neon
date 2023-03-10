@@ -3,6 +3,7 @@
 
 use anyhow::Context;
 use std::str;
+use std::str::FromStr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, info_span, Instrument};
 
@@ -50,11 +51,11 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         Ok(SafekeeperPostgresCommand::StartWalPush)
     } else if cmd.starts_with("START_REPLICATION") {
         let re =
-            Regex::new(r"START_REPLICATION(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)").unwrap();
+            Regex::new(r"START_REPLICATION(?: SLOT [^ ]+)?(?: PHYSICAL)? ([[:xdigit:]]+/[[:xdigit:]]+)").unwrap();
         let mut caps = re.captures_iter(cmd);
         let start_lsn = caps
             .next()
-            .map(|cap| cap[1].parse::<Lsn>())
+            .map(|cap| Lsn::from_str(&cap[1]))
             .context("parse start LSN from START_REPLICATION command")??;
         Ok(SafekeeperPostgresCommand::StartReplication { start_lsn })
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
