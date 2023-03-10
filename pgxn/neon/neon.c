@@ -8,12 +8,6 @@
  *
  *-------------------------------------------------------------------------
  */
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
-
 #include "postgres.h"
 #include "fmgr.h"
 
@@ -46,7 +40,6 @@ _PG_init(void)
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
 PG_FUNCTION_INFO_V1(backpressure_throttling_time);
-PG_FUNCTION_INFO_V1(num_cpus);
 
 Datum
 pg_cluster_size(PG_FUNCTION_ARGS)
@@ -91,18 +84,4 @@ Datum
 backpressure_throttling_time(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_UINT64(BackpressureThrottlingTime());
-}
-
-Datum
-num_cpus(PG_FUNCTION_ARGS)
-{
-	uint32 num_cpus;
-#ifdef _WIN32
-	SYSTEM_INFO sysinfo;
-	GetSystemInfo(&sysinfo);
-	num_cpus = (uint32) sysinfo.dwNumberOfProcessors;
-#else
-	num_cpus = (uint32) sysconf(_SC_NPROCESSORS_ONLN);
-#endif
-	PG_RETURN_UINT32(num_cpus);
 }
