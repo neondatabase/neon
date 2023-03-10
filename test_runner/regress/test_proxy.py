@@ -141,6 +141,7 @@ def test_forward_params_to_client(static_proxy: NeonProxy):
 def test_close_on_connections_exit(static_proxy: NeonProxy):
     with static_proxy.connect(options="project=irrelevant"):
         with static_proxy.connect(options="project=irrelevant"):
-            static_proxy._popen.terminate()
-            with pytest.raises(subprocess.TimeoutExpired):
-                static_proxy._popen.wait(timeout=2)
+            if static_proxy._popen:
+                static_proxy._popen.terminate()
+                with pytest.raises(subprocess.TimeoutExpired):
+                    static_proxy._popen.wait(timeout=2)
