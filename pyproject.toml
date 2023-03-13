@@ -35,11 +35,10 @@ types-toml = "^0.10.8"
 pytest-httpserver = "^1.0.6"
 aiohttp = "3.7.4"
 
-[tool.poetry.dev-dependencies]
-flake8 = "^5.0.4"
-mypy = "==0.991"
-black = "^22.6.0"
-isort = "^5.10.1"
+[tool.poetry.group.dev.dependencies]
+black = "^23.1.0"
+mypy = "==1.1.1"
+ruff = "^0.0.255"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -52,14 +51,6 @@ extend-exclude = '''
     vendor
 )/
 '''
-
-[tool.isort]
-profile = "black"
-line_length = 100
-skip_gitignore = true
-skip = [
-    "vendor",
-]
 
 [tool.mypy]
 exclude = "^vendor/"
@@ -80,3 +71,13 @@ module = [
     "pg8000.*",
 ]
 ignore_missing_imports = true
+
+[tool.ruff]
+extend-exclude = ["vendor/"]
+ignore = ["E501"]
+select = [
+    "E", # pycodestyle
+    "F", # Pyflakes
+    "I", # isort
+    "W", # pycodestyle
+]
