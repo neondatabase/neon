@@ -256,6 +256,51 @@ RUN wget https://github.com/theory/pgtap/archive/refs/tags/v1.2.0.tar.gz -O pgta
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgtap.control
 
 #########################################################################################
+#
+# Layer "prefix-pg-build"
+# compile Prefix extension
+#
+#########################################################################################
+FROM build-deps AS prefix-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN wget https://github.com/dimitri/prefix/archive/refs/tags/v1.2.9.tar.gz -O prefix.tar.gz && \
+    mkdir prefix-src && cd prefix-src && tar xvzf ../prefix.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/prefix.control
+
+#########################################################################################
+#
+# Layer "hll-pg-build"
+# compile hll extension
+#
+#########################################################################################
+FROM build-deps AS hll-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN wget https://github.com/citusdata/postgresql-hll/archive/refs/tags/v2.17.tar.gz -O hll.tar.gz && \
+    mkdir hll-src && cd hll-src && tar xvzf ../hll.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/hll.control
+
+#########################################################################################
+#
+# Layer "plpgsql-check-pg-build"
+# compile plpgsql_check extension
+#
+#########################################################################################
+FROM build-deps AS plpgsql-check-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN wget https://github.com/okbob/plpgsql_check/archive/refs/tags/v2.3.2.tar.gz -O plpgsql_check.tar.gz && \
+    mkdir plpgsql_check-src && cd plpgsql_check-src && tar xvzf ../plpgsql_check.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plpgsql_check.control
+
+#########################################################################################
 # 
 # Layer "rust extensions"
 # This layer is used to build `pgx` deps
@@ -278,7 +323,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
-    cargo install --git https://github.com/vadim2404/pgx --branch neon_abi_v0.6.1 --locked cargo-pgx && \
+    cargo install --locked --version 0.7.3 cargo-pgx && \
     /bin/bash -c 'cargo pgx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
@@ -292,11 +337,11 @@ USER root
 
 FROM rust-extensions-build AS pg-jsonschema-pg-build
 
-RUN git clone --depth=1 --single-branch --branch neon_abi_v0.1.4 https://github.com/vadim2404/pg_jsonschema/ && \
-    cd pg_jsonschema && \
+# there is no release tag yet, but we need it due to the superuser fix in the control file
+RUN wget https://github.com/supabase/pg_jsonschema/archive/caeab60d70b2fd3ae421ec66466a3abbb37b7ee6.tar.gz -O pg_jsonschema.tar.gz && \
+    mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xvzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
+    sed -i 's/pgx = "0.7.1"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgx install --release && \
-    # it's needed to enable extension because it uses untrusted C language
-    sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_jsonschema.control && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
 #########################################################################################
@@ -308,12 +353,31 @@ RUN git clone --depth=1 --single-branch --branch neon_abi_v0.1.4 https://github.
 
 FROM rust-extensions-build AS pg-graphql-pg-build
 
-RUN git clone --depth=1 --single-branch --branch neon_abi_v1.1.0 https://github.com/vadim2404/pg_graphql && \
-    cd pg_graphql && \  
+# Currently pgx version bump to >= 0.7.2  causes "call to unsafe function" compliation errors in
+# pgx-contrib-spiext. There is a branch that removes that dependency, so use it. It is on the
+# same 1.1 version we've used before.
+RUN git clone -b remove-pgx-contrib-spiext --single-branch https://github.com/yrashk/pg_graphql && \
+    cd pg_graphql && \
+    sed -i 's/pgx = "~0.7.1"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgx-tests = "~0.7.1"/pgx-tests = "0.7.3"/g' Cargo.toml && \
     cargo pgx install --release && \
     # it's needed to enable extension because it uses untrusted C language
     sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_graphql.control && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_graphql.control
+
+#########################################################################################
+#
+# Layer "pg-tiktoken-build"
+# Compile "pg_tiktoken" extension
+#
+#########################################################################################
+
+FROM rust-extensions-build AS pg-tiktoken-pg-build
+
+RUN git clone --depth=1 --single-branch https://github.com/kelvich/pg_tiktoken && \
+    cd pg_tiktoken && \
+    cargo pgx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_tiktoken.control
 
 #########################################################################################
 #
@@ -332,15 +396,23 @@ COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgtap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=prefix-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
         PG_CONFIG=/usr/local/pgsql/bin/pg_config \
         -C pgxn/neon \
+        -s install && \
+    make -j $(getconf _NPROCESSORS_ONLN) \
+        PG_CONFIG=/usr/local/pgsql/bin/pg_config \
+        -C pgxn/neon_utils \
         -s install
 
 #########################################################################################
@@ -395,7 +467,7 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 
 # Install:
 # libreadline8 for psql
-# libicu67, locales for collations (including ICU)
+# libicu67, locales for collations (including ICU and plpgsql_check)
 # libossp-uuid16 for extension ossp-uuid
 # libgeos, libgdal, libsfcgal1, libproj and libprotobuf-c1 for PostGIS
 # libxml2, libxslt1.1 for xml2

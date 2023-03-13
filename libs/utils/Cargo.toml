@@ -12,42 +12,37 @@ anyhow.workspace = true
 bincode.workspace = true
 bytes.workspace = true
 heapless.workspace = true
+hex = { workspace = true, features = ["serde"] }
 hyper = { workspace = true, features = ["full"] }
 futures = { workspace = true}
+jsonwebtoken.workspace = true
+nix.workspace = true
+once_cell.workspace = true
+pin-project-lite.workspace = true
 routerify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
-nix.workspace = true
-signal-hook.workspace = true
 rand.workspace = true
-jsonwebtoken.workspace = true
-hex = { workspace = true, features = ["serde"] }
-rustls.workspace = true
-rustls-split.workspace = true
-git-version.workspace = true
 serde_with.workspace = true
-once_cell.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
-
-metrics.workspace = true
-pq_proto.workspace = true
-
-workspace_hack.workspace = true
 url.workspace = true
 uuid = { version = "1.2", features = ["v4", "serde"] }
+
+metrics.workspace = true
+workspace_hack.workspace = true
+
 [dev-dependencies]
 byteorder.workspace = true
 bytes.workspace = true
+criterion.workspace = true
 hex-literal.workspace = true
 tempfile.workspace = true
-criterion.workspace = true
-rustls-pemfile.workspace = true
 
 [[bench]]
 name = "benchmarks"

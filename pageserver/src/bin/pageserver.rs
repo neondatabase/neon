@@ -23,11 +23,10 @@ use pageserver::{
     tenant::mgr,
     virtual_file,
 };
+use postgres_backend::AuthType;
 use utils::{
     auth::JwtAuth,
-    logging,
-    postgres_backend::AuthType,
-    project_git_version,
+    logging, project_git_version,
     sentry_init::init_sentry,
     signals::{self, Signal},
     tcp_listener,
@@ -281,33 +280,17 @@ fn start_pageserver(
     };
     info!("Using auth: {:#?}", conf.auth_type);
 
-    // TODO: remove ZENITH_AUTH_TOKEN once it's not used anywhere in development/staging/prod configuration.
-    match (var("ZENITH_AUTH_TOKEN"), var("NEON_AUTH_TOKEN")) {
-        (old, Ok(v)) => {
+    match var("NEON_AUTH_TOKEN") {
+        Ok(v) => {
             info!("Loaded JWT token for authentication with Safekeeper");
-            if let Ok(v_old) = old {
-                warn!(
-                    "JWT token for Safekeeper is specified twice, ZENITH_AUTH_TOKEN is deprecated"
-                );
-                if v_old != v {
-                    warn!("JWT token for Safekeeper has two different values, choosing NEON_AUTH_TOKEN");
-                }
-            }
             pageserver::config::SAFEKEEPER_AUTH_TOKEN
                 .set(Arc::new(v))
                 .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
         }
-        (Ok(v), _) => {
-            info!("Loaded JWT token for authentication with Safekeeper");
-            warn!("Please update pageserver configuration: the JWT token should be NEON_AUTH_TOKEN, not ZENITH_AUTH_TOKEN");
-            pageserver::config::SAFEKEEPER_AUTH_TOKEN
-                .set(Arc::new(v))
-                .map_err(|_| anyhow!("Could not initialize SAFEKEEPER_AUTH_TOKEN"))?;
-        }
-        (_, Err(VarError::NotPresent)) => {
+        Err(VarError::NotPresent) => {
             info!("No JWT token for authentication with Safekeeper detected");
         }
-        (_, Err(e)) => {
+        Err(e) => {
             return Err(e).with_context(|| {
                 "Failed to either load to detect non-present NEON_AUTH_TOKEN environment variable"
             })

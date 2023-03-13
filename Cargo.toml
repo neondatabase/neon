@@ -64,6 +64,7 @@ md5 = "0.7.0"
 memoffset = "0.8"
 nix = "0.26"
 notify = "5.0.0"
+num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
 opentelemetry = "0.18.0"
@@ -133,6 +134,7 @@ heapless = { default-features=false, features=[], git = "https://github.com/japa
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
+postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }

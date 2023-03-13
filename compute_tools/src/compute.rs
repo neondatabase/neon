@@ -25,6 +25,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
 use serde::{Serialize, Serializer};
+use tokio_postgres;
 use tracing::{info, instrument, warn};
 
 use crate::checker::create_writability_check_data;
@@ -284,6 +285,7 @@ impl ComputeNode {
         handle_role_deletions(self, &mut client)?;
         handle_grants(self, &mut client)?;
         create_writability_check_data(&mut client)?;
+        handle_extensions(&self.spec, &mut client)?;
 
         // 'Close' connection
         drop(client);
@@ -399,5 +401,44 @@ impl ComputeNode {
         }
 
         Ok(())
+    }
+
+    /// Select `pg_stat_statements` data and return it as a stringified JSON
+    pub async fn collect_insights(&self) -> String {
+        let mut result_rows: Vec<String> = Vec::new();
+        let connect_result = tokio_postgres::connect(self.connstr.as_str(), NoTls).await;
+        let (client, connection) = connect_result.unwrap();
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+        let result = client
+            .simple_query(
+                "SELECT
+    row_to_json(pg_stat_statements)
+FROM
+    pg_stat_statements
+WHERE
+    userid != 'cloud_admin'::regrole::oid
+ORDER BY
+    (mean_exec_time + mean_plan_time) DESC
+LIMIT 100",
+            )
+            .await;
+
+        if let Ok(raw_rows) = result {
+            for message in raw_rows.iter() {
+                if let postgres::SimpleQueryMessage::Row(row) = message {
+                    if let Some(json) = row.get(0) {
+                        result_rows.push(json.to_string());
+                    }
+                }
+            }
+
+            format!("{{\"pg_stat_statements\": [{}]}}", result_rows.join(","))
+        } else {
+            "{{\"pg_stat_statements\": []}}".to_string()
+        }
     }
 }

@@ -1,27 +1,25 @@
 //! Part of Safekeeper pretending to be Postgres, i.e. handling Postgres
 //! protocol commands.
 
+use anyhow::Context;
+use std::str;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{info, info_span, Instrument};
+
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
-use crate::receive_wal::ReceiveWalConn;
 
-use crate::send_wal::ReplicationConn;
-
+use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
-use anyhow::Context;
-
+use postgres_backend::QueryError;
+use postgres_backend::{self, PostgresBackend};
 use postgres_ffi::PG_TLI;
-use regex::Regex;
-
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
-use std::str;
-use tracing::info;
+use regex::Regex;
 use utils::auth::{Claims, Scope};
-use utils::postgres_backend_async::QueryError;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    postgres_backend::{self, PostgresBackend},
 };
 
 /// Safekeeper handler of postgres commands
@@ -32,6 +30,8 @@ pub struct SafekeeperPostgresHandler {
     pub tenant_id: Option<TenantId>,
     pub timeline_id: Option<TimelineId>,
     pub ttid: TenantTimelineId,
+    /// Unique connection id is logged in spans for observability.
+    pub conn_id: ConnectionId,
     claims: Option<Claims>,
 }
 
@@ -53,7 +53,7 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         let start_lsn = caps
             .next()
             .map(|cap| cap[1].parse::<Lsn>())
-            .context("failed to parse start LSN from START_REPLICATION command")??;
+            .context("parse start LSN from START_REPLICATION command")??;
         Ok(SafekeeperPostgresCommand::StartReplication { start_lsn })
     } else if cmd.starts_with("IDENTIFY_SYSTEM") {
         Ok(SafekeeperPostgresCommand::IdentifySystem)
@@ -67,11 +67,14 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
     }
 }
 
-impl postgres_backend::Handler for SafekeeperPostgresHandler {
+#[async_trait::async_trait]
+impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
+    for SafekeeperPostgresHandler
+{
     // tenant_id and timeline_id are passed in connection string params
     fn startup(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackend<IO>,
         sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         if let FeStartupPacket::StartupMessage { params, .. } = sm {
@@ -110,7 +113,7 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
 
     fn check_auth_jwt(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackend<IO>,
         jwt_response: &[u8],
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
@@ -137,9 +140,9 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         Ok(())
     }
 
-    fn process_query(
+    async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
         query_string: &str,
     ) -> Result<(), QueryError> {
         if query_string
@@ -147,9 +150,10 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
             .starts_with("set datestyle to ")
         {
             // important for debug because psycopg2 executes "SET datestyle TO 'ISO'" on connect
-            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
             return Ok(());
         }
+
         let cmd = parse_cmd(query_string)?;
 
         info!(
@@ -161,38 +165,36 @@ impl postgres_backend::Handler for SafekeeperPostgresHandler {
         let timeline_id = self.timeline_id.context("timelineid is required")?;
         self.check_permission(Some(tenant_id))?;
         self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
+        let span_ttid = self.ttid; // satisfy borrow checker
 
-        let res = match cmd {
-            SafekeeperPostgresCommand::StartWalPush => ReceiveWalConn::new(pgb).run(self),
+        match cmd {
+            SafekeeperPostgresCommand::StartWalPush => {
+                self.handle_start_wal_push(pgb)
+                    .instrument(info_span!("WAL receiver", ttid = %span_ttid))
+                    .await
+            }
             SafekeeperPostgresCommand::StartReplication { start_lsn } => {
-                ReplicationConn::new(pgb).run(self, pgb, start_lsn)
+                self.handle_start_replication(pgb, start_lsn)
+                    .instrument(info_span!("WAL sender", ttid = %span_ttid))
+                    .await
             }
-            SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb),
-            SafekeeperPostgresCommand::JSONCtrl { ref cmd } => handle_json_ctrl(self, pgb, cmd),
-        };
-
-        match res {
-            Ok(()) => Ok(()),
-            Err(QueryError::Disconnected(connection_error)) => {
-                info!("Timeline {tenant_id}/{timeline_id} query failed with connection error: {connection_error}");
-                Err(QueryError::Disconnected(connection_error))
+            SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
+            SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
+                handle_json_ctrl(self, pgb, cmd).await
             }
-            Err(QueryError::Other(e)) => Err(QueryError::Other(e.context(format!(
-                "Failed to process query for timeline {}",
-                self.ttid
-            )))),
         }
     }
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf) -> Self {
+    pub fn new(conf: SafeKeeperConf, conn_id: u32) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
             tenant_id: None,
             timeline_id: None,
             ttid: TenantTimelineId::empty(),
+            conn_id,
             claims: None,
         }
     }
@@ -217,8 +219,11 @@ impl SafekeeperPostgresHandler {
     ///
     /// Handle IDENTIFY_SYSTEM replication command
     ///
-    fn handle_identify_system(&mut self, pgb: &mut PostgresBackend) -> Result<(), QueryError> {
-        let tli = GlobalTimelines::get(self.ttid)?;
+    async fn handle_identify_system<IO: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+    ) -> Result<(), QueryError> {
+        let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
 
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn
@@ -267,7 +272,7 @@ impl SafekeeperPostgresHandler {
             Some(lsn_bytes),
             None,
         ]))?
-        .write_message(&BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"))?;
+        .write_message_noflush(&BeMessage::CommandComplete(b"IDENTIFY_SYSTEM"))?;
         Ok(())
     }
 

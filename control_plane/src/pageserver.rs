@@ -11,6 +11,7 @@ use anyhow::{bail, Context};
 use pageserver_api::models::{
     TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
+use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
@@ -20,7 +21,6 @@ use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    postgres_backend::AuthType,
 };
 
 use crate::{background_process, local_env::LocalEnv};

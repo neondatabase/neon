@@ -21,10 +21,10 @@ use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
 
+use postgres_backend::AuthType;
 use utils::{
     id::{NodeId, TenantId, TimelineId},
     logging::LogFormat,
-    postgres_backend::AuthType,
 };
 
 use crate::tenant::config::TenantConf;
@@ -696,6 +696,12 @@ impl PageServerConf {
         if let Some(compaction_threshold) = item.get("compaction_threshold") {
             t_conf.compaction_threshold =
                 Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
+        }
+
+        if let Some(image_creation_threshold) = item.get("image_creation_threshold") {
+            t_conf.image_creation_threshold = Some(
+                parse_toml_u64("image_creation_threshold", image_creation_threshold)?.try_into()?,
+            );
         }
 
         if let Some(gc_horizon) = item.get("gc_horizon") {

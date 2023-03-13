@@ -1,7 +1,7 @@
-//! This module implements Timeline lifecycle management and has all neccessary code
+//! This module implements Timeline lifecycle management and has all necessary code
 //! to glue together SafeKeeper and all other background services.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use parking_lot::{Mutex, MutexGuard};
 use postgres_ffi::XLogSegNo;
 use pq_proto::ReplicationFeedback;
@@ -13,6 +13,7 @@ use tokio::{
     time::Instant,
 };
 use tracing::*;
+use utils::http::error::ApiError;
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
@@ -356,6 +357,18 @@ pub enum TimelineError {
     UninitialinzedPgVersion(TenantTimelineId),
 }
 
+// Convert to HTTP API error.
+impl From<TimelineError> for ApiError {
+    fn from(te: TimelineError) -> ApiError {
+        match te {
+            TimelineError::NotFound(ttid) => {
+                ApiError::NotFound(anyhow!("timeline {} not found", ttid))
+            }
+            _ => ApiError::InternalServerError(anyhow!("{}", te)),
+        }
+    }
+}
+
 /// Timeline struct manages lifecycle (creation, deletion, restore) of a safekeeper timeline.
 /// It also holds SharedState and provides mutually exclusive access to it.
 pub struct Timeline {
@@ -519,7 +532,7 @@ impl Timeline {
 
     /// Register compute connection, starting timeline-related activity if it is
     /// not running yet.
-    pub fn on_compute_connect(&self) -> Result<()> {
+    pub async fn on_compute_connect(&self) -> Result<()> {
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
@@ -533,7 +546,7 @@ impl Timeline {
         // Wake up wal backup launcher, if offloading not started yet.
         if is_wal_backup_action_pending {
             // Can fail only if channel to a static thread got closed, which is not normal at all.
-            self.wal_backup_launcher_tx.blocking_send(self.ttid)?;
+            self.wal_backup_launcher_tx.send(self.ttid).await?;
         }
         Ok(())
     }
@@ -550,6 +563,11 @@ impl Timeline {
         // Wake up wal backup launcher, if it is time to stop the offloading.
         if is_wal_backup_action_pending {
             // Can fail only if channel to a static thread got closed, which is not normal at all.
+            //
+            // Note: this is blocking_send because on_compute_disconnect is called in Drop, there is
+            // no async Drop and we use current thread runtimes. With current thread rt spawning
+            // task in drop impl is racy, as thread along with runtime might finish before the task.
+            // This should be switched send.await when/if we go to full async.
             self.wal_backup_launcher_tx.blocking_send(self.ttid)?;
         }
         Ok(())

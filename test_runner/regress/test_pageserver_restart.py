@@ -45,14 +45,6 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start()
 
-    # Stopping the pageserver breaks the connection from the postgres backend to
-    # the page server, and causes the next query on the connection to fail. Start a new
-    # postgres connection too, to avoid that error. (Ideally, the compute node would
-    # handle that and retry internally, without propagating the error to the user, but
-    # currently it doesn't...)
-    pg_conn = pg.connect()
-    cur = pg_conn.cursor()
-
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
 
@@ -70,8 +62,6 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     assert tenant_status["state"] == "Loading"
 
     # Try to read. This waits until the loading finishes, and then return normally.
-    pg_conn = pg.connect()
-    cur = pg_conn.cursor()
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
 
@@ -131,14 +121,6 @@ def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
         # This kills the pageserver immediately, to simulate a crash
         env.pageserver.stop(immediate=True)
         env.pageserver.start()
-
-        # Stopping the pageserver breaks the connection from the postgres backend to
-        # the page server, and causes the next query on the connection to fail. Start a new
-        # postgres connection too, to avoid that error. (Ideally, the compute node would
-        # handle that and retry internally, without propagating the error to the user, but
-        # currently it doesn't...)
-        pg_conn = pg.connect()
-        cur = pg_conn.cursor()
 
         # Check that all the updates are visible
         num_updates = pg.safe_psql("SELECT sum(updates) FROM foo")[0][0]

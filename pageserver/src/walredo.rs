@@ -23,13 +23,11 @@ use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::prelude::CommandExt;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::{Mutex, MutexGuard};
@@ -639,26 +637,26 @@ impl PostgresRedoManager {
         input: &mut MutexGuard<Option<ProcessInput>>,
         pg_version: u32,
     ) -> Result<(), Error> {
-        // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
-        // just create one with constant name. That fails if you try to launch more than
-        // one WAL redo manager concurrently.
-        let datadir = path_with_suffix_extension(
+        // Previous versions of wal-redo required data directory and that directories
+        // occupied some space on disk. Remove it if we face it.
+        //
+        // This code could be dropped after one release cycle.
+        let legacy_datadir = path_with_suffix_extension(
             self.conf
                 .tenant_path(&self.tenant_id)
                 .join("wal-redo-datadir"),
             TEMP_FILE_SUFFIX,
         );
-
-        // Create empty data directory for wal-redo postgres, deleting old one first.
-        if datadir.exists() {
-            info!("old temporary datadir {datadir:?} exists, removing");
-            fs::remove_dir_all(&datadir).map_err(|e| {
+        if legacy_datadir.exists() {
+            info!("legacy wal-redo datadir {legacy_datadir:?} exists, removing");
+            fs::remove_dir_all(&legacy_datadir).map_err(|e| {
                 Error::new(
                     e.kind(),
-                    format!("Old temporary dir {datadir:?} removal failure: {e}"),
+                    format!("legacy wal-redo datadir {legacy_datadir:?} removal failure: {e}"),
                 )
             })?;
         }
+
         let pg_bin_dir_path = self
             .conf
             .pg_bin_dir(pg_version)
@@ -667,35 +665,6 @@ impl PostgresRedoManager {
             .conf
             .pg_lib_dir(pg_version)
             .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_lib_dir path: {e}")))?;
-
-        info!("running initdb in {}", datadir.display());
-        let initdb = Command::new(pg_bin_dir_path.join("initdb"))
-            .args(["-D", &datadir.to_string_lossy()])
-            .arg("-N")
-            .env_clear()
-            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
-            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path) // macOS
-            .close_fds()
-            .output()
-            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
-
-        if !initdb.status.success() {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!(
-                    "initdb failed\nstdout: {}\nstderr:\n{}",
-                    String::from_utf8_lossy(&initdb.stdout),
-                    String::from_utf8_lossy(&initdb.stderr)
-                ),
-            ));
-        } else {
-            // Limit shared cache for wal-redo-postgres
-            let mut config = OpenOptions::new()
-                .append(true)
-                .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
-            config.write_all(b"shared_buffers=128kB\n")?;
-            config.write_all(b"fsync=off\n")?;
-        }
 
         // Start postgres itself
         let child = Command::new(pg_bin_dir_path.join("postgres"))
@@ -706,7 +675,6 @@ impl PostgresRedoManager {
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
-            .env("PGDATA", &datadir)
             // The redo process is not trusted, and runs in seccomp mode that
             // doesn't allow it to open any files. We have to also make sure it
             // doesn't inherit any file descriptors from the pageserver, that

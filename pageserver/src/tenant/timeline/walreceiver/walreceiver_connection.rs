@@ -33,10 +33,11 @@ use crate::{
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
+use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use pq_proto::ReplicationFeedback;
-use utils::{lsn::Lsn, postgres_backend_async::is_expected_io_error};
+use utils::lsn::Lsn;
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
@@ -353,7 +354,7 @@ pub async fn handle_walreceiver_connection(
             debug!("neon_status_update {status_update:?}");
 
             let mut data = BytesMut::new();
-            status_update.serialize(&mut data)?;
+            status_update.serialize(&mut data);
             physical_stream
                 .as_mut()
                 .zenith_status_update(data.len() as u64, &data)
@@ -434,8 +435,8 @@ fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres:
     {
         return Ok(pg_error);
     } else if let Some(db_error) = pg_error.as_db_error() {
-        if db_error.code() == &SqlState::CONNECTION_FAILURE
-            && db_error.message().contains("end streaming")
+        if db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
+            && db_error.message().contains("ending streaming")
         {
             return Ok(pg_error);
         }

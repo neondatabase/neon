@@ -233,8 +233,8 @@ def test_remote_storage_upload_queue_retries(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
-            # don't create image layers, that causes just noise
-            "image_creation_threshold": "10000",
+            # create image layers eagerly, so that GC can remove some layers
+            "image_creation_threshold": "1",
         }
     )
 
@@ -301,7 +301,7 @@ def test_remote_storage_upload_queue_retries(
 
     # Create more churn to generate all upload ops.
     # The checkpoint / compact / gc ops will block because they call remote_client.wait_completion().
-    # So, run this in a differen thread.
+    # So, run this in a different thread.
     churn_thread_result = [False]
 
     def churn_while_failpoints_active(result):
@@ -395,8 +395,8 @@ def test_remote_timeline_client_calls_started_metric(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
-            # don't create image layers, that causes just noise
-            "image_creation_threshold": "10000",
+            # create image layers eagerly, so that GC can remove some layers
+            "image_creation_threshold": "1",
         }
     )
 
@@ -618,6 +618,9 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     # checkpoint operations. Hence, checkpoint is allowed to fail now.
     log.info("sending delete request")
     checkpoint_allowed_to_fail.set()
+    env.pageserver.allowed_errors.append(
+        ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
+    )
     client.timeline_delete(tenant_id, timeline_id)
 
     assert not timeline_path.exists()

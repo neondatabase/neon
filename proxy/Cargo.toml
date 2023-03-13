@@ -31,6 +31,7 @@ once_cell.workspace = true
 opentelemetry.workspace = true
 parking_lot.workspace = true
 pin-project-lite.workspace = true
+postgres_backend.workspace = true
 pq_proto.workspace = true
 prometheus.workspace = true
 rand.workspace = true

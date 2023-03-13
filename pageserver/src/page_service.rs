@@ -20,7 +20,9 @@ use pageserver_api::models::{
     PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
     PagestreamNblocksRequest, PagestreamNblocksResponse,
 };
-use pq_proto::ConnectionError;
+use postgres_backend::PostgresBackendTCP;
+use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, QueryError};
+use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::io;
@@ -35,8 +37,6 @@ use utils::{
     auth::{Claims, JwtAuth, Scope},
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    postgres_backend::AuthType,
-    postgres_backend_async::{self, is_expected_io_error, PostgresBackend, QueryError},
     simple_rcu::RcuReadGuard,
 };
 
@@ -55,7 +55,7 @@ use crate::trace::Tracer;
 use postgres_ffi::pg_constants::DEFAULTTABLESPACE_OID;
 use postgres_ffi::BLCKSZ;
 
-fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Bytes>> + '_ {
+fn copyin_stream(pgb: &mut PostgresBackendTCP) -> impl Stream<Item = io::Result<Bytes>> + '_ {
     async_stream::try_stream! {
         loop {
             let msg = tokio::select! {
@@ -64,11 +64,11 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 _ = task_mgr::shutdown_watcher() => {
                     // We were requested to shut down.
                     let msg = format!("pageserver is shutting down");
-                    let _ = pgb.write_message(&BeMessage::ErrorResponse(&msg, None));
+                    let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None));
                     Err(QueryError::Other(anyhow::anyhow!(msg)))
                 }
 
-                msg = pgb.read_message() => { msg }
+                msg = pgb.read_message() => { msg.map_err(QueryError::from)}
             };
 
             match msg {
@@ -79,14 +79,16 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                         FeMessage::Sync => continue,
                         FeMessage::Terminate => {
                             let msg = "client terminated connection with Terminate message during COPY";
-                            let query_error_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                            pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error_error.pg_error_code())))?;
+                            let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                            // error can't happen here, ErrorResponse serialization should be always ok
+                            pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
                             Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                             break;
                         }
                         m => {
                             let msg = format!("unexpected message {m:?}");
-                            pgb.write_message(&BeMessage::ErrorResponse(&msg, None))?;
+                            // error can't happen here, ErrorResponse serialization should be always ok
+                            pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None)).map_err(|e| e.into_io_error())?;
                             Err(io::Error::new(io::ErrorKind::Other, msg))?;
                             break;
                         }
@@ -96,16 +98,17 @@ fn copyin_stream(pgb: &mut PostgresBackend) -> impl Stream<Item = io::Result<Byt
                 }
                 Ok(None) => {
                     let msg = "client closed connection during COPY";
-                    let query_error_error = QueryError::Disconnected(ConnectionError::Socket(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
-                    pgb.write_message(&BeMessage::ErrorResponse(msg, Some(query_error_error.pg_error_code())))?;
+                    let query_error = QueryError::Disconnected(ConnectionError::Io(io::Error::new(io::ErrorKind::ConnectionReset, msg)));
+                    // error can't happen here, ErrorResponse serialization should be always ok
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, Some(query_error.pg_error_code()))).map_err(|e| e.into_io_error())?;
                     pgb.flush().await?;
                     Err(io::Error::new(io::ErrorKind::ConnectionReset, msg))?;
                 }
-                Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
+                Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
                     Err(io_error)?;
                 }
                 Err(other) => {
-                    Err(io::Error::new(io::ErrorKind::Other, other))?;
+                    Err(io::Error::new(io::ErrorKind::Other, other.to_string()))?;
                 }
             };
         }
@@ -212,7 +215,7 @@ async fn page_service_conn_main(
             // we've been requested to shut down
             Ok(())
         }
-        Err(QueryError::Disconnected(ConnectionError::Socket(io_error))) => {
+        Err(QueryError::Disconnected(ConnectionError::Io(io_error))) => {
             if is_expected_io_error(&io_error) {
                 info!("Postgres client disconnected ({io_error})");
                 Ok(())
@@ -286,7 +289,7 @@ impl PageServerHandler {
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_pagerequests(
         &self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         ctx: RequestContext,
@@ -311,7 +314,7 @@ impl PageServerHandler {
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
         // switch client to COPYBOTH
-        pgb.write_message(&BeMessage::CopyBothResponse)?;
+        pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
         pgb.flush().await?;
 
         let metrics = PageRequestMetrics::new(&tenant_id, &timeline_id);
@@ -380,7 +383,7 @@ impl PageServerHandler {
                 })
             });
 
-            pgb.write_message(&BeMessage::CopyData(&response.serialize()))?;
+            pgb.write_message_noflush(&BeMessage::CopyData(&response.serialize()))?;
             pgb.flush().await?;
         }
         Ok(())
@@ -390,7 +393,7 @@ impl PageServerHandler {
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_import_basebackup(
         &self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         base_lsn: Lsn,
@@ -416,7 +419,7 @@ impl PageServerHandler {
 
         // Import basebackup provided via CopyData
         info!("importing basebackup");
-        pgb.write_message(&BeMessage::CopyInResponse)?;
+        pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
 
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
@@ -446,7 +449,7 @@ impl PageServerHandler {
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_import_wal(
         &self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         start_lsn: Lsn,
@@ -468,7 +471,7 @@ impl PageServerHandler {
 
         // Import wal provided via CopyData
         info!("importing wal");
-        pgb.write_message(&BeMessage::CopyInResponse)?;
+        pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
         let mut copyin_stream = Box::pin(copyin_stream(pgb));
         let mut reader = tokio_util::io::StreamReader::new(&mut copyin_stream);
@@ -657,7 +660,7 @@ impl PageServerHandler {
     #[instrument(skip(self, pgb, ctx))]
     async fn handle_basebackup_request(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         tenant_id: TenantId,
         timeline_id: TimelineId,
         lsn: Option<Lsn>,
@@ -678,7 +681,7 @@ impl PageServerHandler {
         }
 
         // switch client to COPYOUT
-        pgb.write_message(&BeMessage::CopyOutResponse)?;
+        pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
         pgb.flush().await?;
 
         // Send a tarball of the latest layer on the timeline
@@ -695,7 +698,7 @@ impl PageServerHandler {
             .await?;
         }
 
-        pgb.write_message(&BeMessage::CopyDone)?;
+        pgb.write_message_noflush(&BeMessage::CopyDone)?;
         pgb.flush().await?;
         info!("basebackup complete");
 
@@ -721,10 +724,10 @@ impl PageServerHandler {
 }
 
 #[async_trait::async_trait]
-impl postgres_backend_async::Handler for PageServerHandler {
+impl postgres_backend::Handler<tokio::net::TcpStream> for PageServerHandler {
     fn check_auth_jwt(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackendTCP,
         jwt_response: &[u8],
     ) -> Result<(), QueryError> {
         // this unwrap is never triggered, because check_auth_jwt only called when auth_type is NeonJWT
@@ -752,7 +755,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
     fn startup(
         &mut self,
-        _pgb: &mut PostgresBackend,
+        _pgb: &mut PostgresBackendTCP,
         _sm: &FeStartupPacket,
     ) -> Result<(), QueryError> {
         Ok(())
@@ -760,7 +763,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
     async fn process_query(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackendTCP,
         query_string: &str,
     ) -> Result<(), QueryError> {
         let ctx = self.connection_ctx.attached_child();
@@ -812,7 +815,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // Check that the timeline exists
             self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, None, false, ctx)
                 .await?;
-            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
         // return pair of prev_lsn and last_lsn
         else if query_string.starts_with("get_last_record_rlsn ") {
@@ -835,15 +838,15 @@ impl postgres_backend_async::Handler for PageServerHandler {
 
             let end_of_timeline = timeline.get_last_record_rlsn();
 
-            pgb.write_message(&BeMessage::RowDescription(&[
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::text_col(b"prev_lsn"),
                 RowDescriptor::text_col(b"last_lsn"),
             ]))?
-            .write_message(&BeMessage::DataRow(&[
+            .write_message_noflush(&BeMessage::DataRow(&[
                 Some(end_of_timeline.prev.to_string().as_bytes()),
                 Some(end_of_timeline.last.to_string().as_bytes()),
             ]))?
-            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
         // same as basebackup, but result includes relational data as well
         else if query_string.starts_with("fullbackup ") {
@@ -884,7 +887,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             // Check that the timeline exists
             self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, prev_lsn, true, ctx)
                 .await?;
-            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("import basebackup ") {
             // Import the `base` section (everything but the wal) of a basebackup.
             // Assumes the tenant already exists on this pageserver.
@@ -929,10 +932,10 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 )
                 .await
             {
-                Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
+                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
                 Err(e) => {
                     error!("error importing base backup between {base_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message(&BeMessage::ErrorResponse(
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(
                         &e.to_string(),
                         Some(e.pg_error_code()),
                     ))?
@@ -965,10 +968,10 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 .handle_import_wal(pgb, tenant_id, timeline_id, start_lsn, end_lsn, ctx)
                 .await
             {
-                Ok(()) => pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?,
+                Ok(()) => pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?,
                 Err(e) => {
                     error!("error importing WAL between {start_lsn} and {end_lsn}: {e:?}");
-                    pgb.write_message(&BeMessage::ErrorResponse(
+                    pgb.write_message_noflush(&BeMessage::ErrorResponse(
                         &e.to_string(),
                         Some(e.pg_error_code()),
                     ))?
@@ -977,7 +980,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
         } else if query_string.to_ascii_lowercase().starts_with("set ") {
             // important because psycopg2 executes "SET datestyle TO 'ISO'"
             // on connect
-            pgb.write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else if query_string.starts_with("show ") {
             // show <tenant_id>
             let (_, params_raw) = query_string.split_at("show ".len());
@@ -993,7 +996,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
             self.check_permission(Some(tenant_id))?;
 
             let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
-            pgb.write_message(&BeMessage::RowDescription(&[
+            pgb.write_message_noflush(&BeMessage::RowDescription(&[
                 RowDescriptor::int8_col(b"checkpoint_distance"),
                 RowDescriptor::int8_col(b"checkpoint_timeout"),
                 RowDescriptor::int8_col(b"compaction_target_size"),
@@ -1004,7 +1007,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 RowDescriptor::int8_col(b"image_creation_threshold"),
                 RowDescriptor::int8_col(b"pitr_interval"),
             ]))?
-            .write_message(&BeMessage::DataRow(&[
+            .write_message_noflush(&BeMessage::DataRow(&[
                 Some(tenant.get_checkpoint_distance().to_string().as_bytes()),
                 Some(
                     tenant
@@ -1027,7 +1030,7 @@ impl postgres_backend_async::Handler for PageServerHandler {
                 Some(tenant.get_image_creation_threshold().to_string().as_bytes()),
                 Some(tenant.get_pitr_interval().as_secs().to_string().as_bytes()),
             ]))?
-            .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         } else {
             return Err(QueryError::Other(anyhow::anyhow!(
                 "unknown command {query_string}"
@@ -1055,7 +1058,7 @@ impl From<GetActiveTenantError> for QueryError {
     fn from(e: GetActiveTenantError) -> Self {
         match e {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
-                ConnectionError::Socket(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
+                ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
             GetActiveTenantError::Other(e) => QueryError::Other(e),
         }
