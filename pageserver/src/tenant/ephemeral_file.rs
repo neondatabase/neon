@@ -2,9 +2,7 @@
 //! used to keep in-memory layers spilled on disk.
 
 use crate::config::PageServerConf;
-use crate::page_cache;
-use crate::page_cache::PAGE_SZ;
-use crate::page_cache::{ReadBufResult, WriteBufResult};
+use crate::page_cache::{self, ReadBufResult, WriteBufResult, PAGE_SZ};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::BlockReader;
 use crate::virtual_file::VirtualFile;
@@ -427,7 +425,6 @@ mod tests {
             let actual = cursor.read_blob(pos)?;
             assert_eq!(actual, expected);
         }
-        drop(cursor);
 
         // Test a large blob that spans multiple pages
         let mut large_data = Vec::new();
