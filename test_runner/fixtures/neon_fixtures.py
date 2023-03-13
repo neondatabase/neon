@@ -2558,6 +2558,17 @@ class NeonProxy(PgProtocol):
         self._wait_until_ready()
         return self
 
+    # Sends SIGTERM to the proxy if it has been started
+    def terminate(self):
+        if self._popen:
+            self._popen.terminate()
+
+    # Waits for proxy to exit if it has been opened with a default timeout of
+    # two seconds. Raises subprocess.TimeoutExpired if the proxy does not exit in time.
+    def wait_for_exit(self, timeout=2):
+        if self._popen:
+            self._popen.wait(timeout=2)
+
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
