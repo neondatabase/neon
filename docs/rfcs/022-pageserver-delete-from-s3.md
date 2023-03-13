@@ -254,7 +254,7 @@ If a tenant gets relocated during timeline deletion the attach call with its cur
 
 Available options:
 
-- require list of alive tenants to be passed to attach call
+- require list of alive timelines to be passed to attach call
 - use the same schema with flag in index_part.json (again part of the caveats around pageserver restart applies). In this case nothing stops pageserver from implementing deletion inside if we already have these deletion marks.
 
 With first option the following problem becomes apparent:
