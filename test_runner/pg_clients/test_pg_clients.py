@@ -13,6 +13,7 @@ from fixtures.utils import subprocess_capture
     [
         "csharp/npgsql",
         "java/jdbc",
+        "rust/tokio-postgres",
         "python/asyncpg",
         "python/pg8000",
         pytest.param(
