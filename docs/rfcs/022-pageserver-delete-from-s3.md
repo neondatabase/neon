@@ -28,7 +28,9 @@ Deletion should successfully finish (eventually) without leaving dangling files 
 
 Before the options are discussed, note that deletion can be quite long process. For deletion from s3 the obvious choice is [DeleteObjects](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html) API call. It allows to batch deletion of up to 1k objects in one API call. So deletion operation linearly depends on number of layer files.
 
-For simplicity lets look into deleting tenants.
+Another design limitation is that there is no cheap `mv` operation available for s3. `mv` from `aws s3 mv` uses `copy(src, dst) + delete(src)`. So `mv`-like operation is not feasible as a building block because it actually amplifies the problem with both duration and resulting cost of the operation.
+
+For simplicity lets look into deleting tenants. Differences in deletion process between tenants and timelines are mentioned in paragraph ["Differences between tenants and timelines"](#differences-between-tenants-and-timelines)
 
 ### 1. Pageserver owns deletion machinery
 
@@ -47,16 +49,16 @@ sequenceDiagram
 
     CP->>PS: Delete tenant
     PS->>S3: Create deleted mark file at <br> /tenant/meta/deleted
-    note over PS: Create deleted mark file locally
+    PS->>PS: Create deleted mark file locally
     PS->>CP: Accepted
-    note over PS: delete local files other than deleted mark
+    PS->>PS: delete local files other than deleted mark
     loop Delete layers for each timeline
         PS->>S3: delete(..)
         CP->>PS: Finished?
         PS->>CP: False
     end
     PS->>S3: Delete mark file
-    note over PS: Delete local mark file
+    PS->>PS: Delete local mark file
 
     loop Poll for status
         CP->>PS: Finished?
@@ -95,16 +97,19 @@ sequenceDiagram
     CP->>PS: Retry delete request
 
     PS->>S3: Create deleted mark file at <br> /tenant/meta/deleted
-    note over PS: Create deleted mark file locally
+    PS->>PS: Create deleted mark file locally
 
     PS->>CP: Accepted
+
+    PS->>PS: delete local files other than deleted mark
+
     loop Delete layers for each timeline
         PS->>S3: delete(..)
         CP->>PS: Finished?
         PS->>CP: False
     end
     PS->>S3: Delete mark file
-    note over PS: Delete local mark file
+    PS->>PS: Delete local mark file
 
     CP->>PS: Finished?
     PS->>CP: True
@@ -125,6 +130,7 @@ sequenceDiagram
     note over PS: Crash point 2.
     note over PS: During startup we reconcile <br> with remote and see <br> whether the mark exists
     alt Mark exists
+        PS->>PS: delete local files other than deleted mark
         loop Delete layers for each timeline
             PS->>S3: delete(..)
         end
@@ -143,7 +149,7 @@ sequenceDiagram
         PS->>CP: Delete tenant
     end
 
-    note over PS: Continue with layer file deletions
+    PS->>PS: Continue with layer file deletions
     loop Delete layers for each timeline
         PS->>S3: delete(..)
         CP->>PS: Finished?
@@ -151,7 +157,7 @@ sequenceDiagram
     end
 
     PS->>S3: Delete mark file
-    note over PS: Delete local mark file
+    PS->>PS: Delete local mark file
 
     CP->>PS: Finished?
     PS->>CP: True
@@ -170,11 +176,12 @@ sequenceDiagram
 
     CP->>PS: Delete tenant
     PS->>S3: Create deleted mark file at <br> /tenant/meta/deleted
-    note over PS: Create deleted mark file locally
+    PS->>PS: Create deleted mark file locally
 
-    note over PS: Crash point 2.
+    note over PS: Crash point 3.
     note over PS: During startup we reconcile <br> with remote and see <br> whether the mark exists
 
+    PS->>PS: delete local files other than deleted mark
     loop Delete layers for each timeline
         PS->>S3: delete(..)
     end
@@ -192,7 +199,7 @@ sequenceDiagram
     end
 
     PS->>S3: Delete mark file
-    note over PS: Delete local mark file
+    PS->>PS: Delete local mark file
 
     CP->>PS: Finished?
     PS->>CP: True
@@ -201,6 +208,8 @@ sequenceDiagram
 If pageserver crashes after both mark files are deleted then it will reply to control plane status poll request with 404 which should be treated by control plane as success.
 
 The same applies if pageserver crashes in the end, when remote mark is deleted but before local one gets deleted. In this case on restart pageserver moves forward with deletion of local mark and Control Plane will receive 404.
+
+##### Differences between tenants and timelines
 
 For timeline the sequence is the same with the following differences:
 
