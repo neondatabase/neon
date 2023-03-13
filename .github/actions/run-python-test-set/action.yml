@@ -61,7 +61,8 @@ runs:
       with:
         name: neon-${{ runner.os }}-${{ inputs.build_type }}-artifact
         path: /tmp/neon-previous
-        prefix: latest
+        # Get artifacts from releases/2023-03-07
+        prefix: 4353714769/1
 
     - name: Download compatibility snapshot for Postgres 14
       if: inputs.build_type != 'remote'
