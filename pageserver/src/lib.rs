@@ -4,6 +4,7 @@ pub mod broker_client;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;
+pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;

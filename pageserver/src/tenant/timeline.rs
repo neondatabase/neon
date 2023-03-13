@@ -5,6 +5,7 @@ mod walreceiver;
 
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
+use either::Either;
 use fail::fail_point;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -3968,6 +3969,33 @@ impl Timeline {
             .read()
             .unwrap()
             .clone()
+    }
+}
+
+pub struct LocalLayerInfoForDiskUsageEviction {
+    pub file_name: LayerFileName,
+    pub file_size: u64,
+    pub last_activity_ts: SystemTime,
+}
+
+impl Timeline {
+    pub(crate) fn get_local_layers_for_disk_usage_eviction(
+        &self,
+    ) -> Vec<LocalLayerInfoForDiskUsageEviction> {
+        let layers = self.layers.read().unwrap();
+        layers
+            .iter_historic_layers()
+            .filter(|l| !l.is_remote_layer())
+            .map(|l| LocalLayerInfoForDiskUsageEviction {
+                file_name: l.filename().clone(),
+                file_size: l.file_size().expect("local layer must have a file size"),
+                // XXX dedupe with eviction_task.rs?
+                last_activity_ts: match l.access_stats().most_recent_access_or_residence_event() {
+                    Either::Left(mra) => mra.when,
+                    Either::Right(re) => re.timestamp,
+                },
+            })
+            .collect()
     }
 }
 

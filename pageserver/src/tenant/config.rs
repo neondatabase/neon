@@ -223,47 +223,47 @@ impl TenantConfOpt {
         }
     }
 
-    pub fn update(&mut self, other: &TenantConfOpt) {
-        if let Some(checkpoint_distance) = other.checkpoint_distance {
-            self.checkpoint_distance = Some(checkpoint_distance);
-        }
-        if let Some(checkpoint_timeout) = other.checkpoint_timeout {
-            self.checkpoint_timeout = Some(checkpoint_timeout);
-        }
-        if let Some(compaction_target_size) = other.compaction_target_size {
-            self.compaction_target_size = Some(compaction_target_size);
-        }
-        if let Some(compaction_period) = other.compaction_period {
-            self.compaction_period = Some(compaction_period);
-        }
-        if let Some(compaction_threshold) = other.compaction_threshold {
-            self.compaction_threshold = Some(compaction_threshold);
-        }
-        if let Some(gc_horizon) = other.gc_horizon {
-            self.gc_horizon = Some(gc_horizon);
-        }
-        if let Some(gc_period) = other.gc_period {
-            self.gc_period = Some(gc_period);
-        }
-        if let Some(image_creation_threshold) = other.image_creation_threshold {
-            self.image_creation_threshold = Some(image_creation_threshold);
-        }
-        if let Some(pitr_interval) = other.pitr_interval {
-            self.pitr_interval = Some(pitr_interval);
-        }
-        if let Some(walreceiver_connect_timeout) = other.walreceiver_connect_timeout {
-            self.walreceiver_connect_timeout = Some(walreceiver_connect_timeout);
-        }
-        if let Some(lagging_wal_timeout) = other.lagging_wal_timeout {
-            self.lagging_wal_timeout = Some(lagging_wal_timeout);
-        }
-        if let Some(max_lsn_wal_lag) = other.max_lsn_wal_lag {
-            self.max_lsn_wal_lag = Some(max_lsn_wal_lag);
-        }
-        if let Some(trace_read_requests) = other.trace_read_requests {
-            self.trace_read_requests = Some(trace_read_requests);
-        }
-    }
+    // pub fn update(&mut self, other: &TenantConfOpt) {
+    //     if let Some(checkpoint_distance) = other.checkpoint_distance {
+    //         self.checkpoint_distance = Some(checkpoint_distance);
+    //     }
+    //     if let Some(checkpoint_timeout) = other.checkpoint_timeout {
+    //         self.checkpoint_timeout = Some(checkpoint_timeout);
+    //     }
+    //     if let Some(compaction_target_size) = other.compaction_target_size {
+    //         self.compaction_target_size = Some(compaction_target_size);
+    //     }
+    //     if let Some(compaction_period) = other.compaction_period {
+    //         self.compaction_period = Some(compaction_period);
+    //     }
+    //     if let Some(compaction_threshold) = other.compaction_threshold {
+    //         self.compaction_threshold = Some(compaction_threshold);
+    //     }
+    //     if let Some(gc_horizon) = other.gc_horizon {
+    //         self.gc_horizon = Some(gc_horizon);
+    //     }
+    //     if let Some(gc_period) = other.gc_period {
+    //         self.gc_period = Some(gc_period);
+    //     }
+    //     if let Some(image_creation_threshold) = other.image_creation_threshold {
+    //         self.image_creation_threshold = Some(image_creation_threshold);
+    //     }
+    //     if let Some(pitr_interval) = other.pitr_interval {
+    //         self.pitr_interval = Some(pitr_interval);
+    //     }
+    //     if let Some(walreceiver_connect_timeout) = other.walreceiver_connect_timeout {
+    //         self.walreceiver_connect_timeout = Some(walreceiver_connect_timeout);
+    //     }
+    //     if let Some(lagging_wal_timeout) = other.lagging_wal_timeout {
+    //         self.lagging_wal_timeout = Some(lagging_wal_timeout);
+    //     }
+    //     if let Some(max_lsn_wal_lag) = other.max_lsn_wal_lag {
+    //         self.max_lsn_wal_lag = Some(max_lsn_wal_lag);
+    //     }
+    //     if let Some(trace_read_requests) = other.trace_read_requests {
+    //         self.trace_read_requests = Some(trace_read_requests);
+    //     }
+    // }
 }
 
 impl Default for TenantConf {

@@ -234,6 +234,8 @@ pub enum TaskKind {
     // Eviction. One per timeline.
     Eviction,
 
+    DiskUsageEviction,
+
     // Initial logical size calculation
     InitialLogicalSizeCalculation,
 
