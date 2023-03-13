@@ -270,6 +270,11 @@ impl XLogPageHeaderData {
         use utils::bin_ser::LeSer;
         XLogPageHeaderData::des_from(&mut buf.reader())
     }
+
+    pub fn encode(&self) -> Result<Bytes, SerializeError> {
+        use utils::bin_ser::LeSer;
+        self.ser().map(|b| b.into())
+    }
 }
 
 impl XLogLongPageHeaderData {
@@ -332,10 +337,21 @@ impl CheckPoint {
 // Generate new, empty WAL segment.
 // We need this segment to start compute node.
 //
-pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, SerializeError> {
+pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Bytes, SerializeError> {
     let mut seg_buf = BytesMut::with_capacity(WAL_SEGMENT_SIZE);
 
     let pageaddr = XLogSegNoOffsetToRecPtr(segno, 0, WAL_SEGMENT_SIZE);
+
+    let page_off = lsn.block_offset();
+    let seg_off = lsn.segment_offset(WAL_SEGMENT_SIZE);
+
+    let first_page_only = seg_off < XLOG_BLCKSZ;
+    let shdr_rem_len = if first_page_only {
+        seg_off
+    } else {
+        0
+    };
+
     let hdr = XLogLongPageHeaderData {
         std: {
             XLogPageHeaderData {
@@ -343,7 +359,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, Seriali
                 xlp_info: pg_constants::XLP_LONG_HEADER,
                 xlp_tli: PG_TLI,
                 xlp_pageaddr: pageaddr,
-                xlp_rem_len: 0,
+                xlp_rem_len: shdr_rem_len as u32,
                 ..Default::default() // Put 0 in padding fields.
             }
         },
@@ -357,8 +373,73 @@ pub fn generate_wal_segment(segno: u64, system_id: u64) -> Result<Bytes, Seriali
 
     //zero out the rest of the file
     seg_buf.resize(WAL_SEGMENT_SIZE, 0);
+    
+    if !first_page_only {
+        let block_offset = lsn.page_offset_in_segment(WAL_SEGMENT_SIZE) as usize;
+        let header = XLogPageHeaderData {
+            xlp_magic: XLOG_PAGE_MAGIC as u16,
+            xlp_info: 0,
+            xlp_tli: PG_TLI,
+            xlp_pageaddr: lsn.page_lsn().0,
+            xlp_rem_len: page_off as u32,
+            ..Default::default() // Put 0 in padding fields.
+        };
+        let hdr_bytes = header.encode()?;
+
+        debug_assert!(seg_buf.len() > block_offset + hdr_bytes.len());
+        debug_assert_ne!(block_offset, 0);
+
+        seg_buf[block_offset..block_offset + hdr_bytes.len()].copy_from_slice(&hdr_bytes[..]);
+    }
+
     Ok(seg_buf.freeze())
 }
+/// Generate the wal block that contains the provided Lsn; zero-ed up to the provided Lsn.
+/// The SystemId is required for segment start blocks.
+pub fn generate_wal_block(start_from: Lsn, system_id: u64) -> Result<Bytes, SerializeError> {
+    let mut blk_buf = BytesMut::with_capacity(XLOG_BLCKSZ);
+    let block_offset: u64 = start_from.block_offset() as u64;
+    let block_lsn: u64 = start_from.0 - block_offset;
+    let seg_lsn = start_from.segment_lsn(WAL_SEGMENT_SIZE);
+
+    let is_firstblock = seg_lsn.0 == block_lsn;
+
+    let hdr_len: u64 = if is_firstblock {
+        std::mem::size_of::<XLogLongPageHeaderData>()
+    } else {
+        std::mem::size_of::<XLogPageHeaderData>()
+    } as u64;
+
+    let hdr = XLogLongPageHeaderData {
+        std: {
+            XLogPageHeaderData {
+                xlp_magic: XLOG_PAGE_MAGIC as u16,
+                xlp_info: if is_firstblock { pg_constants::XLP_LONG_HEADER } else { 0 },
+                xlp_tli: PG_TLI,
+                xlp_pageaddr: block_lsn,
+                xlp_rem_len: block_offset.max(hdr_len) as u32,
+                ..Default::default() // Put 0 in padding fields.
+            }
+        },
+        xlp_sysid: system_id,
+        xlp_seg_size: WAL_SEGMENT_SIZE as u32,
+        xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
+    };
+
+    // If it's the first block in a segment, then we need to initialize the
+    // large block header.
+    let hdr_bytes = if (start_from.0 - seg_lsn.0) < XLOG_BLCKSZ as u64 {
+        hdr.encode()?
+    } else {
+        hdr.std.encode()?
+    };
+
+    blk_buf.extend_from_slice(&hdr_bytes);
+    blk_buf.resize(block_offset as usize, 0);
+    
+    Ok(blk_buf.freeze())
+}
+
 
 #[repr(C)]
 #[derive(Serialize)]

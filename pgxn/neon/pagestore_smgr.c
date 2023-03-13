@@ -189,6 +189,7 @@ typedef struct PrfHashEntry {
 #define SH_DEFINE
 #define SH_DECLARE
 #include "lib/simplehash.h"
+#include "neon.h"
 
 /*
  * PrefetchState maintains the state of (prefetch) getPage@LSN requests.
@@ -1209,7 +1210,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 
 	if (ShutdownRequestPending)
 		return;
-	/* Don't log any pages if we're not allowed to do so. duh! */
+	/* Don't log any pages if we're not allowed to do so. */
 	if (!XLogInsertAllowed())
 		return;
 
@@ -1851,9 +1852,18 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	};
 
 	/*
-	 * It is possible that we need to read a page through the neon SMgr
-	 * in the backend that is replaying the WAL. In that case, we can't
-	 * wait for that page to be replayed.
+	 * The redo process does not lock pages that it needs to replay but are
+	 * not in the shared buffers, so a concurrent process may request the
+	 * page after redo has decided it won't redo that page and updated the
+	 * LwLSN for that page.
+	 * If we're in hot standby we need to take care that we don't return
+	 * until after REDO has finished replaying up to that LwLSN, as the page
+	 * should have been locked up to that point.
+	 *
+	 * Although it is possible that we need to read a page through the
+	 * neon SMgr in the backend that is replaying the WAL, the request_lsn
+	 * of that IO request should in those cases be less than that of the
+	 * record we're currently replaying.
 	 */
 	if (RecoveryInProgress())
 		XLogWaitForReplayOf(request_lsn);
@@ -2633,8 +2643,11 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	uint32		hash;
 	LWLock	   *partitionLock;
 	Buffer		buffer;
-	bool		filter_redo;
+	bool		no_redo_needed;
 	BlockNumber relsize;
+
+	if (old_redo_read_buffer_filter && old_redo_read_buffer_filter(record, block_id))
+		return true;
 
 #if PG_VERSION_NUM < 150000
 	if (!XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blkno))
@@ -2642,6 +2655,13 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 #else
 	XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blkno);
 #endif
+
+	/*
+	 * Always run redo on shared catalogs, regardless of whether the block is
+	 * stored in shared buffers. Just for safety.
+	 */
+	if (!OidIsValid(rnode.dbNode))
+		return false;
 
 	INIT_BUFFERTAG(tag, rnode, forknum, blkno);
 	hash = BufTableHashCode(&tag);
@@ -2656,10 +2676,10 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	/* Try to find the relevant buffer */
 	buffer = BufTableLookup(&tag, hash);
 
-	filter_redo = buffer < 0;
+	no_redo_needed = buffer < 0;
 
 	/* we don't have the buffer in memory, update lwLsn past this record */
-	if (filter_redo)
+	if (no_redo_needed)
 	{
 		SetLastWrittenLSNForBlock(end_recptr, rnode, forknum, blkno);
 		lfc_evict(rnode, forknum, blkno);
@@ -2708,8 +2728,8 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 
 		set_cached_relsize(rnode, forknum, nbresponse->n_blocks);
 
-		elog(LOG, "Set length to %d", nbresponse->n_blocks);
+		elog(SmgrTrace, "Set length to %d", nbresponse->n_blocks);
 	}
 
-	return filter_redo;
+	return no_redo_needed;
 }

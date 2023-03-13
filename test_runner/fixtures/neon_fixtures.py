@@ -1451,6 +1451,7 @@ class NeonCli(AbstractNeonCli):
         branch_name: str,
         endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
@@ -1470,6 +1471,8 @@ class NeonCli(AbstractNeonCli):
             args.extend(["--port", str(port)])
         if endpoint_id is not None:
             args.append(endpoint_id)
+        if hot_standby:
+            args.extend(["--hot-standby", "true"])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -2184,6 +2187,7 @@ class Endpoint(PgProtocol):
         super().__init__(host="localhost", port=port, user="cloud_admin", dbname="postgres")
         self.env = env
         self.running = False
+        self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
@@ -2195,6 +2199,7 @@ class Endpoint(PgProtocol):
         self,
         branch_name: str,
         endpoint_id: Optional[str] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> "Endpoint":
@@ -2209,12 +2214,14 @@ class Endpoint(PgProtocol):
         if endpoint_id is None:
             endpoint_id = self.env.generate_endpoint_id()
         self.endpoint_id = endpoint_id
+        self.branch_name = branch_name
 
         self.env.neon_cli.endpoint_create(
             branch_name,
             endpoint_id=self.endpoint_id,
             tenant_id=self.tenant_id,
             lsn=lsn,
+            hot_standby=hot_standby,
             port=self.port,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
@@ -2339,6 +2346,7 @@ class Endpoint(PgProtocol):
         self,
         branch_name: str,
         endpoint_id: Optional[str] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> "Endpoint":
@@ -2353,6 +2361,7 @@ class Endpoint(PgProtocol):
             branch_name=branch_name,
             endpoint_id=endpoint_id,
             config_lines=config_lines,
+            hot_standby=hot_standby,
             lsn=lsn,
         ).start()
 
@@ -2386,6 +2395,7 @@ class EndpointFactory:
         endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
+        hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
     ) -> Endpoint:
         ep = Endpoint(
@@ -2399,6 +2409,7 @@ class EndpointFactory:
         return ep.create_start(
             branch_name=branch_name,
             endpoint_id=endpoint_id,
+            hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
         )
@@ -2409,6 +2420,7 @@ class EndpointFactory:
         endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
+        hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
     ) -> Endpoint:
         ep = Endpoint(
@@ -2427,6 +2439,7 @@ class EndpointFactory:
             branch_name=branch_name,
             endpoint_id=endpoint_id,
             lsn=lsn,
+            hot_standby=hot_standby,
             config_lines=config_lines,
         )
 
@@ -2435,6 +2448,32 @@ class EndpointFactory:
             ep.stop()
 
         return self
+
+    def new_replica(self, origin: Postgres, name: str, config_lines: Optional[List[str]]):
+        assert origin in self.instances
+
+        return self.create(
+            branch_name=origin.branch_name,
+            node_name=name,
+            tenant_id=origin.tenant_id,
+            lsn=None,
+            hot_standby=True,
+            config_lines=config_lines,
+        )
+
+    def new_replica_start(
+        self, origin: Postgres, name: str, config_lines: Optional[List[str]] = None
+    ):
+        assert origin in self.instances
+
+        return self.create_start(
+            branch_name=origin.branch_name,
+            node_name=name,
+            tenant_id=origin.tenant_id,
+            lsn=None,
+            hot_standby=True,
+            config_lines=config_lines,
+        )
 
 
 @dataclass

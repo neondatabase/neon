@@ -100,9 +100,11 @@ impl ComputeControlPlane {
 pub enum Replication {
     // Regular read-write node
     Primary,
-    // if recovery_target_lsn is provided
+    // if recovery_target_lsn is provided, and we want to pin the node to a specific LSN
     Static(Lsn),
-    // Hot standby running on a timleine
+    // Hot standby; read-only replica.
+    // Future versions may want to distinguish between replicas with hot standby
+    // feedback and other kinds of replication configurations.
     Replica,
 }
 
