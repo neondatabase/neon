@@ -287,4 +287,4 @@ Pros:
 
 There was a concern that having deletion code in pageserver is a littlebit scary, but we need to have this code somewhere. So to me it is equally scary to have that in whatever place it ends up at.
 
-Delayed deletion can be done with both approaches. As discussed with Anna (@stepashka) this is only relevant for tenants (projects) not for timelines. For first approach detach can be called immediately and deletion can be done later with attach + delete. With second approach control plane needs to start the deletion whenever nesessary.
+Delayed deletion can be done with both approaches. As discussed with Anna (@stepashka) this is only relevant for tenants (projects) not for timelines. For first approach detach can be called immediately and deletion can be done later with attach + delete. With second approach control plane needs to start the deletion whenever necessary.
