@@ -69,13 +69,13 @@ sequenceDiagram
 Why two mark files?
 Remote one is needed for cases when pageserver is lost during deletion so other pageserver can learn the deletion from s3 during attach.
 
-Local mark file is needed for case when pageserver crashes after remote one is deleted b
-TODO describe mark files
-Why local mark file is needed? If we dont have one, we have two choices, delete local data before deleting the remote part or do that after.
+Why local mark file is needed?
+
+If we dont have one, we have two choices, delete local data before deleting the remote part or do that after.
 
 If we delete local data before remote then during restart pageserver wont pick up remote tenant at all because nothing is available locally (pageserver looks for remote conuterparts of locally available tenants).
 
-If we delete local data after remote then at the end of the sequence when remote mark file is deleted if pageserver restart happens then the state is the same to situation when pageserver just missing data on remote without knowing the fact that this data is deleted, in this case the current behavior is upload everything has local data and remote
+If we delete local data after remote then at the end of the sequence when remote mark file is deleted if pageserver restart happens then the state is the same to situation when pageserver just missing data on remote without knowing the fact that this data is intended to be deleted. In this case the current behavior is upload everything local-only to remote.
 
 Thus we need local record of tenant being deleted as well.
 
@@ -128,8 +128,9 @@ sequenceDiagram
     PS->>S3: Create deleted mark file at <br> /tenant/meta/deleted
 
     note over PS: Crash point 2.
-    note over PS: During startup we reconcile <br> with remote and see <br> whether the mark exists
-    alt Mark exists
+    note over PS: During startup we reconcile <br> with remote and see <br> whether the remote mark exists
+    alt Remote mark exists
+        PS->>PS: create local mark if its missing
         PS->>PS: delete local files other than deleted mark
         loop Delete layers for each timeline
             PS->>S3: delete(..)
@@ -165,47 +166,7 @@ sequenceDiagram
 
 Similar sequence applies when both local and remote marks were persisted but Control Plane still didnt receive a response.
 
-Pageserver crashed after `deleted` mark file was persisted in s3 and locally but before console received a response from PS:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant CP as Control Plane
-    participant PS as Pageserver
-    participant S3
-
-    CP->>PS: Delete tenant
-    PS->>S3: Create deleted mark file at <br> /tenant/meta/deleted
-    PS->>PS: Create deleted mark file locally
-
-    note over PS: Crash point 3.
-    note over PS: During startup we reconcile <br> with remote and see <br> whether the mark exists
-
-    PS->>PS: delete local files other than deleted mark
-    loop Delete layers for each timeline
-        PS->>S3: delete(..)
-    end
-
-    note over CP: Eventually console should <br> retry delete request
-
-    CP->>PS: Retry delete tenant
-    PS->>CP: Not modified
-
-    note over PS: Continue with layer file deletions
-    loop Delete layers for each timeline
-        PS->>S3: delete(..)
-        CP->>PS: Finished?
-        PS->>CP: False
-    end
-
-    PS->>S3: Delete mark file
-    PS->>PS: Delete local mark file
-
-    CP->>PS: Finished?
-    PS->>CP: True
-```
-
-If pageserver crashes after both mark files are deleted then it will reply to control plane status poll request with 404 which should be treated by control plane as success.
+If pageserver crashes after both mark files were deleted then it will reply to control plane status poll request with 404 which should be treated by control plane as success.
 
 The same applies if pageserver crashes in the end, when remote mark is deleted but before local one gets deleted. In this case on restart pageserver moves forward with deletion of local mark and Control Plane will receive 404.
 
