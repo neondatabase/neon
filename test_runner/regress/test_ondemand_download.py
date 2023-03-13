@@ -4,7 +4,7 @@
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, DefaultDict, Dict
+from typing import Any, DefaultDict, Dict, Tuple
 
 import pytest
 from fixtures.log_helper import log
@@ -497,6 +497,17 @@ def test_compaction_downloads_on_demand_without_image_creation(
         # pitr_interval and gc_horizon are not interesting because we dont run gc
     }
 
+    def downloaded_bytes_and_count(pageserver_http: PageserverHttpClient) -> Tuple[int, int]:
+        m = pageserver_http.get_metrics()
+        # these are global counters
+        total_bytes = m.query_one("pageserver_remote_ondemand_downloaded_bytes_total").value
+        assert (
+            total_bytes < 2**53 and total_bytes.is_integer()
+        ), "bytes should still be safe integer-in-f64"
+        count = m.query_one("pageserver_remote_ondemand_downloaded_layers_total").value
+        assert count < 2**53 and count.is_integer(), "count should still be safe integer-in-f64"
+        return (int(total_bytes), int(count))
+
     # Override defaults, to create more layers
     tenant_id, timeline_id = env.neon_cli.create_tenant(conf=stringify(conf))
     env.initial_tenant = tenant_id
@@ -517,10 +528,14 @@ def test_compaction_downloads_on_demand_without_image_creation(
 
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     assert not layers.in_memory_layers, "no inmemory layers expected after post-commit checkpoint"
-    assert len(layers.historic_layers) == 1 + 2, "should have inidb layer and 2 deltas"
+    assert len(layers.historic_layers) == 1 + 2, "should have initdb layer and 2 deltas"
+
+    layer_sizes = 0
 
     for layer in layers.historic_layers:
         log.info(f"pre-compact:  {layer}")
+        assert layer.layer_file_size is not None, "we must know layer file sizes"
+        layer_sizes += layer.layer_file_size
         pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
 
     env.neon_cli.config_tenant(tenant_id, {"compaction_threshold": "3"})
@@ -530,6 +545,12 @@ def test_compaction_downloads_on_demand_without_image_creation(
     for layer in layers.historic_layers:
         log.info(f"post compact: {layer}")
     assert len(layers.historic_layers) == 1, "should have compacted to single layer"
+
+    post_compact = downloaded_bytes_and_count(pageserver_http)
+
+    # use gte to allow pageserver to do other random stuff; this test could be run on a shared pageserver
+    assert post_compact[0] >= layer_sizes
+    assert post_compact[1] >= 3, "should had downloaded the three layers"
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
