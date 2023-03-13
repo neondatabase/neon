@@ -7,7 +7,7 @@ use anyhow::Result;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    Gauge, IntGaugeVec,
+    register_int_counter_vec, Gauge, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use postgres_ffi::XLogSegNo;
@@ -60,6 +60,14 @@ pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
         DISK_WRITE_SECONDS_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec")
+});
+pub static PG_IO_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_io_bytes",
+        "Bytes read from or written to any PostgreSQL connection",
+        &["direction"]
+    )
+    .expect("Failed to register safekeeper_pg_io_bytes gauge")
 });
 
 /// Metrics for WalStorage in a single timeline.

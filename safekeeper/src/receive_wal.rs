@@ -20,6 +20,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
@@ -36,9 +38,9 @@ impl SafekeeperPostgresHandler {
     /// Wrapper around handle_start_wal_push_guts handling result. Error is
     /// handled here while we're still in walreceiver ttid span; with API
     /// extension, this can probably be moved into postgres_backend.
-    pub async fn handle_start_wal_push(
+    pub async fn handle_start_wal_push<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), QueryError> {
         if let Err(end) = self.handle_start_wal_push_guts(pgb).await {
             // Log the result and probably send it to the client, closing the stream.
@@ -47,9 +49,9 @@ impl SafekeeperPostgresHandler {
         Ok(())
     }
 
-    pub async fn handle_start_wal_push_guts(
+    pub async fn handle_start_wal_push_guts<IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
-        pgb: &mut PostgresBackend,
+        pgb: &mut PostgresBackend<IO>,
     ) -> Result<(), CopyStreamHandlerEnd> {
         // Notify the libpq client that it's allowed to send `CopyData` messages
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
@@ -111,17 +113,17 @@ impl SafekeeperPostgresHandler {
     }
 }
 
-struct NetworkReader<'a> {
+struct NetworkReader<'a, IO> {
     ttid: TenantTimelineId,
     conn_id: ConnectionId,
-    pgb_reader: &'a mut PostgresBackendReader,
+    pgb_reader: &'a mut PostgresBackendReader<IO>,
     peer_addr: SocketAddr,
     // WalAcceptor is spawned when we learn server info from walproposer and
     // create timeline; handle is put here.
     acceptor_handle: &'a mut Option<JoinHandle<anyhow::Result<()>>>,
 }
 
-impl<'a> NetworkReader<'a> {
+impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
     async fn run(
         self,
         msg_tx: Sender<ProposerAcceptorMessage>,
@@ -162,16 +164,16 @@ impl<'a> NetworkReader<'a> {
 
 /// Read next message from walproposer.
 /// TODO: Return Ok(None) on graceful termination.
-async fn read_message(
-    pgb_reader: &mut PostgresBackendReader,
+async fn read_message<IO: AsyncRead + AsyncWrite + Unpin>(
+    pgb_reader: &mut PostgresBackendReader<IO>,
 ) -> Result<ProposerAcceptorMessage, CopyStreamHandlerEnd> {
     let copy_data = pgb_reader.read_copy_message().await?;
     let msg = ProposerAcceptorMessage::parse(copy_data)?;
     Ok(msg)
 }
 
-async fn read_network_loop(
-    pgb_reader: &mut PostgresBackendReader,
+async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
+    pgb_reader: &mut PostgresBackendReader<IO>,
     msg_tx: Sender<ProposerAcceptorMessage>,
     mut next_msg: ProposerAcceptorMessage,
 ) -> Result<(), CopyStreamHandlerEnd> {
@@ -186,8 +188,8 @@ async fn read_network_loop(
 /// Read replies from WalAcceptor and pass them back to socket. Returns Ok(())
 /// if reply_rx closed; it must mean WalAcceptor terminated, joining it should
 /// tell the error.
-async fn network_write(
-    pgb_writer: &mut PostgresBackend,
+async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
+    pgb_writer: &mut PostgresBackend<IO>,
     mut reply_rx: Receiver<AcceptorProposerMessage>,
 ) -> Result<(), CopyStreamHandlerEnd> {
     let mut buf = BytesMut::with_capacity(128);
