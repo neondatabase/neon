@@ -17,6 +17,7 @@ import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.terminal import TerminalReporter
+
 from fixtures.neon_fixtures import NeonPageserver
 from fixtures.types import TenantId, TimelineId
 

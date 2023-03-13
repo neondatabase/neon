@@ -10,6 +10,7 @@ from fixtures.compare_fixtures import NeonCompare, PgCompare, VanillaCompare
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnvBuilder, PgBin
 from fixtures.types import Lsn
+
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
 
 

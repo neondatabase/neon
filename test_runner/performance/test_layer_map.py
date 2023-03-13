@@ -7,7 +7,6 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 # Benchmark searching the layer map, when there are a lot of small layer files.
 #
 def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
-
     env = neon_env_builder.init_start()
     n_iters = 10
     n_records = 100000

@@ -22,7 +22,6 @@ def test_read_validation(neon_simple_env: NeonEnv):
 
     with closing(pg.connect()) as con:
         with con.cursor() as c:
-
             for e in extensions:
                 c.execute("create extension if not exists {};".format(e))
 
@@ -150,7 +149,6 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
 
     with closing(pg.connect()) as con:
         with con.cursor() as c:
-
             for e in extensions:
                 c.execute("create extension if not exists {};".format(e))
 

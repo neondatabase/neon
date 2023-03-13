@@ -146,7 +146,7 @@ def test_timetravel(neon_simple_env: NeonEnv):
     env.pageserver.stop()
     env.pageserver.start()
 
-    for (i, lsn) in lsns:
+    for i, lsn in lsns:
         pg_old = env.postgres.create_start(
             branch_name="test_timetravel", node_name=f"test_old_lsn_{i}", lsn=lsn
         )

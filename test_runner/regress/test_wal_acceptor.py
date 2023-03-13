@@ -709,7 +709,6 @@ def test_sync_safekeepers(
     pg_bin: PgBin,
     port_distributor: PortDistributor,
 ):
-
     # We don't really need the full environment for this test, just the
     # safekeepers would be enough.
     neon_env_builder.num_safekeepers = 3

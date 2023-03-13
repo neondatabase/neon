@@ -2,7 +2,12 @@ import os
 from pathlib import Path
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PortDistributor, VanillaPostgres
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    PgBin,
+    PortDistributor,
+    VanillaPostgres,
+)
 from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar, subprocess_capture
 

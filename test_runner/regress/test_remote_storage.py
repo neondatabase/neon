@@ -212,7 +212,6 @@ def test_remote_storage_upload_queue_retries(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_storage_upload_queue_retries",
@@ -374,7 +373,6 @@ def test_remote_timeline_client_calls_started_metric(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_timeline_client_metrics",

@@ -375,7 +375,6 @@ def test_tenant_relocation(
         neon_env_builder.broker,
         neon_env_builder.pg_distrib_dir,
     ):
-
         # Migrate either by attaching from s3 or import/export basebackup
         if method == "major":
             cmd = [

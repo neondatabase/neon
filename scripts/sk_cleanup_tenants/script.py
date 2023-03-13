@@ -68,7 +68,6 @@ def call_delete_tenant_api(tenant_id):
 
 
 def cleanup_tenant(tenant_id):
-
     tenant_dir = Path(f"/storage/safekeeper/data/{tenant_id}")
 
     if not tenant_dir.exists():

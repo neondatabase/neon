@@ -3,6 +3,7 @@ import threading
 import pytest
 from fixtures.compare_fixtures import PgCompare
 from fixtures.neon_fixtures import Postgres
+
 from performance.test_perf_pgbench import get_scales_matrix
 from performance.test_wal_backpressure import record_read_latency
 
