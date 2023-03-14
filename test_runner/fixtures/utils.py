@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, TypeVar
 
 import allure  # type: ignore
-from fixtures.log_helper import log
 from psycopg2.extensions import cursor
+
+from fixtures.log_helper import log
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 

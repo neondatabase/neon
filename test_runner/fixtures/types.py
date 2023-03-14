@@ -17,8 +17,8 @@ class Lsn:
             self.lsn_int = x
         else:
             """Convert lsn from hex notation to int."""
-            l, r = x.split("/")
-            self.lsn_int = (int(l, 16) << 32) + int(r, 16)
+            left, right = x.split("/")
+            self.lsn_int = (int(left, 16) << 32) + int(right, 16)
         assert 0 <= self.lsn_int <= 0xFFFFFFFF_FFFFFFFF
 
     def __str__(self) -> str:

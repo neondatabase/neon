@@ -2,6 +2,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, WalCraft
 
+
 # Restart nodes with WAL end having specially crafted shape, like last record
 # crossing segment boundary, to test decoding issues.
 

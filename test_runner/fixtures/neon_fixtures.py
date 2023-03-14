@@ -35,6 +35,13 @@ import requests
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
+
+# Type-related stuff
+from psycopg2.extensions import connection as PgConnection
+from psycopg2.extensions import cursor as PgCursor
+from psycopg2.extensions import make_dsn, parse_dsn
+from typing_extensions import Literal
+
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, parse_metrics
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -45,12 +52,6 @@ from fixtures.utils import (
     get_self_dir,
     subprocess_capture,
 )
-
-# Type-related stuff
-from psycopg2.extensions import connection as PgConnection
-from psycopg2.extensions import cursor as PgCursor
-from psycopg2.extensions import make_dsn, parse_dsn
-from typing_extensions import Literal
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -1243,7 +1244,6 @@ class PageserverHttpClient(requests.Session):
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
     ) -> List[Dict[str, Any]]:
-
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "true"
@@ -1375,7 +1375,6 @@ class PageserverHttpClient(requests.Session):
         timeline_id: TimelineId,
         max_concurrent_downloads: int,
     ) -> dict[str, Any]:
-
         body = {
             "max_concurrent_downloads": max_concurrent_downloads,
         }
@@ -1668,7 +1667,7 @@ class AbstractNeonCli(abc.ABC):
         env_vars["POSTGRES_DISTRIB_DIR"] = str(self.env.pg_distrib_dir)
         if self.env.rust_log_override is not None:
             env_vars["RUST_LOG"] = self.env.rust_log_override
-        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
+        for extra_env_key, extra_env_value in (extra_env_vars or {}).items():
             env_vars[extra_env_key] = extra_env_value
 
         # Pass coverage settings
@@ -2852,7 +2851,6 @@ class PostgresFactory:
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> Postgres:
-
         pg = Postgres(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
@@ -2876,7 +2874,6 @@ class PostgresFactory:
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> Postgres:
-
         pg = Postgres(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
@@ -3323,7 +3320,6 @@ def check_restored_datadir_content(
     log.info(f"filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}")
 
     for f in mismatch:
-
         f1 = os.path.join(pg.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
         stdout_filename = "{}.filediff".format(f2)

@@ -177,6 +177,7 @@ async def reattach_while_busy(
 # running, and when we retry the queries, they should start working
 # after the attach has finished.
 
+
 # FIXME:
 #
 # This is pretty unstable at the moment. I've seen it fail with a warning like this:

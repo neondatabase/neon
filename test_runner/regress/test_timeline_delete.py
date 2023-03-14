@@ -40,7 +40,6 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     with pytest.raises(
         PageserverApiException, match="Cannot delete timeline which has child timelines"
     ):
-
         timeline_path = (
             env.repo_dir
             / "tenants"
