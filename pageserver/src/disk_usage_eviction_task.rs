@@ -123,8 +123,7 @@ async fn disk_usage_eviction_task(
 
     use crate::tenant::tasks::random_init_delay;
     {
-        let period = Duration::from_secs(10); // XXX make configurable
-        if random_init_delay(period, &cancel).await.is_err() {
+        if random_init_delay(task_config.period, &cancel).await.is_err() {
             info!("shutting down");
             return;
         }
