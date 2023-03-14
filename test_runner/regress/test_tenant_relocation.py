@@ -434,10 +434,13 @@ def test_tenant_relocation(
             )
 
         # rewrite neon cli config to use new pageserver for basebackup to start new compute
-        cli_config_lines = (env.repo_dir / "config").read_text().splitlines()
-        cli_config_lines[-2] = f"listen_http_addr = 'localhost:{new_pageserver_http_port}'"
-        cli_config_lines[-1] = f"listen_pg_addr = 'localhost:{new_pageserver_pg_port}'"
-        (env.repo_dir / "config").write_text("\n".join(cli_config_lines))
+        lines = (env.repo_dir / "config").read_text().splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("listen_http_addr"):
+                lines[i] = f"listen_http_addr = 'localhost:{new_pageserver_http_port}'"
+            if line.startswith("listen_pg_addr"):
+                lines[i] = f"listen_pg_addr = 'localhost:{new_pageserver_pg_port}'"
+        (env.repo_dir / "config").write_text("\n".join(lines))
 
         old_local_path_main = switch_pg_to_new_pageserver(
             env,
@@ -496,7 +499,10 @@ def test_tenant_relocation(
 
         # bring old pageserver back for clean shutdown via neon cli
         # new pageserver will be shut down by the context manager
-        cli_config_lines = (env.repo_dir / "config").read_text().splitlines()
-        cli_config_lines[-2] = f"listen_http_addr = 'localhost:{env.pageserver.service_port.http}'"
-        cli_config_lines[-1] = f"listen_pg_addr = 'localhost:{env.pageserver.service_port.pg}'"
-        (env.repo_dir / "config").write_text("\n".join(cli_config_lines))
+        lines = (env.repo_dir / "config").read_text().splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("listen_http_addr"):
+                lines[i] = f"listen_http_addr = 'localhost:{env.pageserver.service_port.http}'"
+            if line.startswith("listen_pg_addr"):
+                lines[i] = f"listen_pg_addr = 'localhost:{env.pageserver.service_port.pg}'"
+        (env.repo_dir / "config").write_text("\n".join(lines))
