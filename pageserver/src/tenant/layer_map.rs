@@ -154,11 +154,7 @@ where
         expected: &Arc<L>,
         new: Arc<L>,
     ) -> anyhow::Result<Replacement<Arc<L>>> {
-        fail::fail_point!("layermap-replace-notfound", |_| Ok(
-            // this is not what happens if an L0 layer was not found a anyhow error but perhaps
-            // that should be changed. this is good enough to show a replacement failure.
-            Replacement::NotFound
-        ));
+        fail::fail_point!("layermap-replace-notfound", |_| Ok(Replacement::NotFound));
 
         self.layer_map.replace_historic_noflush(expected, new)
     }
@@ -340,12 +336,15 @@ where
 
         let l0_index = if expected_l0 {
             // find the index in case replace worked, we need to replace that as well
-            Some(
-                self.l0_delta_layers
-                    .iter()
-                    .position(|slot| Self::compare_arced_layers(slot, expected))
-                    .ok_or_else(|| anyhow::anyhow!("existing l0 delta layer was not found"))?,
-            )
+            let pos = self
+                .l0_delta_layers
+                .iter()
+                .position(|slot| Self::compare_arced_layers(slot, expected));
+
+            if pos.is_none() {
+                return Ok(Replacement::NotFound);
+            }
+            pos
         } else {
             None
         };
@@ -804,6 +803,26 @@ mod tests {
             )
         }
 
+        #[test]
+        fn replacing_missing_l0_is_notfound() {
+            // original impl had an oversight, and L0 was an anyhow::Error. anyhow::Error should
+            // however only happen for precondition failures.
+
+            let layer = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000053423C21-0000000053424D69";
+            let layer = LayerFileName::from_str(layer).unwrap();
+            let layer = LayerDescriptor::from(layer);
+
+            // same skeletan construction; see scenario below
+            let not_found: Arc<dyn Layer> = Arc::new(layer.clone());
+            let new_version: Arc<dyn Layer> = Arc::new(layer);
+
+            let mut map = LayerMap::default();
+
+            let res = map.batch_update().replace_historic(&not_found, new_version);
+
+            assert!(matches!(res, Ok(Replacement::NotFound)), "{res:?}");
+        }
+
         fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
             let name = LayerFileName::from_str(layer_name).unwrap();
             let skeleton = LayerDescriptor::from(name);
@@ -813,7 +832,8 @@ mod tests {
 
             let mut map = LayerMap::default();
 
-            // two disjoint Arcs in different lifecycle phases.
+            // two disjoint Arcs in different lifecycle phases. even if it seems they must be the
+            // same layer, we use LayerMap::compare_arced_layers as the identity of layers.
             assert!(!LayerMap::compare_arced_layers(&remote, &downloaded));
 
             let expected_in_counts = (1, usize::from(expected_l0));
