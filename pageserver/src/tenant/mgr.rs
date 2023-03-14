@@ -336,10 +336,20 @@ pub async fn delete_timeline(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum TenantStateError {
+    #[error("tenant is not found")]
+    NotFound(TenantId),
+    #[error("tenant is stopping")]
+    IsStopping(TenantId),
+    #[error("tenant is broken")]
+    Broken(TenantId),
+}
+
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(), TenantStateError> {
     remove_tenant_from_memory(tenant_id, async {
         let local_tenant_directory = conf.tenant_path(&tenant_id);
         fs::remove_dir_all(&local_tenant_directory)
@@ -379,7 +389,7 @@ pub async fn load_tenant(
 pub async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(), TenantStateError> {
     remove_tenant_from_memory(tenant_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(tenant_id);
         fs::File::create(&ignore_mark_file)
@@ -489,7 +499,7 @@ where
 async fn remove_tenant_from_memory<V, F>(
     tenant_id: TenantId,
     tenant_cleanup: F,
-) -> anyhow::Result<V>
+) -> anyhow::Result<V, TenantStateError>
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
@@ -505,11 +515,9 @@ where
                 | TenantState::Loading
                 | TenantState::Broken
                 | TenantState::Active => tenant.set_stopping(),
-                TenantState::Stopping => {
-                    anyhow::bail!("Tenant {tenant_id} is stopping already")
-                }
+                TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
             },
-            None => anyhow::bail!("Tenant not found for id {tenant_id}"),
+            None => return Err(TenantStateError::NotFound(tenant_id)),
         }
     }
 
@@ -532,10 +540,15 @@ where
         Err(e) => {
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
-                Some(tenant) => tenant.set_broken(&e.to_string()),
-                None => warn!("Tenant {tenant_id} got removed from memory"),
+                Some(tenant) => {
+                    tenant.set_broken(&e.to_string());
+                    return Err(TenantStateError::Broken(tenant_id));
+                }
+                None => {
+                    warn!("Tenant {tenant_id} got removed from memory");
+                    return Err(TenantStateError::NotFound(tenant_id));
+                }
             }
-            Err(e)
         }
     }
 }
