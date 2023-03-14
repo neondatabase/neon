@@ -12,7 +12,7 @@
 use anyhow::Context;
 use bytes::Buf;
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use pageserver_api::models::TenantState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -31,6 +31,7 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::io::StreamReader;
 use tracing::*;
 use utils::id::ConnectionId;
 use utils::{
@@ -113,6 +114,49 @@ fn copyin_stream(pgb: &mut PostgresBackendTCP) -> impl Stream<Item = io::Result<
             };
         }
     }
+}
+
+/// Read the end of a tar archive.
+///
+/// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
+/// `tokio_tar` already read the first such block. Read the second all-zeros block,
+/// and check that there is no more data after the EOF marker.
+///
+/// XXX: Currently, any trailing data after the EOF marker prints a warning.
+/// Perhaps it should be a hard error?
+async fn read_tar_eof(mut reader: (impl tokio::io::AsyncRead + Unpin)) -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 512];
+
+    // Read the all-zeros block, and verify it
+    let mut total_bytes = 0;
+    while total_bytes < 512 {
+        let nbytes = reader.read(&mut buf[total_bytes..]).await?;
+        total_bytes += nbytes;
+        if nbytes == 0 {
+            break;
+        }
+    }
+    if total_bytes < 512 {
+        anyhow::bail!("incomplete or invalid tar EOF marker");
+    }
+    if !buf.iter().all(|&x| x == 0) {
+        anyhow::bail!("invalid tar EOF marker");
+    }
+
+    // Drain any data after the EOF marker
+    let mut trailing_bytes = 0;
+    loop {
+        let nbytes = reader.read(&mut buf).await?;
+        trailing_bytes += nbytes;
+        if nbytes == 0 {
+            break;
+        }
+    }
+    if trailing_bytes > 0 {
+        warn!("ignored {trailing_bytes} unexpected bytes after the tar archive");
+    }
+    Ok(())
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -422,19 +466,14 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
 
-        let mut copyin_stream = Box::pin(copyin_stream(pgb));
+        let copyin_reader = StreamReader::new(copyin_stream(pgb));
+        tokio::pin!(copyin_reader);
         timeline
-            .import_basebackup_from_tar(&mut copyin_stream, base_lsn, &ctx)
+            .import_basebackup_from_tar(&mut copyin_reader, base_lsn, &ctx)
             .await?;
 
-        // Drain the rest of the Copy data
-        let mut bytes_after_tar = 0;
-        while let Some(bytes) = copyin_stream.next().await {
-            bytes_after_tar += bytes?.len();
-        }
-        if bytes_after_tar > 0 {
-            warn!("ignored {bytes_after_tar} unexpected bytes after the tar archive");
-        }
+        // Read the end of the tar archive.
+        read_tar_eof(copyin_reader).await?;
 
         // TODO check checksum
         // Meanwhile you can verify client-side by taking fullbackup
@@ -473,19 +512,13 @@ impl PageServerHandler {
         info!("importing wal");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
-        let mut copyin_stream = Box::pin(copyin_stream(pgb));
-        let mut reader = tokio_util::io::StreamReader::new(&mut copyin_stream);
-        import_wal_from_tar(&timeline, &mut reader, start_lsn, end_lsn, &ctx).await?;
+        let copyin_reader = StreamReader::new(copyin_stream(pgb));
+        tokio::pin!(copyin_reader);
+        import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
 
-        // Drain the rest of the Copy data
-        let mut bytes_after_tar = 0;
-        while let Some(bytes) = copyin_stream.next().await {
-            bytes_after_tar += bytes?.len();
-        }
-        if bytes_after_tar > 0 {
-            warn!("ignored {bytes_after_tar} unexpected bytes after the tar archive");
-        }
+        // Read the end of the tar archive.
+        read_tar_eof(copyin_reader).await?;
 
         // TODO Does it make sense to overshoot?
         if timeline.get_last_record_lsn() < end_lsn {

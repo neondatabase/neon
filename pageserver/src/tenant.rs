@@ -12,9 +12,7 @@
 //!
 
 use anyhow::{bail, Context};
-use bytes::Bytes;
 use futures::FutureExt;
-use futures::Stream;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
@@ -239,14 +237,13 @@ impl UninitializedTimeline<'_> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub async fn import_basebackup_from_tar(
         self,
-        copyin_stream: &mut (impl Stream<Item = io::Result<Bytes>> + Sync + Send + Unpin),
+        copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
 
-        let mut reader = tokio_util::io::StreamReader::new(copyin_stream);
-        import_datadir::import_basebackup_from_tar(raw_timeline, &mut reader, base_lsn, ctx)
+        import_datadir::import_basebackup_from_tar(raw_timeline, copyin_read, base_lsn, ctx)
             .await
             .context("Failed to import basebackup")?;
 
