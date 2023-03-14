@@ -62,8 +62,9 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-// If true, the proxy will exit when all connections are closed.
-static EXIT_ON_ALL_CONNECTIONS_CLOSED: AtomicBool = AtomicBool::new(false);
+// If cancelled, the proxy will exit when all connections are closed.
+static EXIT_ON_ALL_CONNECTIONS_CLOSED: Lazy<CancellationToken> =
+    Lazy::new(|| CancellationToken::new());
 
 // Marked as cancelled by exit_if_needed(), polled by proxy::task_main
 static PROXY_CANCELLATION_TOKEN: Lazy<CancellationToken> = Lazy::new(|| CancellationToken::new());
@@ -71,13 +72,13 @@ static PROXY_CANCELLATION_TOKEN: Lazy<CancellationToken> = Lazy::new(|| Cancella
 // After this function is called, the Proxy will exit once all connections
 // are closed.
 pub fn set_exit_on_connections_closed() {
-    EXIT_ON_ALL_CONNECTIONS_CLOSED.store(true, Ordering::Relaxed);
+    EXIT_ON_ALL_CONNECTIONS_CLOSED.cancel();
 }
 
 // Shuts the proxy down if all connections are closed, and set_exit_on_connections_closed
 // has been called.
 pub fn exit_if_needed() {
-    if EXIT_ON_ALL_CONNECTIONS_CLOSED.load(Ordering::Relaxed) {
+    if EXIT_ON_ALL_CONNECTIONS_CLOSED.is_cancelled() {
         let num_accepted = NUM_CONNECTIONS_ACCEPTED_COUNTER.get();
         let num_closed = NUM_CONNECTIONS_CLOSED_COUNTER.get();
         if num_accepted == num_closed {
@@ -102,35 +103,36 @@ pub async fn task_main(
     let cancel_map = Arc::new(CancelMap::default());
     loop {
         tokio::select! {
-            accept_result = listener.accept() =>
-                {
-                    let (socket, peer_addr) = accept_result?;
-                    info!("accepted postgres client connection from {peer_addr}");
+            accept_result = listener.accept() => {
+                let (socket, peer_addr) = accept_result?;
+                info!("accepted postgres client connection from {peer_addr}");
 
-                    let session_id = uuid::Uuid::new_v4();
-                    let cancel_map = Arc::clone(&cancel_map);
-                    tokio::spawn(
-                        async move {
-                            info!("spawned a task for {peer_addr}");
+                let session_id = uuid::Uuid::new_v4();
+                let cancel_map = Arc::clone(&cancel_map);
+                tokio::spawn(
+                    async move {
+                        info!("spawned a task for {peer_addr}");
 
-                            socket
-                                .set_nodelay(true)
-                                .context("failed to set socket option")?;
+                        socket
+                            .set_nodelay(true)
+                            .context("failed to set socket option")?;
 
-                            handle_client(config, &cancel_map, session_id, socket).await
-                        }
-                        .unwrap_or_else(|e| {
-                            // Acknowledge that the task has finished with an error.
-                            error!("per-client task finished with an error: {e:#}");
-                        }),
-                    );
-                }
-            _ = PROXY_CANCELLATION_TOKEN.cancelled() =>
-            {
-                bail!("Exiting");
+                        handle_client(config, &cancel_map, session_id, socket).await
+                    }
+                    .unwrap_or_else(|e| {
+                        // Acknowledge that the task has finished with an error.
+                        error!("per-client task finished with an error: {e:#}");
+                    }),
+                );
+            }
+            _ = EXIT_ON_ALL_CONNECTIONS_CLOSED.cancelled() => {
+                drop(listener);
+                break;
             }
         }
     }
+    PROXY_CANCELLATION_TOKEN.cancelled().await;
+    bail!("Exiting")
 }
 
 // TODO(tech debt): unite this with its twin below.

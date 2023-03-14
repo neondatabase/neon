@@ -148,3 +148,7 @@ def test_close_on_connections_exit(static_proxy: NeonProxy):
         static_proxy.terminate()
         with pytest.raises(subprocess.TimeoutExpired):
             static_proxy.wait_for_exit(timeout=2)
+        # Ensure proxy doesn't accept new connections
+        with pytest.raises(psycopg2.OperationalError):
+            with static_proxy.connect(options="project=irrelevant, tcp_user_timeout=2"):
+                pass
