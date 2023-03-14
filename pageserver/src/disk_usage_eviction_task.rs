@@ -302,7 +302,7 @@ async fn disk_usage_eviction_task_iteration_impl(
                 let tenant = match tenant::mgr::get_tenant(*tenant_id, false).await {
                     Ok(tenant) => tenant,
                     Err(e) => {
-                        warn! {%tenant_id, "failed to get tenant: {:#}", e};
+                        warn!(%tenant_id, "failed to get tenant: {:#}", e);
                         continue;
                     }
                 };
@@ -315,7 +315,7 @@ async fn disk_usage_eviction_task_iteration_impl(
                 let timeline = match tenant.get_timeline(*timeline_id, false) {
                     Ok(timeline) => timeline,
                     Err(e) => {
-                        warn! {%tenant_id, %timeline_id, "failed to get timeline: {:#}", e};
+                        warn!(%tenant_id, %timeline_id, "failed to get timeline: {:#}", e);
                         continue;
                     }
                 };
@@ -325,10 +325,10 @@ async fn disk_usage_eviction_task_iteration_impl(
         // XXX batching? but, if the batch fails due to one layer, we should retry the remaining ones
         match timeline.evict_layer(&layer.file_name.file_name()).await {
             Err(e) => {
-                warn! { %tenant_id, %timeline_id, "failed to evict layer: {:#}", e};
+                warn!(%tenant_id, %timeline_id, "failed to evict layer: {:#}", e);
             }
             Ok(None) | Ok(Some(false)) => {
-                info! { %tenant_id, %timeline_id, "layer does not exist, likely it was deleted" };
+                info!(%tenant_id, %timeline_id, "layer does not exist, likely it was deleted");
                 // XXX should we account for this in usage_expected.avail_bytes ?
             }
             Ok(Some(true)) => {
