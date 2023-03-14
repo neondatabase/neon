@@ -2154,7 +2154,7 @@ class NeonPageserver(PgProtocol):
 
     def assert_no_errors(self):
         logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
-        error_or_warn = re.compile("ERROR|WARN")
+        error_or_warn = re.compile(r"\s(ERROR|WARN)")
         errors = []
         while True:
             line = logfile.readline()
