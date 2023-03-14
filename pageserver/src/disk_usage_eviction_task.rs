@@ -28,10 +28,7 @@ use std::{
 };
 
 use anyhow::Context;
-use nix::{
-    dir::Dir,
-    sys::statvfs::{self, Statvfs},
-};
+use nix::dir::Dir;
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
 use sync_wrapper::SyncWrapper;
@@ -45,6 +42,8 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{self, LocalLayerInfoForDiskUsageEviction},
 };
+
+use self::filesystem_level_usage::{Usage, UsageWithPressure};
 
 fn deserialize_pct_0_to_100<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
@@ -210,9 +209,9 @@ enum IterationOutcome {
 #[allow(dead_code)]
 #[derive(Debug)]
 struct IterationOutcomeFinished {
-    before: FilesystemLevelDiskUsageWithPressure,
-    after_actual: FilesystemLevelDiskUsageWithPressure,
-    after_expected: FilesystemLevelDiskUsage,
+    before: UsageWithPressure,
+    after_actual: UsageWithPressure,
+    after_expected: Usage,
 }
 
 async fn disk_usage_eviction_task_iteration_impl(
@@ -220,7 +219,7 @@ async fn disk_usage_eviction_task_iteration_impl(
     tenants_dir_fd: &mut SyncWrapper<Dir>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome> {
-    let usage_pre = get_filesystem_level_usage(tenants_dir_fd)?.with_pressure(task_config);
+    let usage_pre = filesystem_level_usage::get(tenants_dir_fd)?.with_pressure(task_config);
 
     debug!(?usage_pre, "disk usage");
 
@@ -339,7 +338,7 @@ async fn disk_usage_eviction_task_iteration_impl(
                 // XXX should we account for this in usage_expected.avail_bytes ?
             }
             Ok(Some(true)) => {
-                usage_expected.avail_bytes += layer.file_size;
+                usage_expected.set_avail_bytes(usage_expected.avail_bytes() + layer.file_size);
             }
         }
         if !usage_expected.with_pressure(task_config).has_pressure() {
@@ -348,7 +347,7 @@ async fn disk_usage_eviction_task_iteration_impl(
     }
 
     // Verify with statvfs whether we made any real progress
-    let usage_post = get_filesystem_level_usage(tenants_dir_fd)
+    let usage_post = filesystem_level_usage::get(tenants_dir_fd)
         // It's quite unlikely to hit the error here. Keep the code simple and bail out.
         .context("get filesystem-level disk usage after evictions")?
         .with_pressure(task_config);
@@ -362,76 +361,104 @@ async fn disk_usage_eviction_task_iteration_impl(
     }))
 }
 
-#[derive(Debug, Clone)]
-// The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
-// We use the Debug impl for logging, so, it's allright.
-#[allow(dead_code)]
+mod filesystem_level_usage {
+    use anyhow::Context;
+    use nix::{
+        dir::Dir,
+        sys::statvfs::{self, Statvfs},
+    };
+    use sync_wrapper::SyncWrapper;
 
-struct FilesystemLevelDiskUsage {
-    pub total_bytes: u64,
-    pub avail_bytes: u64,
-    pub usage_pct: u64,
-}
+    use super::DiskUsageEvictionTaskConfig;
 
-type FilesystemLevelDiskUsagePressure = [(&'static str, bool); 2];
+    #[derive(Debug, Clone)]
+    // The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
+    // We use the Debug impl for logging, so, it's allright.
+    #[allow(dead_code)]
 
-#[derive(Debug)]
-// The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
-// We use the Debug impl for logging, so, it's allright.
-#[allow(dead_code)]
-
-struct FilesystemLevelDiskUsageWithPressure {
-    pub usage: FilesystemLevelDiskUsage,
-    pub pressure: FilesystemLevelDiskUsagePressure,
-}
-
-impl FilesystemLevelDiskUsageWithPressure {
-    #[inline]
-    fn has_pressure(&self) -> bool {
-        self.pressure.iter().any(|(_, has_pressure)| *has_pressure)
+    pub struct Usage {
+        total_bytes: u64,
+        avail_bytes: u64,
+        usage_pct_cache: Option<u64>,
     }
-}
-impl FilesystemLevelDiskUsage {
-    #[inline]
-    fn with_pressure(
-        &self,
-        task_config: &DiskUsageEvictionTaskConfig,
-    ) -> FilesystemLevelDiskUsageWithPressure {
-        FilesystemLevelDiskUsageWithPressure {
-            usage: self.clone(),
-            pressure: [
-                (
-                    "min_avail_bytes",
-                    self.avail_bytes < task_config.min_avail_bytes,
-                ),
-                ("max_usage_pct", self.usage_pct > task_config.max_usage_pct),
-            ],
+
+    pub type Pressure = [(&'static str, bool); 2];
+
+    #[derive(Debug)]
+    // The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
+    // We use the Debug impl for logging, so, it's allright.
+    #[allow(dead_code)]
+
+    pub struct UsageWithPressure {
+        pub usage: Usage,
+        pub pressure: Pressure,
+    }
+
+    impl UsageWithPressure {
+        #[inline]
+        pub fn has_pressure(&self) -> bool {
+            self.pressure.iter().any(|(_, has_pressure)| *has_pressure)
         }
     }
-}
 
-fn get_filesystem_level_usage(
-    tenants_dir_fd: &mut SyncWrapper<Dir>,
-) -> anyhow::Result<FilesystemLevelDiskUsage> {
-    let stat: Statvfs = statvfs::fstatvfs(tenants_dir_fd.get_mut())
-        .context("statvfs failed, presumably directory got unlinked")?;
+    impl Usage {
+        pub fn avail_bytes(&self) -> u64 {
+            self.avail_bytes
+        }
+        pub fn set_avail_bytes(&mut self, avail_bytes: u64) {
+            self.avail_bytes = avail_bytes;
+            self.usage_pct_cache = None;
+        }
 
-    // https://unix.stackexchange.com/a/703650
-    let blocksize = if stat.fragment_size() > 0 {
-        stat.fragment_size()
-    } else {
-        stat.block_size()
-    };
+        pub fn usage_pct(&mut self) -> u64 {
+            self.usage_pct_cache.unwrap_or_else(|| {
+                let usage_pct = (100.0
+                    * (1.0 - ((self.avail_bytes as f64) / (self.total_bytes as f64))))
+                    as u64;
+                self.usage_pct_cache = Some(usage_pct);
+                usage_pct
+            })
+        }
+        #[inline]
+        pub fn with_pressure(
+            &mut self,
+            task_config: &DiskUsageEvictionTaskConfig,
+        ) -> UsageWithPressure {
+            UsageWithPressure {
+                usage: self.clone(),
+                pressure: [
+                    (
+                        "min_avail_bytes",
+                        self.avail_bytes < task_config.min_avail_bytes,
+                    ),
+                    (
+                        "max_usage_pct",
+                        self.usage_pct() > task_config.max_usage_pct,
+                    ),
+                ],
+            }
+        }
+    }
 
-    // use blocks_available (b_avail) since, pageserver runs as unprivileged user
-    let avail_bytes = stat.blocks_available() * blocksize;
-    let total_bytes = stat.blocks() * blocksize;
+    pub fn get(tenants_dir_fd: &mut SyncWrapper<Dir>) -> anyhow::Result<Usage> {
+        let stat: Statvfs = statvfs::fstatvfs(tenants_dir_fd.get_mut())
+            .context("statvfs failed, presumably directory got unlinked")?;
 
-    let usage_pct = (100.0 * (1.0 - ((avail_bytes as f64) / (total_bytes as f64)))) as u64;
+        // https://unix.stackexchange.com/a/703650
+        let blocksize = if stat.fragment_size() > 0 {
+            stat.fragment_size()
+        } else {
+            stat.block_size()
+        };
 
-    Ok(FilesystemLevelDiskUsage {
-        total_bytes,
-        avail_bytes,
-        usage_pct,
-    })
+        // use blocks_available (b_avail) since, pageserver runs as unprivileged user
+        let avail_bytes = stat.blocks_available() * blocksize;
+        let total_bytes = stat.blocks() * blocksize;
+
+        Ok(Usage {
+            total_bytes,
+            avail_bytes,
+            usage_pct_cache: None,
+        })
+    }
 }
