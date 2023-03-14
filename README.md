@@ -46,11 +46,14 @@ postgresql-libs cmake postgresql protobuf
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-#### Installing dependencies on OSX (12.3.1)
+#### Installing dependencies on macOS (12.3.1)
 1. Install XCode and dependencies
 ```
 xcode-select --install
 brew install protobuf openssl flex bison
+
+# add openssl to PATH, required for ed25519 keys generation in neon_local
+echo 'export PATH="/usr/local/opt/openssl@3/bin:$PATH"' >> ~/.zshrc
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
