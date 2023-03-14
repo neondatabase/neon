@@ -1,0 +1,18 @@
+- name: Fetch state dumps from safekeepers
+  hosts: safekeepers
+  gather_facts: False
+  remote_user: "{{ remote_user }}"
+    
+  tasks:
+    - name: Download file
+      get_url:
+        url: "http://{{ inventory_hostname }}:7676/v1/debug_dump?dump_all=true&dump_disk_content=false"
+        dest: "/tmp/{{ inventory_hostname }}.json"
+
+    - name: Fetch file from remote hosts
+      fetch:
+        src: "/tmp/{{ inventory_hostname }}.json"
+        dest: "./result/{{ inventory_hostname }}.json"
+        flat: yes
+        fail_on_missing: no
+
