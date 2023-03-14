@@ -108,7 +108,7 @@ fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
 fn apierror_from_tenant_map_insert_error(e: TenantMapInsertError) -> ApiError {
     match e {
         TenantMapInsertError::StillInitializing | TenantMapInsertError::ShuttingDown => {
-            ApiError::InternalServerError(e.into())
+            ApiError::InternalServerError(anyhow::Error::new(e))
         }
         TenantMapInsertError::TenantAlreadyExists(id, state) => {
             ApiError::Conflict(format!("tenant {id} already exists, state: {state:?}"))
@@ -119,8 +119,8 @@ fn apierror_from_tenant_map_insert_error(e: TenantMapInsertError) -> ApiError {
 
 fn apierror_from_tenant_state_error(err: TenantStateError) -> ApiError {
     match err {
-        TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {} not found", tid)),
-        _ => ApiError::InternalServerError(err.into()),
+        TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid)),
+        _ => ApiError::InternalServerError(anyhow::Error::new(err)),
     }
 }
 
@@ -397,8 +397,6 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     mgr::detach_tenant(conf, tenant_id)
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await
-        // FIXME: Errors from `detach_tenant` can be caused by both both user and internal errors.
-        // Replace this with better handling once the error type permits it.
         .map_err(apierror_from_tenant_state_error)?;
 
     json_response(StatusCode::OK, ())
@@ -428,8 +426,6 @@ async fn tenant_ignore_handler(request: Request<Body>) -> Result<Response<Body>,
     mgr::ignore_tenant(conf, tenant_id)
         .instrument(info_span!("ignore_tenant", tenant = %tenant_id))
         .await
-        // FIXME: Errors from `ignore_tenant` can be caused by both both user and internal errors.
-        // Replace this with better handling once the error type permits it.
         .map_err(apierror_from_tenant_state_error)?;
 
     json_response(StatusCode::OK, ())

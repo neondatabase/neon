@@ -338,18 +338,18 @@ pub async fn delete_timeline(
 
 #[derive(Debug, thiserror::Error)]
 pub enum TenantStateError {
-    #[error("tenant is not found")]
+    #[error("tenant {0} not found")]
     NotFound(TenantId),
-    #[error("tenant is stopping")]
+    #[error("tenant {0} is stopping")]
     IsStopping(TenantId),
-    #[error("tenant is broken")]
+    #[error("tenant {0} is broken")]
     Broken(TenantId),
 }
 
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<(), TenantStateError> {
+) -> Result<(), TenantStateError> {
     remove_tenant_from_memory(tenant_id, async {
         let local_tenant_directory = conf.tenant_path(&tenant_id);
         fs::remove_dir_all(&local_tenant_directory)
