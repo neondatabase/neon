@@ -53,7 +53,7 @@ xcode-select --install
 brew install protobuf openssl flex bison
 
 # add openssl to PATH, required for ed25519 keys generation in neon_local
-echo 'export PATH="/usr/local/opt/openssl@3/bin:$PATH"' >> ~/.zshrc
+echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)
