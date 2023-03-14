@@ -157,17 +157,26 @@
 //! downloading files from the remote storage. Downloads are performed immediately
 //! against the `RemoteStorage`, independently of the upload queue.
 //!
-//! When we attach a tenant, we perform the following steps:
+//! When we attach a tenant, we prepare the on-disk state based on the remote state,
+//! then use the same code that's used to set up the tenant during pageserver startup:
+//!
 //! - create `Tenant` object in `TenantState::Attaching` state
+//! - Create an attaching marker file for this tenant on disk.
 //! - List timelines that are present in remote storage, and for each:
 //!   - download their remote [`IndexPart`]s
+//!   - create the local `metadata` file from the [`IndexPart`] contents
+//! - Remove the attaching marker file.
+//! - tell the `Tenant` object to load the prepared on-disk state.
+//!
+//! Loading the on-disk state performs the following steps:
+//!
 //!   - create `Timeline` struct and a `RemoteTimelineClient`
-//!   - initialize the client's upload queue with its `IndexPart`
+//!   - initialize the client's upload queue with the `IndexPart`
+//!     - for attach, we carry this over in memory
+//!     - during pageserver startup, we refresh the IndexParts from the remote
 //!   - create [`RemoteLayer`] instances for layers that are referenced by `IndexPart`
 //!     but not present locally
 //!   - schedule uploads for layers that are only present locally.
-//!   - if the remote `IndexPart`'s metadata was newer than the metadata in
-//!     the local filesystem, write the remote metadata to the local filesystem
 //! - After the above is done for each timeline, open the tenant for business by
 //!   transitioning it from `TenantState::Attaching` to `TenantState::Active` state.
 //!   This starts the timelines' WAL-receivers and the tenant's GC & Compaction loops.
