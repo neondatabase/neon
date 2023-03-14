@@ -1,0 +1,26 @@
+[package]
+name = "s3-deleter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-config = { version = "0.54", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "0.24"
+aws-smithy-http = "0.54"
+aws-types = "0.54"
+
+tokio = { version = "1.17", features = ["macros", "sync", "fs", "io-util", "rt-multi-thread"] }
+tokio-rustls = "0.23"
+
+anyhow = { version = "1.0", features = ["backtrace"] }
+
+hex = "0.4"
+thiserror = "1.0"
+rand = "0.8"
+bytes = "1.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+atty = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
