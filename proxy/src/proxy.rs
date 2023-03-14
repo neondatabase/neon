@@ -66,7 +66,7 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
 static EXIT_ON_ALL_CONNECTIONS_CLOSED: AtomicBool = AtomicBool::new(false);
 
 // Marked as cancelled by exit_if_needed(), polled by proxy::task_main
-static PROXY_CANCELLATION_TOKEN: Lazy<CancellationToken> = Lazy::new(|| CancellationToken::new());
+static PROXY_CANCELLATION_TOKEN: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
 
 // After this function is called, the Proxy will exit once all connections
 // are closed.
