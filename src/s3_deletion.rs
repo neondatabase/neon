@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -9,7 +10,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::{init_s3_client, TenantsToClean};
+use crate::{init_s3_client, TenantId, TenantsToClean};
 
 pub struct S3Deleter {
     concurrent_tasks_count: NonZeroUsize,
@@ -47,78 +48,103 @@ impl S3Deleter {
                         id,
                         async move {
                             loop {
-                                match construct_delete_request(
+                                match delete_batch(
                                     &closure_client,
                                     limit,
                                     &closure_tenants_to_clean,
                                 )
                                 .await
-                                .context("delete request construction")
                                 {
-                                    Ok(Some(delete_request)) => {
-                                        match delete_request
-                                            .send()
-                                            .await
-                                            .context("delete request processing")
-                                        {
-                                            Ok(delete_response) => {
-                                                match delete_response.errors() {
-                                                    Some(delete_errors) => {
-                                                        error!("Delete request returned errors: {delete_errors:?}");
-                                                        anyhow::bail!("Failed to delete all elements from the S3: {delete_errors:?}");
-                                                    }
-                                                    None => info!("Successfully removed an object batch from S3"),
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to send a delete request: {e:#}");
-                                                return Err(e);
-                                            }
-                                        }
-                                    }
-                                    Ok(None) => {
-                                        info!("No more delete requests to create, finishing the task");
-                                        return Ok(());
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to construct a delete request: {e:#}");
-                                        return Err(e);
-                                    }
+                                    Ok(ControlFlow::Break(())) => return,
+                                    Ok(ControlFlow::Continue(())) => (),
+                                    Err(e) => error!("Batch processing failed: {e:#}"),
                                 }
                             }
-                        }.await
+                        }
+                        .await,
                     )
                 }
                 .instrument(info_span!("deletion_task", %id)),
             );
         }
 
-        let mut task_failed = false;
         while let Some(task_result) = deletion_tasks.join_next().await {
             match task_result {
-                Ok((id, Ok(()))) => info!("Task {id} finished successfully"),
-                Ok((id, Err(task_error))) => {
-                    error!("Task {id} failed: {task_error:#}");
-                    task_failed = true;
-                }
+                Ok((id, ())) => info!("Task {id} completed"),
                 Err(join_error) => anyhow::bail!("Failed to join on a task: {join_error:?}"),
             }
         }
 
-        anyhow::ensure!(!task_failed, "Some tasks failed");
         Ok(())
+    }
+}
+
+// TODO kb reschedule tenants after the failure
+async fn delete_batch(
+    closure_client: &Arc<Client>,
+    limit: usize,
+    tenant_provider: &Arc<Mutex<TenantsToClean>>,
+) -> anyhow::Result<ControlFlow<(), ()>> {
+    match construct_delete_request(closure_client, limit, tenant_provider)
+        .await
+        .context("delete request construction")
+    {
+        Ok(Some(delete_request)) => {
+            let original_request = delete_request.delete_request.clone();
+
+            match delete_request
+                .delete_request
+                .send()
+                .await
+                .context("delete request processing")
+            {
+                Ok(delete_response) => match delete_response.errors() {
+                    Some(delete_errors) => {
+                        error!("Delete request returned errors: {delete_errors:?}");
+                        anyhow::bail!(
+                            "Failed to delete all elements from the S3: {delete_errors:?}"
+                        );
+                    }
+                    None => {
+                        info!("Successfully removed an object batch from S3, start_tenant: {}, end_tenant: {}", delete_request.start_tenant, delete_request.end_tenant);
+                        return Ok(ControlFlow::Continue(()));
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to send a delete request: {e:#}");
+                    error!("Original request: {original_request:?}");
+                    return Err(e);
+                }
+            }
+        }
+        Ok(None) => {
+            info!("No more delete requests to create, finishing the task");
+            return Ok(ControlFlow::Break(()));
+        }
+        Err(e) => {
+            error!("Failed to construct a delete request: {e:#}");
+            return Err(e);
+        }
     }
 }
 
 // s3://neon-staging-storage-us-east-2/pageserver/v1/tenants/000036a7f7ea960517c8a74790ee2ad6/;
 const TENANT_PATH_IN_S3_BUCKET: &str = "pageserver/v1/tenants/";
 
+struct DeleteRequest {
+    delete_request: DeleteObjects,
+    start_tenant: TenantId,
+    end_tenant: TenantId,
+}
+
 async fn construct_delete_request(
     s3_client: &Client,
     objects_limit: usize,
     tenants_to_clean: &Mutex<TenantsToClean>,
-) -> anyhow::Result<Option<DeleteObjects>> {
+) -> anyhow::Result<Option<DeleteRequest>> {
     let mut request_bucket = None;
+    let mut start_tenant = None;
+    let mut end_tenant = None;
     let mut request_keys = Vec::with_capacity(objects_limit);
 
     while request_keys.len() < objects_limit {
@@ -140,7 +166,21 @@ async fn construct_delete_request(
                     break;
                 }
 
+                if start_tenant.is_none() {
+                    start_tenant = Some(tenant_id);
+                } else {
+                    start_tenant = start_tenant.min(Some(tenant_id));
+                }
+
+                if end_tenant.is_none() {
+                    end_tenant = Some(tenant_id);
+                } else {
+                    end_tenant = end_tenant.max(Some(tenant_id));
+                }
+
                 drop(tenants_accessor);
+
+                let mut should_reschedule = false;
 
                 let list_response = s3_client
                     .list_objects_v2()
@@ -155,8 +195,10 @@ async fn construct_delete_request(
                     .await
                     .context("Tenant directory list failure")?;
 
-                warn!("Tenant {tenant_id} has too many objects returned, rescheduling it for later removal");
-
+                if list_response.is_truncated() {
+                    warn!("Tenant {tenant_id} has too many objects listed, rescheduling it for later removal");
+                    should_reschedule = true;
+                }
 
                 match list_response.contents() {
                     Some(objects) => {
@@ -165,9 +207,23 @@ async fn construct_delete_request(
                                 format!("No key for object {object:?}, tenant {tenant_id}")
                             })?;
                             request_keys.push(ObjectIdentifier::builder().key(key).build());
+                            if request_keys.len() >= objects_limit {
+                                should_reschedule = true;
+                                warn!("Tenant {tenant_id} has too many returned, rescheduling it for later removal");
+                            }
                         }
                     }
                     None => debug!("No keys returned for tenant {tenant_id}, skipping it"),
+                }
+
+                if should_reschedule {
+                    tenants_to_clean.lock().await.reschedule(
+                        request_bucket
+                            .clone()
+                            .expect("With request keys present, we should have the bucket too"),
+                        tenant_id,
+                    );
+                    break;
                 }
             }
             None => break,
@@ -177,15 +233,18 @@ async fn construct_delete_request(
     if request_keys.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(
-            s3_client
-                .delete_objects()
-                .bucket(
-                    request_bucket
-                        .expect("With request keys present, we should have the bucket too")
-                        .0,
-                )
-                .delete(Delete::builder().set_objects(Some(request_keys)).build()),
-        ))
+        let delete_request = s3_client
+            .delete_objects()
+            .bucket(
+                request_bucket
+                    .expect("With request keys present, we should have the bucket too")
+                    .0,
+            )
+            .delete(Delete::builder().set_objects(Some(request_keys)).build());
+        Ok(Some(DeleteRequest {
+            delete_request,
+            start_tenant: start_tenant.expect("start_tenant should be present after collection"),
+            end_tenant: end_tenant.expect("end_tenant should be present after collection"),
+        }))
     }
 }
