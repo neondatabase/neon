@@ -181,12 +181,16 @@ For timeline the sequence is the same with the following differences:
 
 If pageseserver is lost then the deleted tenant should be attached to different pageserver and delete request needs to be retried against new pageserver. Then attach logic is shared with one described for pageserver restarts (local deletion mark wont be available so needs to be created).
 
+##### Restrictions for tenant that is in progress of being deleted
+
+I propose to add another state to tenant/timeline - PendingDelete. This state shouldnt allow executing any operations aside from polling the deletion status.
+
 #### Summary
 
 Pros:
 
 - Storage is not dependent on control plane. Storage can be restarted even if control plane is not working.
-- Allows for easier dogfooding, console can be hosted on neon. If storage depends on control plane and control plane depends on storage we're stuck.
+- Allows for easier dogfooding, console can use Neon backed database as primary operational data store. If storage depends on control plane and control plane depends on storage we're stuck.
 - No need to share inner s3 workings with control plane. Pageserver presents api contract and S3 paths are not part of this contract.
 - No need to pass list of alive timelines to attach call. This will be solved by pageserver observing deleted flag. See
 
