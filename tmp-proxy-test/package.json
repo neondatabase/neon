@@ -1,0 +1,17 @@
+{
+  "name": "proxy-test",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "type": "module",
+  "license": "ISC",
+  "dependencies": {
+    "@neondatabase/serverless": "^0.2.8",
+    "pg": "^8.10.0",
+    "ws": "^8.13.0"
+  }
+}
