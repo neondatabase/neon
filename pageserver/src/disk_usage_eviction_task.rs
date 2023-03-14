@@ -387,7 +387,6 @@ mod filesystem_level_usage {
     }
 
     impl UsageWithPressure {
-        #[inline]
         pub fn has_pressure(&self) -> bool {
             self.pressure.iter().any(|(_, has_pressure)| *has_pressure)
         }
@@ -413,7 +412,6 @@ mod filesystem_level_usage {
             })
         }
 
-        #[inline]
         pub fn with_pressure(
             &mut self,
             task_config: &DiskUsageEvictionTaskConfig,
