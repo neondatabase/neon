@@ -61,6 +61,12 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         cwd=unpacked_base,
     )
 
+    # Make copy of base.tar and append some garbage to it.
+    base_plus_garbage_tar = os.path.join(basebackup_dir, "base-plus-garbage.tar")
+    shutil.copyfile(base_tar, base_plus_garbage_tar)
+    with open(base_plus_garbage_tar, "a") as f:
+        f.write("trailing garbage")
+
     # Get start_lsn and end_lsn
     with open(os.path.join(basebackup_dir, "backup_manifest")) as f:
         manifest = json.load(f)
@@ -74,7 +80,8 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     # Set up pageserver for import
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
-    env.pageserver.http_client().tenant_create(tenant)
+    client = env.pageserver.http_client()
+    client.tenant_create(tenant)
 
     env.pageserver.allowed_errors.extend(
         [
@@ -85,6 +92,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
             ".*InternalServerError.*Tenant .* not found.*",
             ".*InternalServerError.*Timeline .* not found.*",
             ".*InternalServerError.*Cannot delete timeline which has child timelines.*",
+            ".*ignored .* unexpected bytes after the tar archive.*",
         ]
     )
 
@@ -130,11 +138,18 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     with pytest.raises(Exception):
         import_tar(corrupt_base_tar, wal_tar)
 
+    # A tar with trailing garbage is currently accepted. It prints a warnings
+    # to the pageserver log, however. Check that.
+    import_tar(base_plus_garbage_tar, wal_tar)
+    assert env.pageserver.log_contains(
+        ".*WARN.*ignored .* unexpected bytes after the tar archive.*"
+    )
+    client.timeline_delete(tenant, timeline)
+
     # Importing correct backup works
     import_tar(base_tar, wal_tar)
 
     # Wait for data to land in s3
-    client = env.pageserver.http_client()
     wait_for_last_record_lsn(client, tenant, timeline, Lsn(end_lsn))
     wait_for_upload(client, tenant, timeline, Lsn(end_lsn))
 
