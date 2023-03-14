@@ -2725,11 +2725,11 @@ impl Timeline {
         // KeySpace::partition may contain partitions <100000000..100000099> and <200000000..200000199>.
         // If there is delta layer <100000000..300000000> then it never be garbage collected because
         // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
-        let mut start_lsn = Key::MIN;
+        let mut start = Key::MIN;
 
         for partition in partitioning.parts.iter() {
-            let img_range = start_lsn..partition.ranges.last().unwrap().end;
-            start_lsn = img_range.end;
+            let img_range = start..partition.ranges.last().unwrap().end;
+            start = img_range.end;
             if force || self.time_for_new_image_layer(partition, lsn)? {
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
