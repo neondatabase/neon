@@ -14,7 +14,7 @@ pub struct BucketName(pub String);
 #[derive(Debug)]
 pub struct TenantsToClean {
     buckets: Vec<BucketName>,
-    tenants: Vec<(TenantId, usize)>,
+    tenants: VecDeque<(TenantId, usize)>,
 }
 
 const ALIVE_TENANTS_FILE_BASE_NAME: &str = "alive_tenants";
@@ -28,7 +28,7 @@ impl TenantsToClean {
         );
 
         let mut alive_tenants = BTreeSet::new();
-        let mut tenants_to_remove = HashMap::new();
+        let mut bucket_tenants = HashMap::new();
 
         let mut files = fs::read_dir(dir_with_files)
             .await
@@ -56,7 +56,7 @@ impl TenantsToClean {
             } else if let Some(bucket_name) = base_name.strip_suffix(BUCKET_TENANTS_FILE_SUFFIX) {
                 let bucket_files = read_bucket_tenants(&path).await?;
                 let bucket_name = BucketName(bucket_name.to_owned());
-                let old = tenants_to_remove.insert(bucket_name, bucket_files);
+                let old = bucket_tenants.insert(bucket_name, bucket_files);
                 anyhow::ensure!(
                     old.is_none(),
                     "Bucket name got repeated twice in the file names, new file name: {base_name}"
@@ -69,9 +69,9 @@ impl TenantsToClean {
 
         anyhow::ensure!(!alive_tenants.is_empty(), "Found no alive tenants");
 
-        let mut buckets: Vec<BucketName> = Vec::with_capacity(tenants_to_remove.len());
-        let mut tenants = Vec::new();
-        for (bucket, tenants_in_bucket) in tenants_to_remove {
+        let mut buckets: Vec<BucketName> = Vec::with_capacity(bucket_tenants.len());
+        let mut tenants = VecDeque::new();
+        for (bucket, tenants_in_bucket) in bucket_tenants {
             let bucket_index = bucket_index(&mut buckets, bucket);
             tenants.extend(
                 tenants_in_bucket
@@ -86,17 +86,21 @@ impl TenantsToClean {
 
     pub fn next_tenant(&mut self) -> Option<(BucketName, TenantId)> {
         self.tenants
-            .pop()
+            .pop_front()
             .map(|(tenant_id, bucket_index)| (self.buckets[bucket_index].clone(), tenant_id))
     }
 
     pub fn reschedule(&mut self, bucket: BucketName, tenant_id: TenantId) {
         let bucket_index = bucket_index(&mut self.buckets, bucket);
-        self.tenants.push((tenant_id, bucket_index));
+        self.tenants.push_back((tenant_id, bucket_index));
     }
 
     pub fn tenant_count(&self) -> usize {
         self.tenants.len()
+    }
+
+    pub fn tenant_ids(&self) -> Vec<TenantId> {
+        self.tenants.iter().map(|(id, _)| id).copied().collect()
     }
 }
 

@@ -107,23 +107,23 @@ async fn delete_batch(
                     }
                     None => {
                         info!("Successfully removed an object batch from S3, start_tenant: {}, end_tenant: {}", delete_request.start_tenant, delete_request.end_tenant);
-                        return Ok(ControlFlow::Continue(()));
+                        Ok(ControlFlow::Continue(()))
                     }
                 },
                 Err(e) => {
                     error!("Failed to send a delete request: {e:#}");
                     error!("Original request: {original_request:?}");
-                    return Err(e);
+                    Err(e)
                 }
             }
         }
         Ok(None) => {
             info!("No more delete requests to create, finishing the task");
-            return Ok(ControlFlow::Break(()));
+            Ok(ControlFlow::Break(()))
         }
         Err(e) => {
             error!("Failed to construct a delete request: {e:#}");
-            return Err(e);
+            Err(e)
         }
     }
 }
@@ -182,6 +182,7 @@ async fn construct_delete_request(
 
                 let mut should_reschedule = false;
 
+                debug!("Listing S3 objects for tenant {tenant_id}");
                 let list_response = s3_client
                     .list_objects_v2()
                     .bucket(
@@ -209,7 +210,8 @@ async fn construct_delete_request(
                             request_keys.push(ObjectIdentifier::builder().key(key).build());
                             if request_keys.len() >= objects_limit {
                                 should_reschedule = true;
-                                warn!("Tenant {tenant_id} has too many returned, rescheduling it for later removal");
+                                warn!("Tenant {tenant_id} has too many objects returned, rescheduling it for later removal");
+                                break;
                             }
                         }
                     }
