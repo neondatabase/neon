@@ -365,24 +365,22 @@ mod filesystem_level_usage {
 
     use super::DiskUsageEvictionTaskConfig;
 
-    #[derive(Debug, Clone)]
     // The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
     // We use the Debug impl for logging, so, it's allright.
+    #[derive(Debug, Clone)]
     #[allow(dead_code)]
-
     pub struct Usage {
-        total_bytes: u64,
-        avail_bytes: u64,
-        usage_pct_cache: Option<u64>,
+        pub total_bytes: u64,
+        pub avail_bytes: u64,
+        pub usage_pct_cache: Option<u64>,
     }
 
     pub type Pressure = [(&'static str, bool); 2];
 
-    #[derive(Debug)]
     // The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
     // We use the Debug impl for logging, so, it's allright.
+    #[derive(Debug)]
     #[allow(dead_code)]
-
     pub struct UsageWithPressure {
         pub usage: Usage,
         pub pressure: Pressure,
@@ -399,6 +397,7 @@ mod filesystem_level_usage {
         pub fn avail_bytes(&self) -> u64 {
             self.avail_bytes
         }
+
         pub fn set_avail_bytes(&mut self, avail_bytes: u64) {
             self.avail_bytes = avail_bytes;
             self.usage_pct_cache = None;
@@ -413,6 +412,7 @@ mod filesystem_level_usage {
                 usage_pct
             })
         }
+
         #[inline]
         pub fn with_pressure(
             &mut self,
