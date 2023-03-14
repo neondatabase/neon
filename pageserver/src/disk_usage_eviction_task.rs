@@ -23,7 +23,8 @@
 //! The layers not part of the per-tenant reservation are evicted least-recently-used first until we're below all thresholds.
 use std::{
     collections::{hash_map::Entry, HashMap},
-    time::Duration, ops::ControlFlow,
+    ops::ControlFlow,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -154,7 +155,7 @@ async fn disk_usage_eviction_task_iteration(
     iteration_no: u64,
 ) -> ControlFlow<()> {
     let start = Instant::now();
-    let res = disk_usage_eviction_task_iteration_impl(&task_config, tenants_dir_fd, cancel)
+    let res = disk_usage_eviction_task_iteration_impl(task_config, tenants_dir_fd, cancel)
         .instrument(info_span!("disk_usage_eviction_iteration", iteration_no))
         .await;
     match res {

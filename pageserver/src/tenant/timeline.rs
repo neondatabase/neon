@@ -3987,7 +3987,7 @@ impl Timeline {
             .iter_historic_layers()
             .filter(|l| !l.is_remote_layer())
             .map(|l| LocalLayerInfoForDiskUsageEviction {
-                file_name: l.filename().clone(),
+                file_name: l.filename(),
                 file_size: l.file_size().expect("local layer must have a file size"),
                 // XXX dedupe with eviction_task.rs?
                 last_activity_ts: match l.access_stats().most_recent_access_or_residence_event() {
