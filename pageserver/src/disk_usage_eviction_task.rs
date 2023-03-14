@@ -23,7 +23,7 @@
 //! The layers not part of the per-tenant reservation are evicted least-recently-used first until we're below all thresholds.
 use std::{
     collections::{hash_map::Entry, HashMap},
-    time::Duration,
+    time::Duration, ops::ControlFlow,
 };
 
 use anyhow::Context;
@@ -132,8 +132,17 @@ async fn disk_usage_eviction_task(
     let mut iteration_no = 0;
     loop {
         iteration_no += 1;
-        disk_usage_eviction_task_iteration(task_config, &mut tenants_dir_fd, &cancel, iteration_no)
-            .await
+        match disk_usage_eviction_task_iteration(
+            task_config,
+            &mut tenants_dir_fd,
+            &cancel,
+            iteration_no,
+        )
+        .await
+        {
+            ControlFlow::Continue(()) => continue,
+            ControlFlow::Break(()) => break,
+        }
     }
 }
 
@@ -143,7 +152,7 @@ async fn disk_usage_eviction_task_iteration(
     tenants_dir_fd: &mut SyncWrapper<Dir>,
     cancel: &CancellationToken,
     iteration_no: u64,
-) {
+) -> ControlFlow<()> {
     let start = Instant::now();
     let res = disk_usage_eviction_task_iteration_impl(&task_config, tenants_dir_fd, cancel)
         .instrument(info_span!("disk_usage_eviction_iteration", iteration_no))
@@ -178,10 +187,10 @@ async fn disk_usage_eviction_task_iteration(
 
     let sleep_until = start + task_config.period;
     tokio::select! {
-        _ = tokio::time::sleep_until(sleep_until) => {},
+        _ = tokio::time::sleep_until(sleep_until) => ControlFlow::Continue(()),
         _ = cancel.cancelled() => {
             info!("shutting down");
-            return;
+            ControlFlow::Break(())
         }
     }
 }
