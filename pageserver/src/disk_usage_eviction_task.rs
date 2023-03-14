@@ -156,16 +156,10 @@ async fn disk_usage_eviction_task_iteration(
     iteration_no: u64,
 ) -> ControlFlow<()> {
     let start = Instant::now();
-    let res = disk_usage_eviction_task_iteration_impl(task_config, tenants_dir_fd, cancel)
-        .instrument(info_span!("disk_usage_eviction_iteration", iteration_no))
-        .await;
+    let res = disk_usage_eviction_task_iteration_impl(task_config, tenants_dir_fd, cancel).await;
     match res {
         Ok(outcome) => {
-            debug!(
-                iteration_no,
-                ?outcome,
-                "disk_usage_eviction_iteration finished"
-            );
+            debug!(?outcome, "disk_usage_eviction_iteration finished");
             match outcome {
                 IterationOutcome::NoPressure | IterationOutcome::Cancelled => {
                     // nothing to do, select statement below will handle things
