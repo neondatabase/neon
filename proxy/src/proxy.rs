@@ -62,9 +62,8 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-// If cancelled, the proxy will exit when all connections are closed.
-static EXIT_ON_ALL_CONNECTIONS_CLOSED: Lazy<CancellationToken> =
-    Lazy::new(|| CancellationToken::new());
+// If true, the proxy will exit when all connections are closed.
+static EXIT_ON_ALL_CONNECTIONS_CLOSED: AtomicBool = AtomicBool::new(false);
 
 // Marked as cancelled by exit_if_needed(), polled by proxy::task_main
 static PROXY_CANCELLATION_TOKEN: Lazy<CancellationToken> = Lazy::new(|| CancellationToken::new());
@@ -72,13 +71,13 @@ static PROXY_CANCELLATION_TOKEN: Lazy<CancellationToken> = Lazy::new(|| Cancella
 // After this function is called, the Proxy will exit once all connections
 // are closed.
 pub fn set_exit_on_connections_closed() {
-    EXIT_ON_ALL_CONNECTIONS_CLOSED.cancel();
+    EXIT_ON_ALL_CONNECTIONS_CLOSED.store(true, Ordering::Relaxed);
 }
 
 // Shuts the proxy down if all connections are closed, and set_exit_on_connections_closed
 // has been called.
 pub fn exit_if_needed() {
-    if EXIT_ON_ALL_CONNECTIONS_CLOSED.is_cancelled() {
+    if EXIT_ON_ALL_CONNECTIONS_CLOSED.load(Ordering::Relaxed) {
         let num_accepted = NUM_CONNECTIONS_ACCEPTED_COUNTER.get();
         let num_closed = NUM_CONNECTIONS_CLOSED_COUNTER.get();
         if num_accepted == num_closed {
@@ -125,14 +124,11 @@ pub async fn task_main(
                     }),
                 );
             }
-            _ = EXIT_ON_ALL_CONNECTIONS_CLOSED.cancelled() => {
-                drop(listener);
-                break;
+            _ = PROXY_CANCELLATION_TOKEN.cancelled() => {
+                bail!("Exiting");
             }
         }
     }
-    PROXY_CANCELLATION_TOKEN.cancelled().await;
-    bail!("Exiting")
 }
 
 // TODO(tech debt): unite this with its twin below.
