@@ -542,11 +542,11 @@ where
             match tenants_accessor.get(&tenant_id) {
                 Some(tenant) => {
                     tenant.set_broken(&e.to_string());
-                    return Err(TenantStateError::Broken(tenant_id));
+                    Err(TenantStateError::Broken(tenant_id))
                 }
                 None => {
                     warn!("Tenant {tenant_id} got removed from memory");
-                    return Err(TenantStateError::NotFound(tenant_id));
+                    Err(TenantStateError::NotFound(tenant_id))
                 }
             }
         }
