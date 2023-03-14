@@ -224,7 +224,7 @@ Available options:
 
 With first option the following problem becomes apparent:
 
-Who is the source of truth regarding timeline livness?
+Who is the source of truth regarding timeline liveness?
 
 Imagine:
 PS1 fails.
