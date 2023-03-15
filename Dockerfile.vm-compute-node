@@ -12,16 +12,29 @@ RUN set -e \
 
 RUN set -e \
 	&& CONNSTR="dbname=neondb user=cloud_admin sslmode=disable" \
-	&& ARGS="--auto-restart --pgconnstr=\"$CONNSTR\"" \
+	&& ARGS="--auto-restart --cgroup=neon-postgres --pgconnstr=\"$CONNSTR\"" \
 	&& echo "::respawn:su vm-informant -c '/usr/local/bin/vm-informant $ARGS'" >> /etc/inittab
 
 # Combine, starting from non-VM compute node image.
 FROM $SRC_IMAGE as base
 
-# Temporarily set user back to root so we can run adduser
+# Temporarily set user back to root so we can run adduser and apt stuff
 USER root
 RUN adduser vm-informant --disabled-password --no-create-home
+# At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
+# libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-informant
+# requires cgroup v2, so we'll pull in a newer version of cgroup-tools from the testing repo.
+RUN set -e \
+    # add the testing repo
+    && echo 'deb http://deb.debian.org/debian testing main' >> /etc/apt/sources.list \
+    && apt update \
+    && apt install -t testing --no-install-recommends -y cgroup-tools \
+    # remove the testing repo to clean up after ourselves
+    && sed -i '$ d' /etc/apt/sources.list
 USER postgres
 
+ADD vm-cgconfig.conf /etc/cgconfig.conf
 COPY --from=informant /etc/inittab /etc/inittab
 COPY --from=informant /usr/bin/vm-informant /usr/local/bin/vm-informant
+
+ENTRYPOINT ["/usr/sbin/cgexec", "-g", "*:neon-postgres", "/usr/local/bin/compute_ctl"]
