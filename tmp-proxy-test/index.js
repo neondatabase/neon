@@ -5,7 +5,7 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 (async () => {
     try {
         neonConfig.wsProxy = (host, _port) => host + ':7500/v2'
-        // neonConfig.pipelineConnect = "password";
+        neonConfig.pipelineConnect = "password";
 
         const client = new Client({
             connectionString: 'postgres://neon:test@pg.localtest.me/postgres',

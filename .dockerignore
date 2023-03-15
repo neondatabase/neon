@@ -5,6 +5,7 @@
 !Cargo.lock
 !Makefile
 
+!tmp-proxy-test/
 !.cargo/
 !.config/
 !control_plane/

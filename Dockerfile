@@ -44,7 +44,7 @@ COPY --chown=nonroot . .
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
-&& mold -run cargo build --bin pageserver --bin pageserver_binutils --bin draw_timeline_dir --bin safekeeper --bin storage_broker --bin proxy --locked --release \
+&& mold -run cargo build --bin proxy --locked --release \
     && cachepot -s
 
 # Build final image
@@ -63,11 +63,11 @@ RUN set -e \
     && useradd -d /data neon \
     && chown -R neon:neon /data
 
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver_binutils /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/draw_timeline_dir   /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker         /usr/local/bin
+# COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
+# COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver_binutils /usr/local/bin
+# COPY --from=build --chown=neon:neon /home/nonroot/target/release/draw_timeline_dir   /usr/local/bin
+# COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
+# COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker         /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
@@ -76,13 +76,13 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
-RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
-    && /usr/local/bin/pageserver -D /data/.neon/ --init \
-       -c "id=1234" \
-       -c "broker_endpoint='http://storage_broker:50051'" \
-       -c "pg_distrib_dir='/usr/local/'" \
-       -c "listen_pg_addr='0.0.0.0:6400'" \
-       -c "listen_http_addr='0.0.0.0:9898'"
+# RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
+#     && /usr/local/bin/pageserver -D /data/.neon/ --init \
+#        -c "id=1234" \
+#        -c "broker_endpoint='http://storage_broker:50051'" \
+#        -c "pg_distrib_dir='/usr/local/'" \
+#        -c "listen_pg_addr='0.0.0.0:6400'" \
+#        -c "listen_http_addr='0.0.0.0:9898'"
 
 VOLUME ["/data"]
 USER neon
