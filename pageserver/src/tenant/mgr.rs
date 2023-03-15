@@ -316,6 +316,7 @@ pub async fn get_tenant(
         None => return Err(TenantStateError::NotFound(tenant_id)),
     };
     if active_only && !tenant.is_active() {
+        tracing::warn!("Tenant {tenant_id} is not active. Current state: {:?}", tenant.current_state());
         Err(TenantStateError::NotActive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
