@@ -364,9 +364,9 @@ mod filesystem_level_usage {
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
     pub struct Usage {
-        pub total_bytes: u64,
-        pub avail_bytes: u64,
-        pub usage_pct_cache: Option<u64>,
+        total_bytes: u64,
+        avail_bytes: u64,
+        usage_pct_cache: Option<u64>,
     }
 
     pub type Pressure = [(&'static str, bool); 2];
