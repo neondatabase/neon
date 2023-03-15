@@ -13,6 +13,7 @@ use metrics::{
     register_int_counter_vec, Gauge, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
+
 use postgres_ffi::XLogSegNo;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
@@ -76,6 +77,7 @@ pub static PG_IO_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
 pub const LABEL_UNKNOWN: &str = "unknown";
 
 /// Labels for traffic metrics.
+#[derive(Clone)]
 struct ConnectionLabels {
     /// Availability zone of the connection origin.
     client_az: String,
@@ -83,27 +85,23 @@ struct ConnectionLabels {
     sk_az: String,
     /// Client application name.
     app_name: String,
-    /// Total bytes read from this connection.
-    read: GenericCounter<metrics::core::AtomicU64>,
-    /// Total bytes written to this connection.
-    write: GenericCounter<metrics::core::AtomicU64>,
 }
 
 impl ConnectionLabels {
     fn new() -> Self {
-        let mut this = Self {
+        Self {
             client_az: LABEL_UNKNOWN.to_string(),
             sk_az: LABEL_UNKNOWN.to_string(),
             app_name: LABEL_UNKNOWN.to_string(),
-            // Fill in the metrics with dummy values, they will be updated later.
-            read: GenericCounter::new("_", "_").unwrap(),
-            write: GenericCounter::new("_", "_").unwrap(),
-        };
-        this.update_metrics();
-        this
+        }
     }
 
-    fn update_metrics(&mut self) {
+    fn build_metrics(
+        &self,
+    ) -> (
+        GenericCounter<metrics::core::AtomicU64>,
+        GenericCounter<metrics::core::AtomicU64>,
+    ) {
         let same_az = match (self.client_az.as_str(), self.sk_az.as_str()) {
             (LABEL_UNKNOWN, _) | (_, LABEL_UNKNOWN) => LABEL_UNKNOWN,
             (client_az, sk_az) => {
@@ -115,27 +113,37 @@ impl ConnectionLabels {
             }
         };
 
-        self.read = PG_IO_BYTES.with_label_values(&[
+        let read = PG_IO_BYTES.with_label_values(&[
             &self.client_az,
             &self.sk_az,
             &self.app_name,
             "read",
             same_az,
         ]);
-        self.write = PG_IO_BYTES.with_label_values(&[
+        let write = PG_IO_BYTES.with_label_values(&[
             &self.client_az,
             &self.sk_az,
             &self.app_name,
             "write",
             same_az,
         ]);
+        (read, write)
     }
+}
+
+struct TrafficMetricsState {
+    /// Labels for traffic metrics.
+    labels: ConnectionLabels,
+    /// Total bytes read from this connection.
+    read: GenericCounter<metrics::core::AtomicU64>,
+    /// Total bytes written to this connection.
+    write: GenericCounter<metrics::core::AtomicU64>,
 }
 
 /// Metrics for measuring traffic (r/w bytes) in a single PostgreSQL connection.
 #[derive(Clone)]
 pub struct TrafficMetrics {
-    labels: Arc<RwLock<ConnectionLabels>>,
+    state: Arc<RwLock<TrafficMetricsState>>,
 }
 
 impl Default for TrafficMetrics {
@@ -146,37 +154,42 @@ impl Default for TrafficMetrics {
 
 impl TrafficMetrics {
     pub fn new() -> Self {
+        let labels = ConnectionLabels::new();
+        let (read, write) = labels.build_metrics();
+        let state = TrafficMetricsState {
+            labels,
+            read,
+            write,
+        };
         Self {
-            labels: Arc::new(RwLock::new(ConnectionLabels::new())),
+            state: Arc::new(RwLock::new(state)),
         }
     }
 
     pub fn set_client_az(&self, value: &str) {
-        let mut labels = self.labels.write().unwrap();
-        labels.client_az = value.to_string();
-        labels.update_metrics();
+        let mut state = self.state.write().unwrap();
+        state.labels.client_az = value.to_string();
+        (state.read, state.write) = state.labels.build_metrics();
     }
 
     pub fn set_sk_az(&self, value: &str) {
-        let mut labels = self.labels.write().unwrap();
-        labels.sk_az = value.to_string();
-        labels.update_metrics();
+        let mut state = self.state.write().unwrap();
+        state.labels.sk_az = value.to_string();
+        (state.read, state.write) = state.labels.build_metrics();
     }
 
     pub fn set_app_name(&self, value: &str) {
-        let mut labels = self.labels.write().unwrap();
-        labels.app_name = value.to_string();
-        labels.update_metrics();
+        let mut state = self.state.write().unwrap();
+        state.labels.app_name = value.to_string();
+        (state.read, state.write) = state.labels.build_metrics();
     }
 
     pub fn observe_read(&self, cnt: usize) {
-        let labels = self.labels.read().unwrap();
-        labels.read.inc_by(cnt as u64)
+        self.state.read().unwrap().read.inc_by(cnt as u64)
     }
 
     pub fn observe_write(&self, cnt: usize) {
-        let labels = self.labels.read().unwrap();
-        labels.write.inc_by(cnt as u64)
+        self.state.read().unwrap().write.inc_by(cnt as u64)
     }
 }
 
