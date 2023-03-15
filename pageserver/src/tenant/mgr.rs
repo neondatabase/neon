@@ -338,8 +338,6 @@ pub enum TenantStateError {
     NotFound(TenantId),
     #[error("tenant {0} is stopping")]
     IsStopping(TenantId),
-    #[error("tenant {0} is broken")]
-    Broken(TenantId),
     #[error("tenant {0} is not active")]
     NotActive(TenantId),
     #[error(transparent)]
@@ -542,13 +540,13 @@ where
             match tenants_accessor.get(&tenant_id) {
                 Some(tenant) => {
                     tenant.set_broken(&e.to_string());
-                    Err(TenantStateError::Broken(tenant_id))
                 }
                 None => {
                     warn!("Tenant {tenant_id} got removed from memory");
-                    Err(TenantStateError::NotFound(tenant_id))
+                    return Err(TenantStateError::NotFound(tenant_id))
                 }
             }
+            Err(TenantStateError::Other(e))   
         }
     }
 }
