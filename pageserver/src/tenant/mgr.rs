@@ -391,7 +391,7 @@ pub async fn load_tenant(
 pub async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<(), TenantStateError> {
+) -> Result<(), TenantStateError> {
     remove_tenant_from_memory(tenant_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(tenant_id);
         fs::File::create(&ignore_mark_file)
@@ -501,7 +501,7 @@ where
 async fn remove_tenant_from_memory<V, F>(
     tenant_id: TenantId,
     tenant_cleanup: F,
-) -> anyhow::Result<V, TenantStateError>
+) -> Result<V, TenantStateError>
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
