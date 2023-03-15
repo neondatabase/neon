@@ -138,9 +138,15 @@ pub struct PageServerConf {
 
     pub pg_distrib_dir: PathBuf,
 
-    pub auth_type: AuthType,
-
+    // Authentication
+    /// authentication method for the HTTP mgmt API
+    pub http_auth_type: AuthType,
+    /// authentication method for libpq connections from compute
+    pub pg_auth_type: AuthType,
+    /// Path to a file containing public key for verifying JWT tokens.
+    /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<PathBuf>,
+
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
     pub default_tenant_conf: TenantConf,
@@ -208,7 +214,8 @@ struct PageServerConfigBuilder {
 
     pg_distrib_dir: BuilderValue<PathBuf>,
 
-    auth_type: BuilderValue<AuthType>,
+    http_auth_type: BuilderValue<AuthType>,
+    pg_auth_type: BuilderValue<AuthType>,
 
     //
     auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
@@ -251,7 +258,8 @@ impl Default for PageServerConfigBuilder {
             pg_distrib_dir: Set(env::current_dir()
                 .expect("cannot access current directory")
                 .join("pg_install")),
-            auth_type: Set(AuthType::Trust),
+            http_auth_type: Set(AuthType::Trust),
+            pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
             id: NotSet,
@@ -323,8 +331,12 @@ impl PageServerConfigBuilder {
         self.pg_distrib_dir = BuilderValue::Set(pg_distrib_dir)
     }
 
-    pub fn auth_type(&mut self, auth_type: AuthType) {
-        self.auth_type = BuilderValue::Set(auth_type)
+    pub fn http_auth_type(&mut self, auth_type: AuthType) {
+        self.http_auth_type = BuilderValue::Set(auth_type)
+    }
+
+    pub fn pg_auth_type(&mut self, auth_type: AuthType) {
+        self.pg_auth_type = BuilderValue::Set(auth_type)
     }
 
     pub fn auth_validation_public_key_path(
@@ -419,7 +431,10 @@ impl PageServerConfigBuilder {
             pg_distrib_dir: self
                 .pg_distrib_dir
                 .ok_or(anyhow!("missing pg_distrib_dir"))?,
-            auth_type: self.auth_type.ok_or(anyhow!("missing auth_type"))?,
+            http_auth_type: self
+                .http_auth_type
+                .ok_or(anyhow!("missing http_auth_type"))?,
+            pg_auth_type: self.pg_auth_type.ok_or(anyhow!("missing pg_auth_type"))?,
             auth_validation_public_key_path: self
                 .auth_validation_public_key_path
                 .ok_or(anyhow!("missing auth_validation_public_key_path"))?,
@@ -612,7 +627,8 @@ impl PageServerConf {
                 "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
                     PathBuf::from(parse_toml_string(key, item)?),
                 )),
-                "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
+                "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
+                "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
                     builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
@@ -647,7 +663,7 @@ impl PageServerConf {
 
         let mut conf = builder.build().context("invalid config")?;
 
-        if conf.auth_type == AuthType::NeonJWT {
+        if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
                 .auth_validation_public_key_path
                 .get_or_insert_with(|| workdir.join("auth_public_key.pem"));
@@ -766,7 +782,8 @@ impl PageServerConf {
             superuser: "cloud_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir,
-            auth_type: AuthType::Trust,
+            http_auth_type: AuthType::Trust,
+            pg_auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
             default_tenant_conf: TenantConf::default(),
@@ -951,7 +968,8 @@ log_format = 'json'
                 max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
                 workdir,
                 pg_distrib_dir,
-                auth_type: AuthType::Trust,
+                http_auth_type: AuthType::Trust,
+                pg_auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
                 default_tenant_conf: TenantConf::default(),
@@ -1008,7 +1026,8 @@ log_format = 'json'
                 max_file_descriptors: 333,
                 workdir,
                 pg_distrib_dir,
-                auth_type: AuthType::Trust,
+                http_auth_type: AuthType::Trust,
+                pg_auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
                 default_tenant_conf: TenantConf::default(),

@@ -246,6 +246,13 @@ def prepare_snapshot(
     if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
         pageserver_config["broker_endpoints"] = etcd_broker_endpoints  # old etcd version
 
+    # Older pageserver versions had just one `auth_type` setting. Now there
+    # are separate settings for pg and http ports. We don't use authentication
+    # in compatibility tests so just remove authentication related settings.
+    pageserver_config.pop("auth_type", None)
+    pageserver_config.pop("pg_auth_type", None)
+    pageserver_config.pop("http_auth_type", None)
+
     if pg_distrib_dir:
         pageserver_config["pg_distrib_dir"] = str(pg_distrib_dir)
 

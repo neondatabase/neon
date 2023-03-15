@@ -137,10 +137,12 @@ Each compute should present a token valid for the timeline's tenant.
 Pageserver also has HTTP API: some parts are per-tenant,
 some parts are server-wide, these are different scopes.
 
-The `auth_type` configuration variable in Pageserver's config may have
-either of three values:
+Authentication can be enabled separately for the HTTP mgmt API, and
+for the libpq connections from compute. The `http_auth_type` and
+`pg_auth_type` configuration variables in Pageserver's config may
+have one of these values:
 
-* `Trust` removes all authentication. The outdated `MD5` value does likewise
+* `Trust` removes all authentication.
 * `NeonJWT` enables JWT validation.
    Tokens are validated using the public key which lies in a PEM file
    specified in the `auth_validation_public_key_path` config.

@@ -97,7 +97,7 @@ impl ComputeControlPlane {
         });
 
         node.create_pgdata()?;
-        node.setup_pg_conf(self.env.pageserver.auth_type)?;
+        node.setup_pg_conf(self.env.pageserver.pg_auth_type)?;
 
         self.nodes
             .insert((tenant_id, node.name.clone()), Arc::clone(&node));

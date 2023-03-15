@@ -110,12 +110,14 @@ impl NeonBroker {
 pub struct PageServerConf {
     // node id
     pub id: NodeId,
+
     // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
 
-    // used to determine which auth type is used
-    pub auth_type: AuthType,
+    // auth type used for the PG and HTTP ports
+    pub pg_auth_type: AuthType,
+    pub http_auth_type: AuthType,
 
     // jwt auth token used for communication with pageserver
     pub auth_token: String,
@@ -127,7 +129,8 @@ impl Default for PageServerConf {
             id: NodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
-            auth_type: AuthType::Trust,
+            pg_auth_type: AuthType::Trust,
+            http_auth_type: AuthType::Trust,
             auth_token: String::new(),
         }
     }

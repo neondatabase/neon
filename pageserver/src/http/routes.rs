@@ -82,6 +82,7 @@ fn get_config(request: &Request<Body>) -> &'static PageServerConf {
     get_state(request).conf
 }
 
+/// Check that the requester is authorized to operate on given tenant
 fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
     check_permission_with(request, |claims| {
         crate::auth::check_permission(claims, tenant_id)

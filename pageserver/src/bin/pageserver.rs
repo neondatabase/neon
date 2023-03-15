@@ -270,15 +270,31 @@ fn start_pageserver(
     WALRECEIVER_RUNTIME.block_on(pageserver::broker_client::init_broker_client(conf))?;
 
     // Initialize authentication for incoming connections
-    let auth = match &conf.auth_type {
-        AuthType::Trust => None,
-        AuthType::NeonJWT => {
-            // unwrap is ok because check is performed when creating config, so path is set and file exists
-            let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
-            Some(JwtAuth::from_key_path(key_path)?.into())
-        }
-    };
-    info!("Using auth: {:#?}", conf.auth_type);
+    let http_auth;
+    let pg_auth;
+    if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
+        // unwrap is ok because check is performed when creating config, so path is set and file exists
+        let key_path = conf.auth_validation_public_key_path.as_ref().unwrap();
+        info!(
+            "Loading public key for verifying JWT tokens from {:#?}",
+            key_path
+        );
+        let auth: Arc<JwtAuth> = Arc::new(JwtAuth::from_key_path(key_path)?);
+
+        http_auth = match &conf.http_auth_type {
+            AuthType::Trust => None,
+            AuthType::NeonJWT => Some(auth.clone()),
+        };
+        pg_auth = match &conf.pg_auth_type {
+            AuthType::Trust => None,
+            AuthType::NeonJWT => Some(auth),
+        };
+    } else {
+        http_auth = None;
+        pg_auth = None;
+    }
+    info!("Using auth for http API: {:#?}", conf.http_auth_type);
+    info!("Using auth for pg connections: {:#?}", conf.pg_auth_type);
 
     match var("NEON_AUTH_TOKEN") {
         Ok(v) => {
@@ -308,7 +324,7 @@ fn start_pageserver(
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, launch_ts, auth.clone(), remote_storage)?
+        let router = http::make_router(conf, launch_ts, http_auth, remote_storage)?
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
@@ -382,9 +398,9 @@ fn start_pageserver(
             async move {
                 page_service::libpq_listener_main(
                     conf,
-                    auth,
+                    pg_auth,
                     pageserver_listener,
-                    conf.auth_type,
+                    conf.pg_auth_type,
                     libpq_ctx,
                 )
                 .await

@@ -82,7 +82,7 @@ impl PageServerNode {
         let (host, port) = parse_host_port(&env.pageserver.listen_pg_addr)
             .expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
-        let password = if env.pageserver.auth_type == AuthType::NeonJWT {
+        let password = if env.pageserver.pg_auth_type == AuthType::NeonJWT {
             Some(env.pageserver.auth_token.clone())
         } else {
             None
@@ -106,25 +106,32 @@ impl PageServerNode {
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
+        let http_auth_type_param =
+            format!("http_auth_type='{}'", self.env.pageserver.http_auth_type);
         let listen_http_addr_param = format!(
             "listen_http_addr='{}'",
             self.env.pageserver.listen_http_addr
         );
+
+        let pg_auth_type_param = format!("pg_auth_type='{}'", self.env.pageserver.pg_auth_type);
         let listen_pg_addr_param =
             format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
         let mut overrides = vec![
             id,
             pg_distrib_dir_param,
-            authg_type_param,
+            http_auth_type_param,
+            pg_auth_type_param,
             listen_http_addr_param,
             listen_pg_addr_param,
             broker_endpoint_param,
         ];
 
-        if self.env.pageserver.auth_type != AuthType::Trust {
+        if self.env.pageserver.http_auth_type != AuthType::Trust
+            || self.env.pageserver.pg_auth_type != AuthType::Trust
+        {
             overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
         }
         overrides
@@ -247,7 +254,10 @@ impl PageServerNode {
     }
 
     fn pageserver_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
-        Ok(if self.env.pageserver.auth_type != AuthType::Trust {
+        // FIXME: why is this tied to pageserver's auth type? Whether or not the safekeeper
+        // needs a token, and how to generate that token, seems independent to whether
+        // the pageserver requires a token in incoming requests.
+        Ok(if self.env.pageserver.http_auth_type != AuthType::Trust {
             // Generate a token to connect from the pageserver to a safekeeper
             let token = self
                 .env
@@ -283,7 +293,7 @@ impl PageServerNode {
 
     fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
         let mut builder = self.http_client.request(method, url);
-        if self.env.pageserver.auth_type == AuthType::NeonJWT {
+        if self.env.pageserver.http_auth_type == AuthType::NeonJWT {
             builder = builder.bearer_auth(&self.env.pageserver.auth_token)
         }
         builder
