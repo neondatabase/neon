@@ -924,7 +924,8 @@ class NeonEnv:
             pg=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
         )
-        pageserver_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
 
         toml += textwrap.dedent(
             f"""
@@ -932,7 +933,8 @@ class NeonEnv:
             id=1
             listen_pg_addr = 'localhost:{pageserver_port.pg}'
             listen_http_addr = 'localhost:{pageserver_port.http}'
-            auth_type = '{pageserver_auth_type}'
+            pg_auth_type = '{pg_auth_type}'
+            http_auth_type = '{http_auth_type}'
         """
         )
 
