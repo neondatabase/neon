@@ -16,7 +16,7 @@ use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCou
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{error, info, warn};
 use utils::measured_stream::MeasuredStream;
 
@@ -209,9 +209,18 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     if let Some(tls) = tls.take() {
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.
-                        stream = PqStream::new(
-                            stream.into_inner().upgrade(tls.to_server_config()).await?,
-                        );
+
+                        let (raw, read_buf) = stream.into_inner();
+                        // TODO: Normally, client doesn't send any data before
+                        // server says TLS handshake is ok and read_buf is empy.
+                        // However, you could imagine pipelining of postgres
+                        // SSLRequest + TLS ClientHello in one hunk similar to
+                        // pipelining in our node js driver. We should probably
+                        // support that by chaining read_buf with the stream.
+                        if !read_buf.is_empty() {
+                            bail!("data is sent before server replied with EncryptionResponse");
+                        }
+                        stream = PqStream::new(raw.upgrade(tls.to_server_config()).await?);
                     }
                 }
                 _ => bail!(ERR_PROTO_VIOLATION),
@@ -443,11 +452,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             value: mut node_info,
         } = auth_result;
 
-        let node = connect_to_compute(&mut node_info, params, &extra, &creds)
+        let mut node = connect_to_compute(&mut node_info, params, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
 
         prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
-        proxy_pass(stream.into_inner(), node.stream, &node_info.aux).await
+        // Before proxy passing, forward to compute whatever data is left in the
+        // PqStream input buffer. Normally there is none, but our serverless npm
+        // driver in pipeline mode sends startup, password and first query
+        // immediately after opening the connection.
+        let (stream, read_buf) = stream.into_inner();
+        node.stream.write_all(&read_buf).await?;
+        proxy_pass(stream, node.stream, &node_info.aux).await
     }
 }
