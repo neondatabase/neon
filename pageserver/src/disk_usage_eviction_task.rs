@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use sync_wrapper::SyncWrapper;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
+use tracing::{debug, error, info, instrument, warn, Instrument};
 use utils::id::{TenantId, TimelineId};
 
 use crate::{
@@ -134,13 +134,9 @@ async fn disk_usage_eviction_task(
     let mut iteration_no = 0;
     loop {
         iteration_no += 1;
-        match disk_usage_eviction_task_iteration(
-            task_config,
-            &mut tenants_dir_fd,
-            &cancel,
-            iteration_no,
-        )
-        .await
+        match disk_usage_eviction_task_iteration(task_config, &mut tenants_dir_fd, &cancel)
+            .instrument(tracing::info_span!("iteration", iteration_no))
+            .await
         {
             ControlFlow::Continue(()) => continue,
             ControlFlow::Break(()) => break,
@@ -148,12 +144,10 @@ async fn disk_usage_eviction_task(
     }
 }
 
-#[instrument(skip_all, fields(iteration_no))]
 async fn disk_usage_eviction_task_iteration(
     task_config: &DiskUsageEvictionTaskConfig,
     tenants_dir_fd: &mut SyncWrapper<Dir>,
     cancel: &CancellationToken,
-    iteration_no: u64,
 ) -> ControlFlow<()> {
     let start = Instant::now();
     let res = disk_usage_eviction_task_iteration_impl(task_config, tenants_dir_fd, cancel).await;
