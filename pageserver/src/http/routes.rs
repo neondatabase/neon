@@ -88,7 +88,7 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
     })
 }
 
-fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
+fn api_error_from_pre_error(err: PageReconstructError) -> ApiError {
     match err {
         PageReconstructError::Other(err) => ApiError::InternalServerError(err),
         PageReconstructError::NeedsDownload(_, _) => {
@@ -105,7 +105,7 @@ fn apierror_from_prerror(err: PageReconstructError) -> ApiError {
     }
 }
 
-fn apierror_from_tenant_map_insert_error(e: TenantMapInsertError) -> ApiError {
+fn api_error_from_tenant_map_insert_error(e: TenantMapInsertError) -> ApiError {
     match e {
         TenantMapInsertError::StillInitializing | TenantMapInsertError::ShuttingDown => {
             ApiError::InternalServerError(anyhow::Error::new(e))
@@ -117,7 +117,7 @@ fn apierror_from_tenant_map_insert_error(e: TenantMapInsertError) -> ApiError {
     }
 }
 
-fn apierror_from_tenant_state_error(err: TenantStateError) -> ApiError {
+fn api_error_from_tenant_state_error(err: TenantStateError) -> ApiError {
     match err {
         TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid)),
         _ => ApiError::InternalServerError(anyhow::Error::new(err)),
@@ -226,7 +226,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
-        .map_err(apierror_from_tenant_state_error)?;
+        .map_err(api_error_from_tenant_state_error)?;
     match tenant.create_timeline(
         new_timeline_id,
         request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -258,7 +258,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     let response_data = async {
         let tenant = mgr::get_tenant(tenant_id, true)
             .await
-            .map_err(apierror_from_tenant_state_error)?;
+            .map_err(api_error_from_tenant_state_error)?;
         let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
@@ -295,7 +295,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_info = async {
         let tenant = mgr::get_tenant(tenant_id, true)
             .await
-            .map_err(apierror_from_tenant_state_error)?;
+            .map_err(api_error_from_tenant_state_error)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -334,7 +334,7 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     let result = timeline
         .find_lsn_for_timestamp(timestamp_pg, &ctx)
         .await
-        .map_err(apierror_from_prerror)?;
+        .map_err(api_error_from_pre_error)?;
 
     let result = match result {
         LsnForTimestamp::Present(lsn) => format!("{lsn}"),
@@ -360,7 +360,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         mgr::attach_tenant(state.conf, tenant_id, remote_storage.clone(), &ctx)
             .instrument(info_span!("tenant_attach", tenant = %tenant_id))
             .await
-            .map_err(apierror_from_tenant_map_insert_error)?;
+            .map_err(api_error_from_tenant_map_insert_error)?;
     } else {
         return Err(ApiError::BadRequest(anyhow!(
             "attach_tenant is not possible because pageserver was configured without remote storage"
@@ -383,7 +383,7 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
         // FIXME: Errors from `delete_timeline` can occur for a number of reasons, incuding both
         // user and internal errors. Replace this with better handling once the error type permits
         // it.
-        .map_err(apierror_from_tenant_state_error)?;
+        .map_err(api_error_from_tenant_state_error)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -397,7 +397,7 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     mgr::detach_tenant(conf, tenant_id)
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await
-        .map_err(apierror_from_tenant_state_error)?;
+        .map_err(api_error_from_tenant_state_error)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -412,7 +412,7 @@ async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, A
     mgr::load_tenant(state.conf, tenant_id, state.remote_storage.clone(), &ctx)
         .instrument(info_span!("load", tenant = %tenant_id))
         .await
-        .map_err(apierror_from_tenant_map_insert_error)?;
+        .map_err(api_error_from_tenant_map_insert_error)?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -426,7 +426,7 @@ async fn tenant_ignore_handler(request: Request<Body>) -> Result<Response<Body>,
     mgr::ignore_tenant(conf, tenant_id)
         .instrument(info_span!("ignore_tenant", tenant = %tenant_id))
         .await
-        .map_err(apierror_from_tenant_state_error)?;
+        .map_err(api_error_from_tenant_state_error)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -502,7 +502,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
-        .map_err(apierror_from_tenant_state_error)?;
+        .map_err(api_error_from_tenant_state_error)?;
 
     // this can be long operation
     let inputs = tenant
@@ -766,7 +766,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     )
     .instrument(info_span!("tenant_create", tenant = ?target_tenant_id))
     .await
-    .map_err(apierror_from_tenant_map_insert_error)?;
+    .map_err(api_error_from_tenant_map_insert_error)?;
 
     // We created the tenant. Existing API semantics are that the tenant
     // is Active when this function returns.
@@ -792,7 +792,7 @@ async fn get_tenant_config_handler(request: Request<Body>) -> Result<Response<Bo
 
     let tenant = mgr::get_tenant(tenant_id, false)
         .await
-        .map_err(apierror_from_tenant_state_error)?;
+        .map_err(api_error_from_tenant_state_error)?;
 
     let response = HashMap::from([
         (
@@ -890,7 +890,7 @@ async fn update_tenant_config_handler(
         .await
         // FIXME: `update_tenant_config` can fail because of both user and internal errors.
         // Replace this `map_err` with better error handling once the type permits it
-        .map_err(apierror_from_tenant_state_error)?;
+        .map_err(api_error_from_tenant_state_error)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1029,7 +1029,7 @@ async fn active_timeline_of_active_tenant(
 ) -> Result<Arc<Timeline>, ApiError> {
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
-        .map_err(apierror_from_tenant_state_error)?;
+        .map_err(api_error_from_tenant_state_error)?;
     tenant
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)
