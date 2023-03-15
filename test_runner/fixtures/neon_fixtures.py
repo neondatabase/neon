@@ -25,6 +25,7 @@ from types import TracebackType
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import urlparse
 
+import aiohttp
 import asyncpg
 import backoff  # type: ignore
 import boto3
@@ -2561,7 +2562,11 @@ class NeonProxy(PgProtocol):
 
     @staticmethod
     async def activate_link_auth(
-        local_vanilla_pg, proxy_with_metric_collector, psql_session_id, create_user=True
+        local_vanilla_pg,
+        proxy_with_metric_collector,
+        psql_session_id,
+        create_user=True,
+        use_legacy_mgmt_api=False,
     ):
         pg_user = "proxy"
 
@@ -2570,33 +2575,40 @@ class NeonProxy(PgProtocol):
             local_vanilla_pg.start()
             local_vanilla_pg.safe_psql(f"create user {pg_user} with login superuser")
 
-        db_info = json.dumps(
-            {
-                "session_id": psql_session_id,
-                "result": {
-                    "Success": {
-                        "host": local_vanilla_pg.default_options["host"],
-                        "port": local_vanilla_pg.default_options["port"],
-                        "dbname": local_vanilla_pg.default_options["dbname"],
-                        "user": pg_user,
-                        "aux": {
-                            "project_id": "test_project_id",
-                            "endpoint_id": "test_endpoint_id",
-                            "branch_id": "test_branch_id",
-                        },
-                    }
-                },
-            }
-        )
+        db_info = {
+            "session_id": psql_session_id,
+            "result": {
+                "Success": {
+                    "host": local_vanilla_pg.default_options["host"],
+                    "port": local_vanilla_pg.default_options["port"],
+                    "dbname": local_vanilla_pg.default_options["dbname"],
+                    "user": pg_user,
+                    "aux": {
+                        "project_id": "test_project_id",
+                        "endpoint_id": "test_endpoint_id",
+                        "branch_id": "test_branch_id",
+                    },
+                }
+            },
+        }
 
-        log.info("sending session activation message")
-        psql = await PSQL(
-            host=proxy_with_metric_collector.host,
-            port=proxy_with_metric_collector.mgmt_port,
-        ).run(db_info)
-        assert psql.stdout is not None
-        out = (await psql.stdout.read()).decode("utf-8").strip()
-        assert out == "ok"
+        if use_legacy_mgmt_api:
+            log.info("sending session activation message using legacy libpq mgmt interface")
+            psql = await PSQL(
+                host=proxy_with_metric_collector.host,
+                port=proxy_with_metric_collector.mgmt_port,
+            ).run(json.dumps(db_info))
+            assert psql.stdout is not None
+            out = (await psql.stdout.read()).decode("utf-8").strip()
+            assert out == "ok"
+        else:
+            log.info("sending session activation message using HTTP mgmt interface")
+            async with aiohttp.request(
+                "POST",
+                f"http://{proxy_with_metric_collector.host}:{proxy_with_metric_collector.http_port}/v1/kick_session",
+                json=db_info,
+            ) as resp:
+                assert resp.ok
 
 
 @pytest.fixture(scope="function")

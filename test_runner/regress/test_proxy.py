@@ -35,7 +35,10 @@ def test_password_hack(static_proxy: NeonProxy):
 
 
 @pytest.mark.asyncio
-async def test_link_auth(vanilla_pg: VanillaPostgres, link_proxy: NeonProxy):
+@pytest.mark.parametrize("use_legacy_mgmt_api", [True, False])
+async def test_link_auth(
+    vanilla_pg: VanillaPostgres, link_proxy: NeonProxy, use_legacy_mgmt_api: bool
+):
     """
     Check the Link auth flow: a lightweight auth method which delegates
     all necessary checks to the console by sending client an auth URL.
@@ -47,7 +50,12 @@ async def test_link_auth(vanilla_pg: VanillaPostgres, link_proxy: NeonProxy):
     link = await NeonProxy.find_auth_link(base_uri, psql)
 
     psql_session_id = NeonProxy.get_session_id(base_uri, link)
-    await NeonProxy.activate_link_auth(vanilla_pg, link_proxy, psql_session_id)
+    await NeonProxy.activate_link_auth(
+        vanilla_pg,
+        link_proxy,
+        psql_session_id,
+        use_legacy_mgmt_api=use_legacy_mgmt_api,
+    )
 
     assert psql.stdout is not None
     out = (await psql.stdout.read()).decode("utf-8").strip()
