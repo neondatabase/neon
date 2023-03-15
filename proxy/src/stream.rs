@@ -1,5 +1,6 @@
 use crate::error::UserFacingError;
 use anyhow::bail;
+use bytes::BytesMut;
 use pin_project_lite::pin_project;
 use pq_proto::framed::{ConnectionError, Framed};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};
@@ -27,8 +28,8 @@ impl<S> PqStream<S> {
         }
     }
 
-    /// Extract the underlying stream.
-    pub fn into_inner(self) -> S {
+    /// Extract the underlying stream and read buffer.
+    pub fn into_inner(self) -> (S, BytesMut) {
         self.framed.into_inner()
     }
 

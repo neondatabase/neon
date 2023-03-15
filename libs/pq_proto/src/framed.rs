@@ -63,9 +63,9 @@ impl<S> Framed<S> {
         &self.stream
     }
 
-    /// Extract the underlying stream.
-    pub fn into_inner(self) -> S {
-        self.stream
+    /// Deconstruct into the underlying stream and read buffer.
+    pub fn into_inner(self) -> (S, BytesMut) {
+        (self.stream, self.read_buf)
     }
 
     /// Return new Framed with stream type transformed by async f, for TLS
