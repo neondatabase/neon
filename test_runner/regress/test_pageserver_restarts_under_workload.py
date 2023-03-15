@@ -20,7 +20,7 @@ def test_pageserver_restarts_under_worload(neon_simple_env: NeonEnv, pg_bin: PgB
     # the background task may complete the init task delay after finding an
     # active tenant, but shutdown starts right before Tenant::gc_iteration
     env.pageserver.allowed_errors.append(
-        r"Gc failed, retrying in \S+: Cannot run GC iteration on inactive tenant"
+        r".*Gc failed, retrying in \S+: Cannot run GC iteration on inactive tenant"
     )
 
     def run_pgbench(pg: Postgres):
