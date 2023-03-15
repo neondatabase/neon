@@ -226,7 +226,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
-        .map_err(ApiError::NotFound)?;
+        .map_err(apierror_from_tenant_state_error)?;
     match tenant.create_timeline(
         new_timeline_id,
         request_data.ancestor_timeline_id.map(TimelineId::from),
@@ -258,7 +258,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     let response_data = async {
         let tenant = mgr::get_tenant(tenant_id, true)
             .await
-            .map_err(ApiError::NotFound)?;
+            .map_err(apierror_from_tenant_state_error)?;
         let timelines = tenant.list_timelines();
 
         let mut response_data = Vec::with_capacity(timelines.len());
@@ -295,7 +295,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     let timeline_info = async {
         let tenant = mgr::get_tenant(tenant_id, true)
             .await
-            .map_err(ApiError::NotFound)?;
+            .map_err(apierror_from_tenant_state_error)?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -383,7 +383,7 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
         // FIXME: Errors from `delete_timeline` can occur for a number of reasons, incuding both
         // user and internal errors. Replace this with better handling once the error type permits
         // it.
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(apierror_from_tenant_state_error)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -502,7 +502,7 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(apierror_from_tenant_state_error)?;
 
     // this can be long operation
     let inputs = tenant
@@ -792,7 +792,7 @@ async fn get_tenant_config_handler(request: Request<Body>) -> Result<Response<Bo
 
     let tenant = mgr::get_tenant(tenant_id, false)
         .await
-        .map_err(ApiError::NotFound)?;
+        .map_err(apierror_from_tenant_state_error)?;
 
     let response = HashMap::from([
         (
@@ -890,7 +890,7 @@ async fn update_tenant_config_handler(
         .await
         // FIXME: `update_tenant_config` can fail because of both user and internal errors.
         // Replace this `map_err` with better error handling once the type permits it
-        .map_err(ApiError::InternalServerError)?;
+        .map_err(apierror_from_tenant_state_error)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -1029,7 +1029,7 @@ async fn active_timeline_of_active_tenant(
 ) -> Result<Arc<Timeline>, ApiError> {
     let tenant = mgr::get_tenant(tenant_id, true)
         .await
-        .map_err(ApiError::NotFound)?;
+        .map_err(apierror_from_tenant_state_error)?;
     tenant
         .get_timeline(timeline_id, true)
         .map_err(ApiError::NotFound)

@@ -1074,7 +1074,10 @@ async fn get_active_tenant_with_timeout(
     tenant_id: TenantId,
     _ctx: &RequestContext, /* require get a context to support cancellation in the future */
 ) -> Result<Arc<Tenant>, GetActiveTenantError> {
-    let tenant = mgr::get_tenant(tenant_id, false).await?;
+    let tenant = match  mgr::get_tenant(tenant_id, false).await {
+        Ok(tenant) => tenant,
+        Err(e) => return Err(GetActiveTenantError::Other(e.into())),
+    };
     let wait_time = Duration::from_secs(30);
     match tokio::time::timeout(wait_time, tenant.wait_to_become_active()).await {
         Ok(Ok(())) => Ok(tenant),

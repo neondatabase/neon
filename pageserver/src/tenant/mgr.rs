@@ -289,7 +289,7 @@ pub async fn set_new_tenant_config(
     conf: &'static PageServerConf,
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> Result<(), TenantStateError> {
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
@@ -306,16 +306,17 @@ pub async fn set_new_tenant_config(
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-pub async fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
+pub async fn get_tenant(
+    tenant_id: TenantId,
+    active_only: bool,
+) -> Result<Arc<Tenant>, TenantStateError> {
     let m = TENANTS.read().await;
-    let tenant = m
-        .get(&tenant_id)
-        .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
+    let tenant= match m.get(&tenant_id) {
+        Some(tenant) => tenant,
+        None => return Err(TenantStateError::NotFound(tenant_id)),
+    };
     if active_only && !tenant.is_active() {
-        anyhow::bail!(
-            "Tenant {tenant_id} is not active. Current state: {:?}",
-            tenant.current_state()
-        )
+        Err(TenantStateError::NotActive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
     }
@@ -325,14 +326,9 @@ pub async fn delete_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     ctx: &RequestContext,
-) -> anyhow::Result<()> {
-    match get_tenant(tenant_id, true).await {
-        Ok(tenant) => {
-            tenant.delete_timeline(timeline_id, ctx).await?;
-        }
-        Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
-    }
-
+) -> Result<(), TenantStateError> {
+    let tenant = get_tenant(tenant_id, true).await?;
+    tenant.delete_timeline(timeline_id, ctx).await?;   
     Ok(())
 }
 
@@ -344,6 +340,10 @@ pub enum TenantStateError {
     IsStopping(TenantId),
     #[error("tenant {0} is broken")]
     Broken(TenantId),
+    #[error("tenant {0} is not active")]
+    NotActive(TenantId),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 pub async fn detach_tenant(
