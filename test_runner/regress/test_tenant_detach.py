@@ -320,7 +320,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
     with pytest.raises(
-        expected_exception=PageserverApiException, match=f"NotFound: Tenant {tenant_id}"
+        expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
     ):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 

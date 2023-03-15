@@ -570,7 +570,7 @@ pub async fn immediate_gc(
     let tenant = guard
         .get(&tenant_id)
         .map(Arc::clone)
-        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .with_context(|| format!("tenant {tenant_id}"))
         .map_err(ApiError::NotFound)?;
 
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
@@ -620,7 +620,7 @@ pub async fn immediate_compact(
     let tenant = guard
         .get(&tenant_id)
         .map(Arc::clone)
-        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .with_context(|| format!("tenant {tenant_id}"))
         .map_err(ApiError::NotFound)?;
 
     let timeline = tenant
