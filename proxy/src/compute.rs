@@ -1,12 +1,27 @@
-use crate::{auth::parse_endpoint_param, cancellation::CancelClosure, error::UserFacingError};
+use crate::{
+    auth::parse_endpoint_param,
+    cancellation::CancelClosure,
+    console::messages::{DatabaseInfo, MetricsAuxInfo},
+    console::CachedNodeInfo,
+    error::UserFacingError,
+};
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::{io, net::SocketAddr, time::Duration};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::tls::MakeTlsConnect;
 use tracing::{error, info, warn};
+
+/// Should we allow self-signed certificates in TLS connections?
+/// Most definitely, this shouldn't be allowed in production.
+pub static ALLOW_SELF_SIGNED_COMPUTE: AtomicBool = AtomicBool::new(false);
 
 const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
@@ -42,6 +57,88 @@ impl UserFacingError for ConnectionError {
 /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
 pub type ScramKeys = tokio_postgres::config::ScramKeys<32>;
 
+#[derive(Clone)]
+pub enum Password {
+    /// A regular cleartext password.
+    ClearText(Vec<u8>),
+    /// A pair of `ClientKey` & `ServerKey` for `SCRAM-SHA-256`.
+    ScramKeys(ScramKeys),
+}
+
+pub enum ComputeNode {
+    /// Route via link auth.
+    Link(DatabaseInfo),
+    /// Regular compute node.
+    Static {
+        password: Password,
+        info: CachedNodeInfo,
+    },
+}
+
+impl ComputeNode {
+    /// Get metrics auxiliary info.
+    pub fn metrics_aux_info(&self) -> &MetricsAuxInfo {
+        match self {
+            Self::Link(info) => &info.aux,
+            Self::Static { info, .. } => &info.aux,
+        }
+    }
+
+    /// Invalidate compute node info if it's cached.
+    pub fn invalidate(&self) -> bool {
+        if let Self::Static { info, .. } = self {
+            warn!("invalidating compute node info cache entry");
+            info.invalidate();
+            return true;
+        }
+
+        false
+    }
+
+    /// Turn compute node info into a postgres connection config.
+    pub fn to_conn_config(&self) -> ConnCfg {
+        let mut config = ConnCfg::new();
+
+        let (host, port) = match self {
+            Self::Link(info) => {
+                // NB: use pre-supplied dbname, user and password for link auth.
+                // See `ConnCfg::set_startup_params` below.
+                config.0.dbname(&info.dbname).user(&info.user);
+                if let Some(password) = &info.password {
+                    config.0.password(password.as_bytes());
+                }
+
+                (&info.host, info.port)
+            }
+            Self::Static { info, password } => {
+                // NB: setup auth keys (for SCRAM) or plaintext password.
+                match password {
+                    Password::ClearText(text) => config.0.password(text),
+                    Password::ScramKeys(keys) => {
+                        use tokio_postgres::config::AuthKeys;
+                        config.0.auth_keys(AuthKeys::ScramSha256(keys.to_owned()))
+                    }
+                };
+
+                (&info.address.host, info.address.port)
+            }
+        };
+
+        // Backwards compatibility. pg_sni_proxy uses "--" in domain names
+        // while direct connections do not. Once we migrate to pg_sni_proxy
+        // everywhere, we can remove this.
+        config.0.ssl_mode(if host.contains("--") {
+            // We need TLS connection with SNI info to properly route it.
+            tokio_postgres::config::SslMode::Require
+        } else {
+            tokio_postgres::config::SslMode::Disable
+        });
+
+        config.0.host(host).port(port);
+        config
+    }
+}
+
 /// A config for establishing a connection to compute node.
 /// Eventually, `tokio_postgres` will be replaced with something better.
 /// Newtype allows us to implement methods on top of it.
@@ -51,43 +148,32 @@ pub struct ConnCfg(Box<tokio_postgres::Config>);
 
 /// Creation and initialization routines.
 impl ConnCfg {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self(Default::default())
-    }
-
-    /// Reuse password or auth keys from the other config.
-    pub fn reuse_password(&mut self, other: &Self) {
-        if let Some(password) = other.get_password() {
-            self.password(password);
-        }
-
-        if let Some(keys) = other.get_auth_keys() {
-            self.auth_keys(keys);
-        }
     }
 
     /// Apply startup message params to the connection config.
     pub fn set_startup_params(&mut self, params: &StartupMessageParams) {
         // Only set `user` if it's not present in the config.
         // Link auth flow takes username from the console's response.
-        if let (None, Some(user)) = (self.get_user(), params.get("user")) {
-            self.user(user);
+        if let (None, Some(user)) = (self.0.get_user(), params.get("user")) {
+            self.0.user(user);
         }
 
         // Only set `dbname` if it's not present in the config.
         // Link auth flow takes dbname from the console's response.
-        if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
-            self.dbname(dbname);
+        if let (None, Some(dbname)) = (self.0.get_dbname(), params.get("database")) {
+            self.0.dbname(dbname);
         }
 
         // Don't add `options` if they were only used for specifying a project.
         // Connection pools don't support `options`, because they affect backend startup.
         if let Some(options) = filtered_options(params) {
-            self.options(&options);
+            self.0.options(&options);
         }
 
         if let Some(app_name) = params.get("application_name") {
-            self.application_name(app_name);
+            self.0.application_name(app_name);
         }
 
         // TODO: This is especially ugly...
@@ -95,10 +181,10 @@ impl ConnCfg {
             use tokio_postgres::config::ReplicationMode;
             match replication {
                 "true" | "on" | "yes" | "1" => {
-                    self.replication_mode(ReplicationMode::Physical);
+                    self.0.replication_mode(ReplicationMode::Physical);
                 }
                 "database" => {
-                    self.replication_mode(ReplicationMode::Logical);
+                    self.0.replication_mode(ReplicationMode::Logical);
                 }
                 _other => {}
             }
@@ -110,27 +196,6 @@ impl ConnCfg {
         //
         // This and the reverse params problem can be better addressed
         // in a bespoke connection machinery (a new library for that sake).
-    }
-}
-
-impl std::ops::Deref for ConnCfg {
-    type Target = tokio_postgres::Config;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-/// For now, let's make it easier to setup the config.
-impl std::ops::DerefMut for ConnCfg {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Default for ConnCfg {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -220,16 +285,13 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
-    async fn do_connect(
-        &self,
-        allow_self_signed_compute: bool,
-    ) -> Result<PostgresConnection, ConnectionError> {
+    async fn do_connect(&self) -> Result<PostgresConnection, ConnectionError> {
         let (socket_addr, stream, host) = self.connect_raw().await?;
 
         let tls_connector = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(allow_self_signed_compute)
-            .build()
-            .unwrap();
+            .danger_accept_invalid_certs(ALLOW_SELF_SIGNED_COMPUTE.load(Ordering::Relaxed))
+            .build()?;
+
         let mut mk_tls = postgres_native_tls::MakeTlsConnector::new(tls_connector);
         let tls = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut mk_tls, host)?;
 
@@ -261,11 +323,8 @@ impl ConnCfg {
     }
 
     /// Connect to a corresponding compute node.
-    pub async fn connect(
-        &self,
-        allow_self_signed_compute: bool,
-    ) -> Result<PostgresConnection, ConnectionError> {
-        self.do_connect(allow_self_signed_compute)
+    pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
+        self.do_connect()
             .inspect_err(|err| {
                 // Immediately log the error we have at our disposal.
                 error!("couldn't connect to compute node: {err}");

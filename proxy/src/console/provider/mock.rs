@@ -2,13 +2,12 @@
 
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo, PgEndpoint,
 };
-use crate::{auth::ClientCredentials, compute, error::io_error, scram, url::ApiUrl};
+use crate::{auth::ClientCredentials, error::io_error, scram, url::ApiUrl};
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
-use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Debug, Error)]
@@ -84,19 +83,15 @@ impl Api {
     }
 
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
-        let mut config = compute::ConnCfg::new();
-        config
-            .host(self.endpoint.host_str().unwrap_or("localhost"))
-            .port(self.endpoint.port().unwrap_or(5432))
-            .ssl_mode(SslMode::Disable);
+        let host = self.endpoint.host_str().unwrap_or("localhost").into();
+        let port = self.endpoint.port().unwrap_or(5432);
 
-        let node = NodeInfo {
-            config,
+        let info = NodeInfo {
+            address: PgEndpoint { host, port },
             aux: Default::default(),
-            allow_self_signed_compute: false,
         };
 
-        Ok(node)
+        Ok(info)
     }
 }
 

@@ -1,10 +1,8 @@
 use super::AuthSuccess;
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
-    console::{
-        self,
-        provider::{CachedNodeInfo, ConsoleReqExtra},
-    },
+    compute::{ComputeNode, Password},
+    console::{self, provider::ConsoleReqExtra},
     stream,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -19,7 +17,7 @@ pub async fn cleartext_hack(
     extra: &ConsoleReqExtra<'_>,
     creds: &mut ClientCredentials<'_>,
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+) -> auth::Result<AuthSuccess<ComputeNode>> {
     warn!("cleartext auth flow override is enabled, proceeding");
     let password = AuthFlow::new(client)
         .begin(auth::CleartextPassword)
@@ -27,13 +25,15 @@ pub async fn cleartext_hack(
         .authenticate()
         .await?;
 
-    let mut node = api.wake_compute(extra, creds).await?;
-    node.config.password(password);
+    let info = api.wake_compute(extra, creds).await?;
 
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: node,
+        value: ComputeNode::Static {
+            password: Password::ClearText(password),
+            info,
+        },
     })
 }
 
@@ -44,7 +44,7 @@ pub async fn password_hack(
     extra: &ConsoleReqExtra<'_>,
     creds: &mut ClientCredentials<'_>,
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+) -> auth::Result<AuthSuccess<ComputeNode>> {
     warn!("project not specified, resorting to the password hack auth flow");
     let payload = AuthFlow::new(client)
         .begin(auth::PasswordHack)
@@ -55,12 +55,14 @@ pub async fn password_hack(
     info!(project = &payload.endpoint, "received missing parameter");
     creds.project = Some(payload.endpoint);
 
-    let mut node = api.wake_compute(extra, creds).await?;
-    node.config.password(payload.password);
+    let info = api.wake_compute(extra, creds).await?;
 
     // Report tentative success; compute node will check the password anyway.
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: node,
+        value: ComputeNode::Static {
+            password: Password::ClearText(payload.password),
+            info,
+        },
     })
 }

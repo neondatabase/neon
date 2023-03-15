@@ -1,14 +1,13 @@
 pub mod mock;
 pub mod neon;
 
-use super::messages::MetricsAuxInfo;
+use super::messages::{MetricsAuxInfo, PgEndpoint};
 use crate::{
     auth::ClientCredentials,
-    cache::{timed_lru, TimedLru},
-    compute, scram,
+    cache::{types::Cached, TimedLru},
+    scram,
 };
 use async_trait::async_trait;
-use std::sync::Arc;
 
 pub mod errors {
     use crate::{
@@ -112,11 +111,9 @@ pub mod errors {
             }
         }
     }
+
     #[derive(Debug, Error)]
     pub enum WakeComputeError {
-        #[error("Console responded with a malformed compute address: {0}")]
-        BadComputeAddress(Box<str>),
-
         #[error(transparent)]
         ApiError(ApiError),
     }
@@ -132,10 +129,7 @@ pub mod errors {
         fn to_string_client(&self) -> String {
             use WakeComputeError::*;
             match self {
-                // We shouldn't show user the address even if it's broken.
-                // Besides, user is unlikely to care about this detail.
-                BadComputeAddress(_) => REQUEST_FAILED.to_owned(),
-                // However, API might return a meaningful error.
+                // API might return a meaningful error.
                 ApiError(e) => e.to_string_client(),
             }
         }
@@ -160,23 +154,17 @@ pub enum AuthInfo {
 }
 
 /// Info for establishing a connection to a compute node.
-/// This is what we get after auth succeeded, but not before!
-#[derive(Clone)]
+/// This struct is cached, so we shouldn't store any user creds here.
 pub struct NodeInfo {
-    /// Compute node connection params.
-    /// It's sad that we have to clone this, but this will improve
-    /// once we migrate to a bespoke connection logic.
-    pub config: compute::ConnCfg,
+    /// Address of the compute node.
+    pub address: PgEndpoint,
 
     /// Labels for proxy's metrics.
-    pub aux: Arc<MetricsAuxInfo>,
-
-    /// Whether we should accept self-signed certificates (for testing)
-    pub allow_self_signed_compute: bool,
+    pub aux: MetricsAuxInfo,
 }
 
-pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;
-pub type CachedNodeInfo = timed_lru::Cached<&'static NodeInfoCache>;
+pub type NodeInfoCache = TimedLru<Box<str>, NodeInfo>;
+pub type CachedNodeInfo = Cached<NodeInfo>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.

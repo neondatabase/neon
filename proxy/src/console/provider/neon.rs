@@ -5,10 +5,9 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
 };
-use crate::{auth::ClientCredentials, compute, http, scram};
+use crate::{auth::ClientCredentials, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Clone)]
@@ -91,22 +90,9 @@ impl Api {
             let response = self.endpoint.execute(request).await?;
             let body = parse_body::<WakeCompute>(response).await?;
 
-            // Unfortunately, ownership won't let us use `Option::ok_or` here.
-            let (host, port) = match parse_host_port(&body.address) {
-                None => return Err(WakeComputeError::BadComputeAddress(body.address)),
-                Some(x) => x,
-            };
-
-            // Don't set anything but host and port! This config will be cached.
-            // We'll set username and such later using the startup message.
-            // TODO: add more type safety (in progress).
-            let mut config = compute::ConnCfg::new();
-            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
-
             let node = NodeInfo {
-                config,
-                aux: body.aux.into(),
-                allow_self_signed_compute: false,
+                address: body.address,
+                aux: body.aux,
             };
 
             Ok(node)
@@ -141,13 +127,15 @@ impl super::Api for Api {
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
         if let Some(cached) = self.caches.node_info.get(key) {
-            info!(key = key, "found cached compute node info");
+            info!(key, "found cached compute node info");
             return Ok(cached);
         }
 
-        let node = self.do_wake_compute(extra, creds).await?;
-        let (_, cached) = self.caches.node_info.insert(key.into(), node);
-        info!(key = key, "created a cache entry for compute node info");
+        let info = self.do_wake_compute(extra, creds).await?;
+
+        let owned_key = Box::<str>::from(key);
+        let (_, cached) = self.caches.node_info.insert(owned_key.into(), info.into());
+        info!(key, "created a cache entry for compute node info");
 
         Ok(cached)
     }
@@ -176,21 +164,4 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     let text = body.error;
     error!("console responded with an error ({status}): {text}");
     Err(ApiError::Console { status, text })
-}
-
-fn parse_host_port(input: &str) -> Option<(&str, u16)> {
-    let (host, port) = input.split_once(':')?;
-    Some((host, port.parse().ok()?))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_host_port() {
-        let (host, port) = parse_host_port("127.0.0.1:5432").expect("failed to parse");
-        assert_eq!(host, "127.0.0.1");
-        assert_eq!(port, 5432);
-    }
 }

@@ -4,7 +4,7 @@ mod tests;
 use crate::{
     auth::{self, backend::AuthSuccess},
     cancellation::{self, CancelMap},
-    compute::{self, PostgresConnection},
+    compute::{self, ComputeNode, PostgresConnection},
     config::{ProxyConfig, TlsConfig},
     console::{self, messages::MetricsAuxInfo},
     error::io_error,
@@ -155,7 +155,7 @@ pub async fn handle_ws_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id, false);
+    let client = Client::new(stream, creds, &params, session_id);
     cancel_map
         .with_session(|session| client.connect_to_db(session, true))
         .await
@@ -194,15 +194,7 @@ async fn handle_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let allow_self_signed_compute = config.allow_self_signed_compute;
-
-    let client = Client::new(
-        stream,
-        creds,
-        &params,
-        session_id,
-        allow_self_signed_compute,
-    );
+    let client = Client::new(stream, creds, &params, session_id);
     cancel_map
         .with_session(|session| client.connect_to_db(session, false))
         .await
@@ -283,61 +275,38 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-/// Try to connect to the compute node once.
-#[tracing::instrument(name = "connect_once", skip_all)]
-async fn connect_to_compute_once(
-    node_info: &console::CachedNodeInfo,
-) -> Result<PostgresConnection, compute::ConnectionError> {
-    // If we couldn't connect, a cached connection info might be to blame
-    // (e.g. the compute node's address might've changed at the wrong time).
-    // Invalidate the cache entry (if any) to prevent subsequent errors.
-    let invalidate_cache = |_: &compute::ConnectionError| {
-        let is_cached = node_info.cached();
-        if is_cached {
-            warn!("invalidating stalled compute node info cache entry");
-            node_info.invalidate();
-        }
-
-        let label = match is_cached {
-            true => "compute_cached",
-            false => "compute_uncached",
-        };
-        NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
-    };
-
-    let allow_self_signed_compute = node_info.allow_self_signed_compute;
-
-    node_info
-        .config
-        .connect(allow_self_signed_compute)
-        .inspect_err(invalidate_cache)
-        .await
-}
-
 /// Try to connect to the compute node, retrying if necessary.
 /// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
 async fn connect_to_compute(
-    node_info: &mut console::CachedNodeInfo,
+    node_info: &mut ComputeNode,
     params: &StartupMessageParams,
     extra: &console::ConsoleReqExtra<'_>,
     creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
-    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
+    let mut num_retries = NUM_RETRIES_WAKE_COMPUTE;
     loop {
-        // Apply startup params to the (possibly, cached) compute node info.
-        node_info.config.set_startup_params(params);
-        match connect_to_compute_once(node_info).await {
+        let mut config = node_info.to_conn_config();
+        config.set_startup_params(params);
+        match config.connect().await {
             Err(e) if num_retries > 0 => {
-                info!("compute node's state has changed; requesting a wake-up");
-                match creds.wake_compute(extra).map_err(io_error).await? {
+                let label = match node_info.invalidate() {
+                    true => "compute_cached",
+                    false => "compute_uncached",
+                };
+                NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+
+                let res = creds.wake_compute(extra).map_err(io_error).await?;
+                match (res, &node_info) {
                     // Update `node_info` and try one more time.
-                    Some(mut new) => {
-                        new.config.reuse_password(&node_info.config);
-                        *node_info = new;
+                    (Some(new), ComputeNode::Static { password, .. }) => {
+                        *node_info = ComputeNode::Static {
+                            password: password.to_owned(),
+                            info: new,
+                        }
                     }
                     // Link auth doesn't work that way, so we just exit.
-                    None => return Err(e),
+                    _ => return Err(e),
                 }
             }
             other => return other,
@@ -430,8 +399,6 @@ struct Client<'a, S> {
     params: &'a StartupMessageParams,
     /// Unique connection ID.
     session_id: uuid::Uuid,
-    /// Allow self-signed certificates (for testing).
-    allow_self_signed_compute: bool,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -441,14 +408,12 @@ impl<'a, S> Client<'a, S> {
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
-        allow_self_signed_compute: bool,
     ) -> Self {
         Self {
             stream,
             creds,
             params,
             session_id,
-            allow_self_signed_compute,
         }
     }
 }
@@ -468,7 +433,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             mut creds,
             params,
             session_id,
-            allow_self_signed_compute,
         } = self;
 
         let extra = console::ConsoleReqExtra {
@@ -491,19 +455,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             value: mut node_info,
         } = auth_result;
 
-        node_info.allow_self_signed_compute = allow_self_signed_compute;
-
         let mut node = connect_to_compute(&mut node_info, params, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
 
         prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
+
         // Before proxy passing, forward to compute whatever data is left in the
         // PqStream input buffer. Normally there is none, but our serverless npm
         // driver in pipeline mode sends startup, password and first query
         // immediately after opening the connection.
         let (stream, read_buf) = stream.into_inner();
         node.stream.write_all(&read_buf).await?;
-        proxy_pass(stream, node.stream, &node_info.aux).await
+
+        proxy_pass(stream, node.stream, node_info.metrics_aux_info()).await
     }
 }

@@ -22,11 +22,37 @@ impl fmt::Debug for GetRoleSecret {
     }
 }
 
+/// Represents compute node's host & port pair.
+#[derive(Debug)]
+pub struct PgEndpoint {
+    pub host: Box<str>,
+    pub port: u16,
+}
+
+impl<'de> Deserialize<'de> for PgEndpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let raw = String::deserialize(deserializer)?;
+        let (host, port) = raw
+            .rsplit_once(':')
+            .ok_or_else(|| Error::custom(format!("bad compute address: {raw}")))?;
+
+        Ok(PgEndpoint {
+            host: host.into(),
+            port: port.parse().map_err(Error::custom)?,
+        })
+    }
+}
+
 /// Response which holds compute node's `host:port` pair.
 /// Returned by the `/proxy_wake_compute` API method.
 #[derive(Debug, Deserialize)]
 pub struct WakeCompute {
-    pub address: Box<str>,
+    pub address: PgEndpoint,
     pub aux: MetricsAuxInfo,
 }
 
@@ -182,6 +208,26 @@ mod tests {
             "user": "john_doe",
             "project": "hello_world",
             "N.E.W": "forward compatibility check",
+            "aux": dummy_aux(),
+        }))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_wake_compute() -> anyhow::Result<()> {
+        let _: WakeCompute = serde_json::from_value(json!({
+            "address": "127.0.0.1:5432",
+            "aux": dummy_aux(),
+        }))?;
+
+        let _: WakeCompute = serde_json::from_value(json!({
+            "address": "[::1]:5432",
+            "aux": dummy_aux(),
+        }))?;
+
+        serde_json::from_value::<WakeCompute>(json!({
+            "address": "localhost:5432",
             "aux": dummy_aux(),
         }))?;
 

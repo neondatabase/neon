@@ -6,6 +6,7 @@ use proxy::metrics;
 use anyhow::bail;
 use clap::{self, Arg};
 use proxy::config::{self, ProxyConfig};
+use std::sync::atomic::Ordering;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -103,6 +104,7 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         .parse()?;
     if allow_self_signed_compute {
         warn!("allowing self-signed compute certificates");
+        proxy::compute::ALLOW_SELF_SIGNED_COMPUTE.store(true, Ordering::Relaxed);
     }
 
     let metric_collection = match (
@@ -154,7 +156,6 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         tls_config,
         auth_backend,
         metric_collection,
-        allow_self_signed_compute,
     }));
 
     Ok(config)

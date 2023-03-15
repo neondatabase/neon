@@ -1,8 +1,8 @@
 use super::AuthSuccess;
 use crate::{
     auth::{self, AuthFlow, ClientCredentials},
-    compute,
-    console::{self, AuthInfo, CachedNodeInfo, ConsoleReqExtra},
+    compute::{self, ComputeNode, Password},
+    console::{self, AuthInfo, ConsoleReqExtra},
     sasl, scram,
     stream::PqStream,
 };
@@ -14,7 +14,7 @@ pub(super) async fn authenticate(
     extra: &ConsoleReqExtra<'_>,
     creds: &ClientCredentials<'_>,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+) -> auth::Result<AuthSuccess<ComputeNode>> {
     info!("fetching user's authentication info");
     let info = api.get_auth_info(extra, creds).await?.unwrap_or_else(|| {
         // If we don't have an authentication secret, we mock one to
@@ -25,7 +25,7 @@ pub(super) async fn authenticate(
     });
 
     let flow = AuthFlow::new(client);
-    let scram_keys = match info {
+    let keys = match info {
         AuthInfo::Md5(_) => {
             info!("auth endpoint chooses MD5");
             return Err(auth::AuthError::bad_auth_method("MD5"));
@@ -41,21 +41,20 @@ pub(super) async fn authenticate(
                 }
             };
 
-            Some(compute::ScramKeys {
+            compute::ScramKeys {
                 client_key: client_key.as_bytes(),
                 server_key: secret.server_key.as_bytes(),
-            })
+            }
         }
     };
 
-    let mut node = api.wake_compute(extra, creds).await?;
-    if let Some(keys) = scram_keys {
-        use tokio_postgres::config::AuthKeys;
-        node.config.auth_keys(AuthKeys::ScramSha256(keys));
-    }
+    let info = api.wake_compute(extra, creds).await?;
 
     Ok(AuthSuccess {
         reported_auth_ok: false,
-        value: node,
+        value: ComputeNode::Static {
+            password: Password::ScramKeys(keys),
+            info,
+        },
     })
 }

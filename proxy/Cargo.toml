@@ -35,6 +35,7 @@ postgres_backend.workspace = true
 pq_proto.workspace = true
 prometheus.workspace = true
 rand.workspace = true
+ref-cast.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 reqwest-middleware.workspace = true
@@ -50,9 +51,9 @@ socket2.workspace = true
 sync_wrapper.workspace = true
 thiserror.workspace = true
 tls-listener.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tokio-postgres.workspace = true
 tokio-rustls.workspace = true
-tokio = { workspace = true, features = ["signal"] }
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true

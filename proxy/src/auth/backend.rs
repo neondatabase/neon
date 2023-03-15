@@ -6,6 +6,7 @@ pub use link::LinkAuthError;
 
 use crate::{
     auth::{self, ClientCredentials},
+    compute::ComputeNode,
     console::{
         self,
         provider::{CachedNodeInfo, ConsoleReqExtra},
@@ -114,7 +115,7 @@ async fn auth_quirks(
     creds: &mut ClientCredentials<'_>,
     client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
     allow_cleartext: bool,
-) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+) -> auth::Result<AuthSuccess<ComputeNode>> {
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
@@ -156,7 +157,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
         extra: &ConsoleReqExtra<'_>,
         client: &mut stream::PqStream<impl AsyncRead + AsyncWrite + Unpin>,
         allow_cleartext: bool,
-    ) -> auth::Result<AuthSuccess<CachedNodeInfo>> {
+    ) -> auth::Result<AuthSuccess<ComputeNode>> {
         use BackendType::*;
 
         let res = match self {
@@ -184,9 +185,7 @@ impl BackendType<'_, ClientCredentials<'_>> {
             Link(url) => {
                 info!("performing link authentication");
 
-                link::authenticate(url, client)
-                    .await?
-                    .map(CachedNodeInfo::new_uncached)
+                link::authenticate(url, client).await?
             }
         };
 
