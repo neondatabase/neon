@@ -311,12 +311,15 @@ pub async fn get_tenant(
     active_only: bool,
 ) -> Result<Arc<Tenant>, TenantStateError> {
     let m = TENANTS.read().await;
-    let tenant= match m.get(&tenant_id) {
+    let tenant = match m.get(&tenant_id) {
         Some(tenant) => tenant,
         None => return Err(TenantStateError::NotFound(tenant_id)),
     };
     if active_only && !tenant.is_active() {
-        tracing::warn!("Tenant {tenant_id} is not active. Current state: {:?}", tenant.current_state());
+        tracing::warn!(
+            "Tenant {tenant_id} is not active. Current state: {:?}",
+            tenant.current_state()
+        );
         Err(TenantStateError::NotActive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
@@ -329,7 +332,7 @@ pub async fn delete_timeline(
     ctx: &RequestContext,
 ) -> Result<(), TenantStateError> {
     let tenant = get_tenant(tenant_id, true).await?;
-    tenant.delete_timeline(timeline_id, ctx).await?;   
+    tenant.delete_timeline(timeline_id, ctx).await?;
     Ok(())
 }
 
@@ -544,10 +547,10 @@ where
                 }
                 None => {
                     warn!("Tenant {tenant_id} got removed from memory");
-                    return Err(TenantStateError::NotFound(tenant_id))
+                    return Err(TenantStateError::NotFound(tenant_id));
                 }
             }
-            Err(TenantStateError::Other(e))   
+            Err(TenantStateError::Other(e))
         }
     }
 }
