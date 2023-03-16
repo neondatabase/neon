@@ -124,6 +124,17 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     ps_metrics = all_metrics[0]
     sk_metrics = all_metrics[1:]
 
+    # Find all metrics among all safekeepers, accepts the same arguments as query_all()
+    def query_all_safekeepers(name, filter):
+        return list(
+            chain.from_iterable(
+                map(
+                    lambda sk: sk.query_all(name, filter),
+                    sk_metrics,
+                )
+            )
+        )
+
     ttids = [
         {"tenant_id": str(tenant_1), "timeline_id": str(timeline_1)},
         {"tenant_id": str(tenant_2), "timeline_id": str(timeline_2)},
@@ -164,48 +175,25 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
             f"process_start_time_seconds (UTC): {datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)}"
         )
 
-    def query_all_safekeepers(name, filter):
-        return list(
-            chain.from_iterable(
-                map(
-                    lambda sk: sk.query_all(name, filter),
-                    sk_metrics,
-                )
-            )
-        )
-
-    crossaz_read_bytes = sum(
-        int(metric.value)
-        for metric in query_all_safekeepers(
+    for io_direction in ["read", "write"]:
+        # Querying all metrics for number of bytes read/written by pageserver in another AZ
+        io_metrics = query_all_safekeepers(
             "safekeeper_pg_io_bytes_total",
             {
                 "app_name": "pageserver",
                 "client_az": "test_ps_az",
-                "dir": "read",
+                "dir": io_direction,
                 "same_az": "false",
             },
         )
-    )
-    log.info(f"crossaz_read_bytes: {crossaz_read_bytes}")
-    assert crossaz_read_bytes > 0
-
-    crossaz_write_bytes = sum(
-        int(metric.value)
-        for metric in query_all_safekeepers(
-            "safekeeper_pg_io_bytes_total",
-            {
-                "app_name": "pageserver",
-                "client_az": "test_ps_az",
-                "dir": "write",
-                "same_az": "false",
-            },
-        )
-    )
-    log.info(f"crossaz_write_bytes: {crossaz_write_bytes}")
-    assert crossaz_write_bytes > 0
+        total_bytes = sum(int(metric.value) for metric in io_metrics)
+        log.info(f"Pageserver {io_direction} bytes from another AZ: {total_bytes}")
+        # We expect some bytes to be read/written, to make sure metrics are working
+        assert total_bytes > 0
 
     # Test (a subset of) safekeeper global metrics
     for sk_m in sk_metrics:
+        # Test that every safekeeper has read some bytes
         assert any(
             map(
                 lambda x: x.value > 0,
@@ -213,6 +201,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
             )
         ), f"{sk_m.name} has not read bytes"
 
+        # Test that every safekeeper has written some bytes
         assert any(
             map(
                 lambda x: x.value > 0,
