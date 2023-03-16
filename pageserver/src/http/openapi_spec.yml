@@ -351,6 +351,13 @@ paths:
         schema:
           type: string
           format: hex
+      - name: allow_ignored
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: |
+          When true, allow to detach a tenant which state is ignored.
     post:
       description: |
         Remove tenant data (including all corresponding timelines) from pageserver's memory and file system.

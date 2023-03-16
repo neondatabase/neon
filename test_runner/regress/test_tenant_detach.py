@@ -325,6 +325,42 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 
 
+def test_tenant_detach_ignored_tenant(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
+
+    # create new Tenant
+    tenant_id, timeline_id = env.neon_cli.create_tenant()
+
+    # assert tenant exists on disk
+    assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    # we rely upon autocommit after each statement
+    pg.safe_psql_many(
+        queries=[
+            "CREATE TABLE t(key int primary key, value text)",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        ]
+    )
+
+    # ignore tenant
+    pageserver_http.tenant_ignore(tenant_id)
+
+    # ensure tenant is detached with ignore state
+    log.info("detaching tenant")
+    pageserver_http.tenant_detach(tenant_id, True)
+    log.info("tenant detached without error")
+
+    # check that nothing is left on disk for deleted tenant
+    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+    env.pageserver.allowed_errors.append(".*NotFound: Tenant .* not found")
+    with pytest.raises(
+        expected_exception=PageserverApiException, match=f"NotFound: Tenant {tenant_id} not found"
+    ):
+        pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
+
+
 #
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_detach_while_attaching(

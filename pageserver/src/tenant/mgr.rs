@@ -350,8 +350,9 @@ pub enum TenantStateError {
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    allow_ignored_state: bool,
 ) -> Result<(), TenantStateError> {
-    remove_tenant_from_memory(tenant_id, async {
+    let op = async {
         let local_tenant_directory = conf.tenant_path(&tenant_id);
         fs::remove_dir_all(&local_tenant_directory)
             .await
@@ -359,8 +360,11 @@ pub async fn detach_tenant(
                 format!("Failed to remove local tenant directory {local_tenant_directory:?}")
             })?;
         Ok(())
-    })
-    .await
+    };
+    if allow_ignored_state {
+        return op.await;
+    }
+    remove_tenant_from_memory(tenant_id, op).await
 }
 
 pub async fn load_tenant(
@@ -502,7 +506,7 @@ async fn remove_tenant_from_memory<V, F>(
     tenant_cleanup: F,
 ) -> Result<V, TenantStateError>
 where
-    F: std::future::Future<Output = anyhow::Result<V>>,
+    F: std::future::Future<Output = Result<V, TenantStateError>>,
 {
     // It's important to keep the tenant in memory after the final cleanup, to avoid cleanup races.
     // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
