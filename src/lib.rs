@@ -1,7 +1,9 @@
-mod cloud_admin_api;
+pub mod cloud_admin_api;
 mod copied_definitions;
 mod input_collect;
 mod s3_deletion;
+
+use std::env;
 
 use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
@@ -13,6 +15,25 @@ use aws_sdk_s3::{Client, Config};
 pub use copied_definitions::id::TenantId;
 pub use input_collect::{BucketName, TenantsToClean};
 pub use s3_deletion::S3Deleter;
+use tracing::error;
+
+pub const TEST_BASE_URL: &str = "https://console.stage.neon.tech/admin";
+
+const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
+
+pub fn get_cloud_admin_api_token_or_exit() -> String {
+    match env::var(CLOUD_ADMIN_API_TOKEN_ENV_VAR) {
+        Ok(token) => token,
+        Err(env::VarError::NotPresent) => {
+            error!("{CLOUD_ADMIN_API_TOKEN_ENV_VAR} env variable is not present");
+            std::process::exit(1);
+        }
+        Err(env::VarError::NotUnicode(not_unicode_string)) => {
+            error!("{CLOUD_ADMIN_API_TOKEN_ENV_VAR} env variable's value is not a valid unicode string: {not_unicode_string:?}");
+            std::process::exit(1);
+        }
+    }
+}
 
 pub fn init_logging() {
     tracing_subscriber::fmt()

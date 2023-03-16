@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
+use crate::cloud_admin_api::CloudAdminApiClient;
 use crate::{init_s3_client, TenantId, TenantsToClean};
 
 pub struct S3Deleter {
@@ -17,6 +18,7 @@ pub struct S3Deleter {
     deletions_per_batch: usize,
     tenants_to_clean: Arc<Mutex<TenantsToClean>>,
     s3_client: Arc<Client>,
+    admin_api_client: Arc<CloudAdminApiClient>,
 }
 
 impl S3Deleter {
@@ -24,6 +26,7 @@ impl S3Deleter {
         bucket_region: Region,
         concurrent_tasks_count: NonZeroUsize,
         tenants_to_clean: TenantsToClean,
+        admin_api_client: CloudAdminApiClient,
     ) -> Self {
         Self {
             concurrent_tasks_count,
@@ -31,6 +34,7 @@ impl S3Deleter {
             deletions_per_batch: 900,
             tenants_to_clean: Arc::new(Mutex::new(tenants_to_clean)),
             s3_client: Arc::new(init_s3_client(bucket_region)),
+            admin_api_client: Arc::new(admin_api_client),
         }
     }
 
@@ -39,6 +43,7 @@ impl S3Deleter {
 
         let mut deletion_tasks = JoinSet::new();
         for id in 0..concurrent_tasks_count {
+            let closure_admin_client = Arc::clone(&self.admin_api_client);
             let closure_client = Arc::clone(&self.s3_client);
             let closure_tenants_to_clean = Arc::clone(&self.tenants_to_clean);
             let limit = self.deletions_per_batch;
@@ -49,6 +54,7 @@ impl S3Deleter {
                         async move {
                             loop {
                                 match delete_batch(
+                                    &closure_admin_client,
                                     &closure_client,
                                     limit,
                                     &closure_tenants_to_clean,
@@ -81,11 +87,12 @@ impl S3Deleter {
 
 // TODO kb reschedule tenants after the failure
 async fn delete_batch(
-    closure_client: &Arc<Client>,
+    admin_client: &CloudAdminApiClient,
+    closure_client: &Client,
     limit: usize,
-    tenant_provider: &Arc<Mutex<TenantsToClean>>,
+    tenant_provider: &Mutex<TenantsToClean>,
 ) -> anyhow::Result<ControlFlow<(), ()>> {
-    match construct_delete_request(closure_client, limit, tenant_provider)
+    match construct_delete_request(admin_client, closure_client, limit, tenant_provider)
         .await
         .context("delete request construction")
     {
@@ -138,6 +145,7 @@ struct DeleteRequest {
 }
 
 async fn construct_delete_request(
+    admin_client: &CloudAdminApiClient,
     s3_client: &Client,
     objects_limit: usize,
     tenants_to_clean: &Mutex<TenantsToClean>,
@@ -153,6 +161,24 @@ async fn construct_delete_request(
 
         match next_tenant {
             Some((bucket_name, tenant_id)) => {
+                let admin_project = admin_client
+                    .find_tenant_project(tenant_id)
+                    .await
+                    .with_context(|| format!("fetching project data for tenant {tenant_id}"))?;
+                match admin_project {
+                    Some(project) => {
+                        if project.deleted {
+                            info!("Found deleted project for tenant {tenant_id} in admin data, can safely delete");
+                        } else {
+                            error!("Found alive project for tenant {tenant_id}, cannot delete");
+                            continue;
+                        }
+                    }
+                    None => {
+                        warn!("Found no project for tenant {tenant_id} in admin data, deleting")
+                    }
+                }
+
                 if request_bucket.is_none() {
                     s3_client
                         .head_bucket()
