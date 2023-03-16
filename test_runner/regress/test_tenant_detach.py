@@ -225,7 +225,7 @@ def test_tenant_reattach_while_busy(
 
     # Attempts to connect from compute to pageserver while the tenant is
     # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(".*Tenant .* not found in the local state.*")
+    env.pageserver.allowed_errors.append(".*Tenant .* not found.*")
     env.pageserver.allowed_errors.append(
         ".*Tenant .* will not become active\\. Current state: Stopping.*"
     )

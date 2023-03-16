@@ -338,11 +338,11 @@ pub async fn delete_timeline(
 
 #[derive(Debug, thiserror::Error)]
 pub enum TenantStateError {
-    #[error("tenant {0} not found")]
+    #[error("Tenant {0} not found")]
     NotFound(TenantId),
-    #[error("tenant {0} is stopping")]
+    #[error("Tenant {0} is stopping")]
     IsStopping(TenantId),
-    #[error("tenant {0} is not active")]
+    #[error("Tenant {0} is not active")]
     NotActive(TenantId),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
