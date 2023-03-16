@@ -311,10 +311,9 @@ pub async fn get_tenant(
     active_only: bool,
 ) -> Result<Arc<Tenant>, TenantStateError> {
     let m = TENANTS.read().await;
-    let tenant = match m.get(&tenant_id) {
-        Some(tenant) => tenant,
-        None => return Err(TenantStateError::NotFound(tenant_id)),
-    };
+    let tenant = m
+        .get(&tenant_id)
+        .ok_or(TenantStateError::NotFound(tenant_id))?;
     if active_only && !tenant.is_active() {
         tracing::warn!(
             "Tenant {tenant_id} is not active. Current state: {:?}",
