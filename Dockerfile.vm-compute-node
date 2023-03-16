@@ -14,6 +14,7 @@ FROM neondatabase/vm-informant:$VM_INFORMANT_VERSION as informant
 # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-informant
 # requires cgroup v2, so we'll build cgroup-tools ourselves.
 FROM debian:bullseye-slim as libcgroup-builder
+ARG LIBCGROUP_VERSION
 
 RUN set -exu \
 	&& apt update \
