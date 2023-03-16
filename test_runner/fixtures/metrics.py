@@ -78,5 +78,7 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_created_persistent_files_total",
     "pageserver_written_persistent_bytes_total",
     "pageserver_tenant_states_count",
+    "pageserver_evictions_count",
+    "pageserver_evictions_with_low_residence_duration_count",
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
 )

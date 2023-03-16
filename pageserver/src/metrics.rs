@@ -195,6 +195,25 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static EVICTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_evictions_count",
+        "Number of layers evicted from the pageserver",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static EVICTIONS_WITH_LOW_RESIDENCE_DURATION: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_evictions_with_low_residence_duration_count",
+        "If a layer is evicted that was resident for less than `low_threshold`, it is counted to this counter. \
+         Residence duration is determined using the `residence_duration_data_source`.",
+        &["tenant_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
+    )
+    .expect("failed to define a metric")
+});
+
 // Metrics collected on disk IO operations
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     0.000001, // 1 usec
@@ -520,10 +539,21 @@ pub struct TimelineMetrics {
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
+
+    // these 4 belong together
+    pub evictions: IntCounter,
+    evictions_with_low_residence_duration_data_source: &'static str,
+    evictions_with_low_residence_duration_threshold: Duration,
+    pub evictions_with_low_residence_duration: IntCounter,
 }
 
 impl TimelineMetrics {
-    pub fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+    pub fn new(
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
+        evictions_with_low_residence_duration_data_source: &'static str,
+        evictions_with_low_residence_duration_threshold: Duration,
+    ) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
         let reconstruct_time_histo = RECONSTRUCT_TIME
@@ -560,6 +590,19 @@ impl TimelineMetrics {
         let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
+        let evictions = EVICTIONS
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
+        let evictions_with_low_residence_duration = EVICTIONS_WITH_LOW_RESIDENCE_DURATION
+            .get_metric_with_label_values(&[
+                &tenant_id,
+                &timeline_id,
+                evictions_with_low_residence_duration_data_source,
+                &Self::evictions_with_low_residence_duration_threshold_label_value(
+                    evictions_with_low_residence_duration_threshold,
+                ),
+            ])
+            .unwrap();
 
         TimelineMetrics {
             tenant_id,
@@ -579,7 +622,15 @@ impl TimelineMetrics {
             current_logical_size_gauge,
             num_persistent_files_created,
             persistent_bytes_written,
+            evictions,
+            evictions_with_low_residence_duration_data_source,
+            evictions_with_low_residence_duration_threshold,
+            evictions_with_low_residence_duration,
         }
+    }
+
+    fn evictions_with_low_residence_duration_threshold_label_value(threshold: Duration) -> String {
+        format!("{}", threshold.as_secs())
     }
 }
 
@@ -595,7 +646,15 @@ impl Drop for TimelineMetrics {
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
-
+        let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = EVICTIONS_WITH_LOW_RESIDENCE_DURATION.remove_label_values(&[
+            tenant_id,
+            timeline_id,
+            self.evictions_with_low_residence_duration_data_source,
+            &Self::evictions_with_low_residence_duration_threshold_label_value(
+                self.evictions_with_low_residence_duration_threshold,
+            ),
+        ]);
         for op in STORAGE_TIME_OPERATIONS {
             let _ =
                 STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
@@ -630,7 +689,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct RemoteTimelineClientMetrics {
     tenant_id: String,

@@ -1051,6 +1051,22 @@ impl Timeline {
             .file_size()
             .expect("Local layer should have a file size");
 
+        let local_layer_mtime = local_layer
+            .local_path()
+            .expect("local layer should have a local path")
+            .metadata()
+            .context("get local layer file stat")?
+            .modified()
+            .context("get mtime of layer file")?;
+        let local_layer_residence_duration =
+            match SystemTime::now().duration_since(local_layer_mtime) {
+                Err(e) => {
+                    warn!("layer mtime is in the future: {}", e);
+                    None
+                }
+                Ok(delta) => Some(delta),
+            };
+
         let layer_metadata = LayerFileMetadata::new(layer_file_size);
 
         let new_remote_layer = Arc::new(match local_layer.filename() {
@@ -1092,6 +1108,14 @@ impl Timeline {
                 self.metrics
                     .resident_physical_size_gauge
                     .sub(layer_file_size);
+
+                self.metrics.evictions.inc();
+
+                if let Some(delta) = local_layer_residence_duration {
+                    if delta < self.conf.evictions_low_residence_duration_metric_threshold {
+                        self.metrics.evictions_with_low_residence_duration.inc();
+                    }
+                }
 
                 true
             }
@@ -1208,7 +1232,12 @@ impl Timeline {
                 ancestor_timeline: ancestor,
                 ancestor_lsn: metadata.ancestor_lsn(),
 
-                metrics: TimelineMetrics::new(&tenant_id, &timeline_id),
+                metrics: TimelineMetrics::new(
+                    &tenant_id,
+                    &timeline_id,
+                    "mtime",
+                    conf.evictions_low_residence_duration_metric_threshold,
+                ),
 
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
 
