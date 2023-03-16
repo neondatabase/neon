@@ -1,9 +1,10 @@
 pub mod cloud_admin_api;
 mod copied_definitions;
-mod input_collect;
+pub mod delete_batch_producer;
 mod s3_deletion;
 
 use std::env;
+use std::time::Duration;
 
 use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
@@ -13,13 +14,26 @@ use aws_sdk_s3::Region;
 use aws_sdk_s3::{Client, Config};
 
 pub use copied_definitions::id::TenantId;
-pub use input_collect::{BucketName, TenantsToClean};
 pub use s3_deletion::S3Deleter;
 use tracing::error;
 
 pub const TEST_BASE_URL: &str = "https://console.stage.neon.tech/admin";
 
+const MAX_RETRIES: usize = 10;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
+
+#[derive(Debug, Clone)]
+pub struct S3Target {
+    pub bucket_name: String,
+    pub prefix_in_bucket: String,
+    pub delimiter: String,
+}
+
+impl S3Target {
+    pub fn add_segment_to_prefix(&mut self, new_segment: &str) {
+        self.prefix_in_bucket = [&self.prefix_in_bucket, new_segment, ""].join(&self.delimiter);
+    }
+}
 
 pub fn get_cloud_admin_api_token_or_exit() -> String {
     match env::var(CLOUD_ADMIN_API_TOKEN_ENV_VAR) {
@@ -71,4 +85,30 @@ pub fn init_s3_client(bucket_region: Region) -> Client {
         .build();
 
     Client::from_conf(config)
+}
+
+async fn list_objects_with_retries(
+    s3_client: &Client,
+    s3_target: &S3Target,
+    continuation_token: Option<String>,
+) -> anyhow::Result<aws_sdk_s3::output::ListObjectsV2Output> {
+    for _ in 0..MAX_RETRIES {
+        match s3_client
+            .list_objects_v2()
+            .bucket(&s3_target.bucket_name)
+            .prefix(&s3_target.prefix_in_bucket)
+            .delimiter(&s3_target.delimiter)
+            .set_continuation_token(continuation_token.clone())
+            .send()
+            .await
+        {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                error!("list_objects_v2 query failed: {e}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+
+    anyhow::bail!("Failed to list objects {MAX_RETRIES} times")
 }

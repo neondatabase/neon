@@ -1,43 +1,37 @@
 use std::num::NonZeroUsize;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use anyhow::Context;
-use aws_sdk_s3::client::fluent_builders::DeleteObjects;
 use aws_sdk_s3::model::{Delete, ObjectIdentifier};
-use aws_sdk_s3::{Client, Region};
-use tokio::sync::Mutex;
+use aws_sdk_s3::Client;
+use crossbeam::channel::Receiver;
 use tokio::task::JoinSet;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{error, info, info_span, Instrument};
 
-use crate::cloud_admin_api::CloudAdminApiClient;
-use crate::{init_s3_client, TenantId, TenantsToClean};
+use crate::{list_objects_with_retries, S3Target, TenantId};
 
 pub struct S3Deleter {
-    concurrent_tasks_count: NonZeroUsize,
-    deletions_per_batch: usize,
     dry_run: bool,
-    tenants_to_clean: Arc<Mutex<TenantsToClean>>,
+    concurrent_tasks_count: NonZeroUsize,
+    delete_batch_receiver: Receiver<Vec<TenantId>>,
     s3_client: Arc<Client>,
-    admin_api_client: Arc<CloudAdminApiClient>,
+    s3_target: S3Target,
 }
 
 impl S3Deleter {
     pub fn new(
         dry_run: bool,
-        bucket_region: Region,
         concurrent_tasks_count: NonZeroUsize,
-        tenants_to_clean: TenantsToClean,
-        admin_api_client: CloudAdminApiClient,
+        s3_client: Arc<Client>,
+        delete_batch_receiver: Receiver<Vec<TenantId>>,
+        s3_target: S3Target,
     ) -> Self {
         Self {
             dry_run,
             concurrent_tasks_count,
-            // max is 1000, but we can accidentally get over that, so keep it less
-            deletions_per_batch: 900,
-            tenants_to_clean: Arc::new(Mutex::new(tenants_to_clean)),
-            s3_client: Arc::new(init_s3_client(bucket_region)),
-            admin_api_client: Arc::new(admin_api_client),
+            delete_batch_receiver,
+            s3_client,
+            s3_target,
         }
     }
 
@@ -46,10 +40,9 @@ impl S3Deleter {
 
         let mut deletion_tasks = JoinSet::new();
         for id in 0..concurrent_tasks_count {
-            let closure_admin_client = Arc::clone(&self.admin_api_client);
             let closure_client = Arc::clone(&self.s3_client);
-            let closure_tenants_to_clean = Arc::clone(&self.tenants_to_clean);
-            let limit = self.deletions_per_batch;
+            let closure_s3_target = self.s3_target.clone();
+            let closure_batch_receiver = self.delete_batch_receiver.clone();
             let dry_run = self.dry_run;
             deletion_tasks.spawn(
                 async move {
@@ -57,18 +50,24 @@ impl S3Deleter {
                         id,
                         async move {
                             loop {
-                                match delete_batch(
-                                    &closure_admin_client,
-                                    &closure_client,
-                                    limit,
-                                    &closure_tenants_to_clean,
-                                    dry_run,
-                                )
-                                .await
-                                {
-                                    Ok(ControlFlow::Break(())) => return,
-                                    Ok(ControlFlow::Continue(())) => (),
-                                    Err(e) => error!("Batch processing failed: {e:#}"),
+                                info!("Task started");
+                                match closure_batch_receiver.recv() {
+                                    Ok(batch) => {
+                                        info!("Deleting batch of size {}", batch.len());
+                                        info!("Tenant ids to remove: {batch:?}");
+                                        delete_batch(
+                                            &closure_client,
+                                            &closure_s3_target,
+                                            batch,
+                                            dry_run,
+                                        )
+                                        .await
+                                        .context("batch deletion")?;
+                                    }
+                                    Err(_sender_dropped) => {
+                                        info!("Task finished: sender dropped");
+                                        return Ok::<_, anyhow::Error>(());
+                                    }
                                 }
                             }
                         }
@@ -81,7 +80,11 @@ impl S3Deleter {
 
         while let Some(task_result) = deletion_tasks.join_next().await {
             match task_result {
-                Ok((id, ())) => info!("Task {id} completed"),
+                Ok((id, Ok(()))) => info!("Task {id} completed"),
+                Ok((id, Err(e))) => {
+                    error!("Task {id} failed: {e:#}");
+                    return Err(e);
+                }
                 Err(join_error) => anyhow::bail!("Failed to join on a task: {join_error:?}"),
             }
         }
@@ -90,203 +93,111 @@ impl S3Deleter {
     }
 }
 
-// TODO kb reschedule tenants after the failure
+/// S3 delete_objects allows up to 1000 keys to be passed in a single request.
+const MAX_ITEMS_TO_DELETE: usize = 900;
+
 async fn delete_batch(
-    admin_client: &CloudAdminApiClient,
-    closure_client: &Client,
-    limit: usize,
-    tenant_provider: &Mutex<TenantsToClean>,
-    dry_run: bool,
-) -> anyhow::Result<ControlFlow<(), ()>> {
-    match construct_delete_request(admin_client, closure_client, limit, tenant_provider)
-        .await
-        .context("delete request construction")
-    {
-        Ok(Some(delete_request)) => {
-            if dry_run {
-                info!(
-                    "Dry run, request for deletion: {:?}",
-                    delete_request.delete_request
-                );
-                Ok(ControlFlow::Continue(()))
-            } else {
-                let original_request = delete_request.delete_request.clone();
-
-                match delete_request
-                    .delete_request
-                    .send()
-                    .await
-                    .context("delete request processing")
-                {
-                    Ok(delete_response) => match delete_response.errors() {
-                        Some(delete_errors) => {
-                            error!("Delete request returned errors: {delete_errors:?}");
-                            anyhow::bail!(
-                                "Failed to delete all elements from the S3: {delete_errors:?}"
-                            );
-                        }
-                        None => {
-                            info!("Successfully removed an object batch from S3, start_tenant: {}, end_tenant: {}", delete_request.start_tenant, delete_request.end_tenant);
-                            Ok(ControlFlow::Continue(()))
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to send a delete request: {e:#}");
-                        error!("Original request: {original_request:?}");
-                        Err(e)
-                    }
-                }
-            }
-        }
-        Ok(None) => {
-            info!("No more delete requests to create, finishing the task");
-            Ok(ControlFlow::Break(()))
-        }
-        Err(e) => {
-            error!("Failed to construct a delete request: {e:#}");
-            Err(e)
-        }
-    }
-}
-
-// s3://neon-staging-storage-us-east-2/pageserver/v1/tenants/000036a7f7ea960517c8a74790ee2ad6/;
-const TENANT_PATH_IN_S3_BUCKET: &str = "pageserver/v1/tenants/";
-
-struct DeleteRequest {
-    delete_request: DeleteObjects,
-    start_tenant: TenantId,
-    end_tenant: TenantId,
-}
-
-async fn construct_delete_request(
-    admin_client: &CloudAdminApiClient,
     s3_client: &Client,
-    objects_limit: usize,
-    tenants_to_clean: &Mutex<TenantsToClean>,
-) -> anyhow::Result<Option<DeleteRequest>> {
-    let mut request_bucket = None;
-    let mut start_tenant = None;
-    let mut end_tenant = None;
-    let mut request_keys = Vec::with_capacity(objects_limit);
+    s3_target: &S3Target,
+    batch: Vec<TenantId>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let mut object_ids_to_delete = Vec::with_capacity(MAX_ITEMS_TO_DELETE);
 
-    while request_keys.len() < objects_limit {
-        let mut tenants_accessor = tenants_to_clean.lock().await;
-        let next_tenant = tenants_accessor.next_tenant();
+    for tenant_to_delete in batch {
+        let mut new_target = s3_target.clone();
+        new_target.add_segment_to_prefix(&tenant_to_delete.to_string());
 
-        match next_tenant {
-            Some((bucket_name, tenant_id)) => {
-                let admin_project = admin_client
-                    .find_tenant_project(tenant_id)
-                    .await
-                    .with_context(|| format!("fetching project data for tenant {tenant_id}"))?;
-                match admin_project {
-                    Some(project) => {
-                        if project.deleted {
-                            info!("Found deleted project for tenant {tenant_id} in admin data, can safely delete");
-                        } else {
-                            error!("Found alive project for tenant {tenant_id}, cannot delete");
-                            continue;
-                        }
-                    }
-                    None => {
-                        warn!("Found no project for tenant {tenant_id} in admin data, deleting")
-                    }
-                }
+        let mut continuation_token = None;
+        loop {
+            let fetch_response =
+                list_objects_with_retries(s3_client, &new_target, continuation_token.clone())
+                    .await?;
 
-                if request_bucket.is_none() {
-                    s3_client
-                        .head_bucket()
-                        .bucket(bucket_name.0.clone())
-                        .send()
-                        .await
-                        .with_context(|| format!("bucket {bucket_name:?} was not found"))?;
-                    request_bucket = Some(bucket_name);
-                } else if Some(&bucket_name) != request_bucket.as_ref() {
-                    tenants_accessor.reschedule(bucket_name, tenant_id);
-                    break;
-                }
-
-                if start_tenant.is_none() {
-                    start_tenant = Some(tenant_id);
-                } else {
-                    start_tenant = start_tenant.min(Some(tenant_id));
-                }
-
-                if end_tenant.is_none() {
-                    end_tenant = Some(tenant_id);
-                } else {
-                    end_tenant = end_tenant.max(Some(tenant_id));
-                }
-
-                drop(tenants_accessor);
-
-                let mut should_reschedule = false;
-
-                debug!("Listing S3 objects for tenant {tenant_id}");
-                let list_response = s3_client
-                    .list_objects_v2()
-                    .bucket(
-                        request_bucket
-                            .as_ref()
-                            .map(|bucket_name| &bucket_name.0)
-                            .expect("Should have set a bucket on a first next_tenant call"),
-                    )
-                    .prefix(format!("{TENANT_PATH_IN_S3_BUCKET}{tenant_id}"))
-                    .send()
-                    .await
-                    .context("Tenant directory list failure")?;
-
-                if list_response.is_truncated() {
-                    warn!("Tenant {tenant_id} has too many objects listed, rescheduling it for later removal");
-                    should_reschedule = true;
-                }
-
-                match list_response.contents() {
-                    Some(objects) => {
-                        for object in objects {
-                            let key = object.key().with_context(|| {
-                                format!("No key for object {object:?}, tenant {tenant_id}")
-                            })?;
-                            request_keys.push(ObjectIdentifier::builder().key(key).build());
-                            if request_keys.len() >= objects_limit {
-                                should_reschedule = true;
-                                warn!("Tenant {tenant_id} has too many objects returned, rescheduling it for later removal");
-                                break;
-                            }
-                        }
-                    }
-                    None => debug!("No keys returned for tenant {tenant_id}, skipping it"),
-                }
-
-                if should_reschedule {
-                    tenants_to_clean.lock().await.reschedule(
-                        request_bucket
-                            .clone()
-                            .expect("With request keys present, we should have the bucket too"),
-                        tenant_id,
+            for object_id in fetch_response
+                .contents()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|object| object.key())
+                .map(|key| ObjectIdentifier::builder().key(key).build())
+            {
+                if object_ids_to_delete.len() >= MAX_ITEMS_TO_DELETE {
+                    let object_ids_for_request = std::mem::replace(
+                        &mut object_ids_to_delete,
+                        Vec::with_capacity(MAX_ITEMS_TO_DELETE),
                     );
-                    break;
+                    send_delete_request(
+                        s3_client,
+                        &s3_target.bucket_name,
+                        object_ids_for_request,
+                        dry_run,
+                    )
+                    .await
+                    .context("object ids deletion")?;
                 }
+                object_ids_to_delete.push(object_id);
             }
-            None => break,
+
+            match fetch_response.continuation_token {
+                Some(new_token) => continuation_token = Some(new_token),
+                None => break,
+            }
         }
     }
 
-    if request_keys.is_empty() {
-        Ok(None)
+    if !object_ids_to_delete.is_empty() {
+        info!("Removing last objects of the batch");
+        send_delete_request(
+            s3_client,
+            &s3_target.bucket_name,
+            object_ids_to_delete,
+            dry_run,
+        )
+        .await
+        .context("Last object ids deletion")?;
+    }
+
+    Ok(())
+}
+
+async fn send_delete_request(
+    s3_client: &Client,
+    bucket_name: &str,
+    ids: Vec<ObjectIdentifier>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    info!("Removing {} object ids from S3", ids.len());
+    info!("Object ids to remove: {ids:?}");
+    let delete_request = s3_client
+        .delete_objects()
+        .bucket(bucket_name)
+        .delete(Delete::builder().set_objects(Some(ids)).build());
+    if dry_run {
+        info!("Dry run, skipping the actual removal");
+        Ok(())
     } else {
-        let delete_request = s3_client
-            .delete_objects()
-            .bucket(
-                request_bucket
-                    .expect("With request keys present, we should have the bucket too")
-                    .0,
-            )
-            .delete(Delete::builder().set_objects(Some(request_keys)).build());
-        Ok(Some(DeleteRequest {
-            delete_request,
-            start_tenant: start_tenant.expect("start_tenant should be present after collection"),
-            end_tenant: end_tenant.expect("end_tenant should be present after collection"),
-        }))
+        let original_request = delete_request.clone();
+
+        match delete_request
+            .send()
+            .await
+            .context("delete request processing")
+        {
+            Ok(delete_response) => match delete_response.errors() {
+                Some(delete_errors) => {
+                    error!("Delete request returned errors: {delete_errors:?}");
+                    anyhow::bail!("Failed to delete all elements from the S3: {delete_errors:?}");
+                }
+                None => {
+                    info!("Successfully removed an object batch from S3");
+                    Ok(())
+                }
+            },
+            Err(e) => {
+                error!("Failed to send a delete request: {e:#}");
+                error!("Original request: {original_request:?}");
+                Err(e)
+            }
+        }
     }
 }

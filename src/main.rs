@@ -1,10 +1,13 @@
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::sync::Arc;
 
+use anyhow::Context;
 use aws_sdk_s3::Region;
 use s3_deleter::cloud_admin_api::CloudAdminApiClient;
+use s3_deleter::delete_batch_producer::DeleteBatchProducer;
 use s3_deleter::{
-    get_cloud_admin_api_token_or_exit, init_logging, S3Deleter, TenantsToClean, TEST_BASE_URL,
+    get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, S3Deleter, S3Target,
+    TEST_BASE_URL,
 };
 use tracing::info;
 
@@ -12,25 +15,40 @@ use tracing::info;
 async fn main() -> anyhow::Result<()> {
     init_logging();
 
+    info!("Starting S3 removal");
     let cloud_admin_api_client =
         CloudAdminApiClient::new(get_cloud_admin_api_token_or_exit(), TEST_BASE_URL.parse()?);
 
-    let file_dir = Path::new("/Users/someonetoignore/Downloads/staging_removals/");
-    let tenants_to_clean = TenantsToClean::new(file_dir).await?;
-    let tenant_count = tenants_to_clean.tenant_count();
+    let bucket_region = Region::from_static("us-east-2");
+    let s3_client = Arc::new(init_s3_client(bucket_region));
+    let delimiter = "/".to_string();
+    let s3_target = S3Target {
+        bucket_name: "neon-staging-storage-us-east-2".to_string(),
+        prefix_in_bucket: ["pageserver", "v1", "tenants", ""].join(&delimiter),
+        delimiter,
+    };
+
+    let delete_batch_producer = DeleteBatchProducer::start(
+        cloud_admin_api_client,
+        Arc::clone(&s3_client),
+        s3_target.clone(),
+    );
 
     let dry_run = true;
     let s3_deleter = S3Deleter::new(
         dry_run,
-        Region::from_static("us-east-2"),
-        // Region::from_static("eu-west-1"),
         NonZeroUsize::new(15).unwrap(),
-        tenants_to_clean,
-        cloud_admin_api_client,
+        s3_client,
+        delete_batch_producer.subscribe(),
+        s3_target,
     );
 
-    info!("Starting S3 removal, tenants to remove from S3: {tenant_count}");
-    s3_deleter.remove_all().await?;
+    let (deleter_task_result, batch_producer_task_result) =
+        tokio::join!(s3_deleter.remove_all(), delete_batch_producer.join());
+
+    deleter_task_result.context("s3 deletion")?;
+    batch_producer_task_result.context("delete batch producer join")?;
+
     info!("Finished S3 removal");
 
     Ok(())
