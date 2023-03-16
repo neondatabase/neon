@@ -2924,8 +2924,8 @@ impl Timeline {
                 // gc_timeline only pays attention to image layers that are older than the GC cutoff,
                 // but create_image_layers creates image layers at last-record-lsn.
                 // So it's possible that gc_timeline decides that it wants new image layer to be created for a key range,
-                // and on next compcation create_image_layers creates the image layer.
-                // But on next GC cycle, gc_timeline still wantes the new image layer to be created,
+                // and on next compaction create_image_layers creates the image layer.
+                // But on next GC cycle, gc_timeline still wants the new image layer to be created,
                 // because the newly created image layer doesn't help to remove the delta layer,
                 // until the newly created image layer falls off the PITR horizon.
                 //
