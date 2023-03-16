@@ -1,7 +1,7 @@
 # Collect /v1/debug_dump from all safekeeper nodes
 
 1. Run ansible playbooks to collect .json dumps from all safekeepers and store them in `./result` directory.
-2. Run `DB_CONNSTR=... ./upload.sh prod_30feb` to upload dumps to `prod_30feb` table in specified postgres database.
+2. Run `DB_CONNSTR=... ./upload.sh prod_feb30` to upload dumps to `prod_feb30` table in specified postgres database.
 
 ## How to use ansible (staging)
 
