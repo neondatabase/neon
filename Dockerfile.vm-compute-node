@@ -2,39 +2,68 @@
 
 ARG SRC_IMAGE
 ARG VM_INFORMANT_VERSION=v0.1.14
+# on libcgroup update, make sure to check bootstrap.sh for changes
+ARG LIBCGROUP_VERSION=v2.0.3
 
-# Pull VM informant and set up inittab
+# Pull VM informant, to copy from later
 FROM neondatabase/vm-informant:$VM_INFORMANT_VERSION as informant
+
+# Build cgroup-tools
+#
+# At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
+# libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-informant
+# requires cgroup v2, so we'll build cgroup-tools ourselves.
+FROM debian:bullseye-slim as libcgroup-builder
+
+RUN set -exu \
+	&& apt update \
+	&& apt install --no-install-recommends -y \
+		git \
+		ca-certificates \
+		automake \
+		cmake \
+		make \
+		gcc \
+		byacc \
+		flex \
+		libtool \
+		libpam0g-dev \
+	&& git clone --depth 1 -b $LIBCGROUP_VERSION https://github.com/libcgroup/libcgroup \
+	&& INSTALL_DIR="/libcgroup-install" \
+	&& mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/include" \
+	&& cd libcgroup \
+	# extracted from bootstrap.sh, with modified flags:
+	&& (test -d m4 || mkdir m4) \
+	&& autoreconf -fi \
+	&& rm -rf autom4te.cache \
+	&& CFLAGS="-O3" ./configure --prefix="$INSTALL_DIR" --sysconfdir=/etc --localstatedir=/var --enable-opaque-hierarchy="name=systemd" \
+	# actually build the thing...
+	&& make install
+
+# Combine, starting from non-VM compute node image.
+FROM $SRC_IMAGE as base
+
+# Temporarily set user back to root so we can run adduser, set inittab
+USER root
+RUN adduser vm-informant --disabled-password --no-create-home
 
 RUN set -e \
 	&& rm -f /etc/inittab \
 	&& touch /etc/inittab
 
 RUN set -e \
+	&& echo "::sysinit:cgconfigparser -l /etc/cgconfig.conf -s 1664" >> /etc/inittab \
 	&& CONNSTR="dbname=neondb user=cloud_admin sslmode=disable" \
 	&& ARGS="--auto-restart --cgroup=neon-postgres --pgconnstr=\"$CONNSTR\"" \
 	&& echo "::respawn:su vm-informant -c '/usr/local/bin/vm-informant $ARGS'" >> /etc/inittab
 
-# Combine, starting from non-VM compute node image.
-FROM $SRC_IMAGE as base
-
-# Temporarily set user back to root so we can run adduser and apt stuff
-USER root
-RUN adduser vm-informant --disabled-password --no-create-home
-# At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
-# libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-informant
-# requires cgroup v2, so we'll pull in a newer version of cgroup-tools from the testing repo.
-RUN set -e \
-    # add the testing repo
-    && echo 'deb http://deb.debian.org/debian testing main' >> /etc/apt/sources.list \
-    && apt update \
-    && apt install -t testing --no-install-recommends -y cgroup-tools \
-    # remove the testing repo to clean up after ourselves
-    && sed -i '$ d' /etc/apt/sources.list
 USER postgres
 
 ADD vm-cgconfig.conf /etc/cgconfig.conf
-COPY --from=informant /etc/inittab /etc/inittab
 COPY --from=informant /usr/bin/vm-informant /usr/local/bin/vm-informant
+
+COPY --from=libcgroup-builder /libcgroup-install/bin/* /usr/bin/
+COPY --from=libcgroup-builder /libcgroup-install/lib/* /usr/lib/
+COPY --from=libcgroup-builder /libcgroup-install/sbin/* /usr/sbin/
 
 ENTRYPOINT ["/usr/sbin/cgexec", "-g", "*:neon-postgres", "/usr/local/bin/compute_ctl"]
