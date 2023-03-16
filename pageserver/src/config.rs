@@ -118,6 +118,9 @@ pub struct PageServerConf {
     /// Example (default): 127.0.0.1:9898
     pub listen_http_addr: String,
 
+    /// Current availability zone. Used for traffic metrics.
+    pub availability_zone: Option<String>,
+
     // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
     pub wait_lsn_timeout: Duration,
     // How long to wait for WAL redo to complete.
@@ -202,6 +205,8 @@ struct PageServerConfigBuilder {
 
     listen_http_addr: BuilderValue<String>,
 
+    availability_zone: BuilderValue<Option<String>>,
+
     wait_lsn_timeout: BuilderValue<Duration>,
     wal_redo_timeout: BuilderValue<Duration>,
 
@@ -247,6 +252,7 @@ impl Default for PageServerConfigBuilder {
         Self {
             listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
+            availability_zone: Set(None),
             wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
             wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
@@ -301,6 +307,10 @@ impl PageServerConfigBuilder {
 
     pub fn listen_http_addr(&mut self, listen_http_addr: String) {
         self.listen_http_addr = BuilderValue::Set(listen_http_addr)
+    }
+
+    pub fn availability_zone(&mut self, availability_zone: Option<String>) {
+        self.availability_zone = BuilderValue::Set(availability_zone)
     }
 
     pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
@@ -414,6 +424,9 @@ impl PageServerConfigBuilder {
             listen_http_addr: self
                 .listen_http_addr
                 .ok_or(anyhow!("missing listen_http_addr"))?,
+            availability_zone: self
+                .availability_zone
+                .ok_or(anyhow!("missing availability_zone"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow!("missing wait_lsn_timeout"))?,
@@ -614,6 +627,7 @@ impl PageServerConf {
             match key {
                 "listen_pg_addr" => builder.listen_pg_addr(parse_toml_string(key, item)?),
                 "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
+                "availability_zone" => builder.availability_zone(Some(parse_toml_string(key, item)?)),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
                 "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
                 "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
@@ -779,6 +793,7 @@ impl PageServerConf {
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            availability_zone: None,
             superuser: "cloud_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir,
@@ -961,6 +976,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+                availability_zone: None,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
                 wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
@@ -1019,6 +1035,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
+                availability_zone: None,
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),

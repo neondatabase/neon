@@ -45,6 +45,7 @@ pub fn spawn_connection_manager_task(
     lagging_wal_timeout: Duration,
     max_lsn_wal_lag: NonZeroU64,
     auth_token: Option<Arc<String>>,
+    availability_zone: Option<String>,
     ctx: RequestContext,
 ) {
     let mut broker_client = get_broker_client().clone();
@@ -67,6 +68,7 @@ pub fn spawn_connection_manager_task(
                 lagging_wal_timeout,
                 max_lsn_wal_lag,
                 auth_token,
+                availability_zone,
             );
             loop {
                 select! {
@@ -334,6 +336,7 @@ struct WalreceiverState {
     /// Data about all timelines, available for connection, fetched from storage broker, grouped by their corresponding safekeeper node id.
     wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
     auth_token: Option<Arc<String>>,
+    availability_zone: Option<String>,
 }
 
 /// Current connection data.
@@ -381,6 +384,7 @@ impl WalreceiverState {
         lagging_wal_timeout: Duration,
         max_lsn_wal_lag: NonZeroU64,
         auth_token: Option<Arc<String>>,
+        availability_zone: Option<String>,
     ) -> Self {
         let id = TenantTimelineId {
             tenant_id: timeline.tenant_id,
@@ -396,6 +400,7 @@ impl WalreceiverState {
             wal_stream_candidates: HashMap::new(),
             wal_connection_retries: HashMap::new(),
             auth_token,
+            availability_zone,
         }
     }
 
@@ -740,6 +745,7 @@ impl WalreceiverState {
                         None => None,
                         Some(x) => Some(x),
                     },
+                    self.availability_zone.as_deref(),
                 ) {
                     Ok(connstr) => Some((*sk_id, info, connstr)),
                     Err(e) => {
@@ -824,17 +830,24 @@ fn wal_stream_connection_config(
     }: TenantTimelineId,
     listen_pg_addr_str: &str,
     auth_token: Option<&str>,
+    availability_zone: Option<&str>,
 ) -> anyhow::Result<PgConnectionConfig> {
     let (host, port) =
         parse_host_port(listen_pg_addr_str).context("Unable to parse listen_pg_addr_str")?;
     let port = port.unwrap_or(5432);
-    Ok(PgConnectionConfig::new_host_port(host, port)
+    let mut connstr = PgConnectionConfig::new_host_port(host, port)
         .extend_options([
             "-c".to_owned(),
             format!("timeline_id={}", timeline_id),
             format!("tenant_id={}", tenant_id),
         ])
-        .set_password(auth_token.map(|s| s.to_owned())))
+        .set_password(auth_token.map(|s| s.to_owned()));
+
+    if let Some(availability_zone) = availability_zone {
+        connstr = connstr.extend_options([format!("availability_zone={}", availability_zone)]);
+    }
+
+    Ok(connstr)
 }
 
 #[cfg(test)]
@@ -1273,6 +1286,7 @@ mod tests {
             wal_stream_candidates: HashMap::new(),
             wal_connection_retries: HashMap::new(),
             auth_token: None,
+            availability_zone: None,
         }
     }
 }

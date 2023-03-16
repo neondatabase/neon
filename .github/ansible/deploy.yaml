@@ -91,6 +91,15 @@
       tags:
       - pageserver
 
+    # used in `pageserver.service` template
+    - name: learn current availability_zone
+      shell:
+        cmd: "curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone"
+      register: ec2_availability_zone
+
+    - set_fact: 
+        ec2_availability_zone={{ ec2_availability_zone.stdout }}
+
     - name: upload systemd service definition
       ansible.builtin.template:
         src: systemd/pageserver.service
@@ -152,6 +161,15 @@
       become: true
       tags:
       - safekeeper
+
+    # used in `safekeeper.service` template
+    - name: learn current availability_zone
+      shell:
+        cmd: "curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone"
+      register: ec2_availability_zone
+
+    - set_fact: 
+        ec2_availability_zone={{ ec2_availability_zone.stdout }}
 
     # in the future safekeepers should discover pageservers byself
     # but currently use first pageserver that was discovered
