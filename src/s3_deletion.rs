@@ -16,6 +16,7 @@ use crate::{init_s3_client, TenantId, TenantsToClean};
 pub struct S3Deleter {
     concurrent_tasks_count: NonZeroUsize,
     deletions_per_batch: usize,
+    dry_run: bool,
     tenants_to_clean: Arc<Mutex<TenantsToClean>>,
     s3_client: Arc<Client>,
     admin_api_client: Arc<CloudAdminApiClient>,
@@ -23,12 +24,14 @@ pub struct S3Deleter {
 
 impl S3Deleter {
     pub fn new(
+        dry_run: bool,
         bucket_region: Region,
         concurrent_tasks_count: NonZeroUsize,
         tenants_to_clean: TenantsToClean,
         admin_api_client: CloudAdminApiClient,
     ) -> Self {
         Self {
+            dry_run,
             concurrent_tasks_count,
             // max is 1000, but we can accidentally get over that, so keep it less
             deletions_per_batch: 900,
@@ -47,6 +50,7 @@ impl S3Deleter {
             let closure_client = Arc::clone(&self.s3_client);
             let closure_tenants_to_clean = Arc::clone(&self.tenants_to_clean);
             let limit = self.deletions_per_batch;
+            let dry_run = self.dry_run;
             deletion_tasks.spawn(
                 async move {
                     (
@@ -58,6 +62,7 @@ impl S3Deleter {
                                     &closure_client,
                                     limit,
                                     &closure_tenants_to_clean,
+                                    dry_run,
                                 )
                                 .await
                                 {
@@ -91,36 +96,45 @@ async fn delete_batch(
     closure_client: &Client,
     limit: usize,
     tenant_provider: &Mutex<TenantsToClean>,
+    dry_run: bool,
 ) -> anyhow::Result<ControlFlow<(), ()>> {
     match construct_delete_request(admin_client, closure_client, limit, tenant_provider)
         .await
         .context("delete request construction")
     {
         Ok(Some(delete_request)) => {
-            let original_request = delete_request.delete_request.clone();
+            if dry_run {
+                info!(
+                    "Dry run, request for deletion: {:?}",
+                    delete_request.delete_request
+                );
+                Ok(ControlFlow::Continue(()))
+            } else {
+                let original_request = delete_request.delete_request.clone();
 
-            match delete_request
-                .delete_request
-                .send()
-                .await
-                .context("delete request processing")
-            {
-                Ok(delete_response) => match delete_response.errors() {
-                    Some(delete_errors) => {
-                        error!("Delete request returned errors: {delete_errors:?}");
-                        anyhow::bail!(
-                            "Failed to delete all elements from the S3: {delete_errors:?}"
-                        );
+                match delete_request
+                    .delete_request
+                    .send()
+                    .await
+                    .context("delete request processing")
+                {
+                    Ok(delete_response) => match delete_response.errors() {
+                        Some(delete_errors) => {
+                            error!("Delete request returned errors: {delete_errors:?}");
+                            anyhow::bail!(
+                                "Failed to delete all elements from the S3: {delete_errors:?}"
+                            );
+                        }
+                        None => {
+                            info!("Successfully removed an object batch from S3, start_tenant: {}, end_tenant: {}", delete_request.start_tenant, delete_request.end_tenant);
+                            Ok(ControlFlow::Continue(()))
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to send a delete request: {e:#}");
+                        error!("Original request: {original_request:?}");
+                        Err(e)
                     }
-                    None => {
-                        info!("Successfully removed an object batch from S3, start_tenant: {}, end_tenant: {}", delete_request.start_tenant, delete_request.end_tenant);
-                        Ok(ControlFlow::Continue(()))
-                    }
-                },
-                Err(e) => {
-                    error!("Failed to send a delete request: {e:#}");
-                    error!("Original request: {original_request:?}");
-                    Err(e)
                 }
             }
         }
