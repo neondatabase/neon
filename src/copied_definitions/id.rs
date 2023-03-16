@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use std::{fmt, str::FromStr};
 
 use hex::FromHex;

@@ -1,4 +1,5 @@
-mod id;
+mod cloud_admin_api;
+mod copied_definitions;
 mod input_collect;
 mod s3_deletion;
 
@@ -9,7 +10,7 @@ use aws_config::sso::SsoCredentialsProvider;
 use aws_sdk_s3::Region;
 use aws_sdk_s3::{Client, Config};
 
-pub use id::TenantId;
+pub use copied_definitions::id::TenantId;
 pub use input_collect::{BucketName, TenantsToClean};
 pub use s3_deletion::S3Deleter;
 
