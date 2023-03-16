@@ -95,6 +95,7 @@ impl KeySpace {
                     self.ranges.remove(prev_index);
                 }
             } else {
+                prev_index += 1; // insert after prev range
                 break;
             }
             if prev_index == 0 {
@@ -182,5 +183,126 @@ impl KeySpaceAccum {
         KeySpace {
             ranges: self.ranges,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write;
+
+    // Helper function to create a key range.
+    //
+    // Make the tests below less verbose.
+    fn kr(irange: Range<i128>) -> Range<Key> {
+        Key::from_i128(irange.start)..Key::from_i128(irange.end)
+    }
+
+    #[allow(dead_code)]
+    fn dump_keyspace(ks: &KeySpace) {
+        for r in ks.ranges.iter() {
+            println!("  {}..{}", r.start.to_i128(), r.end.to_i128());
+        }
+    }
+
+    fn assert_ks_eq(actual: &KeySpace, expected: Vec<Range<Key>>) {
+        if actual.ranges != expected {
+            let mut msg = String::new();
+
+            writeln!(msg, "expected:").unwrap();
+            for r in &expected {
+                writeln!(msg, "  {}..{}", r.start.to_i128(), r.end.to_i128()).unwrap();
+            }
+            writeln!(msg, "got:").unwrap();
+            for r in &actual.ranges {
+                writeln!(msg, "  {}..{}", r.start.to_i128(), r.end.to_i128()).unwrap();
+            }
+            panic!("{}", msg);
+        }
+    }
+
+    #[test]
+    fn keyspace_add_range() {
+        // two separate ranges
+        //
+        // #####
+        //         #####
+        let mut ks = KeySpace::default();
+        ks.add_range(kr(0..10));
+        ks.add_range(kr(20..30));
+        assert_ks_eq(&ks, vec![kr(0..10), kr(20..30)]);
+
+        // two separate ranges, added in reverse order
+        //
+        //         #####
+        // #####
+        let mut ks = KeySpace::default();
+        ks.add_range(kr(20..30));
+        ks.add_range(kr(0..10));
+        assert_ks_eq(&ks, vec![kr(0..10), kr(20..30)]);
+
+        // add range that is adjacent to the end of an existing range
+        //
+        // #####
+        //      #####
+        ks.add_range(kr(0..10));
+        ks.add_range(kr(10..30));
+        assert_ks_eq(&ks, vec![kr(0..30)]);
+
+        // add range that is adjacent to the start of an existing range
+        //
+        //      #####
+        // #####
+        let mut ks = KeySpace::default();
+        ks.add_range(kr(10..30));
+        ks.add_range(kr(0..10));
+        assert_ks_eq(&ks, vec![kr(0..30)]);
+
+        // add range that overlaps with the end of an existing range
+        //
+        // #####
+        //    #####
+        let mut ks = KeySpace::default();
+        ks.add_range(kr(0..10));
+        ks.add_range(kr(5..30));
+        assert_ks_eq(&ks, vec![kr(0..30)]);
+
+        // add range that overlaps with the start of an existing range
+        //
+        //    #####
+        // #####
+        let mut ks = KeySpace::default();
+        ks.add_range(kr(5..30));
+        ks.add_range(kr(0..10));
+        assert_ks_eq(&ks, vec![kr(0..30)]);
+
+        // add range that is fully covered by an existing range
+        //
+        // #########
+        //   #####
+        let mut ks = KeySpace::default();
+        ks.add_range(kr(0..30));
+        ks.add_range(kr(10..20));
+        assert_ks_eq(&ks, vec![kr(0..30)]);
+
+        // add range that extends an existing range from both ends
+        //
+        //   #####
+        // #########
+        let mut ks = KeySpace::default();
+        ks.add_range(kr(10..20));
+        ks.add_range(kr(0..30));
+        assert_ks_eq(&ks, vec![kr(0..30)]);
+
+        // add a range that overlaps with two existing ranges, joining them
+        //
+        // #####   #####
+        //    #######
+        println!("joins");
+        let mut ks = KeySpace::default();
+        ks.add_range(kr(0..10));
+        ks.add_range(kr(20..30));
+        ks.add_range(kr(5..25));
+        assert_ks_eq(&ks, vec![kr(0..30)]);
     }
 }
