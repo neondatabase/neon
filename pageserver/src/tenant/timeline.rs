@@ -2930,7 +2930,7 @@ impl Timeline {
                 // until the newly created image layer falls off the PITR horizon.
                 //
                 // So we should check if image layer beyond cutoff LSN already exists.
-                if !layers.image_layer_exists(&img_range, &(*cutoff_lsn..lsn + 1))? {
+                if !layers.image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))? {
                     debug!(
                         "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
                         img_range.start, img_range.end, cutoff_lsn, lsn
