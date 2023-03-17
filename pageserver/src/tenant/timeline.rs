@@ -47,7 +47,7 @@ use crate::tenant::{
 };
 
 use crate::config::PageServerConf;
-use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
@@ -3762,7 +3762,7 @@ impl Timeline {
         }
 
         let mut layers_to_remove = Vec::new();
-        let mut wanted_image_layers = KeySpace::default();
+        let mut wanted_image_layers = KeySpaceRandomAccum::default();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -3870,7 +3870,7 @@ impl Timeline {
         self.wanted_image_layers
             .lock()
             .unwrap()
-            .replace((new_gc_cutoff, wanted_image_layers));
+            .replace((new_gc_cutoff, wanted_image_layers.to_keyspace()));
 
         let mut updates = layers.batch_update();
         if !layers_to_remove.is_empty() {
