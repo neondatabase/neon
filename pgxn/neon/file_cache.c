@@ -78,6 +78,7 @@ typedef struct FileCacheEntry
 typedef struct FileCacheControl
 {
 	uint32 size; /* size of cache file in chunks */
+	uint32 used; /* number of used chunks */
 	dlist_head lru; /* double linked list for LRU replacement algorithm */
 } FileCacheControl;
 
@@ -121,6 +122,7 @@ lfc_shmem_startup(void)
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
 		lfc_ctl->size = 0;
+		lfc_ctl->used = 0;
 		dlist_init(&lfc_ctl->lru);
 
 		/* Remove file cache on restart */
@@ -174,7 +176,7 @@ lfc_change_limit_hook(int newval, void *extra)
 		}
 	}
 	LWLockAcquire(lfc_lock, LW_EXCLUSIVE);
-	while (new_size < lfc_ctl->size && !dlist_is_empty(&lfc_ctl->lru))
+	while (new_size < lfc_ctl->used && !dlist_is_empty(&lfc_ctl->lru))
 	{
 		/* Shrink cache by throwing away least recently accessed chunks and returning their space to file system */
 		FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
@@ -184,7 +186,7 @@ lfc_change_limit_hook(int newval, void *extra)
 			elog(LOG, "Failed to punch hole in file: %m");
 #endif
 		hash_search(lfc_hash, &victim->key, HASH_REMOVE, NULL);
-		lfc_ctl->size -= 1;
+		lfc_ctl->used -= 1;
 	}
 	elog(LOG, "set local file cache limit to %d", new_size);
 	LWLockRelease(lfc_lock);
@@ -479,7 +481,7 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		 * there are should be very large number of concurrent IO operations and them are limited by max_connections,
 		 * we prefer not to complicate code and use second approach.
 		 */
-		if (lfc_ctl->size >= SIZE_MB_TO_CHUNKS(lfc_size_limit) && !dlist_is_empty(&lfc_ctl->lru))
+		if (lfc_ctl->used >= SIZE_MB_TO_CHUNKS(lfc_size_limit) && !dlist_is_empty(&lfc_ctl->lru))
 		{
 			/* Cache overflow: evict least recently used chunk */
 			FileCacheEntry* victim = dlist_container(FileCacheEntry, lru_node, dlist_pop_head_node(&lfc_ctl->lru));
@@ -489,7 +491,10 @@ lfc_write(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 			elog(LOG, "Swap file cache page");
 		}
 		else
+		{
+			lfc_ctl->used += 1;
 			entry->offset = lfc_ctl->size++; /* allocate new chunk at end of file */
+		}
 		entry->access_count = 1;
 		memset(entry->bitmap, 0, sizeof entry->bitmap);
 	}
