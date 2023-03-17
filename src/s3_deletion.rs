@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, Instrument};
 
-use crate::{list_objects_with_retries, S3Target, TenantId};
+use crate::{list_objects_with_retries, S3Target, TenantId, MAX_RETRIES};
 
 pub struct S3Deleter {
     dry_run: bool,
@@ -233,32 +233,35 @@ async fn send_delete_request(
     } else {
         let original_request = delete_request.clone();
 
-        match delete_request
-            .send()
-            .await
-            .context("delete request processing")
-        {
-            Ok(delete_response) => {
-                info!("Delete response: {delete_response:?}");
-                match delete_response.errors() {
-                    Some(delete_errors) => {
-                        error!("Delete request returned errors: {delete_errors:?}");
-                        anyhow::bail!(
-                            "Failed to delete all elements from the S3: {delete_errors:?}"
-                        );
-                    }
-                    None => {
-                        info!("Successfully removed an object batch from S3");
-                        Ok(())
+        for _ in 0..MAX_RETRIES {
+            match delete_request
+                .clone()
+                .send()
+                .await
+                .context("delete request processing")
+            {
+                Ok(delete_response) => {
+                    info!("Delete response: {delete_response:?}");
+                    match delete_response.errors() {
+                        Some(delete_errors) => {
+                            error!("Delete request returned errors: {delete_errors:?}");
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                        None => {
+                            info!("Successfully removed an object batch from S3");
+                            return Ok(());
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                error!("Failed to send a delete request: {e:#}");
-                error!("Original request: {original_request:?}");
-                Err(e)
+                Err(e) => {
+                    error!("Failed to send a delete request: {e:#}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         }
+
+        error!("Failed to do deletion, request: {original_request:?}");
+        anyhow::bail!("Failed to run deletion request {MAX_RETRIES} times");
     }
 }
 
