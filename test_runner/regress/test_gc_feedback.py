@@ -4,7 +4,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 
 
 @pytest.mark.timeout(10000)
-def test_gc_old_layers(neon_env_builder: NeonEnvBuilder):
+def test_gc_feedback(neon_env_builder: NeonEnvBuilder):
     """
     Test that GC is able to collect all old layers even if them are forming
     "stairs" and there are not three delta layers since last image layer.
