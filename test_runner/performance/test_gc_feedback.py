@@ -1,6 +1,6 @@
 import pytest
-from fixtures.log_helper import log
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
