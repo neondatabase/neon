@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,7 +60,7 @@ impl S3Deleter {
                                 drop(guard);
                                 match receiver_result {
                                     Ok(batch) => {
-                                        delete_batch(
+                                        let stats = delete_batch(
                                             &closure_client,
                                             &closure_s3_target,
                                             batch,
@@ -67,6 +68,10 @@ impl S3Deleter {
                                         )
                                         .await
                                         .context("batch deletion")?;
+                                        info!(
+                                            "Batch processed, number of objects deleted per tenant in the batch is: {:?}",
+                                            stats.deleted_keys
+                                        );
                                     }
                                     Err(TryRecvError::Empty) => {
                                         debug!("No tasks yet, waiting");
@@ -105,14 +110,19 @@ impl S3Deleter {
 /// S3 delete_objects allows up to 1000 keys to be passed in a single request.
 const MAX_ITEMS_TO_DELETE: usize = 900;
 
+struct DeletionStats {
+    deleted_keys: BTreeMap<TenantId, usize>,
+}
+
 async fn delete_batch(
     s3_client: &Client,
     s3_target: &S3Target,
     batch: Vec<TenantId>,
     dry_run: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DeletionStats> {
     info!("Deleting batch of size {}", batch.len());
     info!("Tenant ids to remove: {batch:?}");
+    let mut deleted_keys = BTreeMap::new();
     let mut object_ids_to_delete = Vec::with_capacity(MAX_ITEMS_TO_DELETE);
 
     for tenant_to_delete in batch {
@@ -152,7 +162,9 @@ async fn delete_batch(
                         .await
                         .context("object ids deletion")?;
                     }
+
                     object_ids_to_delete.push(object_id);
+                    *deleted_keys.entry(tenant_to_delete).or_default() += 1;
                 }
 
                 subtargets.extend(
@@ -188,7 +200,7 @@ async fn delete_batch(
         .context("Last object ids deletion")?;
     }
 
-    Ok(())
+    Ok(DeletionStats { deleted_keys })
 }
 
 async fn send_delete_request(

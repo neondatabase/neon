@@ -16,6 +16,8 @@ use aws_sdk_s3::{Client, Config};
 pub use copied_definitions::id::TenantId;
 pub use s3_deletion::S3Deleter;
 use tracing::error;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 pub const TEST_BASE_URL: &str = "https://console.stage.neon.tech/admin";
 
@@ -50,16 +52,29 @@ pub fn get_cloud_admin_api_token_or_exit() -> String {
     }
 }
 
-pub fn init_logging() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+pub fn init_logging() -> WorkerGuard {
+    let (file_writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::never(
+        "./logs/",
+        chrono::Utc::now()
+            .format("s3_deleter__%Y_%m_%d__%H_%M_%S.log")
+            .to_string(),
+    ));
+
+    let file_logs = fmt::Layer::new()
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(file_writer);
+    let stdout_logs = fmt::Layer::new()
         .with_target(false)
         .with_ansi(atty::is(atty::Stream::Stdout))
-        .with_writer(std::io::stdout)
+        .with_writer(std::io::stdout);
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(file_logs)
+        .with(stdout_logs)
         .init();
+
+    guard
 }
 
 pub fn init_s3_client(bucket_region: Region) -> Client {

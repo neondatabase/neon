@@ -13,7 +13,7 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_logging();
+    let _guard = init_logging();
 
     info!("Starting S3 removal");
     let cloud_admin_api_client =
