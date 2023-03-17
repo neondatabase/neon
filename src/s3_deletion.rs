@@ -39,7 +39,7 @@ impl S3Deleter {
         }
     }
 
-    pub async fn remove_all(self) -> anyhow::Result<()> {
+    pub async fn remove_all(self) -> anyhow::Result<BTreeMap<TenantId, usize>> {
         let concurrent_tasks_count = self.concurrent_tasks_count.get();
 
         let mut deletion_tasks = JoinSet::new();
@@ -54,6 +54,7 @@ impl S3Deleter {
                     (
                         id,
                         async move {
+                            let mut task_stats = BTreeMap::new();
                             loop {
                                 let mut guard = closure_batch_receiver.lock().await;
                                 let receiver_result = guard.try_recv();
@@ -68,10 +69,11 @@ impl S3Deleter {
                                         )
                                         .await
                                         .context("batch deletion")?;
-                                        info!(
+                                        debug!(
                                             "Batch processed, number of objects deleted per tenant in the batch is: {:?}",
                                             stats.deleted_keys
                                         );
+                                        task_stats.extend(stats.deleted_keys);
                                     }
                                     Err(TryRecvError::Empty) => {
                                         debug!("No tasks yet, waiting");
@@ -80,7 +82,7 @@ impl S3Deleter {
                                     }
                                     Err(TryRecvError::Disconnected) => {
                                         info!("Task finished: sender dropped");
-                                        return Ok::<_, anyhow::Error>(());
+                                        return Ok(task_stats);
                                     }
                                 }
                             }
@@ -92,9 +94,13 @@ impl S3Deleter {
             );
         }
 
+        let mut total_stats = BTreeMap::new();
         while let Some(task_result) = deletion_tasks.join_next().await {
             match task_result {
-                Ok((id, Ok(()))) => info!("Task {id} completed"),
+                Ok((id, Ok(task_stats))) => {
+                    info!("Task {id} completed");
+                    total_stats.extend(task_stats);
+                }
                 Ok((id, Err(e))) => {
                     error!("Task {id} failed: {e:#}");
                     return Err(e);
@@ -103,12 +109,14 @@ impl S3Deleter {
             }
         }
 
-        Ok(())
+        Ok(total_stats)
     }
 }
 
 /// S3 delete_objects allows up to 1000 keys to be passed in a single request.
-const MAX_ITEMS_TO_DELETE: usize = 900;
+/// Yet if you pass too many key requests, apparently S3 could return with OK and
+/// actually delete nothing, so keep the number lower.
+const MAX_ITEMS_TO_DELETE: usize = 200;
 
 struct DeletionStats {
     deleted_keys: BTreeMap<TenantId, usize>,

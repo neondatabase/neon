@@ -52,13 +52,16 @@ pub fn get_cloud_admin_api_token_or_exit() -> String {
     }
 }
 
-pub fn init_logging() -> WorkerGuard {
-    let (file_writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::never(
-        "./logs/",
-        chrono::Utc::now()
-            .format("s3_deleter__%Y_%m_%d__%H_%M_%S.log")
-            .to_string(),
-    ));
+pub fn init_logging(dry_run: bool) -> WorkerGuard {
+    let file_name = if dry_run {
+        chrono::Utc::now().format("s3_deleter__%Y_%m_%d__%H_%M_%S__dry.log")
+    } else {
+        chrono::Utc::now().format("s3_deleter__%Y_%m_%d__%H_%M_%S.log")
+    }
+    .to_string();
+
+    let (file_writer, guard) =
+        tracing_appender::non_blocking(tracing_appender::rolling::never("./logs/", file_name));
 
     let file_logs = fmt::Layer::new()
         .with_target(false)

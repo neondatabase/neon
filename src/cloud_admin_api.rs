@@ -235,7 +235,6 @@ impl CloudAdminApiClient {
         Ok(response.data)
     }
 
-    // TODO kb pagination
     pub async fn projects_for_pageserver(
         &self,
         pageserver_id: u64,
