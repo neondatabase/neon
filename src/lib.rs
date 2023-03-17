@@ -19,8 +19,6 @@ use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-pub const TEST_BASE_URL: &str = "https://console.stage.neon.tech/admin";
-
 const MAX_RETRIES: usize = 10;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
 
@@ -80,7 +78,7 @@ pub fn init_logging(dry_run: bool) -> WorkerGuard {
     guard
 }
 
-pub fn init_s3_client(bucket_region: Region) -> Client {
+pub fn init_s3_client(account_id: String, bucket_region: Region) -> Client {
     let credentials_provider = {
         // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
         CredentialsProviderChain::first_try("env", EnvironmentVariableCredentialsProvider::new())
@@ -88,7 +86,7 @@ pub fn init_s3_client(bucket_region: Region) -> Client {
             .or_else(
                 "sso",
                 SsoCredentialsProvider::builder()
-                    .account_id("369495373322")
+                    .account_id(account_id)
                     .role_name("PowerUserAccess")
                     .start_url("https://neondb.awsapps.com/start")
                     .region(Region::from_static("eu-central-1"))

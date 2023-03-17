@@ -30,6 +30,7 @@ impl DeleteBatchProducer {
         admin_client: CloudAdminApiClient,
         s3_client: Arc<Client>,
         s3_target: S3Target,
+        tenant_limit: Option<usize>,
     ) -> Self {
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::unbounded_channel();
         let list_span = info_span!("bucket_list", name = %s3_target.bucket_name);
@@ -66,6 +67,7 @@ impl DeleteBatchProducer {
                                 .strip_prefix(&s3_target.prefix_in_bucket)?
                                 .strip_suffix('/')
                         })
+                        .take(tenant_limit.unwrap_or(usize::MAX))
                         .map(|tenant_id_str| {
                             tenant_id_str.parse().with_context(|| {
                                 format!("Incorrect tenant id str: {tenant_id_str}")
