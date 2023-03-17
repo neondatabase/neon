@@ -905,7 +905,7 @@ class NeonEnv:
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
-        self.initial_timeline: None | TimelineId = None
+        self.initial_timeline: Optional[TimelineId] = None
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
