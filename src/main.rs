@@ -78,7 +78,8 @@ async fn main() -> anyhow::Result<()> {
     );
     info!("Total stats: {deletion_stats:?}");
 
-    batch_producer_task_result.context("delete batch producer join")?;
+    let total_tenants_listed = batch_producer_task_result.context("delete batch producer join")?;
+    info!("Total bucket tenants listed: {total_tenants_listed}");
 
     info!("Finished S3 removal");
 

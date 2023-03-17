@@ -21,7 +21,7 @@ use crate::{list_objects_with_retries, S3Target, TenantId, MAX_RETRIES};
 const BATCH_SIZE: usize = 100;
 
 pub struct DeleteBatchProducer {
-    batch_sender_task: JoinHandle<anyhow::Result<()>>,
+    batch_sender_task: JoinHandle<anyhow::Result<usize>>,
     batch_receiver: Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>>,
 }
 
@@ -48,6 +48,7 @@ impl DeleteBatchProducer {
 
                 let mut continuation_token = None;
                 let mut next_batch = Vec::with_capacity(BATCH_SIZE);
+                let mut total_tenants_listed = 0_usize;
 
                 loop {
                     let fetch_response = list_objects_with_retries(
@@ -69,9 +70,13 @@ impl DeleteBatchProducer {
                         })
                         .take(tenant_limit.unwrap_or(usize::MAX))
                         .map(|tenant_id_str| {
-                            tenant_id_str.parse().with_context(|| {
+                            let tenant_id = tenant_id_str.parse().with_context(|| {
                                 format!("Incorrect tenant id str: {tenant_id_str}")
-                            })
+                            });
+                            if tenant_id.is_ok() {
+                                total_tenants_listed += 1;
+                            }
+                            tenant_id
                         })
                         .collect::<anyhow::Result<Vec<TenantId>>>()
                         .context("list and parse bucket's tenant ids")?;
@@ -91,7 +96,7 @@ impl DeleteBatchProducer {
                         next_batch.push(tenant_id_to_delete);
                     }
 
-                    match fetch_response.continuation_token {
+                    match fetch_response.next_continuation_token {
                         Some(new_token) => continuation_token = Some(new_token),
                         None => break,
                     }
@@ -105,7 +110,7 @@ impl DeleteBatchProducer {
                 }
 
                 info!("Finished listing the bucket");
-                Ok(())
+                Ok(total_tenants_listed)
             }
             .instrument(list_span),
         );
@@ -120,7 +125,7 @@ impl DeleteBatchProducer {
         self.batch_receiver.clone()
     }
 
-    pub async fn join(self) -> anyhow::Result<()> {
+    pub async fn join(self) -> anyhow::Result<usize> {
         match self.batch_sender_task.await {
             Ok(task_result) => task_result,
             Err(join_error) => anyhow::bail!("Failed to join the task: {join_error}"),

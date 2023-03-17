@@ -188,7 +188,7 @@ async fn delete_batch(
                         }),
                 );
 
-                match fetch_response.continuation_token {
+                match fetch_response.next_continuation_token {
                     Some(new_token) => continuation_token = Some(new_token),
                     None => break,
                 }
