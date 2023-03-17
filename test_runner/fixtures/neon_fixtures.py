@@ -643,6 +643,7 @@ class NeonEnvBuilder:
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
         initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        env.initial_timeline = initial_timeline
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
@@ -904,6 +905,7 @@ class NeonEnv:
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
+        self.initial_timeline: None | TimelineId = None
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
