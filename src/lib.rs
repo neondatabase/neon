@@ -31,6 +31,7 @@ pub struct S3Target {
 
 impl S3Target {
     pub fn add_segment_to_prefix(&mut self, new_segment: &str) {
+        let _ = self.prefix_in_bucket.pop();
         self.prefix_in_bucket = [&self.prefix_in_bucket, new_segment, ""].join(&self.delimiter);
     }
 }

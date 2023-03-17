@@ -1,19 +1,22 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use aws_sdk_s3::model::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
-use crossbeam::channel::Receiver;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::{error, info, info_span, Instrument};
+use tracing::{debug, error, info, info_span, Instrument};
 
 use crate::{list_objects_with_retries, S3Target, TenantId};
 
 pub struct S3Deleter {
     dry_run: bool,
     concurrent_tasks_count: NonZeroUsize,
-    delete_batch_receiver: Receiver<Vec<TenantId>>,
+    delete_batch_receiver: Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>>,
     s3_client: Arc<Client>,
     s3_target: S3Target,
 }
@@ -23,7 +26,7 @@ impl S3Deleter {
         dry_run: bool,
         concurrent_tasks_count: NonZeroUsize,
         s3_client: Arc<Client>,
-        delete_batch_receiver: Receiver<Vec<TenantId>>,
+        delete_batch_receiver: Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>>,
         s3_target: S3Target,
     ) -> Self {
         Self {
@@ -42,19 +45,20 @@ impl S3Deleter {
         for id in 0..concurrent_tasks_count {
             let closure_client = Arc::clone(&self.s3_client);
             let closure_s3_target = self.s3_target.clone();
-            let closure_batch_receiver = self.delete_batch_receiver.clone();
+            let closure_batch_receiver = Arc::clone(&self.delete_batch_receiver);
             let dry_run = self.dry_run;
             deletion_tasks.spawn(
                 async move {
+                    info!("Task started");
                     (
                         id,
                         async move {
                             loop {
-                                info!("Task started");
-                                match closure_batch_receiver.recv() {
+                                let mut guard = closure_batch_receiver.lock().await;
+                                let receiver_result = guard.try_recv();
+                                drop(guard);
+                                match receiver_result {
                                     Ok(batch) => {
-                                        info!("Deleting batch of size {}", batch.len());
-                                        info!("Tenant ids to remove: {batch:?}");
                                         delete_batch(
                                             &closure_client,
                                             &closure_s3_target,
@@ -64,7 +68,12 @@ impl S3Deleter {
                                         .await
                                         .context("batch deletion")?;
                                     }
-                                    Err(_sender_dropped) => {
+                                    Err(TryRecvError::Empty) => {
+                                        debug!("No tasks yet, waiting");
+                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                        continue;
+                                    }
+                                    Err(TryRecvError::Disconnected) => {
                                         info!("Task finished: sender dropped");
                                         return Ok::<_, anyhow::Error>(());
                                     }
@@ -102,45 +111,67 @@ async fn delete_batch(
     batch: Vec<TenantId>,
     dry_run: bool,
 ) -> anyhow::Result<()> {
+    info!("Deleting batch of size {}", batch.len());
+    info!("Tenant ids to remove: {batch:?}");
     let mut object_ids_to_delete = Vec::with_capacity(MAX_ITEMS_TO_DELETE);
 
     for tenant_to_delete in batch {
-        let mut new_target = s3_target.clone();
-        new_target.add_segment_to_prefix(&tenant_to_delete.to_string());
+        let mut tenant_root_target = s3_target.clone();
+        tenant_root_target.add_segment_to_prefix(&tenant_to_delete.to_string());
 
         let mut continuation_token = None;
-        loop {
-            let fetch_response =
-                list_objects_with_retries(s3_client, &new_target, continuation_token.clone())
-                    .await?;
+        let mut subtargets = vec![tenant_root_target];
+        while !subtargets.is_empty() {
+            let current_target = subtargets.pop().expect("Subtargets is not empty");
+            loop {
+                let fetch_response = list_objects_with_retries(
+                    s3_client,
+                    &current_target,
+                    continuation_token.clone(),
+                )
+                .await?;
 
-            for object_id in fetch_response
-                .contents()
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|object| object.key())
-                .map(|key| ObjectIdentifier::builder().key(key).build())
-            {
-                if object_ids_to_delete.len() >= MAX_ITEMS_TO_DELETE {
-                    let object_ids_for_request = std::mem::replace(
-                        &mut object_ids_to_delete,
-                        Vec::with_capacity(MAX_ITEMS_TO_DELETE),
-                    );
-                    send_delete_request(
-                        s3_client,
-                        &s3_target.bucket_name,
-                        object_ids_for_request,
-                        dry_run,
-                    )
-                    .await
-                    .context("object ids deletion")?;
+                for object_id in fetch_response
+                    .contents()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|object| object.key())
+                    .map(|key| ObjectIdentifier::builder().key(key).build())
+                {
+                    if object_ids_to_delete.len() >= MAX_ITEMS_TO_DELETE {
+                        let object_ids_for_request = std::mem::replace(
+                            &mut object_ids_to_delete,
+                            Vec::with_capacity(MAX_ITEMS_TO_DELETE),
+                        );
+                        send_delete_request(
+                            s3_client,
+                            &s3_target.bucket_name,
+                            object_ids_for_request,
+                            dry_run,
+                        )
+                        .await
+                        .context("object ids deletion")?;
+                    }
+                    object_ids_to_delete.push(object_id);
                 }
-                object_ids_to_delete.push(object_id);
-            }
 
-            match fetch_response.continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
-                None => break,
+                subtargets.extend(
+                    fetch_response
+                        .common_prefixes()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|common_prefix| common_prefix.prefix())
+                        .map(|prefix| {
+                            let mut new_target = s3_target.clone();
+                            new_target.prefix_in_bucket = prefix.to_string();
+                            new_target
+                        }),
+                );
+
+                match fetch_response.continuation_token {
+                    Some(new_token) => continuation_token = Some(new_token),
+                    None => break,
+                }
             }
         }
     }

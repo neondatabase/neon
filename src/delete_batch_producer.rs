@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use aws_sdk_s3::Client;
-use crossbeam::channel::Receiver;
-use tokio::sync::Semaphore;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, info_span, warn, Instrument};
 
@@ -15,11 +15,14 @@ use crate::{list_objects_with_retries, S3Target, TenantId, MAX_RETRIES};
 /// Also, there are some non-standard tenants to remove, having more layers.
 /// delete_objects request allows up to 1000 keys, so be on a safe side and allow most
 /// batch processing tasks to do 1 delete objects request only.
-const BATCH_SIZE: usize = 400;
+///
+/// Every batch item will be additionally S3 LS'ed later, so keep the batch size
+/// even lower to allow multiple concurrent tasks do the LS requests.
+const BATCH_SIZE: usize = 100;
 
 pub struct DeleteBatchProducer {
     batch_sender_task: JoinHandle<anyhow::Result<()>>,
-    batch_receiver: Receiver<Vec<TenantId>>,
+    batch_receiver: Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>>,
 }
 
 impl DeleteBatchProducer {
@@ -28,7 +31,7 @@ impl DeleteBatchProducer {
         s3_client: Arc<Client>,
         s3_target: S3Target,
     ) -> Self {
-        let (batch_sender, batch_receiver) = crossbeam::channel::unbounded();
+        let (batch_sender, batch_receiver) = tokio::sync::mpsc::unbounded_channel();
         let list_span = info_span!("bucket_list", name = %s3_target.bucket_name);
         let admin_client = Arc::new(admin_client);
 
@@ -107,11 +110,11 @@ impl DeleteBatchProducer {
 
         Self {
             batch_sender_task,
-            batch_receiver,
+            batch_receiver: Arc::new(Mutex::new(batch_receiver)),
         }
     }
 
-    pub fn subscribe(&self) -> Receiver<Vec<TenantId>> {
+    pub fn subscribe(&self) -> Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>> {
         self.batch_receiver.clone()
     }
 
