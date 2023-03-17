@@ -133,7 +133,7 @@ async fn delete_batch(
     let mut deleted_keys = BTreeMap::new();
     let mut object_ids_to_delete = Vec::with_capacity(MAX_ITEMS_TO_DELETE);
 
-    for tenant_to_delete in batch {
+    for &tenant_to_delete in &batch {
         let mut tenant_root_target = s3_target.clone();
         tenant_root_target.add_segment_to_prefix(&tenant_to_delete.to_string());
 
@@ -208,6 +208,10 @@ async fn delete_batch(
         .context("Last object ids deletion")?;
     }
 
+    if !dry_run {
+        ensure_batch_deleted(s3_client, s3_target, batch).await?;
+    }
+
     Ok(DeletionStats { deleted_keys })
 }
 
@@ -234,16 +238,21 @@ async fn send_delete_request(
             .await
             .context("delete request processing")
         {
-            Ok(delete_response) => match delete_response.errors() {
-                Some(delete_errors) => {
-                    error!("Delete request returned errors: {delete_errors:?}");
-                    anyhow::bail!("Failed to delete all elements from the S3: {delete_errors:?}");
+            Ok(delete_response) => {
+                info!("Delete response: {delete_response:?}");
+                match delete_response.errors() {
+                    Some(delete_errors) => {
+                        error!("Delete request returned errors: {delete_errors:?}");
+                        anyhow::bail!(
+                            "Failed to delete all elements from the S3: {delete_errors:?}"
+                        );
+                    }
+                    None => {
+                        info!("Successfully removed an object batch from S3");
+                        Ok(())
+                    }
                 }
-                None => {
-                    info!("Successfully removed an object batch from S3");
-                    Ok(())
-                }
-            },
+            }
             Err(e) => {
                 error!("Failed to send a delete request: {e:#}");
                 error!("Original request: {original_request:?}");
@@ -251,4 +260,36 @@ async fn send_delete_request(
             }
         }
     }
+}
+
+async fn ensure_batch_deleted(
+    s3_client: &Client,
+    s3_target: &S3Target,
+    batch: Vec<TenantId>,
+) -> anyhow::Result<()> {
+    let mut not_deleted_tenants = Vec::with_capacity(batch.len());
+
+    for tenant_id in batch {
+        let mut tenant_root_target = s3_target.clone();
+        tenant_root_target.add_segment_to_prefix(&tenant_id.to_string());
+
+        let fetch_response =
+            list_objects_with_retries(s3_client, &tenant_root_target, None).await?;
+
+        if fetch_response.is_truncated()
+            || fetch_response.contents().is_some()
+            || fetch_response.common_prefixes().is_some()
+        {
+            error!(
+                "Tenant {tenant_id} should be deleted, but his list response is {fetch_response:?}"
+            );
+            not_deleted_tenants.push(tenant_id);
+        }
+    }
+
+    anyhow::ensure!(
+        not_deleted_tenants.is_empty(),
+        "Failed to delete all tenants in a batch"
+    );
+    Ok(())
 }
