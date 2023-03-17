@@ -979,7 +979,7 @@ cached_metric_collection_interval = '22200 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
 
-evictions_low_residence_duration_metric_threshold = '44 s'
+evictions_low_residence_duration_metric_threshold = '444 s'
 
 log_format = 'json'
 
