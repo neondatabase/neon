@@ -291,6 +291,7 @@ impl RemoteStorage for S3Bucket {
                 .list_objects_v2()
                 .bucket(self.bucket_name.clone())
                 .set_prefix(self.prefix_in_bucket.clone())
+                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
                 .set_continuation_token(continuation_token)
                 .send()
                 .await
@@ -306,7 +307,7 @@ impl RemoteStorage for S3Bucket {
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.key()?))),
             );
 
-            match fetch_response.continuation_token {
+            match fetch_response.next_continuation_token {
                 Some(new_token) => continuation_token = Some(new_token),
                 None => break,
             }
@@ -371,7 +372,7 @@ impl RemoteStorage for S3Bucket {
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
             );
 
-            match fetch_response.continuation_token {
+            match fetch_response.next_continuation_token {
                 Some(new_token) => continuation_token = Some(new_token),
                 None => break,
             }
