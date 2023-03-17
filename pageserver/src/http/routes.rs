@@ -748,6 +748,14 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         );
     }
 
+    if let Some(eviction_policy) = request_data.eviction_policy {
+        tenant_conf.eviction_policy = Some(
+            serde_json::from_value(eviction_policy)
+                .context("parse field `eviction_policy`")
+                .map_err(ApiError::BadRequest)?,
+        );
+    }
+
     let target_tenant_id = request_data
         .new_tenant_id
         .map(TenantId::from)

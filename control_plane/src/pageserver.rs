@@ -362,6 +362,11 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'trace_read_requests' as bool")?,
+            eviction_policy: settings
+                .get("eviction_policy")
+                .map(|x| serde_json::from_str(x))
+                .transpose()
+                .context("Failed to parse 'eviction_policy' json")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
