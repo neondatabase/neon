@@ -623,6 +623,9 @@ impl ImageLayerWriterInner {
                 lsn: self.lsn,
             },
         );
+        if final_path.exists() {
+            warn!("Overwrite existed image layer {}", final_path.display());
+        }
         std::fs::rename(self.path, final_path)?;
 
         trace!("created image layer {}", layer.path().display());
