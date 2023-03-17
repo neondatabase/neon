@@ -12,6 +12,8 @@ This RFC aims to spin a discussion to come to a robust deletion solution that wo
 
 TLDR; There are two options, one based on control plane issuing actual delete requests to s3 and the other one that keeps s3 stuff bound to pageserver. Each one has its pros and cons.
 
+The decision is to stick with pageserver centric approach. For motivation see [Decision](#decision).
+
 ## Components
 
 pageserver, control-plane
@@ -256,7 +258,7 @@ There was a concern that having deletion code in pageserver is a littlebit scary
 
 Delayed deletion can be done with both approaches. As discussed with Anna (@stepashka) this is only relevant for tenants (projects) not for timelines. For first approach detach can be called immediately and deletion can be done later with attach + delete. With second approach control plane needs to start the deletion whenever necessary.
 
-***
+## Decision
 
 After discussion in comments I see that we settled on two options (though a bit different from ones described in rfc). First one is the same - pageserver owns as much as possible. The second option is that pageserver owns markers thing, but actual deletion happens in control plane by repeatedly calling ls + delete.
 
