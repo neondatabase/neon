@@ -1,7 +1,6 @@
 use crate::repository::{key_range_size, singleton_range, Key};
 use postgres_ffi::BLCKSZ;
 use std::ops::Range;
-use tracing::debug;
 
 ///
 /// Represents a set of Keys, in a compact form.
@@ -63,57 +62,14 @@ impl KeySpace {
         KeyPartitioning { parts }
     }
 
-    /// Add range to keyspace.
-    ///
-    /// Unlike KeySpaceAccum, it accepts key ranges in any order and overlapping ranges.
-    pub fn add_range(&mut self, range: Range<Key>) {
-        let start = range.start;
-        let mut end = range.end;
-        let mut prev_index = match self.ranges.binary_search_by_key(&end, |r| r.start) {
-            Ok(index) => index,
-            Err(0) => {
-                self.ranges.insert(0, range);
-                return;
-            }
-            Err(index) => index - 1,
-        };
-        loop {
-            let mut prev = &mut self.ranges[prev_index];
-            if prev.end >= start {
-                // two ranges overlap
-                if prev.start <= start {
-                    // combine with prev range
-                    if prev.end < end {
-                        prev.end = end;
-                        debug!("Extend wanted image {}..{}", prev.start, end);
-                    }
-                    return;
-                } else {
-                    if prev.end > end {
-                        end = prev.end;
-                    }
-                    self.ranges.remove(prev_index);
-                }
-            } else {
-                prev_index += 1; // insert after prev range
-                break;
-            }
-            if prev_index == 0 {
-                break;
-            }
-            prev_index -= 1;
-        }
-        debug!("Wanted image {}..{}", start, end);
-        self.ranges.insert(prev_index, start..end);
-    }
-
     ///
     /// Check if key space contains overlapping range
     ///
     pub fn overlaps(&self, range: &Range<Key>) -> bool {
         match self.ranges.binary_search_by_key(&range.end, |r| r.start) {
-            Ok(_) => false,
+            Ok(0) => false,
             Err(0) => false,
+            Ok(index) => self.ranges[index - 1].end > range.start,
             Err(index) => self.ranges[index - 1].end > range.start,
         }
     }
@@ -186,6 +142,52 @@ impl KeySpaceAccum {
     }
 }
 
+///
+/// A helper object, to collect a set of keys and key ranges into a KeySpace
+/// object. Key ranages may be inserted in any order and can overlap.
+///
+#[derive(Clone, Debug, Default)]
+pub struct KeySpaceRandomAccum {
+    ranges: Vec<Range<Key>>,
+}
+
+impl KeySpaceRandomAccum {
+    pub fn new() -> Self {
+        Self { ranges: Vec::new() }
+    }
+
+    pub fn add_key(&mut self, key: Key) {
+        self.add_range(singleton_range(key))
+    }
+
+    pub fn add_range(&mut self, range: Range<Key>) {
+        self.ranges.push(range);
+    }
+
+    pub fn to_keyspace(mut self) -> KeySpace {
+        let mut ranges = Vec::new();
+        if !self.ranges.is_empty() {
+            self.ranges.sort_by_key(|r| r.start);
+            let mut start = self.ranges.first().unwrap().start;
+            let mut end = self.ranges.first().unwrap().end;
+            for r in self.ranges {
+                assert!(r.start >= start);
+                if r.start > end {
+                    ranges.push(start..end);
+                    start = r.start;
+                    end = r.end;
+                } else {
+                    if r.end > end {
+                        end = r.end;
+                    }
+                }
+            }
+            ranges.push(start..end);
+        }
+        KeySpace { ranges }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,19 +229,17 @@ mod tests {
         //
         // #####
         //         #####
-        let mut ks = KeySpace::default();
+        let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(0..10));
         ks.add_range(kr(20..30));
-        assert_ks_eq(&ks, vec![kr(0..10), kr(20..30)]);
 
         // two separate ranges, added in reverse order
         //
         //         #####
         // #####
-        let mut ks = KeySpace::default();
+        let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(20..30));
         ks.add_range(kr(0..10));
-        assert_ks_eq(&ks, vec![kr(0..10), kr(20..30)]);
 
         // add range that is adjacent to the end of an existing range
         //
@@ -247,62 +247,122 @@ mod tests {
         //      #####
         ks.add_range(kr(0..10));
         ks.add_range(kr(10..30));
-        assert_ks_eq(&ks, vec![kr(0..30)]);
+        assert_ks_eq(&ks.to_keyspace(), vec![kr(0..30)]);
 
         // add range that is adjacent to the start of an existing range
         //
         //      #####
         // #####
-        let mut ks = KeySpace::default();
+        let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(10..30));
         ks.add_range(kr(0..10));
-        assert_ks_eq(&ks, vec![kr(0..30)]);
+        assert_ks_eq(&ks.to_keyspace(), vec![kr(0..30)]);
 
         // add range that overlaps with the end of an existing range
         //
         // #####
         //    #####
-        let mut ks = KeySpace::default();
+        let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(0..10));
         ks.add_range(kr(5..30));
-        assert_ks_eq(&ks, vec![kr(0..30)]);
+        assert_ks_eq(&ks.to_keyspace(), vec![kr(0..30)]);
 
         // add range that overlaps with the start of an existing range
         //
         //    #####
         // #####
-        let mut ks = KeySpace::default();
+        let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(5..30));
         ks.add_range(kr(0..10));
-        assert_ks_eq(&ks, vec![kr(0..30)]);
+        assert_ks_eq(&ks.to_keyspace(), vec![kr(0..30)]);
 
         // add range that is fully covered by an existing range
         //
         // #########
         //   #####
-        let mut ks = KeySpace::default();
+        let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(0..30));
         ks.add_range(kr(10..20));
-        assert_ks_eq(&ks, vec![kr(0..30)]);
+        assert_ks_eq(&ks.to_keyspace(), vec![kr(0..30)]);
 
         // add range that extends an existing range from both ends
         //
         //   #####
         // #########
-        let mut ks = KeySpace::default();
+        let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(10..20));
         ks.add_range(kr(0..30));
-        assert_ks_eq(&ks, vec![kr(0..30)]);
+        assert_ks_eq(&ks.to_keyspace(), vec![kr(0..30)]);
 
         // add a range that overlaps with two existing ranges, joining them
         //
         // #####   #####
         //    #######
         println!("joins");
-        let mut ks = KeySpace::default();
+        let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(0..10));
         ks.add_range(kr(20..30));
         ks.add_range(kr(5..25));
-        assert_ks_eq(&ks, vec![kr(0..30)]);
+        assert_ks_eq(&ks.to_keyspace(), vec![kr(0..30)]);
+    }
+
+    #[test]
+    fn keyspace_overlaps() {
+        let mut ks = KeySpaceRandomAccum::default();
+        ks.add_range(kr(10..20));
+        ks.add_range(kr(30..40));
+        let ks = ks.to_keyspace();
+
+        //        #####      #####
+        // xxxx
+        assert!(ks.overlaps(&kr(0..5)) == false);
+
+        //        #####      #####
+        //   xxxx
+        assert!(ks.overlaps(&kr(5..9)) == false);
+
+        //        #####      #####
+        //    xxxx
+        assert!(ks.overlaps(&kr(5..10)) == false);
+
+        //        #####      #####
+        //     xxxx
+        assert!(ks.overlaps(&kr(5..11)) == true);
+
+        //        #####      #####
+        //        xxxx
+        assert!(ks.overlaps(&kr(10..15)) == true);
+
+        //        #####      #####
+        //         xxxx
+        assert!(ks.overlaps(&kr(15..20)) == true);
+
+        //        #####      #####
+        //           xxxx
+        assert!(ks.overlaps(&kr(15..25)) == true);
+
+        //        #####      #####
+        //              xxxx
+        assert!(ks.overlaps(&kr(22..28)) == false);
+
+        //        #####      #####
+        //               xxxx
+        assert!(ks.overlaps(&kr(25..30)) == false);
+
+        //        #####      #####
+        //                      xxxx
+        assert!(ks.overlaps(&kr(35..35)) == true);
+
+        //        #####      #####
+        //                        xxxx
+        assert!(ks.overlaps(&kr(40..45)) == false);
+
+        //        #####      #####
+        //                        xxxx
+        assert!(ks.overlaps(&kr(45..50)) == false);
+
+        //        #####      #####
+        //        xxxxxxxxxxx
+        assert!(ks.overlaps(&kr(0..30)) == true); // XXXXX This fails currently!
     }
 }
