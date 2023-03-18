@@ -176,10 +176,8 @@ impl KeySpaceRandomAccum {
                     ranges.push(start..end);
                     start = r.start;
                     end = r.end;
-                } else {
-                    if r.end > end {
-                        end = r.end;
-                    }
+                } else if r.end > end {
+                    end = r.end;
                 }
             }
             ranges.push(start..end);
@@ -315,54 +313,54 @@ mod tests {
 
         //        #####      #####
         // xxxx
-        assert!(ks.overlaps(&kr(0..5)) == false);
+        assert!(!ks.overlaps(&kr(0..5)));
 
         //        #####      #####
         //   xxxx
-        assert!(ks.overlaps(&kr(5..9)) == false);
+        assert!(!ks.overlaps(&kr(5..9)));
 
         //        #####      #####
         //    xxxx
-        assert!(ks.overlaps(&kr(5..10)) == false);
+        assert!(!ks.overlaps(&kr(5..10)));
 
         //        #####      #####
         //     xxxx
-        assert!(ks.overlaps(&kr(5..11)) == true);
+        assert!(ks.overlaps(&kr(5..11)));
 
         //        #####      #####
         //        xxxx
-        assert!(ks.overlaps(&kr(10..15)) == true);
+        assert!(ks.overlaps(&kr(10..15)));
 
         //        #####      #####
         //         xxxx
-        assert!(ks.overlaps(&kr(15..20)) == true);
+        assert!(ks.overlaps(&kr(15..20)));
 
         //        #####      #####
         //           xxxx
-        assert!(ks.overlaps(&kr(15..25)) == true);
+        assert!(ks.overlaps(&kr(15..25)));
 
         //        #####      #####
         //              xxxx
-        assert!(ks.overlaps(&kr(22..28)) == false);
+        assert!(!ks.overlaps(&kr(22..28)));
 
         //        #####      #####
         //               xxxx
-        assert!(ks.overlaps(&kr(25..30)) == false);
+        assert!(!ks.overlaps(&kr(25..30)));
 
         //        #####      #####
         //                      xxxx
-        assert!(ks.overlaps(&kr(35..35)) == true);
+        assert!(ks.overlaps(&kr(35..35)));
 
         //        #####      #####
         //                        xxxx
-        assert!(ks.overlaps(&kr(40..45)) == false);
+        assert!(!ks.overlaps(&kr(40..45)));
 
         //        #####      #####
         //                        xxxx
-        assert!(ks.overlaps(&kr(45..50)) == false);
+        assert!(!ks.overlaps(&kr(45..50)));
 
         //        #####      #####
         //        xxxxxxxxxxx
-        assert!(ks.overlaps(&kr(0..30)) == true); // XXXXX This fails currently!
+        assert!(ks.overlaps(&kr(0..30))); // XXXXX This fails currently!
     }
 }
