@@ -68,13 +68,9 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             physical_size = client.timeline_detail(tenant_id, timeline_id)["current_physical_size"]
             log.info(f"Physical storage size {physical_size}")
 
-    MB=1024*1024
+    MB = 1024 * 1024
+    zenbenchmark.record("logical_size", logical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
+    zenbenchmark.record("physical_size", physical_size // MB, "Mb", MetricReport.LOWER_IS_BETTER)
     zenbenchmark.record(
-        "logical_size", logical_size//MB, "Mb", MetricReport.LOWER_IS_BETTER
-    )
-    zenbenchmark.record(
-        "physical_size", physical_size//MB, "Mb", MetricReport.LOWER_IS_BETTER
-    )
-    zenbenchmark.record(
-        "physical/logical ratio", physical_size/logical_size, "", MetricReport.LOWER_IS_BETTER
+        "physical/logical ratio", physical_size / logical_size, "", MetricReport.LOWER_IS_BETTER
     )
