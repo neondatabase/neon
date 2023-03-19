@@ -289,7 +289,7 @@ pub async fn set_new_tenant_config(
     conf: &'static PageServerConf,
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> Result<(), TenantStateError> {
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
@@ -306,16 +306,20 @@ pub async fn set_new_tenant_config(
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-pub async fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
+pub async fn get_tenant(
+    tenant_id: TenantId,
+    active_only: bool,
+) -> Result<Arc<Tenant>, TenantStateError> {
     let m = TENANTS.read().await;
     let tenant = m
         .get(&tenant_id)
-        .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
+        .ok_or(TenantStateError::NotFound(tenant_id))?;
     if active_only && !tenant.is_active() {
-        anyhow::bail!(
+        tracing::warn!(
             "Tenant {tenant_id} is not active. Current state: {:?}",
             tenant.current_state()
-        )
+        );
+        Err(TenantStateError::NotActive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
     }
@@ -325,21 +329,28 @@ pub async fn delete_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     ctx: &RequestContext,
-) -> anyhow::Result<()> {
-    match get_tenant(tenant_id, true).await {
-        Ok(tenant) => {
-            tenant.delete_timeline(timeline_id, ctx).await?;
-        }
-        Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
-    }
-
+) -> Result<(), TenantStateError> {
+    let tenant = get_tenant(tenant_id, true).await?;
+    tenant.delete_timeline(timeline_id, ctx).await?;
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TenantStateError {
+    #[error("Tenant {0} not found")]
+    NotFound(TenantId),
+    #[error("Tenant {0} is stopping")]
+    IsStopping(TenantId),
+    #[error("Tenant {0} is not active")]
+    NotActive(TenantId),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> Result<(), TenantStateError> {
     remove_tenant_from_memory(tenant_id, async {
         let local_tenant_directory = conf.tenant_path(&tenant_id);
         fs::remove_dir_all(&local_tenant_directory)
@@ -379,7 +390,7 @@ pub async fn load_tenant(
 pub async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> Result<(), TenantStateError> {
     remove_tenant_from_memory(tenant_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(tenant_id);
         fs::File::create(&ignore_mark_file)
@@ -489,7 +500,7 @@ where
 async fn remove_tenant_from_memory<V, F>(
     tenant_id: TenantId,
     tenant_cleanup: F,
-) -> anyhow::Result<V>
+) -> Result<V, TenantStateError>
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
@@ -505,11 +516,9 @@ where
                 | TenantState::Loading
                 | TenantState::Broken
                 | TenantState::Active => tenant.set_stopping(),
-                TenantState::Stopping => {
-                    anyhow::bail!("Tenant {tenant_id} is stopping already")
-                }
+                TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
             },
-            None => anyhow::bail!("Tenant not found for id {tenant_id}"),
+            None => return Err(TenantStateError::NotFound(tenant_id)),
         }
     }
 
@@ -532,10 +541,15 @@ where
         Err(e) => {
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
-                Some(tenant) => tenant.set_broken(&e.to_string()),
-                None => warn!("Tenant {tenant_id} got removed from memory"),
+                Some(tenant) => {
+                    tenant.set_broken(&e.to_string());
+                }
+                None => {
+                    warn!("Tenant {tenant_id} got removed from memory");
+                    return Err(TenantStateError::NotFound(tenant_id));
+                }
             }
-            Err(e)
+            Err(TenantStateError::Other(e))
         }
     }
 }
@@ -555,7 +569,7 @@ pub async fn immediate_gc(
     let tenant = guard
         .get(&tenant_id)
         .map(Arc::clone)
-        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .with_context(|| format!("tenant {tenant_id}"))
         .map_err(ApiError::NotFound)?;
 
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
@@ -605,7 +619,7 @@ pub async fn immediate_compact(
     let tenant = guard
         .get(&tenant_id)
         .map(Arc::clone)
-        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .with_context(|| format!("tenant {tenant_id}"))
         .map_err(ApiError::NotFound)?;
 
     let timeline = tenant
