@@ -358,8 +358,9 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 macro_rules! redo_histogram_time_buckets {
     () => {
         vec![
-            0.000_010, 0.000_025, 0.000_100, 0.000_250, 0.001_000, 0.002_500, 0.010_000, 0.025_000,
-            0.100_000, 0.250_000, 1.000_000,
+            0.000_005, 0.000_010, 0.000_025, 0.000_050, 0.000_100, 0.000_250, 0.000_500, 0.001_000,
+            0.002_500, 0.005_000, 0.010_000, 0.025_000, 0.050_000, 0.100_000, 0.250_000, 0.500_000,
+            1.000_000,
         ]
     };
 }
@@ -376,10 +377,12 @@ macro_rules! redo_histogram_count_buckets {
 
 macro_rules! redo_bytes_histogram_count_buckets {
     () => {
-        // powers of four (7 buckets).
-        //
-        // (keep these as multiples of 8 to capture any MAXALIGNed record of that size, too.)
-        vec![32.0, 128.0, 512.0, 2048.0, 8192.0, 32768.0, 131072.0]
+        // powers of (2^.5), from 2^4.5 to 2^15 (22 buckets)
+        // rounded up to the next multiple of 8 to capture any MAXALIGNed record of that size, too.
+        vec![
+            24.0, 32.0, 48.0, 64.0, 96.0, 128.0, 184.0, 256.0, 368.0, 512.0, 728.0, 1024.0, 1456.0,
+            2048.0, 2904.0, 4096.0, 5800.0, 8192.0, 11592.0, 16384.0, 23176.0, 32768.0,
+        ]
     };
 }
 
