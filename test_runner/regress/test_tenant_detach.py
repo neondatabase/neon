@@ -349,8 +349,17 @@ def test_tenant_detach_ignored_tenant(neon_env_builder: NeonEnvBuilder):
     # ignore tenant
     pageserver_http.tenant_ignore(tenant_id)
 
+    # ensure tenant couldn't be detached without the special flag for ignored tenant
+    log.info("detaching ignored tenant WITHOUT required flag")
+    with pytest.raises(
+        expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
+    ):
+        pageserver_http.tenant_detach(tenant_id)
+
+    log.info("tenant detached failed as expected")
+
     # ensure tenant is detached with ignore state
-    log.info("detaching tenant")
+    log.info("detaching ignored tenant with required flag")
     pageserver_http.tenant_detach(tenant_id, True)
     log.info("tenant detached without error")
 
