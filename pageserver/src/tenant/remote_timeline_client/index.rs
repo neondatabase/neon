@@ -40,6 +40,8 @@ impl LayerFileMetadata {
     }
 }
 
+// TODO seems like another part of the remote storage file format
+// compatibility issue, see https://github.com/neondatabase/neon/issues/3072
 /// In-memory representation of an `index_part.json` file
 ///
 /// Contains the data about all files in the timeline, present remotely and its metadata.
@@ -48,7 +50,7 @@ impl LayerFileMetadata {
 /// remember to add a test case for the changed version.
 #[serde_as]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct IndexPartImpl {
+pub struct IndexPart {
     /// Debugging aid describing the version of this type.
     #[serde(default)]
     version: usize,
@@ -70,10 +72,6 @@ pub struct IndexPartImpl {
     pub disk_consistent_lsn: Lsn,
     metadata_bytes: Vec<u8>,
 }
-
-// TODO seems like another part of the remote storage file format
-// compatibility issue, see https://github.com/neondatabase/neon/issues/3072
-pub type IndexPart = IndexPartImpl;
 
 impl IndexPart {
     /// When adding or modifying any parts of `IndexPart`, increment the version so that it can be
