@@ -141,7 +141,11 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> It
         timelines.append((tenant_id, timeline_id, layers))
 
     eviction_env = EvictionEnv(
-        timelines=timelines, neon_env=env, pageserver_http=pageserver_http, layer_size=layer_size, pg_bin=pg_bin
+        timelines=timelines,
+        neon_env=env,
+        pageserver_http=pageserver_http,
+        layer_size=layer_size,
+        pg_bin=pg_bin,
     )
 
     yield eviction_env
@@ -263,8 +267,8 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv):
     assert env.neon_env.pageserver.log_contains("falling back to global LRU")
     env.neon_env.pageserver.allowed_errors.append(".*falling back to global LRU")
 
-def test_partial_evict_tenant(eviction_env: EvictionEnv):
 
+def test_partial_evict_tenant(eviction_env: EvictionEnv):
     env = eviction_env
     ps_http = env.pageserver_http
 
@@ -278,9 +282,9 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
 
     # make our tenant more recently used than the other one
     with env.neon_env.postgres.create_start("main", tenant_id=tenant_id) as pg:
-        env.pg_bin.run(["pgbench", "-S" , pg.connstr()])
+        env.pg_bin.run(["pgbench", "-S", pg.connstr()])
 
-    target = total_on_disk - (tenant_usage//2)
+    target = total_on_disk - (tenant_usage // 2)
     response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
@@ -291,10 +295,16 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
 
     later_du_by_timeline = env.du_by_timeline()
     for tenant, later_tenant_usage in later_du_by_timeline.items():
-        assert later_tenant_usage < du_by_timeline[tenant], "all tenants should have lost some layers"
+        assert (
+            later_tenant_usage < du_by_timeline[tenant]
+        ), "all tenants should have lost some layers"
 
-    assert later_du_by_timeline[our_tenant] > 0.4 * tenant_usage, "our warmed up tenant should be at about half capacity"
-    assert later_du_by_timeline[other_tenant] < 2 * env.layer_size, "the other tenant should be completely evicted"
+    assert (
+        later_du_by_timeline[our_tenant] > 0.4 * tenant_usage
+    ), "our warmed up tenant should be at about half capacity"
+    assert (
+        later_du_by_timeline[other_tenant] < 2 * env.layer_size
+    ), "the other tenant should be completely evicted"
 
 
 def poor_mans_du(
