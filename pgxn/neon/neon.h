@@ -12,6 +12,11 @@
 #ifndef NEON_H
 #define NEON_H
 
+/* GUCs */
+extern char *neon_safekeeper_token;
+extern char *neon_timeline;
+extern char *neon_tenant;
+
 extern void pg_init_libpagestore(void);
 extern void pg_init_walproposer(void);
 

@@ -39,10 +39,6 @@ typedef struct WalProposerConn WalProposerConn;
 struct WalMessage;
 typedef struct WalMessage WalMessage;
 
-extern char *neon_timeline_walproposer;
-extern char *neon_tenant_walproposer;
-extern char *neon_safekeeper_token_walproposer;
-
 /* Possible return values from ReadPGAsync */
 typedef enum
 {
