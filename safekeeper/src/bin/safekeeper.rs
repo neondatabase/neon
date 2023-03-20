@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use remote_storage::RemoteStorageConfig;
 use toml_edit::Document;
+use utils::signals::ShutdownSignals;
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
@@ -39,7 +40,7 @@ use utils::{
     logging::{self, LogFormat},
     project_git_version,
     sentry_init::init_sentry,
-    signals, tcp_listener,
+    tcp_listener,
 };
 
 const PID_FILE_NAME: &str = "safekeeper.pid";
@@ -216,7 +217,6 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
     metrics::register_internal(Box::new(timeline_collector))?;
 
-    let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
     let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
 
@@ -274,15 +274,12 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 
     set_build_info_metric(GIT_VERSION);
     // TODO: put more thoughts into handling of failed threads
-    // We probably should restart them.
+    // We should catch & die if they are in trouble.
 
-    // NOTE: we still have to handle signals like SIGQUIT to prevent coredumps
-    signals.handle(|signal| {
-        // TODO: implement graceful shutdown with joining threads etc
-        info!(
-            "received {}, terminating in immediate shutdown mode",
-            signal.name()
-        );
+    // On any shutdown signal, log receival and exit. Additionally, handling
+    // SIGQUIT prevents coredump.
+    ShutdownSignals::handle(|signal| {
+        info!("received {}, terminating", signal.name());
         std::process::exit(0);
     })
 }

@@ -24,11 +24,9 @@ use pageserver::{
     virtual_file,
 };
 use postgres_backend::AuthType;
+use utils::signals::ShutdownSignals;
 use utils::{
-    auth::JwtAuth,
-    logging, project_git_version,
-    sentry_init::init_sentry,
-    signals::{self, Signal},
+    auth::JwtAuth, logging, project_git_version, sentry_init::init_sentry, signals::Signal,
     tcp_listener,
 };
 
@@ -263,9 +261,6 @@ fn start_pageserver(
     info!("Starting pageserver pg protocol handler on {pg_addr}");
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
-    // Install signal handlers
-    let signals = signals::install_shutdown_handlers()?;
-
     // Launch broker client
     WALRECEIVER_RUNTIME.block_on(pageserver::broker_client::init_broker_client(conf))?;
 
@@ -409,7 +404,7 @@ fn start_pageserver(
     }
 
     // All started up! Now just sit and wait for shutdown signal.
-    signals.handle(|signal| match signal {
+    ShutdownSignals::handle(|signal| match signal {
         Signal::Quit => {
             info!(
                 "Got {}. Terminating in immediate shutdown mode",
