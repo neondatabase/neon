@@ -105,6 +105,9 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> It
     (broken_on_disk_before, _, _) = poor_mans_du(
         env, timelines=[(broken_tenant_id, broken_timeline_id)]
     )
+    env.pageserver.allowed_errors.append(
+        f".*extend_lru_candidates.*Tenant {broken_tenant_id} is not active. Current state: Broken"
+    )
 
     timelines = []
 
