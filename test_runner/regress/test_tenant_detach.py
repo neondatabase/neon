@@ -264,8 +264,10 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     with pytest.raises(
         expected_exception=PageserverApiException,
         match=f"NotFound: tenant {tenant_id}",
-    ):
+    ) as excinfo:
         pageserver_http.tenant_detach(tenant_id)
+
+    assert excinfo.value.status_code == 404
 
     # the error will be printed to the log too
     env.pageserver.allowed_errors.append(".*NotFound: tenant *")
@@ -354,9 +356,11 @@ def test_tenant_detach_ignored_tenant(neon_env_builder: NeonEnvBuilder):
 
     # check that nothing is left on disk for deleted tenant
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
-    env.pageserver.allowed_errors.append(".*NotFound: Tenant .* not found")
+
+    # assert the tenant doesn not exists in the Pageserver
+    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
     with pytest.raises(
-        expected_exception=PageserverApiException, match=f"NotFound: Tenant {tenant_id} not found"
+        expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
     ):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 

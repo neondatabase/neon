@@ -1117,7 +1117,9 @@ def neon_env_builder(
 
 
 class PageserverApiException(Exception):
-    pass
+    def __init__(self, message, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class PageserverHttpClient(requests.Session):
@@ -1138,7 +1140,7 @@ class PageserverHttpClient(requests.Session):
                 msg = res.json()["msg"]
             except:  # noqa: E722
                 msg = ""
-            raise PageserverApiException(msg) from e
+            raise PageserverApiException(msg, res.status_code) from e
 
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
