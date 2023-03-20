@@ -697,7 +697,7 @@ impl Drop for TimelineMetrics {
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
         self.evictions_with_low_residence_duration
-            .remove(&tenant_id, &timeline_id);
+            .remove(tenant_id, timeline_id);
         for op in STORAGE_TIME_OPERATIONS {
             let _ =
                 STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
