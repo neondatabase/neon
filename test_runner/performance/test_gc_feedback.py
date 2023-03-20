@@ -38,19 +38,17 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     step_size = 10000
     with pg.cursor() as cur:
         cur.execute("SET statement_timeout='1000s'")
-        cur.execute("CREATE TABLE t(step bigint, count bigint default 0, payload text default repeat(' ', 100))  with (fillfactor=50)")
+        cur.execute(
+            "CREATE TABLE t(step bigint, count bigint default 0, payload text default repeat(' ', 100))  with (fillfactor=50)"
+        )
         cur.execute("CREATE INDEX ON t(step)")
         # In each step, we insert 'step_size' new rows, and update the newly inserted rows
         # 'n_update_iters' times. This creates a lot of churn and generates lots of WAL at the end of the table,
         # without modifying the earlier parts of the table.
         for step in range(n_steps):
-            cur.execute(
-                f"INSERT INTO t (step) SELECT {step} FROM generate_series(1, {step_size})"
-            )
+            cur.execute(f"INSERT INTO t (step) SELECT {step} FROM generate_series(1, {step_size})")
             for i in range(n_update_iters):
-                cur.execute(
-                    f"UPDATE t set count=count+1 where step = {step}"
-                )
+                cur.execute(f"UPDATE t set count=count+1 where step = {step}")
                 cur.execute("vacuum t")
 
             # cur.execute("select pg_table_size('t')")
