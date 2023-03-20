@@ -1021,8 +1021,7 @@ impl Timeline {
             return Ok(false);
         }
 
-        let layer_file_size = local_layer
-            .file_size();
+        let layer_file_size = local_layer.file_size();
 
         let local_layer_mtime = local_layer
             .local_path()
@@ -1955,8 +1954,7 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
-            let layer_file_size = layer
-                .file_size();
+            let layer_file_size = layer.file_size();
             self.metrics
                 .resident_physical_size_gauge
                 .sub(layer_file_size);
