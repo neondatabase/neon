@@ -1,7 +1,6 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::Arc;
 use std::{io, result};
 
 use anyhow::Context;
@@ -11,7 +10,6 @@ use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use utils::{http::error::HttpErrorBody, id::NodeId};
 
-use crate::pageserver::PageServerNode;
 use crate::{
     background_process,
     local_env::{LocalEnv, SafekeeperConf},
@@ -65,14 +63,10 @@ pub struct SafekeeperNode {
     pub env: LocalEnv,
     pub http_client: Client,
     pub http_base_url: String,
-
-    pub pageserver: Arc<PageServerNode>,
 }
 
 impl SafekeeperNode {
     pub fn from_env(env: &LocalEnv, conf: &SafekeeperConf) -> SafekeeperNode {
-        let pageserver = Arc::new(PageServerNode::from_env(env));
-
         SafekeeperNode {
             id: conf.id,
             conf: conf.clone(),
@@ -80,7 +74,6 @@ impl SafekeeperNode {
             env: env.clone(),
             http_client: Client::new(),
             http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
-            pageserver,
         }
     }
 
