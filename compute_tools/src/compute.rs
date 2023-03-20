@@ -18,6 +18,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
@@ -126,7 +127,22 @@ impl ComputeNode {
     fn get_basebackup(&self, lsn: &str) -> Result<()> {
         let start_time = Utc::now();
 
-        let mut client = Client::connect(&self.pageserver_connstr, NoTls)?;
+        let mut config = postgres::Config::from_str(&self.pageserver_connstr)?;
+
+        // Like in the neon extension, if the $NEON_AUTH_TOKEN env variable is
+        // set, use it as the password when connecting to pageserver.
+        //
+        // Note: this overrides any password set in the connection string.
+        match std::env::var("NEON_AUTH_TOKEN") {
+            Ok(val) => {
+                info!("Got pageserver auth token from NEON_AUTH_TOKEN env variable");
+                config.password(val);
+            }
+            Err(std::env::VarError::NotPresent) => info!("NEON_AUTH_TOKEN env variable not set"),
+            Err(e) => info!("could not parse NEON_AUTH_TOKEN env variable: {}", e),
+        };
+
+        let mut client = config.connect(NoTls)?;
         let basebackup_cmd = match lsn {
             "0/0" => format!("basebackup {} {}", &self.tenant, &self.timeline), // First start of the compute
             _ => format!("basebackup {} {} {}", &self.tenant, &self.timeline, lsn),

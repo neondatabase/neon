@@ -510,17 +510,9 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 			Safekeeper *sk = &safekeeper[n_safekeepers];
 			int written = 0;
 
-			if (neon_safekeeper_token != NULL) {
-				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-								   "host=%s port=%s password=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-								   sk->host, sk->port, neon_safekeeper_token, neon_timeline,
-								   neon_tenant);
-			} else {
-				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-								   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-								   sk->host, sk->port, neon_timeline, neon_tenant);
-			}
-
+			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
+							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+							   sk->host, sk->port, neon_timeline, neon_tenant);
 			if (written > MAXCONNINFO || written < 0)
 				elog(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
@@ -696,7 +688,7 @@ ResetConnection(Safekeeper *sk)
 	/*
 	 * Try to establish new connection
 	 */
-	sk->conn = walprop_connect_start((char *) &sk->conninfo);
+	sk->conn = walprop_connect_start((char *) &sk->conninfo, neon_auth_token);
 
 	/*
 	 * "If the result is null, then libpq has been unable to allocate a new

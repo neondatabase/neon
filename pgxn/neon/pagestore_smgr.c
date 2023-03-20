@@ -92,14 +92,6 @@ const int	SmgrTrace = DEBUG5;
 
 page_server_api *page_server;
 
-/* GUCs */
-char	   *page_server_connstring;
-
-/*with substituted password*/
-char	   *neon_timeline;
-char	   *neon_tenant;
-int32		max_cluster_size;
-
 /* unlogged relation build states */
 typedef enum
 {
