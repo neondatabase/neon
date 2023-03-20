@@ -452,10 +452,13 @@ fn base_path() -> PathBuf {
 
 /// Generate a public/private key pair for JWT authentication
 fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow::Result<()> {
+    // Generate the key pair
+    //
+    // openssl genpkey -algorithm ed25519 -out auth_private_key.pem
     let keygen_output = Command::new("openssl")
-        .arg("genrsa")
+        .arg("genpkey")
+        .args(["-algorithm", "ed25519"])
         .args(["-out", private_key_path.to_str().unwrap()])
-        .arg("2048")
         .stdout(Stdio::null())
         .output()
         .context("failed to generate auth private key")?;
@@ -465,12 +468,13 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
             String::from_utf8_lossy(&keygen_output.stderr)
         );
     }
-    // openssl rsa -in private_key.pem -pubout -outform PEM -out public_key.pem
+    // Extract the public key from the private key file
+    //
+    // openssl pkey -in auth_private_key.pem -pubout -out auth_public_key.pem
     let keygen_output = Command::new("openssl")
-        .arg("rsa")
+        .arg("pkey")
         .args(["-in", private_key_path.to_str().unwrap()])
         .arg("-pubout")
-        .args(["-outform", "PEM"])
         .args(["-out", public_key_path.to_str().unwrap()])
         .output()
         .context("failed to extract public key from private key")?;

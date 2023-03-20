@@ -111,7 +111,7 @@ struct Args {
     /// WAL backup horizon.
     #[arg(long)]
     disable_wal_backup: bool,
-    /// Path to an RSA .pem public key which is used to check JWT tokens.
+    /// Path to a .pem public key which is used to check JWT tokens.
     #[arg(long)]
     auth_validation_public_key_path: Option<PathBuf>,
     /// Format for logging, either 'plain' or 'json'.
