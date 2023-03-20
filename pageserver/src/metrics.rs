@@ -200,9 +200,9 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
 //
 // Roughly logarithmic scale.
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
-    0.000025, // 25 usec
+    0.000030, // 30 usec
     0.001000, // 1000 usec
-    0.025,    // 25 ms
+    0.030,    // 30 ms
     1.000,    // 1000 ms
 ];
 
