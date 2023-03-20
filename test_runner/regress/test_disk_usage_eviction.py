@@ -166,7 +166,7 @@ def test_pageserver_evicts_until_pressure_is_relieved(eviction_env: EvictionEnv)
 
     target = total_on_disk // 2
 
-    response = pageserver_http.disk_usage_eviction_run({"wanted_trimmed_bytes": target})
+    response = pageserver_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
     (later_total_on_disk, _, _) = env.timelines_du()
@@ -211,7 +211,7 @@ def test_pageserver_respects_overridden_resident_size(eviction_env: EvictionEnv)
     ps_http.set_tenant_config(large_tenant[0], {"min_resident_size_override": min_resident_size})
 
     # do one run
-    response = ps_http.disk_usage_eviction_run({"wanted_trimmed_bytes": target})
+    response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
     time.sleep(1)  # give log time to flush
@@ -251,7 +251,7 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv):
     (total_on_disk, _, _) = env.timelines_du()
     target = total_on_disk
 
-    response = ps_http.disk_usage_eviction_run({"wanted_trimmed_bytes": target})
+    response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
     (later_total_on_disk, _, _) = env.timelines_du()
@@ -281,7 +281,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
         env.pg_bin.run(["pgbench", "-S" , pg.connstr()])
 
     target = total_on_disk - (tenant_usage//2)
-    response = ps_http.disk_usage_eviction_run({"wanted_trimmed_bytes": target})
+    response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
     (later_total_on_disk, _, _) = env.timelines_du()

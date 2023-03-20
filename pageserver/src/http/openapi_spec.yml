@@ -37,15 +37,15 @@ paths:
             schema:
               type: object
               required:
-                - wanted_trimmed_bytes
+                - evict_bytes
               properties:
-                wanted_trimmed_bytes:
+                evict_bytes:
                   type: integer
       responses:
         "200":
           description: |
             The run completed.
-            This does not necessarily mean that we actually evicted `wanted_trimmed_bytes`.
+            This does not necessarily mean that we actually evicted `evict_bytes`.
             Examine the returned object for detail, or, just watch the actual effect of the call using `du` or `df`.
           content:
             application/json:
