@@ -10,20 +10,14 @@ use pageserver_api::models::state;
 use utils::id::{TenantId, TimelineId};
 
 /// Prometheus histogram buckets (in seconds) that capture the majority of
-/// latencies in the microsecond range but also extend far enough up to distinguish
-/// "bad" from "really bad".
+/// latencies in the microsecond and millisecond range but also extend far
+/// enough up to distinguish "bad" from "really bad".
 fn get_buckets_for_critical_operations() -> Vec<f64> {
-    let buckets_per_digit = 5;
-    let min_exponent = -6;
-    let max_exponent = 2;
-
-    let mut buckets = vec![];
-    // Compute 10^(exp / buckets_per_digit) instead of 10^(1/buckets_per_digit)^exp
-    // because it's more numerically stable and doesn't result in numbers like 9.999999
-    for exp in (min_exponent * buckets_per_digit)..=(max_exponent * buckets_per_digit) {
-        buckets.push(10_f64.powf(exp as f64 / buckets_per_digit as f64))
-    }
-    buckets
+    vec![
+        0.000_001, 0.000_010, 0.000_100, // 1 us, 10 us, 100 us
+        0.001_000, 0.010_000, 0.100_000, // 1 ms, 10 ms, 100 ms
+        1.0, 10.0, 100.0, // 1 s, 10 s, 100 s
+    ]
 }
 
 // Metrics collected on operations on the storage repository.
@@ -196,14 +190,13 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 // Metrics collected on disk IO operations
+//
+// Roughly logarithmic scale.
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
-    0.000001, // 1 usec
-    0.00001,  // 10 usec
-    0.0001,   // 100 usec
-    0.001,    // 1 msec
-    0.01,     // 10 msec
-    0.1,      // 100 msec
-    1.0,      // 1 sec
+    0.000025, // 25 usec
+    0.001000, // 1000 usec
+    0.025,    // 25 ms
+    1.000,    // 1000 ms
 ];
 
 const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
@@ -238,20 +231,12 @@ const SMGR_QUERY_TIME_OPERATIONS: &[&str] = &[
     "get_db_size",
 ];
 
-const SMGR_QUERY_TIME_BUCKETS: &[f64] = &[
-    0.00001, // 1/100000 s
-    0.0001, 0.00015, 0.0002, 0.00025, 0.0003, 0.00035, 0.0005, 0.00075, // 1/10000 s
-    0.001, 0.0025, 0.005, 0.0075, // 1/1000 s
-    0.01, 0.0125, 0.015, 0.025, 0.05, // 1/100 s
-    0.1,  // 1/10 s
-];
-
 pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds",
         "Time spent on smgr query handling",
         &["smgr_query_type", "tenant_id", "timeline_id"],
-        SMGR_QUERY_TIME_BUCKETS.into()
+        get_buckets_for_critical_operations()
     )
     .expect("failed to define a metric")
 });
@@ -366,9 +351,8 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 macro_rules! redo_histogram_time_buckets {
     () => {
         vec![
-            0.000_005, 0.000_010, 0.000_025, 0.000_050, 0.000_100, 0.000_250, 0.000_500, 0.001_000,
-            0.002_500, 0.005_000, 0.010_000, 0.025_000, 0.050_000, 0.100_000, 0.250_000, 0.500_000,
-            1.000_000,
+            0.000_010, 0.000_025, 0.000_100, 0.000_250, 0.001_000, 0.002_500, 0.010_000, 0.025_000,
+            0.100_000, 0.250_000, 1.000_000,
         ]
     };
 }
@@ -385,12 +369,10 @@ macro_rules! redo_histogram_count_buckets {
 
 macro_rules! redo_bytes_histogram_count_buckets {
     () => {
-        // powers of (2^.5), from 2^4.5 to 2^15 (22 buckets)
-        // rounded up to the next multiple of 8 to capture any MAXALIGNed record of that size, too.
-        vec![
-            24.0, 32.0, 48.0, 64.0, 96.0, 128.0, 184.0, 256.0, 368.0, 512.0, 728.0, 1024.0, 1456.0,
-            2048.0, 2904.0, 4096.0, 5800.0, 8192.0, 11592.0, 16384.0, 23176.0, 32768.0,
-        ]
+        // powers of four (7 buckets).
+        //
+        // (keep these as multiples of 8 to capture any MAXALIGNed record of that size, too.)
+        vec![32.0, 128.0, 512.0, 2048.0, 8192.0, 32768.0, 131072.0]
     };
 }
 
