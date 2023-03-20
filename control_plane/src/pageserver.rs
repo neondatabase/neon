@@ -82,15 +82,8 @@ impl PageServerNode {
         let (host, port) = parse_host_port(&env.pageserver.listen_pg_addr)
             .expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
-        let password = if env.pageserver.pg_auth_type == AuthType::NeonJWT {
-            Some(env.pageserver.auth_token.clone())
-        } else {
-            None
-        };
-
         Self {
-            pg_connection_config: PgConnectionConfig::new_host_port(host, port)
-                .set_password(password),
+            pg_connection_config: PgConnectionConfig::new_host_port(host, port),
             env: env.clone(),
             http_client: Client::new(),
             http_base_url: format!("http://{}/v1", env.pageserver.listen_http_addr),
@@ -280,20 +273,30 @@ impl PageServerNode {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
-    pub fn page_server_psql_client(&self) -> result::Result<postgres::Client, postgres::Error> {
-        self.pg_connection_config.connect_no_tls()
+    pub fn page_server_psql_client(&self) -> anyhow::Result<postgres::Client> {
+        let mut config = self.pg_connection_config.clone();
+        if self.env.pageserver.pg_auth_type == AuthType::NeonJWT {
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
+            config = config.set_password(Some(token));
+        }
+        Ok(config.connect_no_tls()?)
     }
 
-    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
+    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> anyhow::Result<RequestBuilder> {
         let mut builder = self.http_client.request(method, url);
         if self.env.pageserver.http_auth_type == AuthType::NeonJWT {
-            builder = builder.bearer_auth(&self.env.pageserver.auth_token)
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
+            builder = builder.bearer_auth(token)
         }
-        builder
+        Ok(builder)
     }
 
     pub fn check_status(&self) -> Result<()> {
-        self.http_request(Method::GET, format!("{}/status", self.http_base_url))
+        self.http_request(Method::GET, format!("{}/status", self.http_base_url))?
             .send()?
             .error_from_body()?;
         Ok(())
@@ -301,7 +304,7 @@ impl PageServerNode {
 
     pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
         Ok(self
-            .http_request(Method::GET, format!("{}/tenant", self.http_base_url))
+            .http_request(Method::GET, format!("{}/tenant", self.http_base_url))?
             .send()?
             .error_from_body()?
             .json()?)
@@ -364,7 +367,7 @@ impl PageServerNode {
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
         }
-        self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))
+        self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))?
             .json(&request)
             .send()?
             .error_from_body()?
@@ -381,7 +384,7 @@ impl PageServerNode {
     }
 
     pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
-        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))
+        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
             .json(&TenantConfigRequest {
                 tenant_id,
                 checkpoint_distance: settings
@@ -444,7 +447,7 @@ impl PageServerNode {
             .http_request(
                 Method::GET,
                 format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
-            )
+            )?
             .send()?
             .error_from_body()?
             .json()?;
@@ -463,7 +466,7 @@ impl PageServerNode {
         self.http_request(
             Method::POST,
             format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
-        )
+        )?
         .json(&TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
@@ -500,7 +503,7 @@ impl PageServerNode {
         pg_wal: Option<(Lsn, PathBuf)>,
         pg_version: u32,
     ) -> anyhow::Result<()> {
-        let mut client = self.pg_connection_config.connect_no_tls().unwrap();
+        let mut client = self.page_server_psql_client()?;
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;
