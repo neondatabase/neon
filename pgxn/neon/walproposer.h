@@ -454,7 +454,7 @@ extern char *walprop_error_message(WalProposerConn *conn);
 extern WalProposerConnStatusType walprop_status(WalProposerConn *conn);
 
 /* Re-exported PQconnectStart */
-extern WalProposerConn * walprop_connect_start(char *conninfo);
+extern WalProposerConn * walprop_connect_start(char *conninfo, char *password);
 
 /* Re-exported PQconectPoll */
 extern WalProposerConnectPollStatusType walprop_connect_poll(WalProposerConn *conn);

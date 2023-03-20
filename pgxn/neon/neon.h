@@ -13,7 +13,7 @@
 #define NEON_H
 
 /* GUCs */
-extern char *neon_safekeeper_token;
+extern char *neon_auth_token;
 extern char *neon_timeline;
 extern char *neon_tenant;
 
