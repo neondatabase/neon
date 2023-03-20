@@ -52,9 +52,7 @@ pub static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 // Buckets for background operations like compaction, GC, size calculation
-const STORAGE_OP_BUCKETS: &[f64] = &[
-    0.010, 0.100, 1.0, 10.0, 100.0, 1000.0
-];
+const STORAGE_OP_BUCKETS: &[f64] = &[0.010, 0.100, 1.0, 10.0, 100.0, 1000.0];
 
 pub static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
