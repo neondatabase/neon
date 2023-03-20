@@ -1175,7 +1175,9 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| RequestSpan(evict_timeline_layer_handler).handle(r),
         )
-        .put("/v1/disk_usage_eviction/run", |r| RequestSpan(disk_usage_eviction_run).handle(r))
+        .put("/v1/disk_usage_eviction/run", |r| {
+            RequestSpan(disk_usage_eviction_run).handle(r)
+        })
         .put(
             "/v1/tenant/:tenant_id/break",
             testing_api!("set tenant state to broken", handle_tenant_break),
