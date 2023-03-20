@@ -197,7 +197,7 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
 
 static EVICTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "pageserver_evictions_count",
+        "pageserver_evictions",
         "Number of layers evicted from the pageserver",
         &["tenant_id", "timeline_id"]
     )
@@ -206,7 +206,7 @@ static EVICTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
 
 static EVICTIONS_WITH_LOW_RESIDENCE_DURATION: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "pageserver_evictions_with_low_residence_duration_count",
+        "pageserver_evictions_with_low_residence_duration",
         "If a layer is evicted that was resident for less than `low_threshold`, it is counted to this counter. \
          Residence duration is determined using the `residence_duration_data_source`.",
         &["tenant_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
