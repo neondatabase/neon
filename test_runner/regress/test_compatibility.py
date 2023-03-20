@@ -365,11 +365,9 @@ def check_neon_works(
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
     pageserver_port = snapshot_config["pageserver"]["listen_http_addr"].split(":")[-1]
-    auth_token = snapshot_config["pageserver"]["auth_token"]
     pageserver_http = PageserverHttpClient(
         port=pageserver_port,
         is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
-        auth_token=auth_token,
     )
 
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
