@@ -2474,6 +2474,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "svg_fmt",
+ "sync_wrapper",
  "tempfile",
  "tenant_size_model",
  "thiserror",

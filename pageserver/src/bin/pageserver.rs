@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
+use pageserver::disk_usage_eviction_task::launch_disk_usage_global_eviction_task;
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
@@ -318,6 +319,10 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
+
+    if let Some(remote_storage) = &remote_storage {
+        launch_disk_usage_global_eviction_task(conf, remote_storage.clone())?;
+    }
 
     // Start up the service to handle HTTP mgmt API request. We created the
     // listener earlier already.

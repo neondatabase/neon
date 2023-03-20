@@ -363,6 +363,11 @@ impl PageServerNode {
                 .map(|x| serde_json::from_str(x))
                 .transpose()
                 .context("Failed to parse 'eviction_policy' json")?,
+            min_resident_size_override: settings
+                .remove("min_resident_size_override")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'min_resident_size_override' as integer")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -435,6 +440,11 @@ impl PageServerNode {
                     .map(|x| serde_json::from_str(x))
                     .transpose()
                     .context("Failed to parse 'eviction_policy' json")?,
+                min_resident_size_override: settings
+                    .get("min_resident_size_override")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'min_resident_size_override' as an integer")?,
             })
             .send()?
             .error_from_body()?;

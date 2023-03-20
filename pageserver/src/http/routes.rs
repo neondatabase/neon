@@ -746,6 +746,8 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         );
     }
 
+    tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
+
     let target_tenant_id = request_data
         .new_tenant_id
         .map(TenantId::from)
@@ -876,6 +878,8 @@ async fn update_tenant_config_handler(
                 .map_err(ApiError::BadRequest)?,
         );
     }
+
+    tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
 
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
@@ -1171,6 +1175,105 @@ pub fn make_router(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| RequestSpan(evict_timeline_layer_handler).handle(r),
         )
+        .put("/v1/disk_usage_eviction/run", disk_usage_eviction_run)
+        .put(
+            "/v1/tenant/:tenant_id/break",
+            testing_api!("set tenant state to broken", handle_tenant_break),
+        )
         .get("/v1/panic", |r| RequestSpan(always_panic_handler).handle(r))
         .any(handler_404))
+}
+
+/// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
+#[cfg(feature = "testing")]
+async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiError> {
+    use std::str::FromStr;
+    let tenant_id = get_request_param(&r, "tenant_id")?;
+    let tenant_id = TenantId::from_str(tenant_id).map_err(|e| ApiError::BadRequest(e.into()))?;
+
+    let tenant = crate::tenant::mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
+
+    tenant.set_broken("broken from test");
+
+    json_response(StatusCode::OK, ())
+}
+
+async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+
+    #[derive(serde::Deserialize)]
+    struct Config {
+        /// How much to trim at minimum
+        wanted_trimmed_bytes: u64,
+    }
+
+    #[derive(Debug, Clone, Copy, serde::Serialize)]
+    struct Usage {
+        wanted_trimmed_bytes: u64,
+        freed_bytes: u64,
+    }
+
+    impl crate::disk_usage_eviction_task::Usage for Usage {
+        fn has_pressure(&self) -> bool {
+            self.wanted_trimmed_bytes > self.freed_bytes
+        }
+
+        fn add_available_bytes(&mut self, bytes: u64) {
+            self.freed_bytes += bytes;
+        }
+    }
+
+    let config = json_request::<Config>(&mut r)
+        .await
+        .map_err(|_| ApiError::BadRequest(anyhow::anyhow!("invalid JSON body")))?;
+
+    let usage = Usage {
+        wanted_trimmed_bytes: config.wanted_trimmed_bytes,
+        freed_bytes: 0,
+    };
+
+    use crate::task_mgr::MGMT_REQUEST_RUNTIME;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    let state = get_state(&r);
+
+    let Some(storage) = state.remote_storage.clone() else {
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "remote storage not configured, cannot run eviction iteration"
+        )))
+    };
+
+    let cancel = CancellationToken::new();
+    let child_cancel = cancel.clone();
+    let _g = cancel.drop_guard();
+
+    crate::task_mgr::spawn(
+        MGMT_REQUEST_RUNTIME.handle(),
+        TaskKind::DiskUsageEviction,
+        None,
+        None,
+        "ondemand disk usage eviction",
+        false,
+        async move {
+            let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
+                &storage,
+                usage,
+                &child_cancel,
+            )
+            .await;
+
+            info!(?res, "disk_usage_eviction_task_iteration_impl finished");
+
+            let _ = tx.send(res);
+            Ok(())
+        }
+        .in_current_span(),
+    );
+
+    let response = rx.await.unwrap().map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, response)
 }

@@ -234,6 +234,9 @@ pub enum TaskKind {
     // Eviction. One per timeline.
     Eviction,
 
+    /// See [`crate::disk_usage_eviction_task`].
+    DiskUsageEviction,
+
     // Initial logical size calculation
     InitialLogicalSizeCalculation,
 

@@ -33,6 +33,7 @@ pub mod pid_file;
 
 // Misc
 pub mod accum;
+pub mod approx_accurate;
 pub mod shutdown;
 
 // Utility for binding TcpListeners with proper socket options.

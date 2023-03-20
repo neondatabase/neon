@@ -121,10 +121,10 @@ struct LayerAccessStatsInner {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct LayerAccessStatFullDetails {
-    pub(super) when: SystemTime,
-    pub(super) task_kind: TaskKind,
-    pub(super) access_kind: LayerAccessKind,
+pub(crate) struct LayerAccessStatFullDetails {
+    pub(crate) when: SystemTime,
+    pub(crate) task_kind: TaskKind,
+    pub(crate) access_kind: LayerAccessKind,
 }
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
@@ -255,7 +255,7 @@ impl LayerAccessStats {
         ret
     }
 
-    pub(super) fn most_recent_access_or_residence_event(
+    fn most_recent_access_or_residence_event(
         &self,
     ) -> Either<LayerAccessStatFullDetails, LayerResidenceEvent> {
         let locked = self.0.lock().unwrap();
@@ -266,6 +266,13 @@ impl LayerAccessStats {
                 Some(e) => Either::Right(e.clone()),
                 None => unreachable!("constructors for LayerAccessStats ensure that there's always a residence change event"),
             }
+        }
+    }
+
+    pub(crate) fn latest_activity(&self) -> SystemTime {
+        match self.most_recent_access_or_residence_event() {
+            Either::Left(mra) => mra.when,
+            Either::Right(re) => re.timestamp,
         }
     }
 }

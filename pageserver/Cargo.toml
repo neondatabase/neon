@@ -48,6 +48,7 @@ serde_json = { workspace = true, features = ["raw_value"] }
 serde_with.workspace = true
 signal-hook.workspace = true
 svg_fmt.workspace = true
+sync_wrapper.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }

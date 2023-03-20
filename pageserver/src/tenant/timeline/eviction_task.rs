@@ -6,7 +6,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use either::Either;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
@@ -126,13 +125,7 @@ impl Timeline {
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
-                let last_activity_ts = match hist_layer
-                    .access_stats()
-                    .most_recent_access_or_residence_event()
-                {
-                    Either::Left(mra) => mra.when,
-                    Either::Right(re) => re.timestamp,
-                };
+                let last_activity_ts = hist_layer.access_stats().latest_activity();
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
                     Err(_e) => {
