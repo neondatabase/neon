@@ -536,10 +536,6 @@ pg_init_libpagestore(void)
 	/* substitute password in pageserver_connstring */
 	page_server_connstring = substitute_pageserver_password(page_server_connstring_raw);
 
-	/* Is there more correct way to pass CustomGUC to postgres code? */
-	neon_timeline_walproposer = neon_timeline;
-	neon_tenant_walproposer = neon_tenant;
-
 	/* retrieve the token for Safekeeper, if present */
 	if (safekeeper_token_env != NULL) {
 		if (safekeeper_token_env[0] != '$') {
@@ -548,8 +544,8 @@ pg_init_libpagestore(void)
 							errmsg("expected safekeeper auth token environment variable's name starting with $ but found: %s",
 								   safekeeper_token_env)));
 		}
-		neon_safekeeper_token_walproposer = getenv(&safekeeper_token_env[1]);
-		if (!neon_safekeeper_token_walproposer) {
+		neon_safekeeper_token = getenv(&safekeeper_token_env[1]);
+		if (!neon_safekeeper_token) {
 			ereport(ERROR,
 					(errcode(ERRCODE_CONNECTION_EXCEPTION),
 							errmsg("cannot get safekeeper auth token, environment variable %s is not set",
