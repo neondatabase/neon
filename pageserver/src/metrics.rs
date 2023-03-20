@@ -214,6 +214,74 @@ static EVICTIONS_WITH_LOW_RESIDENCE_DURATION: Lazy<IntCounterVec> = Lazy::new(||
     .expect("failed to define a metric")
 });
 
+/// Each [`Timeline`]'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
+#[derive(Debug)]
+pub struct EvictionsWithLowResidenceDuration {
+    data_source: &'static str,
+    threshold: Duration,
+    counter: Option<IntCounter>,
+}
+
+pub struct EvictionsWithLowResidenceDurationBuilder {
+    data_source: &'static str,
+    threshold: Duration,
+}
+
+impl EvictionsWithLowResidenceDurationBuilder {
+    pub fn new(data_source: &'static str, threshold: Duration) -> Self {
+        Self {
+            data_source,
+            threshold,
+        }
+    }
+
+    fn build(&self, tenant_id: &str, timeline_id: &str) -> EvictionsWithLowResidenceDuration {
+        let counter = EVICTIONS_WITH_LOW_RESIDENCE_DURATION
+            .get_metric_with_label_values(&[
+                tenant_id,
+                timeline_id,
+                self.data_source,
+                &EvictionsWithLowResidenceDuration::threshold_label_value(self.threshold),
+            ])
+            .unwrap();
+        EvictionsWithLowResidenceDuration {
+            data_source: self.data_source,
+            threshold: self.threshold,
+            counter: Some(counter),
+        }
+    }
+}
+
+impl EvictionsWithLowResidenceDuration {
+    fn threshold_label_value(threshold: Duration) -> String {
+        format!("{}", threshold.as_secs())
+    }
+
+    pub fn observe(&self, observed_value: Duration) {
+        if self.threshold < observed_value {
+            self.counter
+                .as_ref()
+                .expect("nobody calls this function after `remove_from_vec`")
+                .inc();
+        }
+    }
+
+    // This could be a `Drop` impl, but, we need the `tenant_id` and `timeline_id`.
+    fn remove(&mut self, tenant_id: &str, timeline_id: &str) {
+        let Some(_counter) = self.counter.take() else {
+            return;
+        };
+        EVICTIONS_WITH_LOW_RESIDENCE_DURATION
+            .remove_label_values(&[
+                tenant_id,
+                timeline_id,
+                self.data_source,
+                &Self::threshold_label_value(self.threshold),
+            ])
+            .expect("we own the metric, no-one else should remove it");
+    }
+}
+
 // Metrics collected on disk IO operations
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     0.000001, // 1 usec
@@ -539,20 +607,15 @@ pub struct TimelineMetrics {
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
-
-    // these 4 belong together
     pub evictions: IntCounter,
-    evictions_with_low_residence_duration_data_source: &'static str,
-    evictions_with_low_residence_duration_threshold: Duration,
-    pub evictions_with_low_residence_duration: IntCounter,
+    pub evictions_with_low_residence_duration: EvictionsWithLowResidenceDuration,
 }
 
 impl TimelineMetrics {
     pub fn new(
         tenant_id: &TenantId,
         timeline_id: &TimelineId,
-        evictions_with_low_residence_duration_data_source: &'static str,
-        evictions_with_low_residence_duration_threshold: Duration,
+        evictions_with_low_residence_duration_builder: EvictionsWithLowResidenceDurationBuilder,
     ) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
@@ -593,16 +656,8 @@ impl TimelineMetrics {
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let evictions_with_low_residence_duration = EVICTIONS_WITH_LOW_RESIDENCE_DURATION
-            .get_metric_with_label_values(&[
-                &tenant_id,
-                &timeline_id,
-                evictions_with_low_residence_duration_data_source,
-                &Self::evictions_with_low_residence_duration_threshold_label_value(
-                    evictions_with_low_residence_duration_threshold,
-                ),
-            ])
-            .unwrap();
+        let evictions_with_low_residence_duration =
+            evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
         TimelineMetrics {
             tenant_id,
@@ -623,14 +678,8 @@ impl TimelineMetrics {
             num_persistent_files_created,
             persistent_bytes_written,
             evictions,
-            evictions_with_low_residence_duration_data_source,
-            evictions_with_low_residence_duration_threshold,
             evictions_with_low_residence_duration,
         }
-    }
-
-    fn evictions_with_low_residence_duration_threshold_label_value(threshold: Duration) -> String {
-        format!("{}", threshold.as_secs())
     }
 }
 
@@ -647,14 +696,8 @@ impl Drop for TimelineMetrics {
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = EVICTIONS_WITH_LOW_RESIDENCE_DURATION.remove_label_values(&[
-            tenant_id,
-            timeline_id,
-            self.evictions_with_low_residence_duration_data_source,
-            &Self::evictions_with_low_residence_duration_threshold_label_value(
-                self.evictions_with_low_residence_duration_threshold,
-            ),
-        ]);
+        self.evictions_with_low_residence_duration
+            .remove(&tenant_id, &timeline_id);
         for op in STORAGE_TIME_OPERATIONS {
             let _ =
                 STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);

@@ -1112,9 +1112,9 @@ impl Timeline {
                 self.metrics.evictions.inc();
 
                 if let Some(delta) = local_layer_residence_duration {
-                    if delta < self.conf.evictions_low_residence_duration_metric_threshold {
-                        self.metrics.evictions_with_low_residence_duration.inc();
-                    }
+                    self.metrics
+                        .evictions_with_low_residence_duration
+                        .observe(delta);
                 }
 
                 true
@@ -1235,8 +1235,10 @@ impl Timeline {
                 metrics: TimelineMetrics::new(
                     &tenant_id,
                     &timeline_id,
-                    "mtime",
-                    conf.evictions_low_residence_duration_metric_threshold,
+                    crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
+                        "mtime",
+                        conf.evictions_low_residence_duration_metric_threshold,
+                    ),
                 ),
 
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
