@@ -64,7 +64,6 @@ pub(super) async fn upload_timeline_layer<'a>(
         })?
         .len();
 
-    // FIXME: this looks bad
     let metadata_size = known_metadata.file_size();
     if metadata_size != fs_size {
         bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
