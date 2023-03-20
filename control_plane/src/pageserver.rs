@@ -280,13 +280,6 @@ impl PageServerNode {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
-    pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
-        let mut client = self.pg_connection_config.connect_no_tls().unwrap();
-
-        println!("Pageserver query: '{sql}'");
-        client.simple_query(sql).unwrap()
-    }
-
     pub fn page_server_psql_client(&self) -> result::Result<postgres::Client, postgres::Error> {
         self.pg_connection_config.connect_no_tls()
     }
