@@ -118,8 +118,6 @@ pub async fn download_layer_file<'a>(
         return Err(DownloadError::Other(anyhow!(
             "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {temp_file_path:?}",
         )));
-    } else {
-        // matches, or upgrading from an earlier IndexPart version
     }
 
     // not using sync_data because it can lose file size update

@@ -38,22 +38,6 @@ impl LayerFileMetadata {
     pub fn file_size(&self) -> u64 {
         self.file_size
     }
-
-    /// Metadata has holes due to version upgrades. This method is called to upgrade self with the
-    /// other value.
-    ///
-    /// This is called on the possibly outdated version. Returns true if any changes
-    /// were made.
-    pub fn merge(&mut self, other: &Self) -> bool {
-        let mut changed = false;
-
-        if self.file_size != other.file_size {
-            self.file_size = other.file_size;
-            changed = true;
-        }
-
-        changed
-    }
 }
 
 /// In-memory representation of an `index_part.json` file
