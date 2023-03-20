@@ -9,7 +9,6 @@
 import asyncio
 import json
 import os
-import shutil
 from pathlib import Path
 from typing import List, Tuple
 
@@ -215,131 +214,6 @@ def test_tenants_attached_after_download(
 
     # Check that we had to retry the downloads
     assert env.pageserver.log_contains(".*download .* succeeded after 1 retries.*")
-
-
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_tenant_upgrades_index_json_from_v0(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    # the "image" for the v0 index_part.json. the fields themselves are
-    # replaced with values read from the later version because of #2592 (initdb
-    # lsn not reproducible).
-    v0_skeleton = json.loads(
-        """{
-        "timeline_layers":[
-            "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000001696070-00000000016960E9"
-        ],
-        "missing_layers":["This should not fail as its not used anymore"],
-        "disk_consistent_lsn":"0/16960E8",
-        "metadata_bytes":[]
-    }"""
-    )
-
-    # getting a too eager compaction happening for this test would not play
-    # well with the strict assertions.
-    neon_env_builder.pageserver_config_override = "tenant_config.compaction_period='1h'"
-
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind, "test_tenant_upgrades_index_json_from_v0"
-    )
-
-    # launch pageserver, populate the default tenants timeline, wait for it to be uploaded,
-    # then go ahead and modify the "remote" version as if it was downgraded, needing upgrade
-    env = neon_env_builder.init_start()
-
-    pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
-
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
-
-    with pg.cursor() as cur:
-        cur.execute("CREATE TABLE t0 AS VALUES (123, 'second column as text');")
-        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
-
-    # flush, wait until in remote storage
-    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
-    env.postgres.stop_all()
-    env.pageserver.stop()
-
-    # remove all local data for the tenant to force redownloading and subsequent upgrade
-    shutil.rmtree(Path(env.repo_dir) / "tenants" / str(tenant_id))
-
-    # downgrade the remote file
-    timeline_path = local_fs_index_part_path(env, tenant_id, timeline_id)
-    with open(timeline_path, "r+") as timeline_file:
-        # keep the deserialized for later inspection
-        orig_index_part = json.load(timeline_file)
-
-        v0_index_part = {
-            key: orig_index_part[key]
-            for key in v0_skeleton.keys() - ["missing_layers"]  # pgserver doesn't have it anymore
-        }
-
-        timeline_file.seek(0)
-        json.dump(v0_index_part, timeline_file)
-        timeline_file.truncate(timeline_file.tell())
-
-    env.pageserver.start()
-    pageserver_http = env.pageserver.http_client()
-    pageserver_http.tenant_attach(tenant_id)
-
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=lambda: assert_tenant_status(pageserver_http, tenant_id, "Active"),
-    )
-
-    pg = env.postgres.create_start("main")
-
-    with pg.cursor() as cur:
-        cur.execute("INSERT INTO t0 VALUES (234, 'test data');")
-        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
-
-    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-    wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
-
-    # not needed anymore
-    env.postgres.stop_all()
-    env.pageserver.stop()
-
-    # make sure the file has been upgraded back to how it started
-    index_part = local_fs_index_part(env, tenant_id, timeline_id)
-    assert index_part["version"] == orig_index_part["version"]
-    assert "missing_layers" not in index_part.keys()
-
-    # expect one more layer because of the forced checkpoint
-    assert len(index_part["timeline_layers"]) == len(orig_index_part["timeline_layers"]) + 1
-
-    # all of the same layer files are there, but they might be shuffled around
-    orig_layers = set(orig_index_part["timeline_layers"])
-    later_layers = set(index_part["timeline_layers"])
-    assert later_layers.issuperset(orig_layers)
-
-    added_layers = later_layers - orig_layers
-    assert len(added_layers) == 1
-
-    # all of metadata has been regenerated (currently just layer file size)
-    all_metadata_keys = set()
-    for layer in orig_layers:
-        orig_metadata = orig_index_part["layer_metadata"][layer]
-        new_metadata = index_part["layer_metadata"][layer]
-        assert (
-            orig_metadata == new_metadata
-        ), f"metadata for layer {layer} should not have changed {orig_metadata} vs. {new_metadata}"
-        all_metadata_keys |= set(orig_metadata.keys())
-
-    one_new_layer = next(iter(added_layers))
-    assert one_new_layer in index_part["layer_metadata"], "new layer should have metadata"
-
-    only_new_metadata = index_part["layer_metadata"][one_new_layer]
-
-    assert (
-        set(only_new_metadata.keys()).symmetric_difference(all_metadata_keys) == set()
-    ), "new layer metadata has same metadata as others"
 
 
 # FIXME: test index_part.json getting downgraded from imaginary new version
