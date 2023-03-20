@@ -29,15 +29,22 @@ These components should not have access to the private key and may only get toke
 The key pair is generated once for an installation of compute/pageserver/safekeeper, e.g. by `neon_local init`.
 There is currently no way to rotate the key without bringing down all components.
 
+### Best practices
+
+See [RFC 8725: JSON Web Token Best Current Practices](https://www.rfc-editor.org/rfc/rfc8725)
+
+
 ### Token format
 
-The JWT tokens in Neon use RSA as the algorithm. Example:
+The JWT tokens in Neon use "EdDSA" as the algorithm (defined in [RFC8037](https://www.rfc-editor.org/rfc/rfc8037)).
+
+Example:
 
 Header:
 
 ```
 {
-  "alg": "RS512",     # RS256, RS384, or RS512
+  "alg": "EdDSA",
   "typ": "JWT"
 }
 ```
@@ -68,8 +75,8 @@ Currently also used for connection from any pageserver to any safekeeper.
 CLI generates a key pair during call to `neon_local init` with the following commands:
 
 ```bash
-openssl genrsa -out auth_private_key.pem 2048
-openssl rsa -in auth_private_key.pem -pubout -outform PEM -out auth_public_key.pem
+openssl genpkey -algorithm ed25519 -out auth_private_key.pem
+openssl pkey -in auth_private_key.pem -pubout -out auth_public_key.pem
 ```
 
 Configuration files for all components point to `public_key.pem` for JWT validation.

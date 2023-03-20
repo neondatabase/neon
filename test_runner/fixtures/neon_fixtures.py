@@ -431,7 +431,7 @@ class AuthKeys:
     priv: str
 
     def generate_token(self, *, scope: str, **token_data: str) -> str:
-        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="RS256")
+        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
         # cast(Any, self.priv)
 
         # jwt.encode can return 'bytes' or 'str', depending on Python version or type
