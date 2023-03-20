@@ -9,16 +9,18 @@ use once_cell::sync::Lazy;
 use pageserver_api::models::state;
 use utils::id::{TenantId, TimelineId};
 
-/// Prometheus histogram buckets (in seconds) that capture the majority of
-/// latencies in the microsecond and millisecond range but also extend far
-/// enough up to distinguish "bad" from "really bad".
-fn get_buckets_for_critical_operations() -> Vec<f64> {
-    vec![
-        0.000_001, 0.000_010, 0.000_100, // 1 us, 10 us, 100 us
-        0.001_000, 0.010_000, 0.100_000, // 1 ms, 10 ms, 100 ms
-        1.0, 10.0, 100.0, // 1 s, 10 s, 100 s
-    ]
-}
+/// Prometheus histogram buckets (in seconds) for operations in the critical
+/// path. In other words, operations that directly affect that latency of user
+/// queries.
+///
+/// The buckets capture the majority of latencies in the microsecond and
+/// millisecond range but also extend far enough up to distinguish "bad" from
+/// "really bad".
+const CRITICAL_OP_BUCKETS: &[f64] = &[
+    0.000_001, 0.000_010, 0.000_100, // 1 us, 10 us, 100 us
+    0.001_000, 0.010_000, 0.100_000, // 1 ms, 10 ms, 100 ms
+    1.0, 10.0, 100.0, // 1 s, 10 s, 100 s
+];
 
 // Metrics collected on operations on the storage repository.
 const STORAGE_TIME_OPERATIONS: &[&str] = &[
@@ -49,12 +51,17 @@ pub static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+// Buckets for background operations like compaction, GC, size calculation
+const STORAGE_OP_BUCKETS: &[f64] = &[
+    0.010, 0.100, 1.0, 10.0, 100.0, 1000.0
+];
+
 pub static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_storage_operations_seconds_global",
         "Time spent on storage operations",
         &["operation"],
-        get_buckets_for_critical_operations(),
+        STORAGE_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -65,7 +72,7 @@ static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value",
         &["tenant_id", "timeline_id"],
-        get_buckets_for_critical_operations(),
+        CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -84,7 +91,7 @@ static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
         &["tenant_id", "timeline_id"],
-        get_buckets_for_critical_operations(),
+        CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -236,7 +243,7 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
         "pageserver_smgr_query_seconds",
         "Time spent on smgr query handling",
         &["smgr_query_type", "tenant_id", "timeline_id"],
-        get_buckets_for_critical_operations()
+        CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
