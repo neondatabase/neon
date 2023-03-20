@@ -1203,7 +1203,7 @@ async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiErro
 async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&r, None)?;
 
-    #[derive(serde::Deserialize)]
+    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
     struct Config {
         /// How many bytes to evict before reporting that pressure is relieved.
         evict_bytes: u64,
@@ -1211,13 +1211,15 @@ async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>,
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
     struct Usage {
-        evict_bytes: u64,
+        // remains unchanged after instantiation of the struct
+        config: Config,
+        // updated by `add_available_bytes`
         freed_bytes: u64,
     }
 
     impl crate::disk_usage_eviction_task::Usage for Usage {
         fn has_pressure(&self) -> bool {
-            self.evict_bytes > self.freed_bytes
+            self.config.evict_bytes > self.freed_bytes
         }
 
         fn add_available_bytes(&mut self, bytes: u64) {
@@ -1230,7 +1232,7 @@ async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>,
         .map_err(|_| ApiError::BadRequest(anyhow::anyhow!("invalid JSON body")))?;
 
     let usage = Usage {
-        evict_bytes: config.evict_bytes,
+        config,
         freed_bytes: 0,
     };
 
