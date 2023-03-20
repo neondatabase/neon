@@ -144,7 +144,7 @@ impl KeySpaceAccum {
 
 ///
 /// A helper object, to collect a set of keys and key ranges into a KeySpace
-/// object. Key ranages may be inserted in any order and can overlap.
+/// object. Key ranges may be inserted in any order and can overlap.
 ///
 #[derive(Clone, Debug, Default)]
 pub struct KeySpaceRandomAccum {
