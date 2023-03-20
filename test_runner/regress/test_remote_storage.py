@@ -6,7 +6,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Tuple
 
 import pytest
 from fixtures.log_helper import log
@@ -715,50 +715,6 @@ def test_empty_branch_remote_storage_upload_on_restart(
     assert (
         new_branch_on_remote_storage.is_dir()
     ), f"New branch should have been reuploaded on pageserver restart to the remote storage path '{new_branch_on_remote_storage}'"
-
-
-# Test creates >1000 timelines and upload them to the remote storage.
-# AWS S3 does not return more than 1000 items and starts paginating, ensure that pageserver paginates correctly.
-@pytest.mark.skip("Too slow to run, requires too much disk space to run")
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
-def test_thousands_of_branches(
-        neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_compaction_downloads_on_demand_without_image_creation",
-    )
-
-    env = neon_env_builder.init_start()
-    client = env.pageserver.http_client()
-    expected_timelines: Set[TimelineId] = set([])
-    tenant_id = env.initial_tenant
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-
-    max_timelines = 1500
-    for i in range(0, max_timelines):
-        new_timeline_id = TimelineId.generate()
-        log.info(f"Creating timeline {new_timeline_id}, {i + 1} out of {max_timelines}")
-        expected_timelines.add(new_timeline_id)
-
-        client.timeline_create(tenant_id, new_timeline_id=new_timeline_id)
-        client.timeline_checkpoint(tenant_id, new_timeline_id)
-        wait_for_last_flush_lsn(env, pg, tenant_id, new_timeline_id)
-        with pg.cursor() as cur:
-            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
-        wait_for_upload(client, tenant_id, new_timeline_id, current_lsn)
-
-    client.tenant_detach(tenant_id=tenant_id)
-    client.tenant_attach(tenant_id=tenant_id)
-
-    timelines_after_reattach = set(
-        [timeline["timeline_id"] for timeline in client.timeline_list(tenant_id=tenant_id)]
-    )
-
-    assert (
-            expected_timelines == timelines_after_reattach
-    ), f"Timelines after reattach do not match the ones created initially. \
-        Missing timelines: {expected_timelines - timelines_after_reattach}, extra timelines: {timelines_after_reattach - expected_timelines}"
 
 
 def wait_upload_queue_empty(
