@@ -1546,6 +1546,10 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
         return res.json()
 
+    def tenant_break(self, tenant_id: TenantId):
+        res = self.put(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/break")
+        self.verbose_error(res)
+
 
 @dataclass
 class TenantConfig:

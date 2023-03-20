@@ -101,10 +101,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> It
     # break the difficult to use initial default tenant, later assert that it has not been evicted
     broken_tenant_id, broken_timeline_id = (env.initial_tenant, env.initial_timeline)
     assert broken_timeline_id is not None
-    res = pageserver_http.put(
-        f"http://localhost:{pageserver_http.port}/v1/tenant/{env.initial_tenant}/break"
-    )
-    pageserver_http.verbose_error(res)
+    pageserver_http.tenant_break(env.initial_tenant)
     (broken_on_disk_before, _, _) = poor_mans_du(
         env, timelines=[(broken_tenant_id, broken_timeline_id)]
     )
