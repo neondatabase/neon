@@ -862,7 +862,7 @@ impl Timeline {
             // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
             // we want to stay below that with a big margin.  The LSN distance determines how
             // much WAL the safekeepers need to store.
-            if distance >= self.get_checkpoint_distance().into()
+            if distance >= i128::from(self.get_checkpoint_distance())
                 || open_layer_size > self.get_checkpoint_distance()
                 || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
             {

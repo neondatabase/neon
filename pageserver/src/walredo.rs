@@ -883,7 +883,7 @@ impl PostgresRedoManager {
             // into this buffer.
             let mut resultbuf = vec![0; BLCKSZ.into()];
             let mut nresult: usize = 0; // # of bytes read into 'resultbuf' so far
-            while nresult < BLCKSZ.into() {
+            while nresult < usize::from(BLCKSZ) {
                 // We do two things simultaneously: reading response from stdout
                 // and forward any logging information that the child writes to its stderr to the page server's log.
                 let n = loop {
