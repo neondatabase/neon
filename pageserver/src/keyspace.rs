@@ -296,7 +296,6 @@ mod tests {
         //
         // #####   #####
         //    #######
-        println!("joins");
         let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(0..10));
         ks.add_range(kr(20..30));
