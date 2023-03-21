@@ -2923,13 +2923,9 @@ impl Timeline {
                 //
                 // gc_timeline only pays attention to image layers that are older than the GC cutoff,
                 // but create_image_layers creates image layers at last-record-lsn.
-                // So it's possible that gc_timeline decides that it wants new image layer to be created for a key range,
-                // and on next compaction create_image_layers creates the image layer.
-                // But on next GC cycle, gc_timeline still wants the new image layer to be created,
-                // because the newly created image layer doesn't help to remove the delta layer,
-                // until the newly created image layer falls off the PITR horizon.
-                //
-                // So we should check if image layer beyond cutoff LSN already exists.
+                // So it's possible that gc_timeline wants a new image layer to be created for a key range,
+                // but the range is already covered by image layers at more recent LSNs. Before we
+                // create a new image layer, check if the range is already covered at more recent LSNs.
                 if !layers.image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))? {
                     debug!(
                         "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
