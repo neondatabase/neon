@@ -1051,6 +1051,22 @@ impl Timeline {
             .file_size()
             .expect("Local layer should have a file size");
 
+        let local_layer_mtime = local_layer
+            .local_path()
+            .expect("local layer should have a local path")
+            .metadata()
+            .context("get local layer file stat")?
+            .modified()
+            .context("get mtime of layer file")?;
+        let local_layer_residence_duration =
+            match SystemTime::now().duration_since(local_layer_mtime) {
+                Err(e) => {
+                    warn!("layer mtime is in the future: {}", e);
+                    None
+                }
+                Ok(delta) => Some(delta),
+            };
+
         let layer_metadata = LayerFileMetadata::new(layer_file_size);
 
         let new_remote_layer = Arc::new(match local_layer.filename() {
@@ -1092,6 +1108,14 @@ impl Timeline {
                 self.metrics
                     .resident_physical_size_gauge
                     .sub(layer_file_size);
+
+                self.metrics.evictions.inc();
+
+                if let Some(delta) = local_layer_residence_duration {
+                    self.metrics
+                        .evictions_with_low_residence_duration
+                        .observe(delta);
+                }
 
                 true
             }
@@ -1208,7 +1232,14 @@ impl Timeline {
                 ancestor_timeline: ancestor,
                 ancestor_lsn: metadata.ancestor_lsn(),
 
-                metrics: TimelineMetrics::new(&tenant_id, &timeline_id),
+                metrics: TimelineMetrics::new(
+                    &tenant_id,
+                    &timeline_id,
+                    crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
+                        "mtime",
+                        conf.evictions_low_residence_duration_metric_threshold,
+                    ),
+                ),
 
                 flush_loop_state: Mutex::new(FlushLoopState::NotStarted),
 
@@ -1335,6 +1366,7 @@ impl Timeline {
             lagging_wal_timeout,
             max_lsn_wal_lag,
             crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
+            self.conf.availability_zone.clone(),
             background_ctx,
         );
     }
@@ -2715,10 +2747,22 @@ impl Timeline {
     ) -> Result<HashMap<LayerFileName, LayerFileMetadata>, PageReconstructError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
+
+        // We need to avoid holes between generated image layers.
+        // Otherwise LayerMap::image_layer_exists will return false if key range of some layer is covered by more than one
+        // image layer with hole between them. In this case such layer can not be utilized by GC.
+        //
+        // How such hole between partitions can appear?
+        // if we have relation with relid=1 and size 100 and relation with relid=2 with size 200 then result of
+        // KeySpace::partition may contain partitions <100000000..100000099> and <200000000..200000199>.
+        // If there is delta layer <100000000..300000000> then it never be garbage collected because
+        // image layers  <100000000..100000099> and <200000000..200000199> are not completely covering it.
+        let mut start = Key::MIN;
+
         for partition in partitioning.parts.iter() {
+            let img_range = start..partition.ranges.last().unwrap().end;
+            start = img_range.end;
             if force || self.time_for_new_image_layer(partition, lsn)? {
-                let img_range =
-                    partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
@@ -2732,7 +2776,6 @@ impl Timeline {
                         "failpoint image-layer-writer-fail-before-finish"
                     )))
                 });
-
                 for range in &partition.ranges {
                     let mut key = range.start;
                     while key < range.end {
@@ -3147,9 +3190,7 @@ impl Timeline {
             }
 
             fail_point!("delta-layer-writer-fail-before-finish", |_| {
-                return Err(
-                    anyhow::anyhow!("failpoint delta-layer-writer-fail-before-finish").into(),
-                );
+                Err(anyhow::anyhow!("failpoint delta-layer-writer-fail-before-finish").into())
             });
 
             writer.as_mut().unwrap().put_value(key, lsn, value)?;

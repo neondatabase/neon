@@ -9,6 +9,7 @@ use tracing::{info, info_span, Instrument};
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
+use crate::metrics::TrafficMetrics;
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::QueryError;
@@ -33,6 +34,7 @@ pub struct SafekeeperPostgresHandler {
     /// Unique connection id is logged in spans for observability.
     pub conn_id: ConnectionId,
     claims: Option<Claims>,
+    io_metrics: Option<TrafficMetrics>,
 }
 
 /// Parsed Postgres command.
@@ -94,6 +96,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
                                 format!("Failed to parse {value} as timeline id")
                             })?);
                         }
+                        Some(("availability_zone", client_az)) => {
+                            if let Some(metrics) = self.io_metrics.as_ref() {
+                                metrics.set_client_az(client_az)
+                            }
+                        }
                         _ => continue,
                     }
                 }
@@ -101,6 +108,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
 
             if let Some(app_name) = params.get("application_name") {
                 self.appname = Some(app_name.to_owned());
+                if let Some(metrics) = self.io_metrics.as_ref() {
+                    metrics.set_app_name(app_name)
+                }
             }
 
             Ok(())
@@ -187,7 +197,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
 }
 
 impl SafekeeperPostgresHandler {
-    pub fn new(conf: SafeKeeperConf, conn_id: u32) -> Self {
+    pub fn new(conf: SafeKeeperConf, conn_id: u32, io_metrics: Option<TrafficMetrics>) -> Self {
         SafekeeperPostgresHandler {
             conf,
             appname: None,
@@ -196,6 +206,7 @@ impl SafekeeperPostgresHandler {
             ttid: TenantTimelineId::empty(),
             conn_id,
             claims: None,
+            io_metrics,
         }
     }
 

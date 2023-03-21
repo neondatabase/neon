@@ -61,6 +61,7 @@ pub mod defaults {
     pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "1 hour";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
+    pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 
     ///
     /// Default built-in configuration file.
@@ -88,6 +89,8 @@ pub mod defaults {
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
 #cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
 #synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
+
+#evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -118,6 +121,9 @@ pub struct PageServerConf {
     /// Example (default): 127.0.0.1:9898
     pub listen_http_addr: String,
 
+    /// Current availability zone. Used for traffic metrics.
+    pub availability_zone: Option<String>,
+
     // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
     pub wait_lsn_timeout: Duration,
     // How long to wait for WAL redo to complete.
@@ -138,9 +144,15 @@ pub struct PageServerConf {
 
     pub pg_distrib_dir: PathBuf,
 
-    pub auth_type: AuthType,
-
+    // Authentication
+    /// authentication method for the HTTP mgmt API
+    pub http_auth_type: AuthType,
+    /// authentication method for libpq connections from compute
+    pub pg_auth_type: AuthType,
+    /// Path to a file containing public key for verifying JWT tokens.
+    /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<PathBuf>,
+
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
     pub default_tenant_conf: TenantConf,
@@ -160,6 +172,9 @@ pub struct PageServerConf {
     pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
     pub synthetic_size_calculation_interval: Duration,
+
+    // See the corresponding metric's help string.
+    pub evictions_low_residence_duration_metric_threshold: Duration,
 
     pub test_remote_failures: u64,
 
@@ -196,6 +211,8 @@ struct PageServerConfigBuilder {
 
     listen_http_addr: BuilderValue<String>,
 
+    availability_zone: BuilderValue<Option<String>>,
+
     wait_lsn_timeout: BuilderValue<Duration>,
     wal_redo_timeout: BuilderValue<Duration>,
 
@@ -208,7 +225,8 @@ struct PageServerConfigBuilder {
 
     pg_distrib_dir: BuilderValue<PathBuf>,
 
-    auth_type: BuilderValue<AuthType>,
+    http_auth_type: BuilderValue<AuthType>,
+    pg_auth_type: BuilderValue<AuthType>,
 
     //
     auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
@@ -228,6 +246,8 @@ struct PageServerConfigBuilder {
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
 
+    evictions_low_residence_duration_metric_threshold: BuilderValue<Duration>,
+
     test_remote_failures: BuilderValue<u64>,
 
     ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
@@ -240,6 +260,7 @@ impl Default for PageServerConfigBuilder {
         Self {
             listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
+            availability_zone: Set(None),
             wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
             wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
@@ -251,7 +272,8 @@ impl Default for PageServerConfigBuilder {
             pg_distrib_dir: Set(env::current_dir()
                 .expect("cannot access current directory")
                 .join("pg_install")),
-            auth_type: Set(AuthType::Trust),
+            http_auth_type: Set(AuthType::Trust),
+            pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
             id: NotSet,
@@ -279,6 +301,11 @@ impl Default for PageServerConfigBuilder {
             .expect("cannot parse default synthetic size calculation interval")),
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
 
+            evictions_low_residence_duration_metric_threshold: Set(humantime::parse_duration(
+                DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
+            )
+            .expect("cannot parse DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD")),
+
             test_remote_failures: Set(0),
 
             ondemand_download_behavior_treat_error_as_warn: Set(false),
@@ -293,6 +320,10 @@ impl PageServerConfigBuilder {
 
     pub fn listen_http_addr(&mut self, listen_http_addr: String) {
         self.listen_http_addr = BuilderValue::Set(listen_http_addr)
+    }
+
+    pub fn availability_zone(&mut self, availability_zone: Option<String>) {
+        self.availability_zone = BuilderValue::Set(availability_zone)
     }
 
     pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
@@ -323,8 +354,12 @@ impl PageServerConfigBuilder {
         self.pg_distrib_dir = BuilderValue::Set(pg_distrib_dir)
     }
 
-    pub fn auth_type(&mut self, auth_type: AuthType) {
-        self.auth_type = BuilderValue::Set(auth_type)
+    pub fn http_auth_type(&mut self, auth_type: AuthType) {
+        self.http_auth_type = BuilderValue::Set(auth_type)
+    }
+
+    pub fn pg_auth_type(&mut self, auth_type: AuthType) {
+        self.pg_auth_type = BuilderValue::Set(auth_type)
     }
 
     pub fn auth_validation_public_key_path(
@@ -386,6 +421,10 @@ impl PageServerConfigBuilder {
         self.test_remote_failures = BuilderValue::Set(fail_first);
     }
 
+    pub fn evictions_low_residence_duration_metric_threshold(&mut self, value: Duration) {
+        self.evictions_low_residence_duration_metric_threshold = BuilderValue::Set(value);
+    }
+
     pub fn ondemand_download_behavior_treat_error_as_warn(
         &mut self,
         ondemand_download_behavior_treat_error_as_warn: bool,
@@ -402,6 +441,9 @@ impl PageServerConfigBuilder {
             listen_http_addr: self
                 .listen_http_addr
                 .ok_or(anyhow!("missing listen_http_addr"))?,
+            availability_zone: self
+                .availability_zone
+                .ok_or(anyhow!("missing availability_zone"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow!("missing wait_lsn_timeout"))?,
@@ -419,7 +461,10 @@ impl PageServerConfigBuilder {
             pg_distrib_dir: self
                 .pg_distrib_dir
                 .ok_or(anyhow!("missing pg_distrib_dir"))?,
-            auth_type: self.auth_type.ok_or(anyhow!("missing auth_type"))?,
+            http_auth_type: self
+                .http_auth_type
+                .ok_or(anyhow!("missing http_auth_type"))?,
+            pg_auth_type: self.pg_auth_type.ok_or(anyhow!("missing pg_auth_type"))?,
             auth_validation_public_key_path: self
                 .auth_validation_public_key_path
                 .ok_or(anyhow!("missing auth_validation_public_key_path"))?,
@@ -453,6 +498,11 @@ impl PageServerConfigBuilder {
             synthetic_size_calculation_interval: self
                 .synthetic_size_calculation_interval
                 .ok_or(anyhow!("missing synthetic_size_calculation_interval"))?,
+            evictions_low_residence_duration_metric_threshold: self
+                .evictions_low_residence_duration_metric_threshold
+                .ok_or(anyhow!(
+                    "missing evictions_low_residence_duration_metric_threshold"
+                ))?,
             test_remote_failures: self
                 .test_remote_failures
                 .ok_or(anyhow!("missing test_remote_failuers"))?,
@@ -599,6 +649,7 @@ impl PageServerConf {
             match key {
                 "listen_pg_addr" => builder.listen_pg_addr(parse_toml_string(key, item)?),
                 "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
+                "availability_zone" => builder.availability_zone(Some(parse_toml_string(key, item)?)),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
                 "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
                 "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
@@ -612,7 +663,8 @@ impl PageServerConf {
                 "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
                     PathBuf::from(parse_toml_string(key, item)?),
                 )),
-                "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
+                "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
+                "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
                     builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
@@ -640,6 +692,7 @@ impl PageServerConf {
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
+                "evictions_low_residence_duration_metric_threshold" => builder.evictions_low_residence_duration_metric_threshold(parse_toml_duration(key, item)?),
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
@@ -647,7 +700,7 @@ impl PageServerConf {
 
         let mut conf = builder.build().context("invalid config")?;
 
-        if conf.auth_type == AuthType::NeonJWT {
+        if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
                 .auth_validation_public_key_path
                 .get_or_insert_with(|| workdir.join("auth_public_key.pem"));
@@ -763,10 +816,12 @@ impl PageServerConf {
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            availability_zone: None,
             superuser: "cloud_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir,
-            auth_type: AuthType::Trust,
+            http_auth_type: AuthType::Trust,
+            pg_auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
             default_tenant_conf: TenantConf::default(),
@@ -778,6 +833,10 @@ impl PageServerConf {
             cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
             synthetic_size_calculation_interval: Duration::from_secs(60),
+            evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
+                defaults::DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
+            )
+            .unwrap(),
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
         }
@@ -919,6 +978,9 @@ metric_collection_interval = '222 s'
 cached_metric_collection_interval = '22200 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
+
+evictions_low_residence_duration_metric_threshold = '444 s'
+
 log_format = 'json'
 
 "#;
@@ -944,6 +1006,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+                availability_zone: None,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
                 wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
@@ -951,7 +1014,8 @@ log_format = 'json'
                 max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
                 workdir,
                 pg_distrib_dir,
-                auth_type: AuthType::Trust,
+                http_auth_type: AuthType::Trust,
+                pg_auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
                 default_tenant_conf: TenantConf::default(),
@@ -970,6 +1034,9 @@ log_format = 'json'
                 metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
                 synthetic_size_calculation_interval: humantime::parse_duration(
                     defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
+                )?,
+                evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
+                    defaults::DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD
                 )?,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
@@ -1001,6 +1068,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
+                availability_zone: None,
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),
@@ -1008,7 +1076,8 @@ log_format = 'json'
                 max_file_descriptors: 333,
                 workdir,
                 pg_distrib_dir,
-                auth_type: AuthType::Trust,
+                http_auth_type: AuthType::Trust,
+                pg_auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
                 default_tenant_conf: TenantConf::default(),
@@ -1020,6 +1089,7 @@ log_format = 'json'
                 cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 synthetic_size_calculation_interval: Duration::from_secs(333),
+                evictions_low_residence_duration_metric_threshold: Duration::from_secs(444),
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
             },

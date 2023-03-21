@@ -51,12 +51,39 @@ walprop_status(WalProposerConn *conn)
 }
 
 WalProposerConn *
-walprop_connect_start(char *conninfo)
+walprop_connect_start(char *conninfo, char *password)
 {
 	WalProposerConn *conn;
 	PGconn	   *pg_conn;
+	const char *keywords[3];
+	const char *values[3];
+	int			n;
 
-	pg_conn = PQconnectStart(conninfo);
+	/*
+	 * Connect using the given connection string. If the
+	 * NEON_AUTH_TOKEN environment variable was set, use that as
+	 * the password.
+	 *
+	 * The connection options are parsed in the order they're given, so
+	 * when we set the password before the connection string, the
+	 * connection string can override the password from the env variable.
+	 * Seems useful, although we don't currently use that capability
+	 * anywhere.
+	 */
+	n = 0;
+	if (password)
+	{
+		keywords[n] = "password";
+		values[n] = neon_auth_token;
+		n++;
+	}
+	keywords[n] = "dbname";
+	values[n] = conninfo;
+	n++;
+	keywords[n] = NULL;
+	values[n] = NULL;
+	n++;
+	pg_conn = PQconnectStartParams(keywords, values, 1);
 
 	/*
 	 * Allocation of a PQconn can fail, and will return NULL. We want to fully

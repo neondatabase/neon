@@ -521,7 +521,6 @@ async def run_race_conditions(env: NeonEnv, pg: Postgres):
 
 # do inserts while concurrently getting up/down subsets of acceptors
 def test_race_conditions(neon_env_builder: NeonEnvBuilder):
-
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
@@ -588,7 +587,6 @@ async def run_wal_lagging(env: NeonEnv, pg: Postgres):
 
 # do inserts while restarting postgres and messing with safekeeper addresses
 def test_wal_lagging(neon_env_builder: NeonEnvBuilder):
-
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 

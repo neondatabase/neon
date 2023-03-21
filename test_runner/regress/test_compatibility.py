@@ -246,6 +246,13 @@ def prepare_snapshot(
     if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
         pageserver_config["broker_endpoints"] = etcd_broker_endpoints  # old etcd version
 
+    # Older pageserver versions had just one `auth_type` setting. Now there
+    # are separate settings for pg and http ports. We don't use authentication
+    # in compatibility tests so just remove authentication related settings.
+    pageserver_config.pop("auth_type", None)
+    pageserver_config.pop("pg_auth_type", None)
+    pageserver_config.pop("http_auth_type", None)
+
     if pg_distrib_dir:
         pageserver_config["pg_distrib_dir"] = str(pg_distrib_dir)
 
@@ -358,11 +365,9 @@ def check_neon_works(
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
     pageserver_port = snapshot_config["pageserver"]["listen_http_addr"].split(":")[-1]
-    auth_token = snapshot_config["pageserver"]["auth_token"]
     pageserver_http = PageserverHttpClient(
         port=pageserver_port,
         is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
-        auth_token=auth_token,
     )
 
     shutil.rmtree(repo_dir / "local_fs_remote_storage")

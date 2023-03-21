@@ -9,22 +9,18 @@ use once_cell::sync::Lazy;
 use pageserver_api::models::state;
 use utils::id::{TenantId, TimelineId};
 
-/// Prometheus histogram buckets (in seconds) that capture the majority of
-/// latencies in the microsecond range but also extend far enough up to distinguish
-/// "bad" from "really bad".
-fn get_buckets_for_critical_operations() -> Vec<f64> {
-    let buckets_per_digit = 5;
-    let min_exponent = -6;
-    let max_exponent = 2;
-
-    let mut buckets = vec![];
-    // Compute 10^(exp / buckets_per_digit) instead of 10^(1/buckets_per_digit)^exp
-    // because it's more numerically stable and doesn't result in numbers like 9.999999
-    for exp in (min_exponent * buckets_per_digit)..=(max_exponent * buckets_per_digit) {
-        buckets.push(10_f64.powf(exp as f64 / buckets_per_digit as f64))
-    }
-    buckets
-}
+/// Prometheus histogram buckets (in seconds) for operations in the critical
+/// path. In other words, operations that directly affect that latency of user
+/// queries.
+///
+/// The buckets capture the majority of latencies in the microsecond and
+/// millisecond range but also extend far enough up to distinguish "bad" from
+/// "really bad".
+const CRITICAL_OP_BUCKETS: &[f64] = &[
+    0.000_001, 0.000_010, 0.000_100, // 1 us, 10 us, 100 us
+    0.001_000, 0.010_000, 0.100_000, // 1 ms, 10 ms, 100 ms
+    1.0, 10.0, 100.0, // 1 s, 10 s, 100 s
+];
 
 // Metrics collected on operations on the storage repository.
 const STORAGE_TIME_OPERATIONS: &[&str] = &[
@@ -55,12 +51,15 @@ pub static STORAGE_TIME_COUNT_PER_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+// Buckets for background operations like compaction, GC, size calculation
+const STORAGE_OP_BUCKETS: &[f64] = &[0.010, 0.100, 1.0, 10.0, 100.0, 1000.0];
+
 pub static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_storage_operations_seconds_global",
         "Time spent on storage operations",
         &["operation"],
-        get_buckets_for_critical_operations(),
+        STORAGE_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -71,7 +70,7 @@ static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
         "pageserver_getpage_reconstruct_seconds",
         "Time spent in reconstruct_value",
         &["tenant_id", "timeline_id"],
-        get_buckets_for_critical_operations(),
+        CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -90,7 +89,7 @@ static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
         "pageserver_wait_lsn_seconds",
         "Time spent waiting for WAL to arrive",
         &["tenant_id", "timeline_id"],
-        get_buckets_for_critical_operations(),
+        CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -195,15 +194,101 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static EVICTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_evictions",
+        "Number of layers evicted from the pageserver",
+        &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+static EVICTIONS_WITH_LOW_RESIDENCE_DURATION: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_evictions_with_low_residence_duration",
+        "If a layer is evicted that was resident for less than `low_threshold`, it is counted to this counter. \
+         Residence duration is determined using the `residence_duration_data_source`.",
+        &["tenant_id", "timeline_id", "residence_duration_data_source", "low_threshold_secs"]
+    )
+    .expect("failed to define a metric")
+});
+
+/// Each [`Timeline`]'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
+#[derive(Debug)]
+pub struct EvictionsWithLowResidenceDuration {
+    data_source: &'static str,
+    threshold: Duration,
+    counter: Option<IntCounter>,
+}
+
+pub struct EvictionsWithLowResidenceDurationBuilder {
+    data_source: &'static str,
+    threshold: Duration,
+}
+
+impl EvictionsWithLowResidenceDurationBuilder {
+    pub fn new(data_source: &'static str, threshold: Duration) -> Self {
+        Self {
+            data_source,
+            threshold,
+        }
+    }
+
+    fn build(&self, tenant_id: &str, timeline_id: &str) -> EvictionsWithLowResidenceDuration {
+        let counter = EVICTIONS_WITH_LOW_RESIDENCE_DURATION
+            .get_metric_with_label_values(&[
+                tenant_id,
+                timeline_id,
+                self.data_source,
+                &EvictionsWithLowResidenceDuration::threshold_label_value(self.threshold),
+            ])
+            .unwrap();
+        EvictionsWithLowResidenceDuration {
+            data_source: self.data_source,
+            threshold: self.threshold,
+            counter: Some(counter),
+        }
+    }
+}
+
+impl EvictionsWithLowResidenceDuration {
+    fn threshold_label_value(threshold: Duration) -> String {
+        format!("{}", threshold.as_secs())
+    }
+
+    pub fn observe(&self, observed_value: Duration) {
+        if self.threshold < observed_value {
+            self.counter
+                .as_ref()
+                .expect("nobody calls this function after `remove_from_vec`")
+                .inc();
+        }
+    }
+
+    // This could be a `Drop` impl, but, we need the `tenant_id` and `timeline_id`.
+    fn remove(&mut self, tenant_id: &str, timeline_id: &str) {
+        let Some(_counter) = self.counter.take() else {
+            return;
+        };
+        EVICTIONS_WITH_LOW_RESIDENCE_DURATION
+            .remove_label_values(&[
+                tenant_id,
+                timeline_id,
+                self.data_source,
+                &Self::threshold_label_value(self.threshold),
+            ])
+            .expect("we own the metric, no-one else should remove it");
+    }
+}
+
 // Metrics collected on disk IO operations
+//
+// Roughly logarithmic scale.
 const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
-    0.000001, // 1 usec
-    0.00001,  // 10 usec
-    0.0001,   // 100 usec
-    0.001,    // 1 msec
-    0.01,     // 10 msec
-    0.1,      // 100 msec
-    1.0,      // 1 sec
+    0.000030, // 30 usec
+    0.001000, // 1000 usec
+    0.030,    // 30 ms
+    1.000,    // 1000 ms
 ];
 
 const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
@@ -238,20 +323,12 @@ const SMGR_QUERY_TIME_OPERATIONS: &[&str] = &[
     "get_db_size",
 ];
 
-const SMGR_QUERY_TIME_BUCKETS: &[f64] = &[
-    0.00001, // 1/100000 s
-    0.0001, 0.00015, 0.0002, 0.00025, 0.0003, 0.00035, 0.0005, 0.00075, // 1/10000 s
-    0.001, 0.0025, 0.005, 0.0075, // 1/1000 s
-    0.01, 0.0125, 0.015, 0.025, 0.05, // 1/100 s
-    0.1,  // 1/10 s
-];
-
 pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_smgr_query_seconds",
         "Time spent on smgr query handling",
         &["smgr_query_type", "tenant_id", "timeline_id"],
-        SMGR_QUERY_TIME_BUCKETS.into()
+        CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -520,10 +597,16 @@ pub struct TimelineMetrics {
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
+    pub evictions: IntCounter,
+    pub evictions_with_low_residence_duration: EvictionsWithLowResidenceDuration,
 }
 
 impl TimelineMetrics {
-    pub fn new(tenant_id: &TenantId, timeline_id: &TimelineId) -> Self {
+    pub fn new(
+        tenant_id: &TenantId,
+        timeline_id: &TimelineId,
+        evictions_with_low_residence_duration_builder: EvictionsWithLowResidenceDurationBuilder,
+    ) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
         let reconstruct_time_histo = RECONSTRUCT_TIME
@@ -560,6 +643,11 @@ impl TimelineMetrics {
         let persistent_bytes_written = PERSISTENT_BYTES_WRITTEN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
+        let evictions = EVICTIONS
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
+        let evictions_with_low_residence_duration =
+            evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
         TimelineMetrics {
             tenant_id,
@@ -579,6 +667,8 @@ impl TimelineMetrics {
             current_logical_size_gauge,
             num_persistent_files_created,
             persistent_bytes_written,
+            evictions,
+            evictions_with_low_residence_duration,
         }
     }
 }
@@ -595,7 +685,9 @@ impl Drop for TimelineMetrics {
         let _ = CURRENT_LOGICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
-
+        let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
+        self.evictions_with_low_residence_duration
+            .remove(tenant_id, timeline_id);
         for op in STORAGE_TIME_OPERATIONS {
             let _ =
                 STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
@@ -630,7 +722,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct RemoteTimelineClientMetrics {
     tenant_id: String,

@@ -265,11 +265,9 @@ impl FeMessage {
             b'c' => Ok(Some(FeMessage::CopyDone)),
             b'f' => Ok(Some(FeMessage::CopyFail)),
             b'p' => Ok(Some(FeMessage::PasswordMessage(msg))),
-            tag => {
-                return Err(ProtocolError::Protocol(format!(
-                    "unknown message tag: {tag},'{msg:?}'"
-                )))
-            }
+            tag => Err(ProtocolError::Protocol(format!(
+                "unknown message tag: {tag},'{msg:?}'"
+            ))),
         }
     }
 }

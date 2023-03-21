@@ -71,6 +71,9 @@ struct Args {
     /// Listen http endpoint for management and metrics in the form host:port.
     #[arg(long, default_value = DEFAULT_HTTP_LISTEN_ADDR)]
     listen_http: String,
+    /// Availability zone of the safekeeper.
+    #[arg(long)]
+    availability_zone: Option<String>,
     /// Do not wait for changes to be written safely to disk. Unsafe.
     #[arg(short, long)]
     no_sync: bool,
@@ -108,7 +111,7 @@ struct Args {
     /// WAL backup horizon.
     #[arg(long)]
     disable_wal_backup: bool,
-    /// Path to an RSA .pem public key which is used to check JWT tokens.
+    /// Path to a .pem public key which is used to check JWT tokens.
     #[arg(long)]
     auth_validation_public_key_path: Option<PathBuf>,
     /// Format for logging, either 'plain' or 'json'.
@@ -166,6 +169,7 @@ fn main() -> anyhow::Result<()> {
         my_id: id,
         listen_pg_addr: args.listen_pg,
         listen_http_addr: args.listen_http,
+        availability_zone: args.availability_zone,
         no_sync: args.no_sync,
         broker_endpoint: args.broker_endpoint,
         broker_keepalive_interval: args.broker_keepalive_interval,

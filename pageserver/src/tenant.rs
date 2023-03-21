@@ -12,9 +12,7 @@
 //!
 
 use anyhow::{bail, Context};
-use bytes::Bytes;
 use futures::FutureExt;
-use futures::Stream;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
@@ -239,14 +237,13 @@ impl UninitializedTimeline<'_> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub async fn import_basebackup_from_tar(
         self,
-        copyin_stream: &mut (impl Stream<Item = io::Result<Bytes>> + Sync + Send + Unpin),
+        copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
 
-        let mut reader = tokio_util::io::StreamReader::new(copyin_stream);
-        import_datadir::import_basebackup_from_tar(raw_timeline, &mut reader, base_lsn, ctx)
+        import_datadir::import_basebackup_from_tar(raw_timeline, copyin_read, base_lsn, ctx)
             .await
             .context("Failed to import basebackup")?;
 
@@ -1243,11 +1240,8 @@ impl Tenant {
             "Cannot run GC iteration on inactive tenant"
         );
 
-        let gc_result = self
-            .gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
-            .await;
-
-        gc_result
+        self.gc_iteration_internal(target_timeline_id, horizon, pitr, ctx)
+            .await
     }
 
     /// Perform one compaction iteration.
@@ -3175,6 +3169,44 @@ mod tests {
         Ok(())
     }
      */
+
+    #[tokio::test]
+    async fn test_get_branchpoints_from_an_inactive_timeline() -> anyhow::Result<()> {
+        let (tenant, ctx) =
+            TenantHarness::create("test_get_branchpoints_from_an_inactive_timeline")?
+                .load()
+                .await;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?
+            .initialize(&ctx)?;
+        make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
+
+        tenant
+            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
+            .await?;
+        let newtline = tenant
+            .get_timeline(NEW_TIMELINE_ID, true)
+            .expect("Should have a local timeline");
+
+        make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
+
+        tline.set_state(TimelineState::Broken);
+
+        tenant
+            .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
+            .await?;
+
+        assert_eq!(
+            newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await?,
+            TEST_IMG(&format!("foo at {}", Lsn(0x40)))
+        );
+
+        let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
+        assert_eq!(branchpoints.len(), 1);
+        assert_eq!(branchpoints[0], Lsn(0x40));
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_retain_data_in_parent_which_is_needed_for_child() -> anyhow::Result<()> {

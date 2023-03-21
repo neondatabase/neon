@@ -5,6 +5,7 @@ from typing import List
 from fixtures.benchmark_fixture import PgBenchRunResult
 from fixtures.compare_fixtures import NeonCompare
 from fixtures.neon_fixtures import fork_at_current_lsn
+
 from performance.test_perf_pgbench import utc_now_timestamp
 
 # -----------------------------------------------------------------------

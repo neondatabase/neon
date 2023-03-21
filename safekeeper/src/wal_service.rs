@@ -9,8 +9,9 @@ use tokio::net::TcpStream;
 use tracing::*;
 use utils::measured_stream::MeasuredStream;
 
+use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::TrafficMetrics;
 use crate::SafeKeeperConf;
-use crate::{handler::SafekeeperPostgresHandler, metrics::PG_IO_BYTES};
 use postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
@@ -68,20 +69,21 @@ fn handle_socket(
         .build()?;
     let local = tokio::task::LocalSet::new();
 
-    let read_metrics = PG_IO_BYTES.with_label_values(&["read"]);
-    let write_metrics = PG_IO_BYTES.with_label_values(&["write"]);
-
     socket.set_nodelay(true)?;
     let peer_addr = socket.peer_addr()?;
 
-    // TODO: measure cross-az traffic
+    let traffic_metrics = TrafficMetrics::new();
+    if let Some(current_az) = conf.availability_zone.as_deref() {
+        traffic_metrics.set_sk_az(current_az);
+    }
+
     let socket = MeasuredStream::new(
         socket,
         |cnt| {
-            read_metrics.inc_by(cnt as u64);
+            traffic_metrics.observe_read(cnt);
         },
         |cnt| {
-            write_metrics.inc_by(cnt as u64);
+            traffic_metrics.observe_write(cnt);
         },
     );
 
@@ -89,7 +91,8 @@ fn handle_socket(
         None => AuthType::Trust,
         Some(_) => AuthType::NeonJWT,
     };
-    let mut conn_handler = SafekeeperPostgresHandler::new(conf, conn_id);
+    let mut conn_handler =
+        SafekeeperPostgresHandler::new(conf, conn_id, Some(traffic_metrics.clone()));
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.

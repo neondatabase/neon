@@ -90,7 +90,6 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
             cur.execute("CREATE DATABASE foodb")
             with closing(pgmain.connect(dbname="foodb")) as conn:
                 with conn.cursor() as cur2:
-
                     cur2.execute("CREATE TABLE foo (t text)")
                     cur2.execute(
                         """
@@ -308,7 +307,6 @@ def test_timeline_initial_logical_size_calculation_cancellation(
 def test_timeline_physical_size_init(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
-
     if remote_storage_kind is not None:
         neon_env_builder.enable_remote_storage(
             remote_storage_kind, "test_timeline_physical_size_init"
@@ -385,7 +383,6 @@ def test_timeline_physical_size_post_checkpoint(
 def test_timeline_physical_size_post_compaction(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
-
     if remote_storage_kind is not None:
         neon_env_builder.enable_remote_storage(
             remote_storage_kind, "test_timeline_physical_size_init"
@@ -440,7 +437,6 @@ def test_timeline_physical_size_post_compaction(
 def test_timeline_physical_size_post_gc(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: Optional[RemoteStorageKind]
 ):
-
     if remote_storage_kind is not None:
         neon_env_builder.enable_remote_storage(
             remote_storage_kind, "test_timeline_physical_size_init"

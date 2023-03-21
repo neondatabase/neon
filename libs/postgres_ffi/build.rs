@@ -63,10 +63,7 @@ fn main() -> anyhow::Result<()> {
             pg_install_dir_versioned = cwd.join("..").join("..").join(pg_install_dir_versioned);
         }
 
-        let pg_config_bin = pg_install_dir_versioned
-            .join(pg_version)
-            .join("bin")
-            .join("pg_config");
+        let pg_config_bin = pg_install_dir_versioned.join("bin").join("pg_config");
         let inc_server_path: String = if pg_config_bin.exists() {
             let output = Command::new(pg_config_bin)
                 .arg("--includedir-server")

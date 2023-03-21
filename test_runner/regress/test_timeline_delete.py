@@ -10,7 +10,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     env.pageserver.allowed_errors.append(".*Timeline .* was not found.*")
     env.pageserver.allowed_errors.append(".*timeline not found.*")
     env.pageserver.allowed_errors.append(".*Cannot delete timeline which has child timelines.*")
-    env.pageserver.allowed_errors.append(".*Tenant .* not found in the local state.*")
+    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
 
     ps_http = env.pageserver.http_client()
 
@@ -24,7 +24,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     invalid_tenant_id = TenantId.generate()
     with pytest.raises(
         PageserverApiException,
-        match=f"Tenant {invalid_tenant_id} not found in the local state",
+        match=f"NotFound: tenant {invalid_tenant_id}",
     ):
         ps_http.timeline_delete(tenant_id=invalid_tenant_id, timeline_id=invalid_timeline_id)
 
@@ -40,7 +40,6 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     with pytest.raises(
         PageserverApiException, match="Cannot delete timeline which has child timelines"
     ):
-
         timeline_path = (
             env.repo_dir
             / "tenants"

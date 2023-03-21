@@ -53,14 +53,15 @@ listen_addr = '{DEFAULT_BROKER_ADDR}'
 id = {DEFAULT_PAGESERVER_ID}
 listen_pg_addr = '{DEFAULT_PAGESERVER_PG_ADDR}'
 listen_http_addr = '{DEFAULT_PAGESERVER_HTTP_ADDR}'
-auth_type = '{pageserver_auth_type}'
+pg_auth_type = '{trust_auth}'
+http_auth_type = '{trust_auth}'
 
 [[safekeepers]]
 id = {DEFAULT_SAFEKEEPER_ID}
 pg_port = {DEFAULT_SAFEKEEPER_PG_PORT}
 http_port = {DEFAULT_SAFEKEEPER_HTTP_PORT}
 "#,
-        pageserver_auth_type = AuthType::Trust,
+        trust_auth = AuthType::Trust,
     )
 }
 
@@ -627,7 +628,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
 
             let node = cplane.nodes.get(&(tenant_id, node_name.to_string()));
 
-            let auth_token = if matches!(env.pageserver.auth_type, AuthType::NeonJWT) {
+            let auth_token = if matches!(env.pageserver.pg_auth_type, AuthType::NeonJWT) {
                 let claims = Claims::new(Some(tenant_id), Scope::Tenant);
 
                 Some(env.generate_auth_token(&claims)?)

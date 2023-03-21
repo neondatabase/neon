@@ -4,10 +4,20 @@ from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
 
 
 def test_proxy_select_1(static_proxy: NeonProxy):
-    static_proxy.safe_psql("select 1", options="project=generic-project-name")
+    """
+    A simplest smoke test: check proxy against a local postgres instance.
+    """
+
+    out = static_proxy.safe_psql("select 1", options="project=generic-project-name")
+    assert out[0][0] == 1
 
 
 def test_password_hack(static_proxy: NeonProxy):
+    """
+    Check the PasswordHack auth flow: an alternative to SCRAM auth for
+    clients which can't provide the project/endpoint name via SNI or `options`.
+    """
+
     user = "borat"
     password = "password"
     static_proxy.safe_psql(
@@ -25,7 +35,11 @@ def test_password_hack(static_proxy: NeonProxy):
 
 
 @pytest.mark.asyncio
-async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProxy):
+async def test_link_auth(vanilla_pg: VanillaPostgres, link_proxy: NeonProxy):
+    """
+    Check the Link auth flow: a lightweight auth method which delegates
+    all necessary checks to the console by sending client an auth URL.
+    """
 
     psql = await PSQL(host=link_proxy.host, port=link_proxy.proxy_port).run("select 42")
 
@@ -40,16 +54,27 @@ async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProx
     assert out == "42"
 
 
-# Pass extra options to the server.
 def test_proxy_options(static_proxy: NeonProxy):
-    with static_proxy.connect(options="project=irrelevant -cproxytest.option=value") as conn:
-        with conn.cursor() as cur:
-            cur.execute("SHOW proxytest.option")
-            value = cur.fetchall()[0][0]
-            assert value == "value"
+    """
+    Check that we pass extra `options` to the PostgreSQL server:
+    * `project=...` shouldn't be passed at all (otherwise postgres will raise an error).
+    * everything else should be passed as-is.
+    """
+
+    options = "project=irrelevant -cproxytest.option=value"
+    out = static_proxy.safe_psql("show proxytest.option", options=options)
+    assert out[0][0] == "value"
+
+    options = "-c proxytest.foo=\\ str project=irrelevant"
+    out = static_proxy.safe_psql("show proxytest.foo", options=options)
+    assert out[0][0] == " str"
 
 
 def test_auth_errors(static_proxy: NeonProxy):
+    """
+    Check that we throw very specific errors in some unsuccessful auth scenarios.
+    """
+
     # User does not exist
     with pytest.raises(psycopg2.Error) as exprinfo:
         static_proxy.connect(user="pinocchio", options="project=irrelevant")
@@ -78,6 +103,10 @@ def test_auth_errors(static_proxy: NeonProxy):
 
 
 def test_forward_params_to_client(static_proxy: NeonProxy):
+    """
+    Check that we forward all necessary PostgreSQL server params to client.
+    """
+
     # A subset of parameters (GUCs) which postgres
     # sends to the client during connection setup.
     # Unfortunately, `GUC_REPORT` can't be queried.

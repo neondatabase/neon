@@ -74,14 +74,11 @@ jobs:
       - name: Install Python deps
         run: ./scripts/pysync
 
-      - name: Run isort to ensure code format
-        run: poetry run isort --diff --check .
+      - name: Run ruff to ensure code format
+        run: poetry run ruff .
 
       - name: Run black to ensure code format
         run: poetry run black --diff --check .
-
-      - name: Run flake8 to ensure code format
-        run: poetry run flake8 .
 
       - name: Run mypy to check types
         run: poetry run mypy .

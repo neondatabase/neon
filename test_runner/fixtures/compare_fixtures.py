@@ -6,8 +6,15 @@ from typing import Dict, Iterator, List
 
 import pytest
 from _pytest.fixtures import FixtureRequest
+
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
-from fixtures.neon_fixtures import NeonEnv, PgBin, PgProtocol, RemotePostgres, VanillaPostgres
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    PgBin,
+    PgProtocol,
+    RemotePostgres,
+    VanillaPostgres,
+)
 from fixtures.pg_stats import PgStatTable
 
 

@@ -177,6 +177,7 @@ async def reattach_while_busy(
 # running, and when we retry the queries, they should start working
 # after the attach has finished.
 
+
 # FIXME:
 #
 # This is pretty unstable at the moment. I've seen it fail with a warning like this:
@@ -224,7 +225,7 @@ def test_tenant_reattach_while_busy(
 
     # Attempts to connect from compute to pageserver while the tenant is
     # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(".*Tenant .* not found in the local state.*")
+    env.pageserver.allowed_errors.append(".*Tenant .* not found.*")
     env.pageserver.allowed_errors.append(
         ".*Tenant .* will not become active\\. Current state: Stopping.*"
     )
@@ -256,18 +257,18 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    env.pageserver.allowed_errors.append(".*NotFound: Tenant .* not found")
+    env.pageserver.allowed_errors.append(".*NotFound: Tenant .*")
 
     # first check for non existing tenant
     tenant_id = TenantId.generate()
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Tenant not found for id {tenant_id}",
+        match=f"NotFound: tenant {tenant_id}",
     ):
         pageserver_http.tenant_detach(tenant_id)
 
     # the error will be printed to the log too
-    env.pageserver.allowed_errors.append(".*Tenant not found for id.*")
+    env.pageserver.allowed_errors.append(".*NotFound: tenant *")
 
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
@@ -293,7 +294,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     # the error will be printed to the log too
     env.pageserver.allowed_errors.append(".*gc target timeline does not exist.*")
-    # Timelines get stopped during detach, ignore the gc calls that error, whitnessing that
+    # Timelines get stopped during detach, ignore the gc calls that error, witnessing that
     env.pageserver.allowed_errors.append(".*InternalServerError\\(timeline is Stopping.*")
 
     # Detach while running manual GC.
@@ -319,7 +320,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
     with pytest.raises(
-        expected_exception=PageserverApiException, match=f"Tenant {tenant_id} not found"
+        expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
     ):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 

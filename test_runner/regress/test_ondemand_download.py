@@ -250,7 +250,7 @@ def test_ondemand_download_timetravel(
     # Run queries at different points in time
     num_layers_downloaded = [0]
     resident_size = [get_resident_physical_size()]
-    for (checkpoint_number, lsn) in lsns:
+    for checkpoint_number, lsn in lsns:
         pg_old = env.postgres.create_start(
             branch_name="main", node_name=f"test_old_lsn_{checkpoint_number}", lsn=lsn
         )

@@ -35,6 +35,13 @@ import requests
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
+
+# Type-related stuff
+from psycopg2.extensions import connection as PgConnection
+from psycopg2.extensions import cursor as PgCursor
+from psycopg2.extensions import make_dsn, parse_dsn
+from typing_extensions import Literal
+
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, parse_metrics
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -45,12 +52,6 @@ from fixtures.utils import (
     get_self_dir,
     subprocess_capture,
 )
-
-# Type-related stuff
-from psycopg2.extensions import connection as PgConnection
-from psycopg2.extensions import cursor as PgCursor
-from psycopg2.extensions import make_dsn, parse_dsn
-from typing_extensions import Literal
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -430,7 +431,7 @@ class AuthKeys:
     priv: str
 
     def generate_token(self, *, scope: str, **token_data: str) -> str:
-        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="RS256")
+        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
         # cast(Any, self.priv)
 
         # jwt.encode can return 'bytes' or 'str', depending on Python version or type
@@ -642,6 +643,7 @@ class NeonEnvBuilder:
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
         initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        env.initial_timeline = initial_timeline
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
@@ -903,6 +905,7 @@ class NeonEnv:
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
+        self.initial_timeline: Optional[TimelineId] = None
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
@@ -923,7 +926,8 @@ class NeonEnv:
             pg=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
         )
-        pageserver_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
 
         toml += textwrap.dedent(
             f"""
@@ -931,7 +935,8 @@ class NeonEnv:
             id=1
             listen_pg_addr = 'localhost:{pageserver_port.pg}'
             listen_http_addr = 'localhost:{pageserver_port.http}'
-            auth_type = '{pageserver_auth_type}'
+            pg_auth_type = '{pg_auth_type}'
+            http_auth_type = '{http_auth_type}'
         """
         )
 
@@ -1243,7 +1248,6 @@ class PageserverHttpClient(requests.Session):
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
     ) -> List[Dict[str, Any]]:
-
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "true"
@@ -1375,7 +1379,6 @@ class PageserverHttpClient(requests.Session):
         timeline_id: TimelineId,
         max_concurrent_downloads: int,
     ) -> dict[str, Any]:
-
         body = {
             "max_concurrent_downloads": max_concurrent_downloads,
         }
@@ -1668,7 +1671,7 @@ class AbstractNeonCli(abc.ABC):
         env_vars["POSTGRES_DISTRIB_DIR"] = str(self.env.pg_distrib_dir)
         if self.env.rust_log_override is not None:
             env_vars["RUST_LOG"] = self.env.rust_log_override
-        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
+        for extra_env_key, extra_env_value in (extra_env_vars or {}).items():
             env_vars[extra_env_key] = extra_env_value
 
         # Pass coverage settings
@@ -2085,8 +2088,8 @@ class NeonPageserver(PgProtocol):
             # https://github.com/neondatabase/neon/issues/2442
             ".*could not remove ephemeral file.*No such file or directory.*",
             # FIXME: These need investigation
-            ".*gc_loop.*Failed to get a tenant .* Tenant .* not found in the local state.*",
-            ".*compaction_loop.*Failed to get a tenant .* Tenant .* not found in the local state.*",
+            ".*gc_loop.*Failed to get a tenant .* Tenant .* not found.*",
+            ".*compaction_loop.*Failed to get a tenant .* Tenant .* not found.*",
             ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
             ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
             ".*Removing intermediate uninit mark file.*",
@@ -2155,7 +2158,7 @@ class NeonPageserver(PgProtocol):
 
     def assert_no_errors(self):
         logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
-        error_or_warn = re.compile("ERROR|WARN")
+        error_or_warn = re.compile(r"\s(ERROR|WARN)")
         errors = []
         while True:
             line = logfile.readline()
@@ -2852,7 +2855,6 @@ class PostgresFactory:
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> Postgres:
-
         pg = Postgres(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
@@ -2876,7 +2878,6 @@ class PostgresFactory:
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> Postgres:
-
         pg = Postgres(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
@@ -3323,7 +3324,6 @@ def check_restored_datadir_content(
     log.info(f"filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}")
 
     for f in mismatch:
-
         f1 = os.path.join(pg.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
         stdout_filename = "{}.filediff".format(f2)

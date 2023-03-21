@@ -146,7 +146,6 @@ def test_basic_eviction(
 
 
 def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.LOCAL_FS,
         test_name="test_gc_of_remote_layers",

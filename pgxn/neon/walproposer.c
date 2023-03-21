@@ -78,10 +78,6 @@ int			wal_acceptor_reconnect_timeout;
 int			wal_acceptor_connection_timeout;
 bool		am_wal_proposer;
 
-char	   *neon_timeline_walproposer = NULL;
-char	   *neon_tenant_walproposer = NULL;
-char	   *neon_safekeeper_token_walproposer = NULL;
-
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
 static int	n_safekeepers = 0;
@@ -514,17 +510,9 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 			Safekeeper *sk = &safekeeper[n_safekeepers];
 			int written = 0;
 
-			if (neon_safekeeper_token_walproposer != NULL) {
-				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-								   "host=%s port=%s password=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-								   sk->host, sk->port, neon_safekeeper_token_walproposer, neon_timeline_walproposer,
-								   neon_tenant_walproposer);
-			} else {
-				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-								   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-								   sk->host, sk->port, neon_timeline_walproposer, neon_tenant_walproposer);
-			}
-
+			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
+							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+							   sk->host, sk->port, neon_timeline, neon_tenant);
 			if (written > MAXCONNINFO || written < 0)
 				elog(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
@@ -550,16 +538,16 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 	greetRequest.pgVersion = PG_VERSION_NUM;
 	pg_strong_random(&greetRequest.proposerId, sizeof(greetRequest.proposerId));
 	greetRequest.systemId = systemId;
-	if (!neon_timeline_walproposer)
+	if (!neon_timeline)
 		elog(FATAL, "neon.timeline_id is not provided");
-	if (*neon_timeline_walproposer != '\0' &&
-		!HexDecodeString(greetRequest.timeline_id, neon_timeline_walproposer, 16))
-		elog(FATAL, "Could not parse neon.timeline_id, %s", neon_timeline_walproposer);
-	if (!neon_tenant_walproposer)
+	if (*neon_timeline != '\0' &&
+		!HexDecodeString(greetRequest.timeline_id, neon_timeline, 16))
+		elog(FATAL, "Could not parse neon.timeline_id, %s", neon_timeline);
+	if (!neon_tenant)
 		elog(FATAL, "neon.tenant_id is not provided");
-	if (*neon_tenant_walproposer != '\0' &&
-		!HexDecodeString(greetRequest.tenant_id, neon_tenant_walproposer, 16))
-		elog(FATAL, "Could not parse neon.tenant_id, %s", neon_tenant_walproposer);
+	if (*neon_tenant != '\0' &&
+		!HexDecodeString(greetRequest.tenant_id, neon_tenant, 16))
+		elog(FATAL, "Could not parse neon.tenant_id, %s", neon_tenant);
 
 #if PG_VERSION_NUM >= 150000
 	/* FIXME don't use hardcoded timeline id */
@@ -700,7 +688,7 @@ ResetConnection(Safekeeper *sk)
 	/*
 	 * Try to establish new connection
 	 */
-	sk->conn = walprop_connect_start((char *) &sk->conninfo);
+	sk->conn = walprop_connect_start((char *) &sk->conninfo, neon_auth_token);
 
 	/*
 	 * "If the result is null, then libpq has been unable to allocate a new

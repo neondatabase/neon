@@ -68,7 +68,6 @@ async def update_and_gc(env: NeonEnv, pg: Postgres, timeline: TimelineId):
 # (repro for https://github.com/neondatabase/neon/issues/1047)
 #
 def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
-
     # Disable pitr, because here we want to test branch creation after GC
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
@@ -101,7 +100,6 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
 #
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
-
     # Disable time-based pitr, we will use LSN-based thresholds in the manual GC calls
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
 

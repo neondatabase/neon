@@ -115,6 +115,11 @@ pub struct TenantCreateRequest {
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub trace_read_requests: Option<bool>,
+    // We defer the parsing of the eviction_policy field to the request handler.
+    // Otherwise we'd have to move the types for eviction policy into this package.
+    // We might do that once the eviction feature has stabilizied.
+    // For now, this field is not even documented in the openapi_spec.yml.
+    pub eviction_policy: Option<serde_json::Value>,
 }
 
 #[serde_as]

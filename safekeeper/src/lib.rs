@@ -52,6 +52,7 @@ pub struct SafeKeeperConf {
     pub my_id: NodeId,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    pub availability_zone: Option<String>,
     pub no_sync: bool,
     pub broker_endpoint: Uri,
     pub broker_keepalive_interval: Duration,
@@ -82,6 +83,7 @@ impl SafeKeeperConf {
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            availability_zone: None,
             remote_storage: None,
             my_id: NodeId(0),
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT

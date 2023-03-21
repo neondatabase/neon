@@ -767,7 +767,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
 
         let err_to_send_and_errcode = match &end {
             ServerInitiated(_) => Some((end.to_string(), SQLSTATE_SUCCESSFUL_COMPLETION)),
-            Other(_) => Some((end.to_string(), SQLSTATE_INTERNAL_ERROR)),
+            Other(_) => Some((format!("{end:#}"), SQLSTATE_INTERNAL_ERROR)),
             // Note: CopyFail in duplex copy is somewhat unexpected (at least to
             // PG walsender; evidently and per my docs reading client should
             // finish it with CopyDone). It is not a problem to recover from it

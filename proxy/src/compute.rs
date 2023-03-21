@@ -6,9 +6,9 @@ use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::NoTls;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
-const COULD_NOT_CONNECT: &str = "Could not connect to compute node";
+const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -131,7 +131,7 @@ impl ConnCfg {
         use tokio_postgres::config::Host;
 
         let connect_once = |host, port| {
-            info!("trying to connect to a compute node at {host}:{port}");
+            info!("trying to connect to compute node at {host}:{port}");
             TcpStream::connect((host, port)).and_then(|socket| async {
                 let socket_addr = socket.peer_addr()?;
                 // This prevents load balancer from severing the connection.
@@ -151,7 +151,7 @@ impl ConnCfg {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!(
-                    "couldn't connect: bad compute config, \
+                    "bad compute config, \
                      ports and hosts entries' count does not match: {:?}",
                     self.0
                 ),
@@ -170,7 +170,7 @@ impl ConnCfg {
                 Ok(socket) => return Ok(socket),
                 Err(err) => {
                     // We can't throw an error here, as there might be more hosts to try.
-                    error!("failed to connect to a compute node at {host}:{port}: {err}");
+                    warn!("couldn't connect to compute node at {host}:{port}: {err}");
                     connection_error = Some(err);
                 }
             }
@@ -179,7 +179,7 @@ impl ConnCfg {
         Err(connection_error.unwrap_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Other,
-                format!("couldn't connect: bad compute config: {:?}", self.0),
+                format!("bad compute config: {:?}", self.0),
             )
         }))
     }
@@ -195,12 +195,11 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
-    /// Connect to a corresponding compute node.
-    pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
+    async fn do_connect(&self) -> Result<PostgresConnection, ConnectionError> {
         // TODO: establish a secure connection to the DB.
         let (socket_addr, mut stream) = self.connect_raw().await?;
         let (client, connection) = self.0.connect_raw(&mut stream, NoTls).await?;
-        info!("connected to user's compute node at {socket_addr}");
+        info!("connected to compute node at {socket_addr}");
 
         // This is very ugly but as of now there's no better way to
         // extract the connection parameters from tokio-postgres' connection.
@@ -218,6 +217,16 @@ impl ConnCfg {
         };
 
         Ok(connection)
+    }
+
+    /// Connect to a corresponding compute node.
+    pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
+        self.do_connect()
+            .inspect_err(|err| {
+                // Immediately log the error we have at our disposal.
+                error!("couldn't connect to compute node: {err}");
+            })
+            .await
     }
 }
 
