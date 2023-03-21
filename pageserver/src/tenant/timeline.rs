@@ -3056,10 +3056,11 @@ impl Timeline {
                 image_layers.push(image_layer);
             }
         }
-        // All wanted layers are taken in account by time_for_new_image_layer.
-        // The wanted_image_layers could get updated out of turn and we could
-        // clear something which hasn't been looked at all. This is fine, because
-        // next gc round any wanted would get added back in.
+        // All layers that the GC wanted us to create have now been created.
+        //
+        // It's possible that another GC cycle happened while we were compacting, and added
+        // something new to wanted_image_layers, and we now clear that before processing it.
+        // That's OK, because the next GC iteration will put it back in.
         *self.wanted_image_layers.lock().unwrap() = None;
 
         // Sync the new layer to disk before adding it to the layer map, to make sure
