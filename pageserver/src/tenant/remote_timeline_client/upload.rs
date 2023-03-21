@@ -64,13 +64,9 @@ pub(super) async fn upload_timeline_layer<'a>(
         })?
         .len();
 
-    // FIXME: this looks bad
-    if let Some(metadata_size) = known_metadata.file_size() {
-        if metadata_size != fs_size {
-            bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
-        }
-    } else {
-        // this is a silly state we would like to avoid
+    let metadata_size = known_metadata.file_size();
+    if metadata_size != fs_size {
+        bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
     }
 
     let fs_size = usize::try_from(fs_size).with_context(|| {
