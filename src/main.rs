@@ -36,7 +36,17 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .context("'CLOUD_ADMIN_API_URL' param parsing")?;
 
-    info!("Starting S3 removal in bucket {bucket_param}, region {region_param}");
+    let mut node_kind = env::var("NODE_KIND").context("'NODE_KIND' param retrieval")?;
+    node_kind.make_ascii_lowercase();
+
+    let delimiter = "/".to_string();
+    let prefix_in_bucket = match node_kind.trim() {
+        "pageserver" => ["pageserver", "v1", "tenants", ""].join(&delimiter),
+        "safekeeper" => ["safekeeper", "v1", "wal", ""].join(&delimiter),
+        unknown => anyhow::bail!("Unknown node type {unknown}"),
+    };
+
+    info!("Starting S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}'");
     let cloud_admin_api_client = CloudAdminApiClient::new(
         get_cloud_admin_api_token_or_exit(),
         cloud_admin_api_url_param,
@@ -44,10 +54,9 @@ async fn main() -> anyhow::Result<()> {
 
     let bucket_region = Region::new(region_param);
     let s3_client = Arc::new(init_s3_client(sso_account_id_param, bucket_region));
-    let delimiter = "/".to_string();
     let s3_target = S3Target {
         bucket_name: bucket_param,
-        prefix_in_bucket: ["pageserver", "v1", "tenants", ""].join(&delimiter),
+        prefix_in_bucket,
         delimiter,
     };
 
