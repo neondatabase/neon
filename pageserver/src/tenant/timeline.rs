@@ -2915,23 +2915,27 @@ impl Timeline {
         let layers = self.layers.read().unwrap();
 
         let mut max_deltas = 0;
-        let wanted_image_layers = self.wanted_image_layers.lock().unwrap();
-        if let Some((cutoff_lsn, wanted)) = &*wanted_image_layers {
-            let img_range =
-                partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
-            if wanted.overlaps(&img_range) {
-                //
-                // gc_timeline only pays attention to image layers that are older than the GC cutoff,
-                // but create_image_layers creates image layers at last-record-lsn.
-                // So it's possible that gc_timeline wants a new image layer to be created for a key range,
-                // but the range is already covered by image layers at more recent LSNs. Before we
-                // create a new image layer, check if the range is already covered at more recent LSNs.
-                if !layers.image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))? {
-                    debug!(
-                        "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
-                        img_range.start, img_range.end, cutoff_lsn, lsn
-                    );
-                    return Ok(true);
+        {
+            let wanted_image_layers = self.wanted_image_layers.lock().unwrap();
+            if let Some((cutoff_lsn, wanted)) = &*wanted_image_layers {
+                let img_range =
+                    partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
+                if wanted.overlaps(&img_range) {
+					//
+					// gc_timeline only pays attention to image layers that are older than the GC cutoff,
+					// but create_image_layers creates image layers at last-record-lsn.
+					// So it's possible that gc_timeline wants a new image layer to be created for a key range,
+					// but the range is already covered by image layers at more recent LSNs. Before we
+					// create a new image layer, check if the range is already covered at more recent LSNs.
+                    if !layers
+                        .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))?
+                    {
+                        debug!(
+                            "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
+                            img_range.start, img_range.end, cutoff_lsn, lsn
+                        );
+                        return Ok(true);
+                    }
                 }
             }
         }
