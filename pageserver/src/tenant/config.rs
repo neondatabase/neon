@@ -179,10 +179,75 @@ impl EvictionPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvictionPolicyLayerAccessThreshold {
+    /// The period at which the policy is evaluated for the timeline's layers.
     #[serde(with = "humantime_serde")]
     pub period: Duration,
+    /// Layers for which `now - latest_activity() > threshold` become eviction candidates.
     #[serde(with = "humantime_serde")]
     pub threshold: Duration,
+    /// Spare the given size worth of eviction candidates from eviction.
+    ///
+    /// Eviction cancidates as determined through threshold.
+    ///
+    /// The reason why this setting exists is the following:
+    /// In the Neon production deployment, the control plane does periodic health checks
+    /// that write to the database. Their purpose is to ensure that the data path works.
+    /// Also, there is the check_availability operation. TODO actually these health checks ARE check_availability.
+    /// So, even if a tenant is unused or read-only from the Neon customer's point of view,
+    /// there are small amounts of writes from time to time.
+    /// The pageserver flushes the in-memory layer that holds the WAL for these writes
+    /// periodically (default 10min), thereby creating a very small L0 layer every time
+    /// the health check runs (health check period >> 10min).
+    /// Once `compaction_threshold` L0 layers have accumulated compaction processes all those
+    /// small L0 layers into an L1 layer, and deletes the small L0 layers after.
+    /// For an inactive tenant, that happens every `compaction_threshold x health check period` days.
+    ///
+    /// Enter eviction & on-demand downloads.
+    ///
+    /// If the control plane's periodic health checks happen less frequently than the eviction
+    /// policy's `threshold` value, the small L0 layers are evicted, because nothing is accessing them.
+    /// But, a pageserver restart will lead to a huge spike of on-demand downloads.
+    /// For example, on a system with 1500 tenants, unknown portion inactive, it's 5k layer downloads,
+    /// very small size for most of them, split 50:50 between initial size calculation and compaction.
+    /// We have reason to assume that, if the initial size calculation were not happenening,
+    /// compaction would download all of the 5k, and vice versa.
+    /// Why is that?
+    /// 1. Compaction: even if there are < `compaction_threshold` layers, the
+    ///    repartitioning / collect_keyspace causes on-demand downloads.
+    ///    The first place that needs the download is the read of DBDIR_KEY.
+    ///    The small L0's from above don't update that key, but since L0s cover the full key range,
+    ///    they get downloaded regardless. ALL L0s!
+    /// 2. Initital size calcuation: even if we disable compaction entirely, initial size calculation
+    ///    does on-demand downloads. In the neon prod deployment, the initial size calculation spike
+    ///    after pageserver restart is caused by
+    ///     https://neonprod.grafana.net/explore?orgId=1&left=%7B%22datasource%22:%22grafanacloud-logs%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22datasource%22:%7B%22type%22:%22loki%22,%22uid%22:%22grafanacloud-logs%22%7D,%22editorMode%22:%22builder%22,%22expr%22:%22%7Bneon_service%3D%5C%22pageserver%5C%22,%20hostname%3D%5C%22pageserver-0.eu-central-1.aws.neon.tech%5C%22%7D%20%7C%3D%20%60spawning%20logical%20size%20computation%20from%20context%20of%20task%20kind%60%20%7C%20regexp%20%60spawning%20logical%20size%20computation%20from%20context%20of%20task%20kind%20%28%3FP%3Ctask_kind%3E%5C%5CS%2B%29%60%20%7C%20line_format%20%60%7B%7B.task_kind%7D%7D%60%22,%22queryType%22:%22range%22,%22maxLines%22:5000%7D%5D,%22range%22:%7B%22from%22:%221679046960000%22,%22to%22:%221679047560000%22%7D%7D
+    ///         265 MetricsCollection
+    ///         1472 MgmtRequest
+    ///         89 WalReceiverConnectionHandler
+    ///    It is unclear whether MgmtRequest is from console or from layer map scraper.
+    ///    Anyways, the cause for on-demand download of all L0's overwhelmingly is the
+    ///    get_current_logical_size_non_incremental accessing DBDIR_KEY.
+    ///
+    /// Now back to the question why pageserver restart causes the spike.
+    /// Why do we have more on-demand downloads after a PS restart compared to regular operation?
+    /// The answer must be that something caches the keys that, without a cache, would cause the small L0s to be donwloaded.
+    /// My first suspect was the page cache, but, I did an experiment where I manually dropped all page cache pages via a to-be-PR'ed HTTP handler, then re-reran compaction.
+    /// In that experiment, compaction didn't do any re-downloads.
+    /// So, digging further, I found that the Timeline::repartition early-exits with "no repartitioning needed"
+    /// if there has been a repartitioning in the past, and the WAL has grown less than `repartition_threshold`.
+    /// That's it.
+    /// The restart blows away the Timeline::partitioning, and the initial size calculation result, both of which act as caches.
+    /// For otherwise unused tenants, they together prevent on-demand downloads for compaction or initial size calculation.
+    /// So, otherwise unused tenants will see evictions of their small L0s.
+    /// So, on pageserver restart, we see the spike in re-downloads.
+    ///
+    /// (The GC doesn't keep the layers resident because TODO (the L0's key range is everything, so, image_layer_exists returns false?))
+    ///
+    /// TODO: figure out if our strategy to spare an amount of candidates is still the right move.
+    /// Since nothing accesses these L0s, it's somewhat dubious whether they will be the most-recently-used eviction candidates.
+    /// Would it maybe better to not evict L0s at all, and add some kind of timeout to compaction that forces compact_level0?
+    #[serde(default)]
+    pub do_not_evict_most_recent_candidates_bytes: u64,
 }
 
 impl TenantConfOpt {

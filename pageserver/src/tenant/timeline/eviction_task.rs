@@ -109,6 +109,7 @@ impl Timeline {
         #[derive(Debug, Default)]
         struct EvictionStats {
             candidates: usize,
+            kept_bytes: u64,
             evicted: usize,
             errors: usize,
             not_evictable: usize,
@@ -158,6 +159,21 @@ impl Timeline {
                     candidates.push(hist_layer)
                 }
             }
+
+            if p.do_not_evict_most_recent_candidates_bytes > 0 {
+                // sort by least-recently-used first; cached key because we're doing dynamic dispatch here
+                candidates.sort_by_cached_key(|l| l.access_stats().latest_activity());
+                // trim off the tail of candidates until we are below min resident size
+                let mut kept_bytes = 0;
+                while kept_bytes < p.do_not_evict_most_recent_candidates_bytes && !candidates.is_empty() {
+                    let layer = candidates
+                        .pop()
+                        .expect("checked that candidates is not empty");
+                    kept_bytes += layer.file_size().expect("we filtered out remote layers above, and local layers are guaranteed to have a file_size()");
+                }
+                stats.kept_bytes = kept_bytes;
+            }
+
             candidates
         };
         stats.candidates = candidates.len();
