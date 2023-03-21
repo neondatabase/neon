@@ -490,10 +490,12 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.buffer.retain(|layer_key, layer| {
             match layer {
                 Some(l) => {
-                    self.layers.insert(layer_key.clone(), l.clone());
+                    // There should not be duplicate layers
+                    assert!(self.layers.insert(layer_key.clone(), l.clone()).is_none());
                 }
                 None => {
-                    self.layers.remove(layer_key);
+                    // layer is present in the tree
+                    assert!(self.layers.remove(layer_key).is_some());
                 }
             };
             false
