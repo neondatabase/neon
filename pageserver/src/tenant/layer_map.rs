@@ -123,6 +123,13 @@ where
     L: ?Sized + Layer,
 {
     ///
+    /// Check if layer map contains layers with specified key and LSN range
+    ///
+    pub fn contains(&self, layer: Arc<L>) -> bool {
+        self.layer_map.contains(layer)
+    }
+
+    ///
     /// Insert an on-disk layer.
     ///
     pub fn insert_historic(&mut self, layer: Arc<L>) {
@@ -266,6 +273,14 @@ where
     /// Start a batch of updates, applied on drop
     pub fn batch_update(&mut self) -> BatchedUpdates<'_, L> {
         BatchedUpdates { layer_map: self }
+    }
+
+    ///
+    /// Check if layer map contains layers with specified key and LSN range
+    ///
+    pub fn contains(&self, layer: Arc<L>) -> bool {
+        self.historic
+            .contains(historic_layer_coverage::LayerKey::from(&*layer))
     }
 
     ///
