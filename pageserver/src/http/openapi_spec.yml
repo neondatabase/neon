@@ -40,7 +40,11 @@ paths:
                 - evict_bytes
               properties:
                 evict_bytes:
-                  type: integer
+                  description: Unsigned bytes or a human writable amount of bytes with IEC kibibyte suffixes.
+                  oneOf:
+                    - type: integer
+                    - type: string
+                      pattern: '^[0-9]+ ?(([KMGTP]i)?B)?$'
       responses:
         "200":
           description: |

@@ -1208,7 +1208,58 @@ async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>,
     #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
     struct Config {
         /// How many bytes to evict before reporting that pressure is relieved.
+        #[serde(
+            deserialize_with = "deserialize_bytes",
+            serialize_with = "serialize_bytes"
+        )]
         evict_bytes: u64,
+    }
+
+    fn serialize_bytes<S: serde::Serializer>(x: &u64, ser: S) -> Result<S::Ok, S::Error> {
+        use ubyte::ByteUnit;
+
+        let x = ByteUnit::from(*x);
+
+        // ByteUnit has a nice lossy serialization format as it's Display
+        ser.collect_str(&x)
+    }
+
+    fn deserialize_bytes<'d, D: serde::Deserializer<'d>>(des: D) -> Result<u64, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = u64;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("positive nsigned number of bytes or positive number of bytes with SI/IEC suffix in a string")
+            }
+
+            fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if v == 0 {
+                    Err(serde::de::Error::invalid_value(
+                        serde::de::Unexpected::Unsigned(v),
+                        &self,
+                    ))
+                } else {
+                    Ok(v)
+                }
+            }
+
+            fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                use std::str::FromStr;
+                let bytes = ubyte::ByteUnit::from_str(v).map_err(serde::de::Error::custom)?;
+                let bytes = u64::from(bytes);
+                self.visit_u64(bytes)
+            }
+        }
+
+        des.deserialize_any(Visitor)
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -1216,6 +1267,7 @@ async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>,
         // remains unchanged after instantiation of the struct
         config: Config,
         // updated by `add_available_bytes`
+        #[serde(serialize_with = "serialize_bytes")]
         freed_bytes: u64,
     }
 
