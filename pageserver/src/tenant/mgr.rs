@@ -348,7 +348,8 @@ pub async fn detach_tenant(
     tenant_id: TenantId,
     allow_ignored_state: bool,
 ) -> Result<(), TenantStateError> {
-    let op = async {
+    debug!("Detaching a tenant with allow_ignored = {allow_ignored_state}");
+    remove_tenant_from_memory(tenant_id, allow_ignored_state, async {
         let local_tenant_directory = conf.tenant_path(&tenant_id);
         fs::remove_dir_all(&local_tenant_directory)
             .await
@@ -356,11 +357,8 @@ pub async fn detach_tenant(
                 format!("Failed to remove local tenant directory {local_tenant_directory:?}")
             })?;
         Ok(())
-    };
-    if allow_ignored_state {
-        return op.await;
-    }
-    remove_tenant_from_memory(tenant_id, op).await
+    })
+    .await
 }
 
 pub async fn load_tenant(
@@ -391,7 +389,7 @@ pub async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
 ) -> Result<(), TenantStateError> {
-    remove_tenant_from_memory(tenant_id, async {
+    remove_tenant_from_memory(tenant_id, false, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(tenant_id);
         fs::File::create(&ignore_mark_file)
             .await
@@ -499,27 +497,40 @@ where
 /// operation would be needed to remove it.
 async fn remove_tenant_from_memory<V, F>(
     tenant_id: TenantId,
+    allow_ignored_state: bool,
     tenant_cleanup: F,
 ) -> Result<V, TenantStateError>
 where
     F: std::future::Future<Output = Result<V, TenantStateError>>,
 {
-    // It's important to keep the tenant in memory after the final cleanup, to avoid cleanup races.
-    // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
-    // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
-    // avoid holding the lock for the entire process.
-    {
-        let tenants_accessor = TENANTS.write().await;
-        match tenants_accessor.get(&tenant_id) {
-            Some(tenant) => match tenant.current_state() {
-                TenantState::Attaching
-                | TenantState::Loading
-                | TenantState::Broken
-                | TenantState::Active => tenant.set_stopping(),
-                TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
-            },
-            None => return Err(TenantStateError::NotFound(tenant_id)),
+    async fn update_tenant_state_for_removal(tenant_id: TenantId) -> Result<(), TenantStateError> {
+        // It's important to keep the tenant in memory after the final cleanup, to avoid cleanup races.
+        // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
+        // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
+        // avoid holding the lock for the entire process.
+        {
+            let tenants_accessor = TENANTS.write().await;
+            match tenants_accessor.get(&tenant_id) {
+                Some(tenant) => match tenant.current_state() {
+                    TenantState::Attaching
+                    | TenantState::Loading
+                    | TenantState::Broken
+                    | TenantState::Active => {
+                        tenant.set_stopping();
+                        Ok(())
+                    }
+                    TenantState::Stopping => Err(TenantStateError::IsStopping(tenant_id)),
+                },
+                None => Err(TenantStateError::NotFound(tenant_id)),
+            }
         }
+    }
+
+    if let Err(e) = update_tenant_state_for_removal(tenant_id).await {
+        if !allow_ignored_state {
+            return Err(e);
+        }
+        debug!("Tenant state is not found in memory which is valid for ignored tenant {tenant_id}")
     }
 
     // shutdown all tenant and timeline tasks: gc, compaction, page service)
@@ -533,7 +544,7 @@ where
     {
         Ok(hook_value) => {
             let mut tenants_accessor = TENANTS.write().await;
-            if tenants_accessor.remove(&tenant_id).is_none() {
+            if tenants_accessor.remove(&tenant_id).is_none() && !allow_ignored_state {
                 warn!("Tenant {tenant_id} got removed from memory before operation finished");
             }
             Ok(hook_value)

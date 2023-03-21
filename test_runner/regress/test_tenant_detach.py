@@ -349,6 +349,7 @@ def test_tenant_detach_ignored_tenant(neon_env_builder: NeonEnvBuilder):
     # ignore tenant
     pageserver_http.tenant_ignore(tenant_id)
 
+    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
     # ensure tenant couldn't be detached without the special flag for ignored tenant
     log.info("detaching ignored tenant WITHOUT required flag")
     with pytest.raises(
@@ -366,15 +367,13 @@ def test_tenant_detach_ignored_tenant(neon_env_builder: NeonEnvBuilder):
     # check that nothing is left on disk for deleted tenant
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
-    # assert the tenant doesn not exists in the Pageserver
-    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
+    # assert the tenant does not exists in the Pageserver
     with pytest.raises(
         expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
     ):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 
 
-#
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_detach_while_attaching(
     neon_env_builder: NeonEnvBuilder,
