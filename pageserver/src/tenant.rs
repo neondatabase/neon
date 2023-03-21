@@ -2160,13 +2160,23 @@ impl Tenant {
         let new_timeline = self
             .prepare_timeline(
                 dst_id,
-                metadata,
+                metadata.clone(),
                 timeline_uninit_mark,
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
             .initialize_with_lock(&mut timelines, true, true)?;
         drop(timelines);
+
+        // Root timeline gets its layers during creation and uploads them along with the metadata.
+        // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
+        // We still need to upload its metadata to avoid branch loss on (re)attach.
+        if let Some(remote_client) = new_timeline.remote_client.as_ref() {
+            remote_client
+                .schedule_index_upload_for_metadata_update(&metadata)
+                .context("branch initial metadata upload")?;
+        }
+
         info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
 
         Ok(new_timeline)

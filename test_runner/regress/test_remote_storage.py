@@ -13,6 +13,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PageserverApiException,
+    PageserverHttpClient,
     RemoteStorageKind,
     available_remote_storages,
     wait_for_last_flush_lsn,
@@ -421,23 +422,6 @@ def test_remote_timeline_client_calls_started_metric(
         )
         wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-    def get_queued_count(file_kind, op_kind):
-        val = client.get_remote_timeline_client_metric(
-            "pageserver_remote_timeline_client_calls_unfinished",
-            tenant_id,
-            timeline_id,
-            file_kind,
-            op_kind,
-        )
-        if val is None:
-            return val
-        return int(val)
-
-    def wait_upload_queue_empty():
-        wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-        wait_until(2, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
-        wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
-
     calls_started: Dict[Tuple[str, str], List[int]] = {
         ("layer", "upload"): [0],
         ("index", "upload"): [0],
@@ -478,7 +462,7 @@ def test_remote_timeline_client_calls_started_metric(
     # create some layers & wait for uploads to finish
     churn("a", "b")
 
-    wait_upload_queue_empty()
+    wait_upload_queue_empty(client, tenant_id, timeline_id)
 
     # ensure that we updated the calls_started metric
     fetch_calls_started()
@@ -635,6 +619,104 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     client.configure_failpoints(("before-upload-layer", "off"))
     # XXX force retry, currently we have to wait for exponential backoff
     time.sleep(10)
+
+
+# Branches off a root branch, but does not write anything to the new branch, so it has a metadata file only.
+# Ensures that such branch is still persisted on the remote storage, and can be restored during tenant (re)attach.
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_created_branch_remote_storage_upload(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_timeline_deletion_with_files_stuck_in_upload_queue",
+    )
+
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+
+    new_branch_name = "new_branch"
+    new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+
+    pg = env.postgres.create_start(new_branch_name, tenant_id=env.initial_tenant)
+    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_branch_timeline_id)
+    pg.stop_and_destroy()
+    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
+
+    timelines_before_detach = set(
+        map(
+            lambda t: TimelineId(t["timeline_id"]),
+            client.timeline_list(env.initial_tenant),
+        )
+    )
+    expected_timelines = set([env.initial_timeline, new_branch_timeline_id])
+    assert (
+        timelines_before_detach == expected_timelines
+    ), f"Expected to have an initial timeline and the branch timeline only, but got {timelines_before_detach}"
+
+    client.tenant_detach(env.initial_tenant)
+    client.tenant_attach(env.initial_tenant)
+    wait_until_tenant_state(client, env.initial_tenant, "Active", 5)
+
+    timelines_after_detach = set(
+        map(
+            lambda t: TimelineId(t["timeline_id"]),
+            client.timeline_list(env.initial_tenant),
+        )
+    )
+
+    assert (
+        timelines_before_detach == timelines_after_detach
+    ), f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
+
+
+def wait_upload_queue_empty(
+    client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
+):
+    wait_until(
+        2,
+        1,
+        lambda: get_queued_count(
+            client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"
+        )
+        == 0,
+    )
+    wait_until(
+        2,
+        1,
+        lambda: get_queued_count(
+            client, tenant_id, timeline_id, file_kind="index", op_kind="upload"
+        )
+        == 0,
+    )
+    wait_until(
+        2,
+        1,
+        lambda: get_queued_count(
+            client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"
+        )
+        == 0,
+    )
+
+
+def get_queued_count(
+    client: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    file_kind: str,
+    op_kind: str,
+):
+    val = client.get_remote_timeline_client_metric(
+        "pageserver_remote_timeline_client_calls_unfinished",
+        tenant_id,
+        timeline_id,
+        file_kind,
+        op_kind,
+    )
+    if val is None:
+        return val
+    return int(val)
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
