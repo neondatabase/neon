@@ -630,7 +630,7 @@ def test_created_branch_remote_storage_upload(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_deletion_with_files_stuck_in_upload_queue",
+        test_name="test_created_branch_remote_storage_upload",
     )
 
     env = neon_env_builder.init_start()

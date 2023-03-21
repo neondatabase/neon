@@ -1163,7 +1163,7 @@ impl Timeline {
     pub(super) fn new(
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
-        metadata: TimelineMetadata,
+        metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
