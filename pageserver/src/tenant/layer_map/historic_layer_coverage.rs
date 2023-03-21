@@ -418,12 +418,6 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     }
 
     pub fn insert(&mut self, layer_key: LayerKey, value: Value) {
-        // layer duplicates are not allowed
-        assert!(!self.layers.contains_key(&layer_key));
-        self.buffer.insert(layer_key, Some(value));
-    }
-
-    pub fn replace_existed(&mut self, layer_key: LayerKey, value: Value) {
         self.buffer.insert(layer_key, Some(value));
     }
 
@@ -478,7 +472,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
             }
             None => Replacement::NotFound,
             Some(_existing) => {
-                self.replace_existed(layer_key.to_owned(), new);
+                self.insert(layer_key.to_owned(), new);
                 Replacement::Replaced { in_buffered }
             }
         }
