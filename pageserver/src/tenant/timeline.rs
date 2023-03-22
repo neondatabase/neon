@@ -2889,7 +2889,7 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            updates.insert_historic(Arc::new(l));
+            assert!(updates.insert_historic(Arc::new(l)));
         }
         updates.flush();
         drop(layers);
