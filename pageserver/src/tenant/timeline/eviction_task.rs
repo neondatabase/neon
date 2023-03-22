@@ -252,31 +252,16 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) {
-        let incremental = self.current_logical_size.initialized_size().and_then(|x| {
-            x.checked_add_signed(
-                self.current_logical_size
-                    .size_added_after_initial
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            )
-        });
-
         let lsn = self.get_last_record_lsn();
 
+        // imitiate on-restart initial logical size
         let size = self.calculate_logical_size(lsn, cancel.clone(), ctx).await;
 
-        let calculated_size_ok = size.is_ok();
-
-        match (size, incremental) {
-            (Ok(size), Some(incremental)) => {
-                let diff = size as i128 - incremental as i128;
-                // for active tenants, it is likely to have some difference, because we cannot know for
-                // which last_record_lsn we got the incremental size
-                info!(%lsn, size, incremental, diff, "re-calculated logical size");
+        match &size {
+            Ok(_size) => {
+                // good, don't log it to avoid confusion
             }
-            (Ok(size), None) => {
-                info!(%lsn, size, "re-calculated logical size before init size calculation finished");
-            }
-            (Err(_), _) => {
+            Err(_) => {
                 // we have known issues for which we already log this on consumption metrics,
                 // gc, and compaction. leave logging out for now.
                 //
@@ -284,10 +269,11 @@ impl Timeline {
             }
         }
 
+        // imitiate repartiting on first compactation
         if let Err(e) = self.collect_keyspace(lsn, ctx).await {
             // if this failed, we probably failed logical size because these use the same keys
-            if !calculated_size_ok {
-                // ignore
+            if size.is_err() {
+                // ignore, see above comment
             } else {
                 warn!(
                     "failed to collect keyspace but succeeded in calculating logical size: {e:#}"
