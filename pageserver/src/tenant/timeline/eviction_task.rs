@@ -11,6 +11,8 @@
 //!     - (other currently missing unknowns)
 //!
 //! Items with parentheses are not (yet) touched by this task.
+//!
+//! See write-up on restart on-demand download spike: <https://gist.github.com/problame/2265bf7b8dc398be834abfead36c76b5>
 use std::{
     ops::ControlFlow,
     sync::Arc,
