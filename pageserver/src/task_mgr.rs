@@ -483,8 +483,7 @@ pub async fn shutdown_tasks(
             let mut task_mut = task.mutable.lock().unwrap();
             task_mut.join_handle.take()
         };
-        if let Some(join_handle) = join_handle {
-            tokio::pin!(join_handle);
+        if let Some(mut join_handle) = join_handle {
             let mut passed = false;
             loop {
                 tokio::select! {
