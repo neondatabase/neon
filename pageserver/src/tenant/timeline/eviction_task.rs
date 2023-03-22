@@ -1,5 +1,16 @@
-//! The per-timeline layer eviction task.
-
+//! The per-timeline layer eviction task, which evicts data which has not been accessed for more
+//! than a given threshold.
+//!
+//! Data includes all kinds of caches, namely:
+//! - (in-memory layers)
+//! - on-demand downloaded layer files on disk
+//! - (cached layer file pages)
+//! - derived data from layer file contents, namely:
+//!     - initial logical size
+//!     - partitioning
+//!     - (other currently missing unknowns)
+//!
+//! Items with parentheses are not (yet) touched by this task.
 use std::{
     ops::ControlFlow,
     sync::Arc,
