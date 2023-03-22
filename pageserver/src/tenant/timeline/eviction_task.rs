@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
+    context::{DownloadBehavior, RequestContext},
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
@@ -54,9 +55,12 @@ impl Timeline {
             }
         }
 
+        // FIXME: is this really unexpected downloadbehaviour in the presence of disk based
+        // eviction?
+        let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
         loop {
             let policy = self.get_eviction_policy();
-            let cf = self.eviction_iteration(&policy, &cancel).await;
+            let cf = self.eviction_iteration(&policy, &cancel, &ctx).await;
 
             match cf {
                 ControlFlow::Break(()) => break,
@@ -78,6 +82,7 @@ impl Timeline {
         self: &Arc<Self>,
         policy: &EvictionPolicy,
         cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> ControlFlow<(), Instant> {
         debug!("eviction iteration: {policy:?}");
         match policy {
@@ -87,7 +92,7 @@ impl Timeline {
             }
             EvictionPolicy::LayerAccessThreshold(p) => {
                 let start = Instant::now();
-                match self.eviction_iteration_threshold(p, cancel).await {
+                match self.eviction_iteration_threshold(p, cancel, ctx).await {
                     ControlFlow::Break(()) => return ControlFlow::Break(()),
                     ControlFlow::Continue(()) => (),
                 }
@@ -102,6 +107,7 @@ impl Timeline {
         self: &Arc<Self>,
         p: &EvictionPolicyLayerAccessThreshold,
         cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
@@ -114,6 +120,13 @@ impl Timeline {
             not_evictable: usize,
             skipped_for_shutdown: usize,
         }
+
+        self.refresh_layers_required_in_restart(cancel, ctx).await;
+
+        if cancel.is_cancelled() {
+            return ControlFlow::Break(());
+        }
+
         let mut stats = EvictionStats::default();
         // Gather layers for eviction.
         // NB: all the checks can be invalidated as soon as we release the layer map lock.
@@ -215,5 +228,63 @@ impl Timeline {
             info!(stats=?stats, "eviction iteration complete");
         }
         ControlFlow::Continue(())
+    }
+
+    /// Recompute the values which would cause on-demand downloads during restart.
+    ///
+    /// Because of current implementation limitations, we cannot actually invalidate these caches
+    /// except for restarting the pageserver, we just recompute the values which would be
+    /// recomputed, if we had a cache miss.
+    ///
+    /// It is possible that this will cause reads to inmemory layers for active tenants, but
+    /// for inactive tenants it will refresh the last_access timestamps so that we will not
+    /// evict and re-download on restart these.
+    async fn refresh_layers_required_in_restart(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) {
+        let incremental = self.current_logical_size.initialized_size().and_then(|x| {
+            x.checked_add_signed(
+                self.current_logical_size
+                    .size_added_after_initial
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        });
+
+        let lsn = self.get_last_record_lsn();
+
+        let size = self.calculate_logical_size(lsn, cancel.clone(), ctx).await;
+
+        let calculated_size_ok = size.is_ok();
+
+        match (size, incremental) {
+            (Ok(size), Some(incremental)) => {
+                let diff = size as i128 - incremental as i128;
+                // for active tenants, it is likely to have some difference, because we cannot know for
+                // which last_record_lsn we got the incremental size
+                info!(%lsn, size, incremental, diff, "re-calculated logical size");
+            }
+            (Ok(size), None) => {
+                info!(%lsn, size, "re-calculated logical size before init size calculation finished");
+            }
+            (Err(_), _) => {
+                // we have known issues for which we already log this on consumption metrics,
+                // gc, and compaction. leave logging out for now.
+                //
+                // https://github.com/neondatabase/neon/issues/2539
+            }
+        }
+
+        if let Err(e) = self.collect_keyspace(lsn, ctx).await {
+            // if this failed, we probably failed logical size because these use the same keys
+            if !calculated_size_ok {
+                // ignore
+            } else {
+                warn!(
+                    "failed to collect keyspace but succeeded in calculating logical size: {e:#}"
+                );
+            }
+        }
     }
 }
