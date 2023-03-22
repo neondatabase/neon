@@ -66,8 +66,6 @@ impl Timeline {
             }
         }
 
-        // FIXME: is this really unexpected downloadbehaviour in the presence of disk based
-        // eviction?
         let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
         loop {
             let policy = self.get_eviction_policy();
