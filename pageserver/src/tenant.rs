@@ -478,7 +478,7 @@ impl Tenant {
 
             let dummy_timeline = self.create_timeline_data(
                 timeline_id,
-                up_to_date_metadata.clone(),
+                up_to_date_metadata,
                 ancestor.clone(),
                 remote_client,
             )?;
@@ -503,7 +503,7 @@ impl Tenant {
                     let broken_timeline = self
                         .create_timeline_data(
                             timeline_id,
-                            up_to_date_metadata.clone(),
+                            up_to_date_metadata,
                             ancestor.clone(),
                             None,
                         )
@@ -1142,7 +1142,7 @@ impl Tenant {
         );
         self.prepare_timeline(
             new_timeline_id,
-            new_metadata,
+            &new_metadata,
             timeline_uninit_mark,
             true,
             None,
@@ -1700,7 +1700,7 @@ impl Tenant {
     fn create_timeline_data(
         &self,
         new_timeline_id: TimelineId,
-        new_metadata: TimelineMetadata,
+        new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -2160,13 +2160,25 @@ impl Tenant {
         let new_timeline = self
             .prepare_timeline(
                 dst_id,
-                metadata,
+                &metadata,
                 timeline_uninit_mark,
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
             .initialize_with_lock(&mut timelines, true, true)?;
         drop(timelines);
+
+        // Root timeline gets its layers during creation and uploads them along with the metadata.
+        // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
+        // We still need to upload its metadata eagerly: if other nodes `attach` the tenant and miss this timeline, their GC
+        // could get incorrect information and remove more layers, than needed.
+        // See also https://github.com/neondatabase/neon/issues/3865
+        if let Some(remote_client) = new_timeline.remote_client.as_ref() {
+            remote_client
+                .schedule_index_upload_for_metadata_update(&metadata)
+                .context("branch initial metadata upload")?;
+        }
+
         info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
 
         Ok(new_timeline)
@@ -2229,7 +2241,7 @@ impl Tenant {
             pg_version,
         );
         let raw_timeline =
-            self.prepare_timeline(timeline_id, new_metadata, timeline_uninit_mark, true, None)?;
+            self.prepare_timeline(timeline_id, &new_metadata, timeline_uninit_mark, true, None)?;
 
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
@@ -2283,7 +2295,7 @@ impl Tenant {
     fn prepare_timeline(
         &self,
         new_timeline_id: TimelineId,
-        new_metadata: TimelineMetadata,
+        new_metadata: &TimelineMetadata,
         uninit_mark: TimelineUninitMark,
         init_layers: bool,
         ancestor: Option<Arc<Timeline>>,
@@ -2297,7 +2309,7 @@ impl Tenant {
                 tenant_id,
                 new_timeline_id,
             );
-            remote_client.init_upload_queue_for_empty_remote(&new_metadata)?;
+            remote_client.init_upload_queue_for_empty_remote(new_metadata)?;
             Some(remote_client)
         } else {
             None
@@ -2336,17 +2348,12 @@ impl Tenant {
         &self,
         timeline_path: &Path,
         new_timeline_id: TimelineId,
-        new_metadata: TimelineMetadata,
+        new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_data = self
-            .create_timeline_data(
-                new_timeline_id,
-                new_metadata.clone(),
-                ancestor,
-                remote_client,
-            )
+            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client)
             .context("Failed to create timeline data structure")?;
         crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
 
@@ -2358,7 +2365,7 @@ impl Tenant {
             self.conf,
             new_timeline_id,
             self.tenant_id,
-            &new_metadata,
+            new_metadata,
             true,
         )
         .context("Failed to create timeline metadata")?;

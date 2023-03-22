@@ -1163,7 +1163,7 @@ impl Timeline {
     pub(super) fn new(
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
-        metadata: TimelineMetadata,
+        metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -1629,6 +1629,8 @@ impl Timeline {
             .map(|l| (l.filename(), l))
             .collect::<HashMap<_, _>>();
 
+        // If no writes happen, new branches do not have any layers, only the metadata file.
+        let has_local_layers = !local_layers.is_empty();
         let local_only_layers = match index_part {
             Some(index_part) => {
                 info!(
@@ -1646,21 +1648,40 @@ impl Timeline {
             }
         };
 
-        // Are there local files that don't exist remotely? Schedule uploads for them
-        for (layer_name, layer) in &local_only_layers {
-            // XXX solve this in the type system
-            let layer_path = layer
-                .local_path()
-                .expect("local_only_layers only contains local layers");
-            let layer_size = layer_path
-                .metadata()
-                .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
-                .len();
-            info!("scheduling {layer_path:?} for upload");
-            remote_client
-                .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
+        if has_local_layers {
+            // Are there local files that don't exist remotely? Schedule uploads for them.
+            // Local timeline metadata will get uploaded to remove along witht he layers.
+            for (layer_name, layer) in &local_only_layers {
+                // XXX solve this in the type system
+                let layer_path = layer
+                    .local_path()
+                    .expect("local_only_layers only contains local layers");
+                let layer_size = layer_path
+                    .metadata()
+                    .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
+                    .len();
+                info!("scheduling {layer_path:?} for upload");
+                remote_client
+                    .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
+            }
+            remote_client.schedule_index_upload_for_file_changes()?;
+        } else if index_part.is_none() {
+            // No data on the remote storage, no local layers, local metadata file.
+            //
+            // TODO https://github.com/neondatabase/neon/issues/3865
+            // Currently, console does not wait for the timeline data upload to the remote storage
+            // and considers the timeline created, expecting other pageserver nodes to work with it.
+            // Branch metadata upload could get interrupted (e.g pageserver got killed),
+            // hence any locally existing branch metadata with no remote counterpart should be uploaded,
+            // otherwise any other pageserver won't see the branch on `attach`.
+            //
+            // After the issue gets implemented, pageserver should rather remove the branch,
+            // since absence on S3 means we did not acknowledge the branch creation and console will have to retry,
+            // no need to keep the old files.
+            remote_client.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
+        } else {
+            // Local timeline has a metadata file, remote one too, both have no layers to sync.
         }
-        remote_client.schedule_index_upload_for_file_changes()?;
 
         info!("Done");
 
