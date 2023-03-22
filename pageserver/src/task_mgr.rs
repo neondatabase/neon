@@ -495,7 +495,7 @@ pub async fn shutdown_tasks(
             let mut passed = false;
             loop {
                 tokio::select! {
-                    _ = &mut join_handle => { continue; },
+                    _ = &mut join_handle => { break; },
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if !passed => {
                         passed = true;
                         info!("waiting for {} to shut down", task.name);
