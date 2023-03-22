@@ -130,6 +130,13 @@ impl Timeline {
             skipped_for_shutdown: usize,
         }
 
+        // what we want is to invalidate any caches which haven't been accessed for `p.threshold`,
+        // but we cannot actually do it for current limitations except by restarting pageserver. we
+        // just recompute the values which would be recomputed on startup.
+        //
+        // for active tenants this will likely materialized page cache or in-memory layers. for
+        // inactive tenants it will refresh the last_access timestamps so that we will not evict
+        // and re-download on restart these layers.
         self.refresh_layers_required_in_restart(cancel, ctx).await;
 
         if cancel.is_cancelled() {
@@ -240,14 +247,6 @@ impl Timeline {
     }
 
     /// Recompute the values which would cause on-demand downloads during restart.
-    ///
-    /// Because of current implementation limitations, we cannot actually invalidate these caches
-    /// except for restarting the pageserver, we just recompute the values which would be
-    /// recomputed, if we had a cache miss.
-    ///
-    /// It is possible that this will cause reads to inmemory layers for active tenants, but
-    /// for inactive tenants it will refresh the last_access timestamps so that we will not
-    /// evict and re-download on restart these.
     async fn refresh_layers_required_in_restart(
         &self,
         cancel: &CancellationToken,
