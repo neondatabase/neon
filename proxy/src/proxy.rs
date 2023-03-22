@@ -62,34 +62,10 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
-// If true, the proxy will exit when all connections are closed.
-static EXIT_ON_ALL_CONNECTIONS_CLOSED: AtomicBool = AtomicBool::new(false);
-
-// Marked as cancelled by exit_if_needed(), polled by proxy::task_main
-static PROXY_CANCELLATION_TOKEN: Lazy<CancellationToken> = Lazy::new(CancellationToken::new);
-
-// After this function is called, the Proxy will exit once all connections
-// are closed.
-pub fn set_exit_on_connections_closed() {
-    EXIT_ON_ALL_CONNECTIONS_CLOSED.store(true, Ordering::Relaxed);
-}
-
-// Shuts the proxy down if all connections are closed, and set_exit_on_connections_closed
-// has been called.
-pub fn exit_if_needed() {
-    if EXIT_ON_ALL_CONNECTIONS_CLOSED.load(Ordering::Relaxed) {
-        let num_accepted = NUM_CONNECTIONS_ACCEPTED_COUNTER.get();
-        let num_closed = NUM_CONNECTIONS_CLOSED_COUNTER.get();
-        if num_accepted == num_closed {
-            info!("All connections closed, terminating");
-            PROXY_CANCELLATION_TOKEN.cancel();
-        }
-    }
-}
-
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
+    cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -99,7 +75,9 @@ pub async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
+    let mut connections = tokio::task::JoinSet::new();
     let cancel_map = Arc::new(CancelMap::default());
+
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
@@ -108,7 +86,7 @@ pub async fn task_main(
 
                 let session_id = uuid::Uuid::new_v4();
                 let cancel_map = Arc::clone(&cancel_map);
-                tokio::spawn(
+                connections.spawn(
                     async move {
                         info!("spawned a task for {peer_addr}");
 
@@ -124,8 +102,19 @@ pub async fn task_main(
                     }),
                 );
             }
-            _ = PROXY_CANCELLATION_TOKEN.cancelled() => {
-                bail!("Exiting");
+            maybe_exited = connections.join_next() => {
+                match maybe_exited
+                {
+                    Some(Ok(())) => {},
+                    Some(Err(e)) => { bail!(e.to_string()) },
+                    None => {
+                        if cancellation_token.is_cancelled()
+                        {
+                            drop(listener);
+                            bail!("All connections closed, exiting");
+                        }
+                    }
+                }
             }
         }
     }
@@ -144,7 +133,6 @@ pub async fn handle_ws_client(
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
     scopeguard::defer! {
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
-        exit_if_needed();
     }
 
     let tls = config.tls_config.as_ref();
@@ -186,7 +174,6 @@ async fn handle_client(
     NUM_CONNECTIONS_ACCEPTED_COUNTER.inc();
     scopeguard::defer! {
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
-        exit_if_needed();
     }
 
     let tls = config.tls_config.as_ref();

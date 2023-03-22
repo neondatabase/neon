@@ -28,6 +28,7 @@ use config::ProxyConfig;
 use futures::FutureExt;
 use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::{project_git_version, sentry_init::init_sentry};
 
@@ -66,11 +67,16 @@ async fn main() -> anyhow::Result<()> {
     let proxy_address: SocketAddr = args.get_one::<String>("proxy").unwrap().parse()?;
     info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
+    let proxy_cancellation_token = CancellationToken::new();
 
     let mut tasks = vec![
-        tokio::spawn(handle_signals()),
+        tokio::spawn(handle_signals(proxy_cancellation_token.clone())),
         tokio::spawn(http::server::task_main(http_listener)),
-        tokio::spawn(proxy::task_main(config, proxy_listener)),
+        tokio::spawn(proxy::task_main(
+            config,
+            proxy_listener,
+            proxy_cancellation_token,
+        )),
         tokio::spawn(console::mgmt::task_main(mgmt_listener)),
     ];
 
@@ -98,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Handle unix signals appropriately.
-async fn handle_signals() -> anyhow::Result<()> {
+async fn handle_signals(token: CancellationToken) -> anyhow::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut hangup = signal(SignalKind::hangup())?;
@@ -118,8 +124,7 @@ async fn handle_signals() -> anyhow::Result<()> {
             }
             _ = terminate.recv() => {
                 warn!("received SIGTERM, shutting down once all existing connections have closed");
-                proxy::set_exit_on_connections_closed();
-                proxy::exit_if_needed();
+                token.cancel();
             }
         }
     }
