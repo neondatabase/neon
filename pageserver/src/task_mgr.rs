@@ -481,13 +481,20 @@ pub async fn shutdown_tasks(
     for task in victim_tasks {
         let join_handle = {
             let mut task_mut = task.mutable.lock().unwrap();
-            info!("waiting for {} to shut down", task.name);
-            let join_handle = task_mut.join_handle.take();
-            drop(task_mut);
-            join_handle
+            task_mut.join_handle.take()
         };
         if let Some(join_handle) = join_handle {
-            let _ = join_handle.await;
+            tokio::pin!(join_handle);
+            let mut passed = false;
+            loop {
+                tokio::select! {
+                    _ = &mut join_handle => { return; },
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if !passed => {
+                        passed = true;
+                        info!("waiting for {} to shut down", task.name);
+                    }
+                }
+            }
         } else {
             // Possibly one of:
             //  * The task had not even fully started yet.
