@@ -1119,7 +1119,9 @@ def neon_env_builder(
 
 
 class PageserverApiException(Exception):
-    pass
+    def __init__(self, message, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class PageserverHttpClient(requests.Session):
@@ -1140,7 +1142,7 @@ class PageserverHttpClient(requests.Session):
                 msg = res.json()["msg"]
             except:  # noqa: E722
                 msg = ""
-            raise PageserverApiException(msg) from e
+            raise PageserverApiException(msg, res.status_code) from e
 
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
@@ -1190,8 +1192,12 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach")
         self.verbose_error(res)
 
-    def tenant_detach(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach")
+    def tenant_detach(self, tenant_id: TenantId, detach_ignored=False):
+        params = {}
+        if detach_ignored:
+            params["detach_ignored"] = "true"
+
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params)
         self.verbose_error(res)
 
     def tenant_load(self, tenant_id: TenantId):

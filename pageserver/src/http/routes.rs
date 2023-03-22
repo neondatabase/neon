@@ -384,10 +384,11 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
 async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
+    let detach_ignored: Option<bool> = parse_query_param(&request, "detach_ignored")?;
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(conf, tenant_id)
+    mgr::detach_tenant(conf, tenant_id, detach_ignored.unwrap_or(false))
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await?;
 

@@ -315,10 +315,6 @@ pub async fn get_tenant(
         .get(&tenant_id)
         .ok_or(TenantStateError::NotFound(tenant_id))?;
     if active_only && !tenant.is_active() {
-        tracing::warn!(
-            "Tenant {tenant_id} is not active. Current state: {:?}",
-            tenant.current_state()
-        );
         Err(TenantStateError::NotActive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
@@ -350,17 +346,35 @@ pub enum TenantStateError {
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    detach_ignored: bool,
 ) -> Result<(), TenantStateError> {
-    remove_tenant_from_memory(tenant_id, async {
-        let local_tenant_directory = conf.tenant_path(&tenant_id);
+    let local_files_cleanup_operation = |tenant_id_to_clean| async move {
+        let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
         fs::remove_dir_all(&local_tenant_directory)
             .await
             .with_context(|| {
-                format!("Failed to remove local tenant directory {local_tenant_directory:?}")
+                format!("local tenant directory {local_tenant_directory:?} removal")
             })?;
         Ok(())
-    })
-    .await
+    };
+
+    let removal_result =
+        remove_tenant_from_memory(tenant_id, local_files_cleanup_operation(tenant_id)).await;
+
+    // Ignored tenants are not present in memory and will bail the removal from memory operation.
+    // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
+    if detach_ignored && matches!(removal_result, Err(TenantStateError::NotFound(_))) {
+        let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
+        if tenant_ignore_mark.exists() {
+            info!("Detaching an ignored tenant");
+            local_files_cleanup_operation(tenant_id)
+                .await
+                .with_context(|| format!("Ignored tenant {tenant_id} local files cleanup"))?;
+            return Ok(());
+        }
+    }
+
+    removal_result
 }
 
 pub async fn load_tenant(
