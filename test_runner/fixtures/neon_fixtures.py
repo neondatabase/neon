@@ -1190,10 +1190,10 @@ class PageserverHttpClient(requests.Session):
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach")
         self.verbose_error(res)
 
-    def tenant_detach(self, tenant_id: TenantId, allow_ignored=False):
+    def tenant_detach(self, tenant_id: TenantId, detach_ignored=False):
         params = {}
-        if allow_ignored:
-            params["allow_ignored"] = "true"
+        if detach_ignored:
+            params["detach_ignored"] = "true"
 
         res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach", params=params)
         self.verbose_error(res)
