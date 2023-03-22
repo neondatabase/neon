@@ -484,6 +484,16 @@ pub async fn shutdown_tasks(
             task_mut.join_handle.take()
         };
         if let Some(mut join_handle) = join_handle {
+            // let's see if test failures could be caused by allocating the timeout in most cases
+            match futures::future::poll_immediate(&mut join_handle).await {
+                Some(_) => {
+                    return;
+                }
+                None => {
+                    // lets allocate a timeout and then wait for it
+                }
+            }
+
             let mut passed = false;
             loop {
                 tokio::select! {
