@@ -2170,7 +2170,9 @@ impl Tenant {
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
         // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
-        // We still need to upload its metadata to avoid branch loss on (re)attach.
+        // We still need to upload its metadata eagerly: if other nodes `attach` the tenant and miss this timeline, their GC
+        // could get incorrect information and remove more layers, than needed.
+        // See also https://github.com/neondatabase/neon/issues/3865
         if let Some(remote_client) = new_timeline.remote_client.as_ref() {
             remote_client
                 .schedule_index_upload_for_metadata_update(&metadata)

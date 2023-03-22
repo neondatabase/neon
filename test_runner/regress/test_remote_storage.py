@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    LocalFsStorage,
     NeonEnvBuilder,
     PageserverApiException,
     PageserverHttpClient,
@@ -624,13 +625,13 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 # Branches off a root branch, but does not write anything to the new branch, so it has a metadata file only.
 # Ensures that such branch is still persisted on the remote storage, and can be restored during tenant (re)attach.
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
-def test_created_branch_remote_storage_upload(
+def test_empty_branch_remote_storage_upload(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_created_branch_remote_storage_upload",
+        test_name="test_empty_branch_remote_storage_upload",
     )
 
     env = neon_env_builder.init_start()
@@ -639,9 +640,8 @@ def test_created_branch_remote_storage_upload(
     new_branch_name = "new_branch"
     new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
 
-    pg = env.postgres.create_start(new_branch_name, tenant_id=env.initial_tenant)
-    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_branch_timeline_id)
-    pg.stop_and_destroy()
+    with env.postgres.create_start(new_branch_name, tenant_id=env.initial_tenant) as pg:
+        wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_branch_timeline_id)
     wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
 
     timelines_before_detach = set(
@@ -669,6 +669,52 @@ def test_created_branch_remote_storage_upload(
     assert (
         timelines_before_detach == timelines_after_detach
     ), f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
+
+
+# Branches off a root branch, but does not write anything to the new branch, so it has a metadata file only.
+# Ensures the branch is not on the remote storage and restarts the pageserver — the branch should be uploaded after the restart.
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_empty_branch_remote_storage_upload_on_restart(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_empty_branch_remote_storage_upload_on_restart",
+    )
+
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+
+    new_branch_name = "new_branch"
+    new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+
+    with env.postgres.create_start(new_branch_name, tenant_id=env.initial_tenant) as pg:
+        wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_branch_timeline_id)
+    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
+
+    env.pageserver.stop()
+
+    # Remove new branch from the remote storage
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    new_branch_on_remote_storage = (
+        env.remote_storage.root
+        / "tenants"
+        / str(env.initial_tenant)
+        / "timelines"
+        / str(new_branch_timeline_id)
+    )
+    assert (
+        new_branch_on_remote_storage.is_dir()
+    ), f"'{new_branch_on_remote_storage}' path does not exist on the remote storage"
+    shutil.rmtree(new_branch_on_remote_storage)
+
+    env.pageserver.start()
+
+    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
+    assert (
+        new_branch_on_remote_storage.is_dir()
+    ), f"New branch should have been reuploaded on pageserver restart to the remote storage path '{new_branch_on_remote_storage}'"
 
 
 def wait_upload_queue_empty(
