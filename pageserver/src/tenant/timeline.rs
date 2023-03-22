@@ -2,6 +2,7 @@
 
 mod eviction_task;
 mod walreceiver;
+mod layer_trace;
 
 use anyhow::{anyhow, bail, ensure, Context};
 use bytes::Bytes;
@@ -19,8 +20,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::BinaryHeap;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -114,6 +114,17 @@ pub struct Timeline {
     pub pg_version: u32,
 
     pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
+
+    /// Set of key ranges which should be covered by image layers to
+    /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
+    /// It is used by compaction task when it checks if new image layer should be created.
+    /// Newly created image layer doesn't help to remove the delta layer, until the
+    /// newly created image layer falls off the PITR horizon. So on next GC cycle,
+    /// gc_timeline may still want the new image layer to be created. To avoid redundant
+    /// image layers creation we should check if image layer exists but beyond PITR horizon.
+    /// This is why we need remember GC cutoff LSN.
+    ///
+    wanted_image_layers: Mutex<Option<(Lsn, KeySpace)>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -216,6 +227,8 @@ pub struct Timeline {
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
     state: watch::Sender<TimelineState>,
+
+    layer_trace_file: Mutex<Option<std::fs::File>>,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -312,7 +325,7 @@ impl LogicalSize {
         //                  we change the type.
         match self.initial_logical_size.get() {
             Some(initial_size) => {
-                initial_size.checked_add_signed(size_increment)
+                initial_size.checked_add(size_increment.try_into().unwrap())
                     .with_context(|| format!("Overflow during logical size calculation, initial_size: {initial_size}, size_increment: {size_increment}"))
                     .map(CurrentLogicalSize::Exact)
             }
@@ -857,6 +870,7 @@ impl Timeline {
     }
 
     pub fn activate(self: &Arc<Self>) {
+        self.start_layer_tracing();
         self.set_state(TimelineState::Active);
         self.launch_wal_receiver();
         self.launch_eviction_task();
@@ -1080,6 +1094,7 @@ impl Timeline {
                 self.metrics
                     .resident_physical_size_gauge
                     .sub(layer_file_size);
+                self.trace_layer_evict(&local_layer.filename());
 
                 self.metrics.evictions.inc();
 
@@ -1186,6 +1201,7 @@ impl Timeline {
                 tenant_id,
                 pg_version,
                 layers: RwLock::new(LayerMap::default()),
+                wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
 
@@ -1248,6 +1264,8 @@ impl Timeline {
                 download_all_remote_layers_task_info: RwLock::new(None),
 
                 state,
+
+                layer_trace_file: Mutex::new(None),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
@@ -1747,7 +1765,7 @@ impl Timeline {
                     .size_added_after_initial
                     .load(AtomicOrdering::Relaxed);
 
-                let sum = calculated_size.saturating_add_signed(added);
+                let sum = calculated_size.saturating_add(added.try_into().unwrap());
 
                 // set the gauge value before it can be set in `update_current_logical_size`.
                 self_clone.metrics.current_logical_size_gauge.set(sum);
@@ -2628,6 +2646,8 @@ impl Timeline {
             self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
         ])?;
 
+        self.trace_layer_flush(&new_delta.filename());
+
         // Add it to the layer map
         self.layers
             .write()
@@ -2683,6 +2703,30 @@ impl Timeline {
         let layers = self.layers.read().unwrap();
 
         let mut max_deltas = 0;
+        let wanted_image_layers = self.wanted_image_layers.lock().unwrap();
+        if let Some((cutoff_lsn, wanted)) = &*wanted_image_layers {
+            let img_range =
+                partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
+            if wanted.overlaps(&img_range) {
+                //
+                // gc_timeline only pays attention to image layers that are older than the GC cutoff,
+                // but create_image_layers creates image layers at last-record-lsn.
+                // So it's possible that gc_timeline decides that it wants new image layer to be created for a key range,
+                // and on next compcation create_image_layers creates the image layer.
+                // But on next GC cycle, gc_timeline still wantes the new image layer to be created,
+                // because the newly created image layer doesn't help to remove the delta layer,
+                // until the newly created image layer falls off the PITR horizon.
+                //
+                // So we should check if image layer beyond cutoff LSN already exists.
+                if !layers.image_layer_exists(&img_range, &(*cutoff_lsn..lsn))? {
+                    debug!(
+                        "Force generation of layer {}-{} wanted by GC)",
+                        img_range.start, img_range.end
+                    );
+                    return Ok(true);
+                }
+            }
+        }
 
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
@@ -2802,6 +2846,11 @@ impl Timeline {
                 image_layers.push(image_layer);
             }
         }
+        // All wanted layers are taken in account by time_for_new_image_layer.
+        // The wanted_image_layers could get updated out of turn and we could
+        // clear something which hasn't been looked at all. This is fine, because
+        // next gc round any wanted would get added back in.
+        *self.wanted_image_layers.lock().unwrap() = None;
 
         // Sync the new layer to disk before adding it to the layer map, to make sure
         // we don't garbage collect something based on the new layer, before it has
@@ -2838,6 +2887,7 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
+            self.trace_layer_image_create(&l.filename());
             updates.insert_historic(Arc::new(l));
         }
         updates.flush();
@@ -3268,6 +3318,7 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
+            self.trace_layer_compact_create(&l.filename());
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
@@ -3278,6 +3329,7 @@ impl Timeline {
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
+            self.trace_layer_compact_delete(&l.filename());
             layer_names_to_delete.push(l.filename());
             self.delete_historic_layer(layer_removal_cs, l, &mut updates)?;
         }
@@ -3474,6 +3526,8 @@ impl Timeline {
 
         info!("GC starting");
 
+        self.trace_gc_start(new_gc_cutoff);
+
         debug!("retain_lsns: {:?}", retain_lsns);
 
         // Before deleting any layers, we need to wait for their upload ops to finish.
@@ -3488,6 +3542,7 @@ impl Timeline {
         }
 
         let mut layers_to_remove = Vec::new();
+        let mut wanted_image_layers = KeySpace::default();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -3571,6 +3626,15 @@ impl Timeline {
                     "keeping {} because it is the latest layer",
                     l.filename().file_name()
                 );
+                // Collect delta key ranges that need image layers to allow garbage
+                // collecting the layers.
+                // It is not so obvious whether we need to propagate information only about
+                // delta layers. Image layers can form "stairs" preventing old image from been deleted.
+                // But image layers are in any case less sparse than delta layers. Also we need some
+                // protection from replacing recent image layers with new one after each GC iteration.
+                if l.is_incremental() && !LayerMap::is_l0(&*l) {
+                    wanted_image_layers.add_range(l.get_key_range());
+                }
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
@@ -3583,6 +3647,10 @@ impl Timeline {
             );
             layers_to_remove.push(Arc::clone(&l));
         }
+        self.wanted_image_layers
+            .lock()
+            .unwrap()
+            .replace((new_gc_cutoff, wanted_image_layers));
 
         let mut updates = layers.batch_update();
         if !layers_to_remove.is_empty() {
@@ -3597,6 +3665,7 @@ impl Timeline {
             {
                 for doomed_layer in layers_to_remove {
                     layer_names_to_delete.push(doomed_layer.filename());
+                    self.trace_layer_gc_delete(&doomed_layer.filename());
                     self.delete_historic_layer(layer_removal_cs, doomed_layer, &mut updates)?; // FIXME: schedule succeeded deletions before returning?
                     result.layers_removed += 1;
                 }
