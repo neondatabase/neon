@@ -15,15 +15,30 @@ project_git_version!(GIT_VERSION);
 
 // Map values to their compressed coordinate - the index the value
 // would have in a sorted and deduplicated list of all values.
-fn build_coordinate_compression_map<T: Ord + Copy>(coords: Vec<T>) -> BTreeMap<T, usize> {
-    let set: BTreeSet<T> = coords.into_iter().collect();
+struct CoordinateMap<T: Ord + Copy> {
+    map: BTreeMap<T, usize>,
+    stretch: f32
+}
 
-    let mut map: BTreeMap<T, usize> = BTreeMap::new();
-    for (i, e) in set.iter().enumerate() {
-        map.insert(*e, i);
+impl<T: Ord + Copy> CoordinateMap<T> {
+    fn new(coords: Vec<T>, stretch: f32) -> Self {
+        let set: BTreeSet<T> = coords.into_iter().collect();
+
+        let mut map: BTreeMap<T, usize> = BTreeMap::new();
+        for (i, e) in set.iter().enumerate() {
+            map.insert(*e, i);
+        }
+
+        Self { map, stretch }
     }
 
-    map
+    fn map(&self, val: T) -> f32 {
+        *self.map.get(&val).unwrap() as f32 * self.stretch
+    }
+
+    fn max(&self) -> f32 {
+        self.map.len() as f32 * self.stretch
+    }
 }
 
 fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
@@ -166,8 +181,9 @@ fn main() -> Result<()> {
     }
 
     // Analyze
-    let key_map = build_coordinate_compression_map(keys);
-    let lsn_map = build_coordinate_compression_map(lsns);
+    let key_map = CoordinateMap::new(keys, 2.0);
+    // Stretch out vertically for better visibility
+    let lsn_map = CoordinateMap::new(lsns, 3.0);
 
     // Initialize stats
     let mut num_deltas = 0;
@@ -176,15 +192,14 @@ fn main() -> Result<()> {
     let mut svg = String::new();
 
     // Draw
-    let stretch = 3.0; // Stretch out vertically for better visibility
     writeln!(svg,
         "{}",
         BeginSvg {
-            w: key_map.len() as f32,
-            h: stretch * lsn_map.len() as f32
+            w: key_map.max(),
+            h: lsn_map.max(),
         }
     )?;
-    let lsn_max = lsn_map.len();
+    let lsn_max = lsn_map.max();
 
     // Sort the files by LSN, but so that image layers go after all delta layers
     // The SVG is painted in the order the elements appear, and we want to draw
@@ -201,16 +216,16 @@ fn main() -> Result<()> {
     });
 
     for f in files_sorted {
-        let key_start = *key_map.get(&f.key_range.start).unwrap();
-        let key_end = *key_map.get(&f.key_range.end).unwrap();
+        let key_start = key_map.map(f.key_range.start);
+        let key_end = key_map.map(f.key_range.end);
         let key_diff = key_end - key_start;
 
         if key_start >= key_end {
             panic!("Invalid key range {}-{}", key_start, key_end);
         }
 
-        let lsn_start = *lsn_map.get(&f.lsn_range.start).unwrap();
-        let lsn_end = *lsn_map.get(&f.lsn_range.end).unwrap();
+        let lsn_start = lsn_map.map(f.lsn_range.start);
+        let lsn_end = lsn_map.map(f.lsn_range.end);
 
         // Fill in and thicken rectangle if it's an
         // image layer so that we can see it.
@@ -218,13 +233,13 @@ fn main() -> Result<()> {
         style.fill = Fill::Color(rgb(0x80, 0x80, 0x80));
         style.stroke = Stroke::Color(rgb(0, 0, 0), 0.5);
 
-        let y_start = stretch * (lsn_max - lsn_start) as f32;
-        let y_end = stretch * (lsn_max - lsn_end) as f32;
+        let y_start = (lsn_max - lsn_start) as f32;
+        let y_end = (lsn_max - lsn_end) as f32;
 
         let x_margin = 0.25;
         let y_margin = 0.5;
 
-        match lsn_start.cmp(&lsn_end) {
+        match f.lsn_range.start.cmp(&f.lsn_range.end) {
             Ordering::Less => {
                 num_deltas += 1;
                 write!(svg,
@@ -264,19 +279,19 @@ fn main() -> Result<()> {
     }
 
     for (idx, gc) in gc_events.iter().enumerate() {
-        let cutoff_lsn = *lsn_map.get(&gc.cutoff).unwrap();
+        let cutoff_lsn = lsn_map.map(gc.cutoff);
 
         let mut style = Style::default();
         style.fill = Fill::None;
         style.stroke = Stroke::Color(rgb(0xff, 0, 0), 0.5);
 
-        let y = stretch * (lsn_max as f32 - (cutoff_lsn as f32));
+        let y = lsn_max - cutoff_lsn;
         writeln!(svg,
                  r#"    <line id="gc_{}" x1="{}" y1="{}" x2="{}" y2="{}" style="{}" />"#,
                  idx,
                  0,
                  y,
-                 key_map.len() as f32,
+                 key_map.max(),
                  y,
                  style.to_string(),
         )?;
@@ -345,11 +360,43 @@ fn main() -> Result<()> {
 </style>
 </head>
 
-  <body>
+  <body onload="init()">
     <script type="text/javascript">
 
       var layer_events = [{layer_events_str}]
       var gc_events = [{gc_events_str}]
+
+      let ticker;
+
+      function init() {{
+          moveSlider({last_time_rel})
+          moveSlider(0)
+          moveSlider(last_slider_pos)
+      }}
+
+      function startAnimation() {{
+          ticker = setInterval(animateStep, 100);
+      }}
+      function stopAnimation() {{
+          clearInterval(ticker);
+      }}
+
+      function animateStep() {{
+          if (last_layer_event < layer_events.length - 1) {{
+              var slider = document.getElementById("time-slider");
+              let prevPos = slider.value
+              let nextEvent = last_layer_event
+              while (nextEvent < layer_events.length - 1) {{
+                  if (layer_events[nextEvent].time_rel > prevPos) {{
+                      break;
+                  }}
+                  nextEvent += 1;
+              }}
+              let nextPos = layer_events[nextEvent].time_rel
+              slider.value = nextPos
+              moveSlider(nextPos)
+          }}
+      }}
 
       function redoLayerEvent(n, dir) {{
           var layer = document.getElementById("layer_" + layer_events[n].filename);
@@ -418,9 +465,7 @@ fn main() -> Result<()> {
       var last_layer_event = 0
       var last_gc_event = 0
 
-      var moveSlider = function(slider) {{
-	  var new_pos = slider.value;
-
+      var moveSlider = function(new_pos) {{
           if (new_pos > last_slider_pos) {{
               while (last_layer_event < layer_events.length - 1) {{
                   if (layer_events[last_layer_event + 1].time_rel > new_pos) {{
@@ -465,12 +510,15 @@ fn main() -> Result<()> {
     <div class="topbar">
       <div class="slidercontainer">
         <label for="time-slider">TIME</label>:
-        <input id="time-slider" class="slider" type="range" min="0" max="{last_time_rel}" value="0" oninput="moveSlider(this)"><br>
+        <input id="time-slider" class="slider" type="range" min="0" max="{last_time_rel}" value="0" oninput="moveSlider(this.value)"><br>
 
         pos: <span id="debug_pos"></span><br>
         event: <span id="debug_layer_event"></span><br>
         gc: <span id="debug_gc_event"></span><br>
       </div>
+
+      <button onclick="startAnimation()">Play</button> 
+      <button onclick="stopAnimation()">Stop</button> 
 
       <svg class="legend">
         <rect x=5 y=0 width=20 height=20 style="fill:rgb(128,128,128);stroke:rgb(0,0,0);stroke-width:0.5;fill-opacity:1;stroke-opacity:1;"/>
