@@ -56,7 +56,7 @@ impl Timeline {
 
         loop {
             let policy = self.get_eviction_policy();
-            let cf = self.eviction_iteration(&policy, cancel.clone()).await;
+            let cf = self.eviction_iteration(&policy, &cancel).await;
 
             match cf {
                 ControlFlow::Break(()) => break,
@@ -77,7 +77,7 @@ impl Timeline {
     async fn eviction_iteration(
         self: &Arc<Self>,
         policy: &EvictionPolicy,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> ControlFlow<(), Instant> {
         debug!("eviction iteration: {policy:?}");
         match policy {
@@ -101,7 +101,7 @@ impl Timeline {
     async fn eviction_iteration_threshold(
         self: &Arc<Self>,
         p: &EvictionPolicyLayerAccessThreshold,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
@@ -174,7 +174,7 @@ impl Timeline {
         };
 
         let results = match self
-            .evict_layer_batch(remote_client, &candidates[..], cancel)
+            .evict_layer_batch(remote_client, &candidates[..], cancel.clone())
             .await
         {
             Err(pre_err) => {
