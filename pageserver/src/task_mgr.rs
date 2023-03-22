@@ -485,7 +485,10 @@ pub async fn shutdown_tasks(
         };
         if let Some(mut join_handle) = join_handle {
             // let's see if test failures could be caused by allocating the timeout in most cases
-            if let Some(_) = futures::future::poll_immediate(&mut join_handle).await {
+            if futures::future::poll_immediate(&mut join_handle)
+                .await
+                .is_some()
+            {
                 return;
             }
 
