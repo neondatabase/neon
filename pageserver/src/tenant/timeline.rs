@@ -1246,6 +1246,11 @@ impl Timeline {
 
                 state,
             };
+            info!(
+                "initialized lsrlsn to {}/{}",
+                disk_consistent_lsn,
+                metadata.prev_record_lsn().unwrap_or(Lsn(0))
+            );
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
                 .metrics

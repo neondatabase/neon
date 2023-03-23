@@ -136,6 +136,7 @@ def test_backward_compatibility(
 
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
+@pytest.mark.repeat(1000)
 def test_forward_compatibility(
     test_output_dir: Path,
     port_distributor: PortDistributor,

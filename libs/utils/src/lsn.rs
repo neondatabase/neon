@@ -6,6 +6,7 @@ use std::ops::{Add, AddAssign};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::info;
 
 use crate::seqwait::MonotonicCounter;
 
@@ -239,6 +240,7 @@ impl MonotonicCounter<Lsn> for RecordLsn {
         let new_prev = self.last;
         self.last = lsn;
         self.prev = new_prev;
+        info!("advanced record lsn to {}/{}", self.last, self.prev);
     }
     fn cnt_value(&self) -> Lsn {
         self.last
