@@ -15,7 +15,6 @@ use futures::TryFutureExt;
 use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -103,14 +102,13 @@ pub async fn task_main(
                 );
             }
             maybe_exited = connections.join_next() => {
-                match maybe_exited
-                {
+                match maybe_exited {
                     Some(Ok(())) => {},
-                    Some(Err(e)) => { bail!(e.to_string()) },
+                    Some(Err(e)) if e.is_cancelled() => unreachable!("we do not deschedule tasks which is different from them reacting to cancellation token and deciding to exit themselves"),
+                    Some(Err(e)) if e.is_panic() => { /* panic has already been logged by panic hook */ },
+                    Some(Err(e)) => { warn!("unexpected error from joined connection task: {e:?}"); },
                     None => {
-                        if cancellation_token.is_cancelled()
-                        {
-                            drop(listener);
+                        if cancellation_token.is_cancelled() {
                             bail!("All connections closed, exiting");
                         }
                     }
