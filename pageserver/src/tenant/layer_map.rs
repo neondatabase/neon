@@ -276,7 +276,7 @@ where
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
         let key = historic_layer_coverage::LayerKey::from(&*layer);
-        assert!(self.historic.contains(&key));
+        assert!(!self.historic.contains(&key));
         self.historic.insert(key, Arc::clone(&layer));
 
         if Self::is_l0(&layer) {
