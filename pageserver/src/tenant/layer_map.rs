@@ -126,7 +126,7 @@ where
     ///
     /// Insert an on-disk layer.
     ///
-    pub fn insert_historic(&mut self, layer: Arc<L>) -> bool {
+    pub fn insert_historic(&mut self, layer: Arc<L>) {
         self.layer_map.insert_historic_noflush(layer)
     }
 
@@ -274,9 +274,9 @@ where
     ///
     /// Helper function for BatchedUpdates::insert_historic
     ///
-    pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) -> bool {
+    pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
         let key = historic_layer_coverage::LayerKey::from(&*layer);
-        let exists = self.historic.contains(&key);
+        assert!(self.historic.contains(&key));
         self.historic.insert(key, Arc::clone(&layer));
 
         if Self::is_l0(&layer) {
@@ -284,7 +284,6 @@ where
         }
 
         NUM_ONDISK_LAYERS.inc();
-        !exists
     }
 
     ///
