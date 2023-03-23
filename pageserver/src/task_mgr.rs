@@ -484,23 +484,21 @@ pub async fn shutdown_tasks(
             task_mut.join_handle.take()
         };
         if let Some(mut join_handle) = join_handle {
-            // let's see if test failures could be caused by allocating the timeout in most cases
-            if futures::future::poll_immediate(&mut join_handle)
-                .await
-                .is_some()
-            {
-                continue;
-            }
-
-            let mut passed = false;
-            loop {
-                tokio::select! {
-                    _ = &mut join_handle => { break; },
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if !passed => {
-                        passed = true;
-                        info!("waiting for {} to shut down", task.name);
-                    }
+            let completed = tokio::select! {
+                _ = &mut join_handle => { true },
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    // allow some time to elapse before logging to cut down the number of log
+                    // lines.
+                    info!("waiting for {} to shut down", task.name);
+                    false
                 }
+            };
+            if !completed {
+                // we never handled this return value, but:
+                // - we don't deschedule which would lead to is_cancelled
+                // - panics are already logged (is_panicked)
+                // - task errors are already logged in the wrapper
+                let _ = join_handle.await;
             }
         } else {
             // Possibly one of:
