@@ -20,6 +20,8 @@ The RFC consists of a walkthrough of prior art on tenant relocation and correspo
 2. More complicated approach that avoids even short downtime.
 3. Even more complicated approach that will allow multiple pageservers to operate concurrently on the same tenant possibly allowing for HA cluster topologies and horizontal scaling of reads (i e compute talks to multiple pageservers).
 
+The order in which solutions are described is a bit different. We start from 2, then move to possible compromises (aka simplistic approach) and then move to discussing directions for solving HA/Pageserver replica case with 3.
+
 ## Components
 
 pageserver, control-plane, safekeepers (a bit)
