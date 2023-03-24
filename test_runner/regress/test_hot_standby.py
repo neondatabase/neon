@@ -40,7 +40,7 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                         p_cur.execute(query)
                         res = p_cur.fetchone()
                         assert res is not None
-                        (response,) = res
+                        response = res
                         responses[query] = response
 
             with secondary.connect() as s_con:
@@ -64,7 +64,6 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                 for query in queries:
                     with s_con.cursor() as secondary_cursor:
                         secondary_cursor.execute(query)
-                        res = secondary_cursor.fetchone()
-                        assert res is not None
-                        (result,) = res
-                        assert result == responses[query]
+                        response = secondary_cursor.fetchone()
+                        assert response is not None
+                        assert response == responses[query]
