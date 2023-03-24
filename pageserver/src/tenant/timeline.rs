@@ -331,8 +331,8 @@ impl LogicalSize {
     /// Returns the initialized (already calculated) value, if any.
     fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
         match self.initial_part_end {
-            Some(v) if v == lsn => return self.initial_logical_size.get().copied(),
-            _ => return None,
+            Some(v) if v == lsn => self.initial_logical_size.get().copied(),
+            _ => None,
         }
     }
 }
