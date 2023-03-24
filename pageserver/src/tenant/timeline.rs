@@ -1420,7 +1420,7 @@ impl Timeline {
             let direntry_path = direntry.path();
             let fname = direntry.file_name();
             let fname = fname.to_string_lossy();
-
+            info!("Load layer {} from directory", &fname);
             if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
@@ -1552,7 +1552,7 @@ impl Timeline {
             // remote index file?
             // If so, rename_to_backup those files & replace their local layer with
             // a RemoteLayer in the layer map so that we re-download them on-demand.
-            if let Some(local_layer) = local_layer {
+            if let Some(local_layer) = &local_layer {
                 let local_layer_path = local_layer
                     .local_path()
                     .expect("caller must ensure that local_layers only contains local layers");
@@ -1577,7 +1577,6 @@ impl Timeline {
                         anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                     } else {
                         self.metrics.resident_physical_size_gauge.sub(local_size);
-                        updates.remove_historic(local_layer);
                         // fall-through to adding the remote layer
                     }
                 } else {
@@ -1613,7 +1612,11 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    updates.insert_historic(remote_layer);
+                    if let Some(local_layer) = &local_layer {
+                        updates.replace_historic(local_layer, remote_layer)?;
+                    } else {
+                        updates.insert_historic(remote_layer);
+                    }
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1637,7 +1640,11 @@ impl Timeline {
                         LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted),
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    updates.insert_historic(remote_layer);
+                    if let Some(local_layer) = &local_layer {
+                        updates.replace_historic(local_layer, remote_layer)?;
+                    } else {
+                        updates.insert_historic(remote_layer);
+                    }
                 }
             }
         }
