@@ -131,6 +131,29 @@ impl From<TenantStateError> for ApiError {
     }
 }
 
+impl From<crate::tenant::DeleteTimelineError> for ApiError {
+    fn from(value: crate::tenant::DeleteTimelineError) -> Self {
+        use crate::tenant::DeleteTimelineError::*;
+        match value {
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found")),
+            HasChildren => ApiError::BadRequest(anyhow::anyhow!(
+                "Cannot delete timeline which has child timelines"
+            )),
+            Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
+impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
+    fn from(value: crate::tenant::mgr::DeleteTimelineError) -> Self {
+        use crate::tenant::mgr::DeleteTimelineError::*;
+        match value {
+            Tenant(t) => ApiError::from(t),
+            Timeline(t) => ApiError::from(t),
+        }
+    }
+}
+
 // Helper function to construct a TimelineInfo struct for a timeline
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
