@@ -329,8 +329,11 @@ impl LogicalSize {
     }
 
     /// Returns the initialized (already calculated) value, if any.
-    fn initialized_size(&self) -> Option<u64> {
-        self.initial_logical_size.get().copied()
+    fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
+        match self.initial_part_end {
+            Some(v) if v == lsn => return self.initial_logical_size.get().copied(),
+            _ => return None,
+        }
     }
 }
 
@@ -1906,17 +1909,16 @@ impl Timeline {
             // need to return something
             Ok(0)
         });
-        let timer = if up_to_lsn == self.initdb_lsn {
-            if let Some(size) = self.current_logical_size.initialized_size() {
-                if size != 0 {
-                    // non-zero size means that the size has already been calculated by this method
-                    // after startup. if the logical size is for a new timeline without layers the
-                    // size will be zero, and we cannot use that, or this caching strategy until
-                    // pageserver restart.
-                    return Ok(size);
-                }
+        // See if we've already done the work for initial size calculation.
+        // This is a short-cut for timelines that are mostly unused.
+        let timer = if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
+            if size != 0 {
+                // non-zero size means that the size has already been calculated by this method
+                // after startup. if the logical size is for a new timeline without layers the
+                // size will be zero, and we cannot use that, or this caching strategy until
+                // pageserver restart.
+                return Ok(size);
             }
-
             self.metrics.init_logical_size_histo.start_timer()
         } else {
             self.metrics.logical_size_histo.start_timer()
