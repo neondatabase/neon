@@ -406,7 +406,7 @@ impl PostgresNode {
 
     fn pg_ctl(&self, args: &[&str], auth_token: &Option<String>) -> Result<()> {
         let pg_ctl_path = self.env.pg_bin_dir(self.pg_version)?.join("pg_ctl");
-        let mut cmd = Command::new(pg_ctl_path);
+        let mut cmd = Command::new(&pg_ctl_path);
         cmd.args(
             [
                 &[
@@ -435,7 +435,9 @@ impl PostgresNode {
             cmd.env("NEON_AUTH_TOKEN", token);
         }
 
-        let pg_ctl = cmd.output().context("pg_ctl failed")?;
+        let pg_ctl = cmd
+            .output()
+            .context(format!("{} failed", pg_ctl_path.display()))?;
         if !pg_ctl.status.success() {
             anyhow::bail!(
                 "pg_ctl failed, exit code: {}, stdout: {}, stderr: {}",
