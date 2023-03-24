@@ -23,7 +23,7 @@ pub enum IdError {
 struct Id([u8; 16]);
 
 impl Id {
-    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> Id {
+    pub fn get_from_buf(buf: &mut impl bytes::Buf) -> Id {
         let mut arr = [0u8; 16];
         buf.copy_to_slice(&mut arr);
         Id::from(arr)
@@ -112,7 +112,7 @@ impl fmt::Debug for Id {
 macro_rules! id_newtype {
     ($t:ident) => {
         impl $t {
-            pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> $t {
+            pub fn get_from_buf(buf: &mut impl bytes::Buf) -> $t {
                 $t(Id::get_from_buf(buf))
             }
 
