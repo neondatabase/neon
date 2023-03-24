@@ -398,7 +398,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 /// The SystemId is required for segment start blocks.
 pub fn generate_wal_block(start_from: Lsn, system_id: u64) -> Result<Bytes, SerializeError> {
     let mut blk_buf = BytesMut::with_capacity(XLOG_BLCKSZ);
-    let block_offset: u64 = start_from.block_offset() as u64;
+    let block_offset: u64 = start_from.block_offset();
     let block_lsn: u64 = start_from.0 - block_offset;
     let seg_lsn = start_from.segment_lsn(WAL_SEGMENT_SIZE);
 

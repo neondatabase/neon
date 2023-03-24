@@ -7,7 +7,7 @@
 //!
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use remote_storage::RemotePath;
 
 use std::io::{self, Seek, SeekFrom};
@@ -39,7 +39,6 @@ use postgres_ffi::waldecoder::WalStreamDecoder;
 
 use pq_proto::SystemId;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use utils::bin_ser::SerializeError;
 
 pub trait Storage {
     /// LSN of last durably stored WAL record.
@@ -550,7 +549,7 @@ impl WalReader {
                 let it = postgres_ffi::generate_wal_segment(
                     self.timeline_start_lsn.segment_number(self.wal_seg_size),
                     self.system_id,
-                    self.pg_version / 10000,
+                    self.pg_version,
                     self.timeline_start_lsn,
                 )?;
                 self.timeline_start_segment = Some(it);
