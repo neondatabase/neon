@@ -29,26 +29,34 @@ def test_hot_standby(neon_simple_env: NeonEnv):
 
                 with p_con.cursor() as p_cur:
                     p_cur.execute("SELECT pg_current_wal_insert_lsn()::text")
-                    [lsn] = p_cur.fetchone()
+                    res = p_cur.fetchone()
+                    assert res is not None
+                    (lsn,) = res
                     primary_lsn = lsn
                 p_con.commit()
 
                 for query in queries:
                     with p_con.cursor() as p_cur:
                         p_cur.execute(query)
-                        response = p_cur.fetchone()
+                        res = p_cur.fetchone()
+                        assert res is not None
+                        (response,) = res
                         responses[query] = response
 
             with secondary.connect() as s_con:
                 with s_con.cursor() as s_cur:
                     s_cur.execute("SHOW transaction_read_only")
-                    (result,) = s_cur.fetchone()
+                    res = s_cur.fetchone()
+                    assert res is not None
+                    (result,) = res
                     assert result == "on"
 
                 while not cought_up:
                     with s_con.cursor() as secondary_cursor:
                         secondary_cursor.execute("SELECT pg_last_wal_replay_lsn()")
-                        [secondary_lsn] = secondary_cursor.fetchone()
+                        res = secondary_cursor.fetchone()
+                        assert res is not None
+                        (secondary_lsn,) = res
                         cought_up = secondary_lsn >= primary_lsn
 
                 s_con.commit()
@@ -56,5 +64,7 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                 for query in queries:
                     with s_con.cursor() as secondary_cursor:
                         secondary_cursor.execute(query)
-                        result = secondary_cursor.fetchone()
+                        res = secondary_cursor.fetchone()
+                        assert res is not None
+                        (result,) = res
                         assert result == responses[query]
