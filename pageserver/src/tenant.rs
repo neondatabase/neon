@@ -431,6 +431,16 @@ remote:
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteTimelineError {
+    #[error("NotFound")]
+    NotFound,
+    #[error("HasChildren")]
+    HasChildren,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 struct RemoteStartupData {
     index_part: IndexPart,
     remote_metadata: TimelineMetadata,
@@ -1307,7 +1317,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         _ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DeleteTimelineError> {
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
         let timeline = {
@@ -1319,13 +1329,13 @@ impl Tenant {
                 .iter()
                 .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
 
-            anyhow::ensure!(
-                !children_exist,
-                "Cannot delete timeline which has child timelines"
-            );
+            if children_exist {
+                return Err(DeleteTimelineError::HasChildren);
+            }
+
             let timeline_entry = match timelines.entry(timeline_id) {
                 Entry::Occupied(e) => e,
-                Entry::Vacant(_) => bail!("timeline not found"),
+                Entry::Vacant(_) => return Err(DeleteTimelineError::NotFound),
             };
 
             let timeline = Arc::clone(timeline_entry.get());

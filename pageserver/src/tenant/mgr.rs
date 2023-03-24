@@ -321,11 +321,20 @@ pub async fn get_tenant(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteTimelineError {
+    #[error("Tenant {0}")]
+    Tenant(#[from] TenantStateError),
+
+    #[error("Timeline {0}")]
+    Timeline(#[from] crate::tenant::DeleteTimelineError),
+}
+
 pub async fn delete_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     ctx: &RequestContext,
-) -> Result<(), TenantStateError> {
+) -> Result<(), DeleteTimelineError> {
     let tenant = get_tenant(tenant_id, true).await?;
     tenant.delete_timeline(timeline_id, ctx).await?;
     Ok(())
