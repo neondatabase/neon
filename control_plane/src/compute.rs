@@ -87,7 +87,6 @@ impl ComputeControlPlane {
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
-            is_test: false,
             timeline_id,
             lsn,
             tenant_id,
@@ -113,7 +112,6 @@ pub struct PostgresNode {
     name: String,
     pub env: LocalEnv,
     pageserver: Arc<PageServerNode>,
-    is_test: bool,
     pub timeline_id: TimelineId,
     pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
     pub tenant_id: TenantId,
@@ -171,7 +169,6 @@ impl PostgresNode {
             name,
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
-            is_test: false,
             timeline_id,
             lsn: recovery_target_lsn,
             tenant_id,
@@ -480,10 +477,6 @@ impl PostgresNode {
         self.pg_ctl(&["start"], auth_token)
     }
 
-    pub fn restart(&self, auth_token: &Option<String>) -> Result<()> {
-        self.pg_ctl(&["restart"], auth_token)
-    }
-
     pub fn stop(&self, destroy: bool) -> Result<()> {
         // If we are going to destroy data directory,
         // use immediate shutdown mode, otherwise,
@@ -513,27 +506,5 @@ impl PostgresNode {
             "cloud_admin",
             "postgres"
         )
-    }
-
-    // XXX: cache that in control plane
-    pub fn whoami(&self) -> String {
-        let output = Command::new("whoami")
-            .output()
-            .expect("failed to execute whoami");
-
-        assert!(output.status.success(), "whoami failed");
-
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
-}
-
-impl Drop for PostgresNode {
-    // destructor to clean up state after test is done
-    // XXX: we may detect failed test by setting some flag in catch_unwind()
-    // and checking it here. But let just clean datadirs on start.
-    fn drop(&mut self) {
-        if self.is_test {
-            let _ = self.stop(true);
-        }
     }
 }
