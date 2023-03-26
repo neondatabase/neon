@@ -19,7 +19,7 @@ inputs:
   run_in_parallel:
     description: 'Whether to run tests in parallel'
     required: false
-    default: 'true'
+    default: 'false'
   save_perf_report:
     description: 'Whether to upload the performance report, if true PERF_TEST_RESULT_CONNSTR env variable should be set'
     required: false
