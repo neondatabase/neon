@@ -1168,8 +1168,6 @@ impl Timeline {
             }
         };
 
-        // TODO: update metrics for how
-
         Ok(replaced)
     }
 }
