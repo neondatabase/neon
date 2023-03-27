@@ -8,7 +8,9 @@ use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
-use pageserver::disk_usage_eviction_task::launch_disk_usage_global_eviction_task;
+use pageserver::disk_usage_eviction_task::{
+    launch_disk_usage_global_eviction_task, DiskUsageEvictionState,
+};
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
@@ -320,8 +322,17 @@ fn start_pageserver(
     // Scan the local 'tenants/' directory and start loading the tenants
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
 
+    // shared state between the background task and the http endpoint; note that the http endpoint
+    // is still accessible even if background task is not configured as long as remote storage has
+    // been configured.
+    let disk_usage_eviction_state: Arc<DiskUsageEvictionState> = Arc::default();
+
     if let Some(remote_storage) = &remote_storage {
-        launch_disk_usage_global_eviction_task(conf, remote_storage.clone())?;
+        launch_disk_usage_global_eviction_task(
+            conf,
+            remote_storage.clone(),
+            disk_usage_eviction_state.clone(),
+        )?;
     }
 
     // Start up the service to handle HTTP mgmt API request. We created the
@@ -329,9 +340,15 @@ fn start_pageserver(
     {
         let _rt_guard = MGMT_REQUEST_RUNTIME.enter();
 
-        let router = http::make_router(conf, launch_ts, http_auth, remote_storage)?
-            .build()
-            .map_err(|err| anyhow!(err))?;
+        let router = http::make_router(
+            conf,
+            launch_ts,
+            http_auth,
+            remote_storage,
+            disk_usage_eviction_state,
+        )?
+        .build()
+        .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
         let server = hyper::Server::from_tcp(http_listener)?
             .serve(service)
