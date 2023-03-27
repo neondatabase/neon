@@ -892,7 +892,7 @@ async fn update_tenant_config_handler(
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
 #[cfg(feature = "testing")]
 async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
+    let tenant_id: TenantId = parse_request_param(&r, "tenant_id")?;
 
     let tenant = crate::tenant::mgr::get_tenant(tenant_id, true)
         .await
