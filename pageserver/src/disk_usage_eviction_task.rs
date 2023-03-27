@@ -614,7 +614,10 @@ mod filesystem_level_usage {
                     "min_avail_bytes",
                     self.avail_bytes < self.config.min_avail_bytes,
                 ),
-                ("max_usage_pct", usage_pct > self.config.max_usage_pct),
+                (
+                    "max_usage_pct",
+                    usage_pct > self.config.max_usage_pct.get() as u64,
+                ),
             ];
 
             pressures.into_iter().any(|(_, has_pressure)| has_pressure)
