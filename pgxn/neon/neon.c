@@ -25,6 +25,7 @@
 #include "neon.h"
 #include "walproposer.h"
 #include "pagestore_client.h"
+#include "console_connector.h"
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);
@@ -36,6 +37,13 @@ _PG_init(void)
 	pg_init_walproposer();
 
 	EmitWarningsOnPlaceholders("neon");
+        InitConsoleConnector();
+}
+
+void
+_PG_fini(void)
+{
+    CleanupConsoleConnector();
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
