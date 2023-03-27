@@ -76,8 +76,8 @@ runs:
           rm -f ${ALLURE_ZIP}
         fi
       env:
-        ALLURE_VERSION: 2.19.0
-        ALLURE_ZIP_MD5: ced21401a1a8b9dfb68cee9e4c210464
+        ALLURE_VERSION: 2.21.0
+        ALLURE_ZIP_MD5: c8db4dd8e2a7882583d569ed2c82879c
 
     - name: Upload Allure results
       if: ${{ inputs.action == 'store' }}
