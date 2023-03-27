@@ -93,6 +93,8 @@ pub mod defaults {
 
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 
+#disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
+
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
@@ -104,6 +106,8 @@ pub mod defaults {
 #gc_horizon = {DEFAULT_GC_HORIZON}
 #image_creation_threshold = {DEFAULT_IMAGE_CREATION_THRESHOLD}
 #pitr_interval = '{DEFAULT_PITR_INTERVAL}'
+
+#min_resident_size_override = .. # in bytes
 
 # [remote_storage]
 

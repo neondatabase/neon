@@ -19,10 +19,21 @@
 //! `min_avail_bytes` is the absolute available space in bytes.
 //! If the actual usage is lower, the threshold is exceeded.
 //!
-//! The iteration evicts layers in LRU fashion.
-//! It tries first with a reservation of up to `tenant_min_resident_size` bytes of the most recent layers per tenant.
-//! The layers not part of the per-tenant reservation are evicted least-recently-used first until we're below all thresholds.
-//! If the per-tenant-reservation strategy doesn't work out, it falls back to global LRU.
+//! The iteration evicts layers in LRU fashion, but, with a weak reservation per tenant.
+//! The reservation is to keep the most recently accessed X bytes per tenant resident.
+//! All layers that don't make the cut are put on a list and become eviction candidates.
+//! We evict until we're below the two thresholds.
+//!
+//! If the above strategy wouldn't free enough space, we fall back to global LRU right away,
+//! not respecting any per-tenant reservations.
+//!
+//! This value for the per-tenant reservation is referred to as `tenant_min_resident_size`
+//! throughout the code, but, no actual variable carries that name.
+//! The per-tenant default value is the `max(tenant's layer file sizes, regardless of local or remote)`.
+//! The idea is to allow at least one layer to be resident per tenant, to ensure it can make forward progress
+//! during page reconstruction.
+//! An alternative default for all tenants can be specified in the `tenant_config` section of the config.
+//! Lastly, each tenant can have an override in their respectice tenant config (`min_resident_size_override`).
 
 // Implementation notes:
 // - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
