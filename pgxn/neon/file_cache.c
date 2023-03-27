@@ -211,7 +211,7 @@ FileCacheMonitorMain(Datum main_arg)
 {
 	/*
 	 * Choose file system state monitor interval so that space can not be exosted
-	 * during this period but not onger than  MAX_MONITOR_INTERVAL (10 sec)
+	 * during this period but not longer than  MAX_MONITOR_INTERVAL (10 sec)
 	 */
 	uint64 monitor_interval = Min(MAX_MONITOR_INTERVAL_USEC, lfc_free_space_watermark*MB/MAX_DISK_WRITE_RATE);
 
