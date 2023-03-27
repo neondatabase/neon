@@ -1911,7 +1911,7 @@ impl Timeline {
         });
         // See if we've already done the work for initial size calculation.
         // This is a short-cut for timelines that are mostly unused.
-        let timer = if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
+        if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
             if size != 0 {
                 // non-zero size means that the size has already been calculated by this method
                 // after startup. if the logical size is for a new timeline without layers the
@@ -1919,10 +1919,8 @@ impl Timeline {
                 // pageserver restart.
                 return Ok(size);
             }
-            self.metrics.init_logical_size_histo.start_timer()
-        } else {
-            self.metrics.logical_size_histo.start_timer()
-        };
+        }
+        let timer = self.metrics.logical_size_histo.start_timer();
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
             .await?;
