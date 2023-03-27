@@ -39,7 +39,7 @@ use super::Timeline;
 
 #[derive(Default)]
 pub struct EvictionTaskTimelineState {
-    last_refresh_required_in_restart: Option<tokio::time::Instant>,
+    last_layer_access_imitation: Option<tokio::time::Instant>,
 }
 
 #[derive(Default)]
@@ -283,12 +283,12 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let mut state = self.eviction_task_timeline_state.lock().await;
-        match state.last_refresh_required_in_restart {
+        match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < p.threshold => { /* no need to run */ }
             _ => {
                 self.imitate_timeline_cached_layer_accesses(cancel, ctx)
                     .await;
-                state.last_refresh_required_in_restart = Some(tokio::time::Instant::now())
+                state.last_layer_access_imitation = Some(tokio::time::Instant::now())
             }
         }
         drop(state);
