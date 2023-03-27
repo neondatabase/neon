@@ -810,11 +810,11 @@ impl Timeline {
 
         let mut is_exact = true;
         let size = current_size.size();
-        if let (CurrentLogicalSize::Approximate(_), Some(init_lsn)) =
+        if let (CurrentLogicalSize::Approximate(_), Some(initial_part_end)) =
             (current_size, self.current_logical_size.initial_part_end)
         {
             is_exact = false;
-            self.try_spawn_size_init_task(init_lsn, ctx);
+            self.try_spawn_size_init_task(initial_part_end, ctx);
         }
 
         Ok((size, is_exact))
@@ -1692,7 +1692,7 @@ impl Timeline {
         Ok(())
     }
 
-    fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn, ctx: &RequestContext) {
+    fn try_spawn_size_init_task(self: &Arc<Self>, lsn: Lsn, ctx: &RequestContext) {
         let permit = match Arc::clone(&self.current_logical_size.initial_size_computation)
             .try_acquire_owned()
         {
@@ -1730,7 +1730,7 @@ impl Timeline {
             // NB: don't log errors here, task_mgr will do that.
             async move {
                 let calculated_size = match self_clone
-                    .logical_size_calculation_task(init_lsn, &background_ctx)
+                    .logical_size_calculation_task(lsn, &background_ctx)
                     .await
                 {
                     Ok(s) => s,
@@ -1815,7 +1815,7 @@ impl Timeline {
     #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
-        init_lsn: Lsn,
+        lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         let mut timeline_state_updates = self.subscribe_for_state_updates();
@@ -1826,7 +1826,7 @@ impl Timeline {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(init_lsn, cancel, &ctx)
+                .calculate_logical_size(lsn, cancel, &ctx)
                 .await
         };
         let timeline_state_cancellation = async {
