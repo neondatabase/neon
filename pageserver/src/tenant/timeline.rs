@@ -1729,8 +1729,6 @@ impl Timeline {
             TaskKind::InitialLogicalSizeCalculation,
             DownloadBehavior::Download,
         );
-        let cancel = CancellationToken::new();
-        let _dg = cancel.clone().drop_guard();
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::InitialLogicalSizeCalculation,
@@ -1740,6 +1738,9 @@ impl Timeline {
             false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
+                // no cancellation here, because nothing really waits for this to complete compared
+                // to spawn_ondemand_logical_size_calculation.
+                let cancel = CancellationToken::new();
                 let calculated_size = match self_clone
                     .logical_size_calculation_task(lsn, &background_ctx, cancel)
                     .await
