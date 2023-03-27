@@ -242,6 +242,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         safekeeper_connstr: sk_info.safekeeper_connstr.unwrap_or_else(|| "".to_owned()),
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
+        availability_zone: String::new(),
     };
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;

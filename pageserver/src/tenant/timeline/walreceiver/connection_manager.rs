@@ -346,6 +346,8 @@ struct WalConnection {
     started_at: NaiveDateTime,
     /// Current safekeeper pageserver is connected to for WAL streaming.
     sk_id: NodeId,
+    /// Availability zone of the safekeeper.
+    availability_zone: Option<String>,
     /// Status of the connection.
     status: WalConnectionStatus,
     /// WAL streaming task handle.
@@ -440,6 +442,7 @@ impl WalreceiverState {
         self.wal_connection = Some(WalConnection {
             started_at: now,
             sk_id: new_sk_id,
+            availability_zone: None,
             status: WalConnectionStatus {
                 is_connected: false,
                 has_processed_wal: false,
@@ -599,6 +602,20 @@ impl WalreceiverState {
                                         new_commit_lsn,
                                         threshold: self.max_lsn_wal_lag,
                                     },
+                                });
+                            }
+                            // If we have a candidate with the same commit_lsn as the current one, which is in the same AZ as pageserver,
+                            // and the current one is not, switch to the new one.
+                            if self.availability_zone.is_some()
+                                && existing_wal_connection.availability_zone
+                                    != self.availability_zone
+                                && Some(&new_safekeeper_broker_data.availability_zone)
+                                    == self.availability_zone.as_ref()
+                            {
+                                return Some(NewWalConnectionCandidate {
+                                    safekeeper_id: new_sk_id,
+                                    wal_source_connconf: new_wal_source_connconf,
+                                    reason: ReconnectReason::SwitchAvailabilityZone,
                                 });
                             }
                         }
@@ -808,6 +825,7 @@ enum ReconnectReason {
         new_commit_lsn: Lsn,
         threshold: NonZeroU64,
     },
+    SwitchAvailabilityZone,
     NoWalTimeout {
         current_lsn: Lsn,
         current_commit_lsn: Lsn,
@@ -873,6 +891,7 @@ mod tests {
                 peer_horizon_lsn: 0,
                 local_start_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
+                availability_zone: String::new(),
             },
             latest_update,
         }
@@ -933,6 +952,7 @@ mod tests {
         state.wal_connection = Some(WalConnection {
             started_at: now,
             sk_id: connected_sk_id,
+            availability_zone: None,
             status: connection_status,
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
@@ -1095,6 +1115,7 @@ mod tests {
         state.wal_connection = Some(WalConnection {
             started_at: now,
             sk_id: connected_sk_id,
+            availability_zone: None,
             status: connection_status,
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
@@ -1160,6 +1181,7 @@ mod tests {
         state.wal_connection = Some(WalConnection {
             started_at: now,
             sk_id: NodeId(1),
+            availability_zone: None,
             status: connection_status,
             connection_task: TaskHandle::spawn(move |sender, _| async move {
                 sender
@@ -1222,6 +1244,7 @@ mod tests {
         state.wal_connection = Some(WalConnection {
             started_at: now,
             sk_id: NodeId(1),
+            availability_zone: None,
             status: connection_status,
             connection_task: TaskHandle::spawn(move |_, _| async move { Ok(()) }),
             discovered_new_wal: Some(NewCommittedWAL {
