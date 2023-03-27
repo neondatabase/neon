@@ -70,9 +70,16 @@ pub struct DiskUsageEvictionTaskConfig {
     pub period: Duration,
 }
 
+#[derive(Default)]
+pub struct DiskUsageEvictionState {
+    /// Exclude http requests and background task from running at the same time.
+    mutex: tokio::sync::Mutex<()>,
+}
+
 pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
+    state: Arc<DiskUsageEvictionState>,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
@@ -100,6 +107,7 @@ pub fn launch_disk_usage_global_eviction_task(
         false,
         async move {
             disk_usage_eviction_task(
+                &*state,
                 task_config,
                 storage,
                 tenants_dir_fd,
@@ -116,6 +124,7 @@ pub fn launch_disk_usage_global_eviction_task(
 
 #[instrument(skip_all)]
 async fn disk_usage_eviction_task(
+    state: &DiskUsageEvictionState,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: GenericRemoteStorage,
     tenants_dir_fd: Dir,
@@ -147,6 +156,7 @@ async fn disk_usage_eviction_task(
 
         async {
             let res = disk_usage_eviction_task_iteration(
+                state,
                 task_config,
                 &storage,
                 &mut tenants_dir_fd,
@@ -182,6 +192,7 @@ pub trait Usage: Clone + Copy + std::fmt::Debug {
 }
 
 async fn disk_usage_eviction_task_iteration(
+    state: &DiskUsageEvictionState,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
     tenants_dir_fd: &mut SyncWrapper<Dir>,
@@ -189,7 +200,7 @@ async fn disk_usage_eviction_task_iteration(
 ) -> anyhow::Result<()> {
     let usage_pre = filesystem_level_usage::get(tenants_dir_fd, task_config)
         .context("get filesystem-level disk usage before evictions")?;
-    let res = disk_usage_eviction_task_iteration_impl(storage, usage_pre, cancel).await;
+    let res = disk_usage_eviction_task_iteration_impl(state, storage, usage_pre, cancel).await;
     match res {
         Ok(outcome) => {
             debug!(?outcome, "disk_usage_eviction_iteration finished");
@@ -273,14 +284,13 @@ struct LayerCount {
 
 #[allow(clippy::needless_late_init)]
 pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
+    state: &DiskUsageEvictionState,
     storage: &GenericRemoteStorage,
     usage_pre: U,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome<U>> {
-    static MUTEX: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
-        once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
-
-    let _g = MUTEX
+    let _g = state
+        .mutex
         .try_lock()
         .map_err(|_| anyhow::anyhow!("iteration is already executing"))?;
 
