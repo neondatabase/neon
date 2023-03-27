@@ -38,7 +38,7 @@ use sync_wrapper::SyncWrapper;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::{approx_accurate::ApproxAccurate, id::TenantId};
+use utils::{approx_accurate::ApproxAccurate, id::TenantId, serde_percent};
 
 use crate::{
     config::PageServerConf,
@@ -46,23 +46,9 @@ use crate::{
     tenant::{self, LocalLayerInfoForDiskUsageEviction, Timeline},
 };
 
-fn deserialize_pct_0_to_100<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    let v: u64 = serde::de::Deserialize::deserialize(deserializer)?;
-    if v > 100 {
-        return Err(serde::de::Error::custom(
-            "must be an integer between 0 and 100",
-        ));
-    }
-    Ok(v)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskUsageEvictionTaskConfig {
-    #[serde(deserialize_with = "deserialize_pct_0_to_100")]
-    pub max_usage_pct: u64,
+    pub max_usage_pct: serde_percent::Value,
     pub min_avail_bytes: u64,
     #[serde(with = "humantime_serde")]
     pub period: Duration,
