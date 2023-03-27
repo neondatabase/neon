@@ -148,6 +148,11 @@ impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::mgr::DeleteTimelineError) -> Self {
         use crate::tenant::mgr::DeleteTimelineError::*;
         match value {
+            // Report Precondition failed so client can distinguish between
+            // "tenant is missing" case from "timeline is missing"
+            Tenant(TenantStateError::NotFound(..)) => {
+                ApiError::PreconditionFailed("Requested tenant is missing")
+            }
             Tenant(t) => ApiError::from(t),
             Timeline(t) => ApiError::from(t),
         }

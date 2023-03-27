@@ -10,7 +10,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     env.pageserver.allowed_errors.append(".*Timeline .* was not found.*")
     env.pageserver.allowed_errors.append(".*timeline not found.*")
     env.pageserver.allowed_errors.append(".*Cannot delete timeline which has child timelines.*")
-    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
+    env.pageserver.allowed_errors.append(".*Precondition failed: Requested tenant is missing.*")
 
     ps_http = env.pageserver.http_client()
 
@@ -24,11 +24,11 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     invalid_tenant_id = TenantId.generate()
     with pytest.raises(
         PageserverApiException,
-        match=f"NotFound: tenant {invalid_tenant_id}",
+        match="Precondition failed: Requested tenant is missing",
     ) as exc:
         ps_http.timeline_delete(tenant_id=invalid_tenant_id, timeline_id=invalid_timeline_id)
 
-    assert exc.value.status_code == 404
+    assert exc.value.status_code == 412
 
     # construct pair of branches to validate that pageserver prohibits
     # deletion of ancestor timelines when they have child branches
