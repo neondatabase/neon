@@ -1350,7 +1350,7 @@ mod tests {
             discovered_new_wal: None,
         });
 
-        // We have another safekeeper with the same commit_lsn, but it's have the same availability zone as
+        // We have another safekeeper with the same commit_lsn, and it have the same availability zone as
         // the current pageserver.
         let mut same_az_sk = dummy_broker_sk_timeline(current_lsn.0, "same_az", now);
         same_az_sk.timeline.availability_zone = test_az.clone();
@@ -1363,6 +1363,8 @@ mod tests {
             (NodeId(1), same_az_sk),
         ]);
 
+        // We expect that pageserver will switch to the safekeeper in the same availability zone,
+        // even if it has the same commit_lsn.
         let next_candidate = state.next_connection_candidate().expect(
             "Expected one candidate selected out of multiple valid data options, but got none",
         );
