@@ -403,10 +403,17 @@ impl Timeline {
 
         tokio::select! {
             _ = cancel.cancelled() => {}
-            _ = gather => {
-                // we don't care if the gathering failed, it will most likely reproduce
-                // and be caught on by the consumption metrics, which will log it.
-            }
+            gather_result = gather => {
+                match gather_result {
+                    Ok(_) => {},
+                    Err(e) => {
+                        // We don't care about the result, but, if it failed, we should log it,
+                        // since consumption metric might be hitting the cached value and
+                        // thus not encountering this error.
+                        warn!("failed to imitate synthetic size calculation accesses: {e:#}")
+                    }
+                }
+           }
         }
     }
 }
