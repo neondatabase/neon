@@ -396,24 +396,22 @@ impl Timeline {
             .eviction_task_immitated_concurrent_logical_size_queries
             .inner();
 
+        // TODO(christian): `cancel` should be propagated through `ctx` so that all the
+        // ondemand size calculation tasks spawned by this get cancelled when
+        // `cancel.is_cancelled()`.
+        let _cancel = cancel;
         let mut throwaway_cache = HashMap::new();
-        let gather =
-            crate::tenant::size::gather_inputs(tenant, limit, None, &mut throwaway_cache, ctx);
-        tokio::pin!(gather);
-
-        tokio::select! {
-            _ = cancel.cancelled() => {}
-            gather_result = gather => {
-                match gather_result {
-                    Ok(_) => {},
-                    Err(e) => {
-                        // We don't care about the result, but, if it failed, we should log it,
-                        // since consumption metric might be hitting the cached value and
-                        // thus not encountering this error.
-                        warn!("failed to imitate synthetic size calculation accesses: {e:#}")
-                    }
-                }
-           }
+        let gather_result =
+            crate::tenant::size::gather_inputs(tenant, limit, None, &mut throwaway_cache, ctx)
+                .await;
+        match gather_result {
+            Ok(_) => {}
+            Err(e) => {
+                // We don't care about the result, but, if it failed, we should log it,
+                // since consumption metric might be hitting the cached value and
+                // thus not encountering this error.
+                warn!("failed to imitate synthetic size calculation accesses: {e:#}")
+            }
         }
     }
 }
