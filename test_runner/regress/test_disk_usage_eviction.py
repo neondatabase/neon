@@ -72,7 +72,7 @@ class EvictionEnv:
     def timelines_du(self) -> Tuple[int, int, int]:
         return poor_mans_du(self.neon_env, [(tid, tlid) for tid, tlid, _ in self.timelines])
 
-    def du_by_timeline(self) -> dict[Tuple[TenantId, TimelineId], int]:
+    def du_by_timeline(self) -> Dict[Tuple[TenantId, TimelineId], int]:
         return {
             (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)])[0]
             for tid, tlid, _ in self.timelines
