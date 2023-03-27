@@ -189,6 +189,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
+        "412":
+          description: Tenant is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreconditionFailedError"
+
         "500":
           description: Generic operation error
           content:
@@ -952,6 +959,13 @@ components:
         msg:
           type: string
     ConflictError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    PreconditionFailedError:
       type: object
       required:
         - msg
