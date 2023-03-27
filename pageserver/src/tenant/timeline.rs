@@ -71,6 +71,8 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use walreceiver::spawn_connection_manager_task;
 
+use self::eviction_task::EvictionTaskTimelineState;
+
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -216,6 +218,8 @@ pub struct Timeline {
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
     state: watch::Sender<TimelineState>,
+
+    eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -1252,6 +1256,10 @@ impl Timeline {
                 download_all_remote_layers_task_info: RwLock::new(None),
 
                 state,
+
+                eviction_task_timeline_state: tokio::sync::Mutex::new(
+                    EvictionTaskTimelineState::default(),
+                ),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result

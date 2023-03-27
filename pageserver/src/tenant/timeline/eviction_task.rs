@@ -35,6 +35,11 @@ use crate::{
 
 use super::Timeline;
 
+#[derive(Default)]
+pub struct EvictionTaskTimelineState {
+    last_refresh_required_in_restart: Option<tokio::time::Instant>,
+}
+
 impl Timeline {
     pub(super) fn launch_eviction_task(self: &Arc<Self>) {
         let self_clone = Arc::clone(self);
@@ -139,7 +144,15 @@ impl Timeline {
         // for active tenants this will likely materialized page cache or in-memory layers. for
         // inactive tenants it will refresh the last_access timestamps so that we will not evict
         // and re-download on restart these layers.
-        self.refresh_layers_required_in_restart(cancel, ctx).await;
+        let mut state = self.eviction_task_timeline_state.lock().await;
+        match state.last_refresh_required_in_restart {
+            Some(ts) if ts.elapsed() < p.threshold => { /* no need to run */ }
+            _ => {
+                self.refresh_layers_required_in_restart(cancel, ctx).await;
+                state.last_refresh_required_in_restart = Some(tokio::time::Instant::now())
+            }
+        }
+        drop(state);
 
         if cancel.is_cancelled() {
             return ControlFlow::Break(());
