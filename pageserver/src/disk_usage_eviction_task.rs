@@ -41,9 +41,8 @@
 
 use std::{
     collections::HashMap,
-    ops::ControlFlow,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::Context;
@@ -54,12 +53,12 @@ use sync_wrapper::SyncWrapper;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::{approx_accurate::ApproxAccurate, id::TenantId, serde_percent::Percent};
+use utils::serde_percent::Percent;
 
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::{self, LocalLayerInfoForDiskUsageEviction, Timeline},
+    tenant::{self, Timeline, storage_layer::PersistentLayer},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,13 +283,6 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         .try_lock()
         .map_err(|_| anyhow::anyhow!("iteration is already executing"))?;
 
-    // planned post-eviction usage
-    let mut usage_planned_min_resident_size_respecting = usage_pre;
-    let mut usage_planned_global_lru = None;
-    // achieved post-eviction usage according to internal accounting
-    let mut usage_assumed = usage_pre;
-    // actual usage read after batched evictions
-
     debug!(?usage_pre, "disk usage");
 
     if !usage_pre.has_pressure() {
@@ -302,42 +294,42 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         "running disk usage based eviction due to pressure"
     );
 
-    let mut lru_candidates: Vec<(_, LocalLayerInfoForDiskUsageEviction)> = Vec::new();
-
-    // get a snapshot of the list of tenants
-    let tenants = tenant::mgr::list_tenants()
-        .await
-        .context("get list of tenants")?;
-
-    {
-        let mut tmp = Vec::new();
-        for (tenant_id, _state) in &tenants {
-            let flow = extend_lru_candidates(
-                Mode::RespectTenantMinResidentSize,
-                *tenant_id,
-                &mut lru_candidates,
-                &mut tmp,
-                cancel,
-            )
-            .await;
-
-            if let ControlFlow::Break(()) = flow {
-                return Ok(IterationOutcome::Cancelled);
-            }
-
-            assert!(tmp.is_empty(), "tmp has to be fully drained each iteration");
-        }
-    }
-
+    // Collect list of all layers in the system, sorted in the order that they should
+    // be evicted.
+    let all_candidates = collect_eviction_candidates(cancel).await?;
     if cancel.is_cancelled() {
         return Ok(IterationOutcome::Cancelled);
     }
 
+    // XXX: Print the whole list, for debbugging
+    let now: SystemTime = SystemTime::now();
+    for (i, candidate) in all_candidates.iter().enumerate() {
+        debug!("cand {}/{}: {}, size {}, at {}, overage {}",
+              i,
+              all_candidates.len(),
+              candidate.layer.local_path().unwrap().display(),
+              candidate.layer.file_size(),
+              now.duration_since(candidate.last_activity_ts).unwrap().as_micros(),
+              candidate.tenant_resident_size_overage
+        );
+    }
+
     // phase1: select victims to relieve pressure
-    lru_candidates.sort_unstable_by_key(|(_, layer)| layer.last_activity_ts);
-    let mut batched: HashMap<_, Vec<LocalLayerInfoForDiskUsageEviction>> = HashMap::new();
-    for (i, (timeline, layer)) in lru_candidates.into_iter().enumerate() {
-        if !usage_planned_min_resident_size_respecting.has_pressure() {
+    //
+    // Walk through the list of candidates, until we have accumulated enough layers to get
+    // us back under the pressure threshold. 'usage_planned' is updated so that it tracks
+    // how much disk space would be used after evicting all the layers up to the current
+    // point in the list. The layers are collected in 'batched', grouped per timeline.
+    //
+    // If we get far enough in the list that we start to evict layers that are below
+    // the tenant's min-resident-size threshold, print a warning, and memorize the disk
+    // usage at that point, in 'usage_planned_min_resident_size_respecting'.
+    let mut batched: HashMap<_, Vec<Arc<dyn PersistentLayer>>> = HashMap::new();
+    let mut min_resident_size_violated = false;
+    let mut usage_planned = usage_pre;
+    let mut usage_planned_min_resident_size_respecting = None;
+    for (i, candidate) in all_candidates.into_iter().enumerate() {
+        if !usage_planned.has_pressure() {
             debug!(
                 no_candidates_evicted = i,
                 "took enough candidates for pressure to be relieved"
@@ -345,66 +337,46 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             break;
         }
 
-        usage_planned_min_resident_size_respecting.add_available_bytes(layer.file_size());
+        if !min_resident_size_violated {
+            if candidate.tenant_resident_size_overage < 0 {
+                warn!(?usage_pre, ?usage_planned, "tenant_min_resident_size-respecting LRU would not relieve pressure, falling back to global LRU at {}", i);
+                min_resident_size_violated = true;
+                usage_planned_min_resident_size_respecting = Some(usage_planned.clone());
+            }
+        } else {
+            // all layers with overage >= 0 should come first
+            assert!(candidate.tenant_resident_size_overage < 0);
+        }
+        usage_planned.add_available_bytes(candidate.layer.file_size());
 
         batched
-            .entry(TimelineKey(timeline.clone()))
+            .entry(TimelineKey(candidate.timeline.clone()))
             .or_default()
-            .push(layer);
+            .push(candidate.layer);
     }
-    // If we can't relieve pressure while respecting tenant_min_resident_size, fall back to global LRU.
-    if usage_planned_min_resident_size_respecting.has_pressure() {
-        // NB: tests depend on parts of this log message
-        warn!(?usage_pre, ?usage_planned_min_resident_size_respecting, "tenant_min_resident_size-respecting LRU would not relieve pressure, falling back to global LRU");
-        batched.clear();
-        let mut usage_planned = usage_pre;
-        let mut global_lru_candidates = Vec::new();
-        let mut tmp = Vec::new();
-        for (tenant_id, _state) in &tenants {
-            let flow = extend_lru_candidates(
-                Mode::GlobalLru,
-                *tenant_id,
-                &mut global_lru_candidates,
-                &mut tmp,
-                cancel,
-            )
-            .await;
 
-            if let ControlFlow::Break(()) = flow {
-                return Ok(IterationOutcome::Cancelled);
-            }
-
-            assert!(tmp.is_empty(), "tmp has to be fully drained each iteration");
+    let usage_planned = if min_resident_size_violated {
+        PlannedUsage {
+            respecting_tenant_min_resident_size: usage_planned_min_resident_size_respecting.unwrap(),
+            fallback_to_global_lru: Some(usage_planned),
         }
-        global_lru_candidates.sort_unstable_by_key(|(_, layer)| layer.last_activity_ts);
-        for (timeline, layer) in global_lru_candidates {
-            usage_planned.add_available_bytes(layer.file_size());
-            batched
-                .entry(TimelineKey(timeline.clone()))
-                .or_default()
-                .push(layer);
-            if cancel.is_cancelled() {
-                return Ok(IterationOutcome::Cancelled);
-            }
+    } else {
+        PlannedUsage {
+            respecting_tenant_min_resident_size: usage_planned,
+            fallback_to_global_lru: None,
         }
-        usage_planned_global_lru = Some(usage_planned);
-    }
-    let usage_planned = PlannedUsage {
-        respecting_tenant_min_resident_size: usage_planned_min_resident_size_respecting,
-        fallback_to_global_lru: usage_planned_global_lru,
     };
-
     debug!(?usage_planned, "usage planned");
 
     // phase2: evict victims batched by timeline
-    let mut batch = Vec::new();
+
+    // achieved post-eviction usage according to internal accounting
+    let mut usage_assumed = usage_pre;
+
     let mut evictions_failed = LayerCount::default();
-    for (timeline, layers) in batched {
+    for (timeline, batch) in batched {
         let tenant_id = timeline.tenant_id;
         let timeline_id = timeline.timeline_id;
-
-        batch.clear();
-        batch.extend(layers.iter().map(|x| &x.layer).cloned());
         let batch_size = batch.len();
 
         debug!(%timeline_id, "evicting batch for timeline");
@@ -417,8 +389,8 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                     warn!("failed to evict batch: {:#}", e);
                 }
                 Ok(results) => {
-                    assert_eq!(results.len(), layers.len());
-                    for (result, layer) in results.into_iter().zip(layers.iter()) {
+                    assert_eq!(results.len(), batch.len());
+                    for (result, layer) in results.into_iter().zip(batch.iter()) {
                         match result {
                             Some(Ok(true)) => {
                                 usage_assumed.add_available_bytes(layer.file_size());
@@ -461,110 +433,128 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     }))
 }
 
-/// Different modes of gathering tenant's least recently used layers.
-#[derive(Debug)]
-enum Mode {
-    /// Add all but the most recently used `min_resident_size` worth of layers to the candidates
-    /// list.
-    ///
-    /// `min_resident_size` defaults to maximum layer file size of the tenant. This ensures that
-    /// the tenant will always have one layer resident. If we cannot compute `min_resident_size`
-    /// accurately because metadata is missing we use hardcoded constant. `min_resident_size` can
-    /// be overridden per tenant for important tenants.
-    RespectTenantMinResidentSize,
-    /// Consider all layer files from all tenants in LRU order.
-    ///
-    /// This is done if the `min_resident_size` respecting does not relieve pressure.
-    GlobalLru,
+// Result type of `collect_eviction_candidates`
+//
+// `collect_eviction_candidates' returns a vector of these, in the preference order
+// that they should be evicted.
+struct EvictionCandidate {
+    timeline: Arc<Timeline>,
+    layer: Arc<dyn PersistentLayer>,
+    last_activity_ts: SystemTime,
+    tenant_resident_size_overage: i64,
 }
 
-#[instrument(skip_all, fields(?mode, %tenant_id))]
-async fn extend_lru_candidates(
-    mode: Mode,
-    tenant_id: TenantId,
-    lru_candidates: &mut Vec<(Arc<Timeline>, LocalLayerInfoForDiskUsageEviction)>,
-    scratch: &mut Vec<(Arc<Timeline>, LocalLayerInfoForDiskUsageEviction)>,
-    cancel: &CancellationToken,
-) -> ControlFlow<()> {
-    debug!("begin");
+/// Collect a list of all non-remote layers in the system, from all timelines in all tenants.
+///
+/// Returns all layers in the order that they should be evicted. The current policy is to
+/// first evict layers in global LRU order, but retain at least min_resident_size bytes of
+/// data for each tenant. After that, if necessary, we evict the remaining layers, also in
+/// global LRU order. A different policy could be implemented by changing the returned order
+/// here.
+///
+/// For each layer, we return its last-activity timestamp, and its "overage" over the
+/// tenant's min resident size limit. In other words, 'tenant_resident_size_overage'
+/// means: If we evicted this layer, and all the layers of this tenant in the result list
+/// before this one, how much would the total size of all the tenant's remaining layers
+/// exceed the the tenant's min resident size? Layers that belong to the "reservation",
+/// 'tenant_resident_size_overage' is negative.
+///
+/// For example, imagine that there are two tenants, A and B, with five layers each, a-e.
+/// Each layer has size 100, and both tenant's min_resident_size is 150.
+/// `collect_eviction_candidates` would return them in this order:
+///
+/// last_activity_ts    tenant/layer    overage
+/// 18:30               A/c        250
+/// 19:00               A/b        150
+/// 18:29               B/c        250
+/// 19:05               B/b        150
+/// 20:00               B/a         50
+/// 20:03               A/a         50
+/// --- min resident size respecting cutoff point  ---
+/// 20:30               A/d        -50
+/// 20:40               B/d        -50
+/// 20:45               B/e       -150
+/// 20:58               A/e       -150
+///
+/// If the task is cancelled by the `cancel` token, returns an empty Vec. The caller
+/// should check for `cancel.is_cancelled`.
+///
+async fn collect_eviction_candidates(
+    cancel: &CancellationToken
+) -> anyhow::Result<Vec<EvictionCandidate>> {
+    // get a snapshot of the list of tenants
+    let tenants = tenant::mgr::list_tenants()
+        .await
+        .context("get list of tenants")?;
 
-    let tenant = match tenant::mgr::get_tenant(tenant_id, true).await {
-        Ok(tenant) => tenant,
-        Err(e) => {
-            // this can happen if tenant has lifecycle transition after we fetched it
-            debug!("failed to get tenant: {e:#}");
-            return ControlFlow::Continue(());
-        }
-    };
-
-    if cancel.is_cancelled() {
-        return ControlFlow::Break(());
-    }
-
-    let mut max_layer_size = ApproxAccurate::default();
-    for tl in tenant.list_timelines() {
-        if !tl.is_active() {
-            continue;
-        }
-        let info = tl.get_local_layers_for_disk_usage_eviction();
-        debug!(timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
-        scratch.extend(
-            info.resident_layers
-                .into_iter()
-                .map(|layer_infos| (tl.clone(), layer_infos)),
-        );
-        max_layer_size = max_layer_size.max(info.max_layer_size.accurate());
-
+    let mut candidates: Vec<EvictionCandidate> = Vec::new();
+    for (tenant_id, _state) in &tenants {
         if cancel.is_cancelled() {
-            return ControlFlow::Break(());
+            return Ok(candidates);
         }
-    }
-
-    let min_resident_size = match mode {
-        Mode::GlobalLru => {
-            lru_candidates.append(scratch);
-            return ControlFlow::Continue(());
-        }
-        Mode::RespectTenantMinResidentSize => match tenant.get_min_resident_size_override() {
-            Some(size) => size,
-            None => {
-                match max_layer_size.accurate() {
-                    Some(size) => size,
-                    None => {
-                        let prod_max_layer_file_size = 332_880_000;
-                        // rate-limit warning in case above comment is wrong and we're missing `LayerMetadata` for many layers
-                        static LAST_WARNED: Mutex<Option<Instant>> = Mutex::new(None);
-                        let mut last_warned = LAST_WARNED.lock().unwrap();
-                        if last_warned
-                            .map(|v| v.elapsed() > Duration::from_secs(60))
-                            .unwrap_or(true)
-                        {
-                            warn!(value=prod_max_layer_file_size, "some layers don't have LayerMetadata to calculate max_layer_file_size, using default value");
-                            *last_warned = Some(Instant::now());
-                        }
-                        prod_max_layer_file_size
-                    }
-                }
+        let tenant = match tenant::mgr::get_tenant(*tenant_id, true).await {
+            Ok(tenant) => tenant,
+            Err(e) => {
+                // this can happen if tenant has lifecycle transition after we fetched it
+                debug!("failed to get tenant: {e:#}");
+                continue;
             }
-        },
-    };
+        };
 
-    scratch.sort_unstable_by_key(|(_, layer_info)| layer_info.last_activity_ts);
+        // collect layers from all timelines in this tenant
+        let mut tenant_candidates = Vec::new();
+        for tl in tenant.list_timelines() {
+            if !tl.is_active() {
+                continue;
+            }
+            let info = tl.get_local_layers_for_disk_usage_eviction();
+            debug!(timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
+            tenant_candidates.extend(
+                info.resident_layers
+                    .into_iter()
+                    .map(|layer_infos| (tl.clone(), layer_infos)),
+            );
 
-    let mut current: u64 = scratch.iter().map(|(_, layer)| layer.file_size()).sum();
-    for (tl, layer) in scratch.drain(..) {
-        if cancel.is_cancelled() {
-            return ControlFlow::Break(());
+            if cancel.is_cancelled() {
+                return Ok(candidates);
+            }
         }
-        if current <= min_resident_size {
-            break;
+
+        // sort this tenant's layers by last_activity_ts, calculate the "overage" for each
+        // layer, and add them to the result.
+        tenant_candidates.sort_unstable_by_key(|(_, layer_info)| layer_info.last_activity_ts);
+
+        let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
+            info!("using overridden min resident size {} for tenant {}", s, tenant.tenant_id());
+            s
+        } else {
+            // By default, use the size of the largest resident layer
+            let s = tenant_candidates.iter().map(|(_, layer_info)| layer_info.file_size()).max().unwrap_or(0);
+            info!("using max layer size {} for tenant {}", s, tenant.tenant_id());
+            s
+        };
+
+        let mut cumulative_resident_size_overage: i128 = -i128::from(min_resident_size);
+        for (timeline, layer_info) in tenant_candidates.into_iter() {
+            let file_size = layer_info.file_size();
+            candidates.push(EvictionCandidate {
+                timeline,
+                last_activity_ts: layer_info.last_activity_ts,
+                layer: layer_info.layer,
+                tenant_resident_size_overage: cumulative_resident_size_overage
+                    .clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+            });
+            cumulative_resident_size_overage += i128::from(file_size);
         }
-        current -= layer.file_size();
-        debug!(?layer, "adding layer to lru_candidates");
-        lru_candidates.push((tl, layer));
     }
 
-    ControlFlow::Continue(())
+    // Final sort. Layers above their tenant's min-resident size threshold first, in
+    // LRU order, and then all the rest also in LRU order
+    candidates.sort_unstable_by_key(|candidate| {
+        (candidate.tenant_resident_size_overage < 0, candidate.last_activity_ts)
+    });
+
+    Ok(candidates)
 }
 
 struct TimelineKey(Arc<Timeline>);
