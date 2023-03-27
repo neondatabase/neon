@@ -1312,4 +1312,72 @@ mod tests {
             availability_zone: None,
         }
     }
+
+    #[tokio::test]
+    async fn switch_to_same_availability_zone() -> anyhow::Result<()> {
+        // Pageserver and one of safekeepers will be in the same availability zone
+        // and pageserver should prefer to connect to it.
+        let test_az = "test_az".to_owned();
+
+        let harness = TenantHarness::create("switch_to_same_availability_zone")?;
+        let mut state = dummy_state(&harness).await;
+        state.availability_zone = Some(test_az.clone());
+        let current_lsn = Lsn(100_000).align();
+        let now = Utc::now().naive_utc();
+
+        let connected_sk_id = NodeId(0);
+
+        let connection_status = WalConnectionStatus {
+            is_connected: true,
+            has_processed_wal: true,
+            latest_connection_update: now,
+            latest_wal_update: now,
+            commit_lsn: Some(current_lsn),
+            streaming_lsn: Some(current_lsn),
+        };
+
+        state.wal_connection = Some(WalConnection {
+            started_at: now,
+            sk_id: connected_sk_id,
+            availability_zone: None,
+            status: connection_status,
+            connection_task: TaskHandle::spawn(move |sender, _| async move {
+                sender
+                    .send(TaskStateUpdate::Progress(connection_status))
+                    .ok();
+                Ok(())
+            }),
+            discovered_new_wal: None,
+        });
+
+        // We have another safekeeper with the same commit_lsn, but it's have the same availability zone as
+        // the current pageserver.
+        let mut same_az_sk = dummy_broker_sk_timeline(current_lsn.0, "same_az", now);
+        same_az_sk.timeline.availability_zone = test_az.clone();
+
+        state.wal_stream_candidates = HashMap::from([
+            (
+                connected_sk_id,
+                dummy_broker_sk_timeline(current_lsn.0, DUMMY_SAFEKEEPER_HOST, now),
+            ),
+            (NodeId(1), same_az_sk),
+        ]);
+
+        let next_candidate = state.next_connection_candidate().expect(
+            "Expected one candidate selected out of multiple valid data options, but got none",
+        );
+
+        assert_eq!(next_candidate.safekeeper_id, NodeId(1));
+        assert_eq!(
+            next_candidate.reason,
+            ReconnectReason::SwitchAvailabilityZone,
+            "Should select bigger WAL safekeeper if it starts to lag enough"
+        );
+        assert_eq!(
+            next_candidate.wal_source_connconf.host(),
+            &Host::Domain("same_az".to_owned())
+        );
+
+        Ok(())
+    }
 }
