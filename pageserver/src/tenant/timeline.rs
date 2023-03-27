@@ -328,7 +328,8 @@ impl LogicalSize {
             .fetch_add(delta, AtomicOrdering::SeqCst);
     }
 
-    /// Returns the initialized (already calculated) value, if any.
+    /// Make the value computed by initial logical size computation
+    /// available for re-use. This doesn't contain the incremental part.
     fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
         match self.initial_part_end {
             Some(v) if v == lsn => self.initial_logical_size.get().copied(),
