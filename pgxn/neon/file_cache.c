@@ -199,7 +199,7 @@ lfc_change_limit_hook(int newval, void *extra)
  * First time low space watermark is reached cache size is divided by two,
  * second time by four,... Finally we remove all chunks from local cache.
  *
- * Please notie that we are not changing lfc_cache_size: it is used to be adjusted by autoscaler.
+ * Please notice that we are not changing lfc_cache_size: it is used to be adjusted by autoscaler.
  * We only throw away cached chunks but do not prevent from filling cache by new chunks.
  *
  * Interval of poooling cache state is calculated as minimal time needed to consume lfc_free_space_watermark
