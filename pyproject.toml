@@ -70,6 +70,9 @@ strict = true
 module = [
     "asyncpg.*",
     "pg8000.*",
+    "allure.*",
+    "allure_commons.*",
+    "allure_pytest.*",
 ]
 ignore_missing_imports = true
 

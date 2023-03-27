@@ -335,6 +335,9 @@ jobs:
           real_s3_region: us-west-2
           real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
+          rerun_flaky: true
+        env:
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
