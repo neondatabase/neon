@@ -4065,9 +4065,7 @@ impl std::fmt::Debug for LocalLayerInfoForDiskUsageEviction {
 
 impl LocalLayerInfoForDiskUsageEviction {
     pub fn file_size(&self) -> u64 {
-        self.layer
-            .file_size()
-            .expect("we know this is a local layer")
+        self.layer.file_size()
     }
 }
 
@@ -4079,7 +4077,7 @@ impl Timeline {
         let mut resident_layers = Vec::new();
 
         for l in layers.iter_historic_layers() {
-            max_layer_size = max_layer_size.max(l.file_size());
+            max_layer_size = max_layer_size.max(Some(l.file_size()));
 
             if l.is_remote_layer() {
                 continue;
