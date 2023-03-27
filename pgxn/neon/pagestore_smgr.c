@@ -1379,8 +1379,18 @@ neon_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockN
 
 	if (RecoveryInProgress())
 	{
+		/*
+		 * We don't know if WAL has been generated but not yet replayed, so
+		 * we're conservative in our estimates about latest pages.
+		 */
 		*latest = false;
-		lsn = GetXLogReplayRecPtr(NULL);
+
+		/*
+		 * Get the last written LSN of this page.
+		 */
+		lsn = GetLastWrittenLSN(rnode, forknum, blkno);
+		lsn = nm_adjust_lsn(lsn);
+
 		elog(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 	}
@@ -1860,12 +1870,15 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	 * until after REDO has finished replaying up to that LwLSN, as the page
 	 * should have been locked up to that point.
 	 *
-	 * Although it is possible that we need to read a page through the
-	 * neon SMgr in the backend that is replaying the WAL, the request_lsn
-	 * of that IO request should in those cases be less than that of the
-	 * record we're currently replaying.
+	 * See also the description on neon_redo_read_buffer_filter below.
+	 *
+	 * NOTE: It is possible that the WAL redo process will still do IO due to
+	 * concurrent failed read IOs. Those IOs should never have a request_lsn
+	 * that is as large as the WAL record we're currently replaying, if it
+	 * weren't for the behaviour of the LwLsn cache that uses the highest
+	 * value of the LwLsn cache when the entry is not found. 
 	 */
-	if (RecoveryInProgress())
+	if (RecoveryInProgress() && !(MyBackendType == B_STARTUP))
 		XLogWaitForReplayOf(request_lsn);
 
 	/*
@@ -2630,6 +2643,21 @@ smgr_init_neon(void)
  *
  * - The block is not in the shared buffers
  * - The block is not in the file cache (or is evicted from that cache)
+ * 
+ * It is important to note that skipping WAL redo for a page also means
+ * the page isn't locked by the redo process, as there is no Buffer
+ * being returned, nor is there a buffer descriptor to lock.
+ * This means that any IO that wants to read this block needs to wait
+ * for the WAL REDO process to finish before it allows the system to start
+ * reading the block, as releasing the block early could lead to phantom
+ * reads.
+ * For example, REDO for a WAL record that modifies 3 blocks could skip
+ * the first block, wait for a lock on the second, and then modify the
+ * third block. Without skipping, all blocks would be locked and phantom
+ * reads would not occur, but with skipping, a concurrent process could
+ * read block 1 with post-REDO contents and read block 3 with pre-REDO
+ * contents, where with REDO locking it would wait on block 1 and see
+ * block 3 with post-REDO contents only.
  */
 bool
 neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
