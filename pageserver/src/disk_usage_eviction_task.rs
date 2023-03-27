@@ -23,6 +23,11 @@
 //! It tries first with a reservation of up to `tenant_min_resident_size` bytes of the most recent layers per tenant.
 //! The layers not part of the per-tenant reservation are evicted least-recently-used first until we're below all thresholds.
 //! If the per-tenant-reservation strategy doesn't work out, it falls back to global LRU.
+
+// Implementation notes:
+// - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
+//   reading these fields. We use the Debug impl for semi-structured logging, though.
+
 use std::{
     collections::HashMap,
     ops::ControlFlow,
@@ -218,8 +223,6 @@ pub enum IterationOutcome<U> {
     Finished(IterationOutcomeFinished<U>),
 }
 
-// The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
-// We use the Debug impl for logging, so, it's allright.
 #[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct IterationOutcomeFinished<U> {
@@ -234,8 +237,6 @@ pub struct IterationOutcomeFinished<U> {
     assumed: AssumedUsage<U>,
 }
 
-// The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
-// We use the Debug impl for logging, so, it's allright.
 #[derive(Debug, Serialize)]
 #[allow(dead_code)]
 struct AssumedUsage<U> {
@@ -245,8 +246,6 @@ struct AssumedUsage<U> {
     failed: LayerCount,
 }
 
-// The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
-// We use the Debug impl for logging, so, it's allright.
 #[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct PlannedUsage<U> {
@@ -591,8 +590,6 @@ mod filesystem_level_usage {
 
     use super::DiskUsageEvictionTaskConfig;
 
-    // The `#[allow(dead_code)]` is to suppress warnings about only the Debug impl reading these fields.
-    // We use the Debug impl for logging, so, it's allright.
     #[derive(Debug, Clone, Copy)]
     #[allow(dead_code)]
     pub struct Usage<'a> {
