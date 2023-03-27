@@ -131,6 +131,29 @@ impl From<TenantStateError> for ApiError {
     }
 }
 
+impl From<crate::tenant::DeleteTimelineError> for ApiError {
+    fn from(value: crate::tenant::DeleteTimelineError) -> Self {
+        use crate::tenant::DeleteTimelineError::*;
+        match value {
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found")),
+            HasChildren => ApiError::BadRequest(anyhow::anyhow!(
+                "Cannot delete timeline which has child timelines"
+            )),
+            Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
+impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
+    fn from(value: crate::tenant::mgr::DeleteTimelineError) -> Self {
+        use crate::tenant::mgr::DeleteTimelineError::*;
+        match value {
+            Tenant(t) => ApiError::from(t),
+            Timeline(t) => ApiError::from(t),
+        }
+    }
+}
+
 // Helper function to construct a TimelineInfo struct for a timeline
 async fn build_timeline_info(
     timeline: &Arc<Timeline>,
@@ -185,7 +208,7 @@ fn build_timeline_info_common(
             None
         }
     };
-    let current_physical_size = Some(timeline.layer_size_sum().approximate_is_ok());
+    let current_physical_size = Some(timeline.layer_size_sum());
     let state = timeline.current_state();
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
@@ -384,10 +407,11 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
 async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
+    let detach_ignored: Option<bool> = parse_query_param(&request, "detach_ignored")?;
 
     let state = get_state(&request);
     let conf = state.conf;
-    mgr::detach_tenant(conf, tenant_id)
+    mgr::detach_tenant(conf, tenant_id, detach_ignored.unwrap_or(false))
         .instrument(info_span!("tenant_detach", tenant = %tenant_id))
         .await?;
 
@@ -451,7 +475,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
         for timeline in tenant.list_timelines().iter() {
-            current_physical_size += timeline.layer_size_sum().approximate_is_ok();
+            current_physical_size += timeline.layer_size_sum();
         }
 
         let state = tenant.current_state();

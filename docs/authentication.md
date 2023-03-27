@@ -106,20 +106,22 @@ Their authentication is just plain PostgreSQL authentication and out of scope fo
 There is no administrative API except those provided by PostgreSQL.
 
 #### Outgoing connections
-Compute connects to Pageserver for getting pages.
-The connection string is configured by the `neon.pageserver_connstring` PostgreSQL GUC, e.g. `postgresql://no_user:$NEON_AUTH_TOKEN@localhost:15028`.
-The environment variable inside the connection string is substituted with
-the JWT token.
+Compute connects to Pageserver for getting pages. The connection string is
+configured by the `neon.pageserver_connstring` PostgreSQL GUC,
+e.g. `postgresql://no_user@localhost:15028`. If the `$NEON_AUTH_TOKEN`
+environment variable is set, it is used as the password for the connection. (The
+pageserver uses JWT tokens for authentication, so the password is really a
+token.)
 
-Compute connects to Safekeepers to write and commit data.
-The token is the same for all safekeepers.
-It's stored in an environment variable, whose name is configured
-by the `neon.safekeeper_token_env` PostgreSQL GUC.
-If the GUC is unset, no token is passed.
+Compute connects to Safekeepers to write and commit data. The list of safekeeper
+addresses is given in the `neon.safekeepers` GUC. The connections to the
+safekeepers take the password from the `$NEON_AUTH_TOKEN` environment
+variable, if set.
 
-Note that both tokens can be (and typically are) the same;
-the scope is the tenant and the token is usually passed through the
-`$NEON_AUTH_TOKEN` environment variable.
+The `compute_ctl` binary that runs before the PostgreSQL server, and launches
+PostgreSQL, also makes a connection to the pageserver. It uses it to fetch the
+initial "base backup" dump, to initialize the PostgreSQL data directory. It also
+uses `$NEON_AUTH_TOKEN` as the password for the connection.
 
 ### Pageserver
 #### Overview

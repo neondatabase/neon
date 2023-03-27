@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use postgres_backend::AuthType;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
@@ -88,7 +87,6 @@ impl ComputeControlPlane {
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
-            is_test: false,
             timeline_id,
             lsn,
             tenant_id,
@@ -97,7 +95,7 @@ impl ComputeControlPlane {
         });
 
         node.create_pgdata()?;
-        node.setup_pg_conf(self.env.pageserver.pg_auth_type)?;
+        node.setup_pg_conf()?;
 
         self.nodes
             .insert((tenant_id, node.name.clone()), Arc::clone(&node));
@@ -114,7 +112,6 @@ pub struct PostgresNode {
     name: String,
     pub env: LocalEnv,
     pageserver: Arc<PageServerNode>,
-    is_test: bool,
     pub timeline_id: TimelineId,
     pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
     pub tenant_id: TenantId,
@@ -172,7 +169,6 @@ impl PostgresNode {
             name,
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
-            is_test: false,
             timeline_id,
             lsn: recovery_target_lsn,
             tenant_id,
@@ -278,7 +274,7 @@ impl PostgresNode {
 
     // Write postgresql.conf with default configuration
     // and PG_VERSION file to the data directory of a new node.
-    fn setup_pg_conf(&self, auth_type: AuthType) -> Result<()> {
+    fn setup_pg_conf(&self) -> Result<()> {
         let mut conf = PostgresConf::new();
         conf.append("max_wal_senders", "10");
         conf.append("wal_log_hints", "off");
@@ -302,29 +298,12 @@ impl PostgresNode {
             let config = &self.pageserver.pg_connection_config;
             let (host, port) = (config.host(), config.port());
 
-            // Set up authentication
-            //
-            // $NEON_AUTH_TOKEN will be replaced with value from environment
-            // variable during compute pg startup. It is done this way because
-            // otherwise user will be able to retrieve the value using SHOW
-            // command or pg_settings
-            let password = if let AuthType::NeonJWT = auth_type {
-                "$NEON_AUTH_TOKEN"
-            } else {
-                ""
-            };
-            // NOTE avoiding spaces in connection string, because it is less error prone if we forward it somewhere.
-            // Also note that not all parameters are supported here. Because in compute we substitute $NEON_AUTH_TOKEN
-            // We parse this string and build it back with token from env var, and for simplicity rebuild
-            // uses only needed variables namely host, port, user, password.
-            format!("postgresql://no_user:{password}@{host}:{port}")
+            // NOTE: avoid spaces in connection string, because it is less error prone if we forward it somewhere.
+            format!("postgresql://no_user@{host}:{port}")
         };
         conf.append("shared_preload_libraries", "neon");
         conf.append_line("");
         conf.append("neon.pageserver_connstring", &pageserver_connstr);
-        if let AuthType::NeonJWT = auth_type {
-            conf.append("neon.safekeeper_token_env", "$NEON_AUTH_TOKEN");
-        }
         conf.append("neon.tenant_id", &self.tenant_id.to_string());
         conf.append("neon.timeline_id", &self.timeline_id.to_string());
         if let Some(lsn) = self.lsn {
@@ -447,6 +426,8 @@ impl PostgresNode {
             "DYLD_LIBRARY_PATH",
             self.env.pg_lib_dir(self.pg_version)?.to_str().unwrap(),
         );
+
+        // Pass authentication token used for the connections to pageserver and safekeepers
         if let Some(token) = auth_token {
             cmd.env("NEON_AUTH_TOKEN", token);
         }
@@ -496,10 +477,6 @@ impl PostgresNode {
         self.pg_ctl(&["start"], auth_token)
     }
 
-    pub fn restart(&self, auth_token: &Option<String>) -> Result<()> {
-        self.pg_ctl(&["restart"], auth_token)
-    }
-
     pub fn stop(&self, destroy: bool) -> Result<()> {
         // If we are going to destroy data directory,
         // use immediate shutdown mode, otherwise,
@@ -529,27 +506,5 @@ impl PostgresNode {
             "cloud_admin",
             "postgres"
         )
-    }
-
-    // XXX: cache that in control plane
-    pub fn whoami(&self) -> String {
-        let output = Command::new("whoami")
-            .output()
-            .expect("failed to execute whoami");
-
-        assert!(output.status.success(), "whoami failed");
-
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
-}
-
-impl Drop for PostgresNode {
-    // destructor to clean up state after test is done
-    // XXX: we may detect failed test by setting some flag in catch_unwind()
-    // and checking it here. But let just clean datadirs on start.
-    fn drop(&mut self) {
-        if self.is_test {
-            let _ = self.stop(true);
-        }
     }
 }

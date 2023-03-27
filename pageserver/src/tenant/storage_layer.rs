@@ -385,7 +385,7 @@ pub trait PersistentLayer: Layer {
     ///
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> Option<u64>;
+    fn file_size(&self) -> u64;
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
 

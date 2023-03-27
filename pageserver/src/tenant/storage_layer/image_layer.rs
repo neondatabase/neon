@@ -258,8 +258,8 @@ impl PersistentLayer for ImageLayer {
         Ok(())
     }
 
-    fn file_size(&self) -> Option<u64> {
-        Some(self.file_size)
+    fn file_size(&self) -> u64 {
+        self.file_size
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
@@ -268,7 +268,7 @@ impl PersistentLayer for ImageLayer {
 
         HistoricLayerInfo::Image {
             layer_file_name,
-            layer_file_size: Some(self.file_size),
+            layer_file_size: self.file_size,
             lsn_start: lsn_range.start,
             remote: false,
             access_stats: self.access_stats.as_api_model(reset),

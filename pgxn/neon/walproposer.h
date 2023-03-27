@@ -39,10 +39,6 @@ typedef struct WalProposerConn WalProposerConn;
 struct WalMessage;
 typedef struct WalMessage WalMessage;
 
-extern char *neon_timeline_walproposer;
-extern char *neon_tenant_walproposer;
-extern char *neon_safekeeper_token_walproposer;
-
 /* Possible return values from ReadPGAsync */
 typedef enum
 {
@@ -458,7 +454,7 @@ extern char *walprop_error_message(WalProposerConn *conn);
 extern WalProposerConnStatusType walprop_status(WalProposerConn *conn);
 
 /* Re-exported PQconnectStart */
-extern WalProposerConn * walprop_connect_start(char *conninfo);
+extern WalProposerConn * walprop_connect_start(char *conninfo, char *password);
 
 /* Re-exported PQconectPoll */
 extern WalProposerConnectPollStatusType walprop_connect_poll(WalProposerConn *conn);

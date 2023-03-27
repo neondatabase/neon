@@ -133,6 +133,7 @@ fn main() -> Result<()> {
         .settings
         .find("neon.pageserver_connstring")
         .expect("pageserver connstr should be provided");
+    let storage_auth_token = spec.storage_auth_token.clone();
     let tenant = spec
         .cluster
         .settings
@@ -153,6 +154,7 @@ fn main() -> Result<()> {
         tenant,
         timeline,
         pageserver_connstr,
+        storage_auth_token,
         metrics: ComputeMetrics::default(),
         state: RwLock::new(ComputeState::new()),
     };

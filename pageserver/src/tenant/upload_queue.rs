@@ -127,12 +127,21 @@ impl UploadQueue {
 
         let mut files = HashMap::with_capacity(index_part.timeline_layers.len());
         for layer_name in &index_part.timeline_layers {
-            let layer_metadata = index_part
+            match index_part
                 .layer_metadata
                 .get(layer_name)
                 .map(LayerFileMetadata::from)
-                .unwrap_or(LayerFileMetadata::MISSING);
-            files.insert(layer_name.to_owned(), layer_metadata);
+            {
+                Some(layer_metadata) => {
+                    files.insert(layer_name.to_owned(), layer_metadata);
+                }
+                None => {
+                    anyhow::bail!(
+                        "No remote layer metadata found for layer {}",
+                        layer_name.file_name()
+                    );
+                }
+            }
         }
 
         let index_part_metadata = index_part.parse_metadata()?;

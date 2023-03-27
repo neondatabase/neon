@@ -1,5 +1,18 @@
-//! The per-timeline layer eviction task.
-
+//! The per-timeline layer eviction task, which evicts data which has not been accessed for more
+//! than a given threshold.
+//!
+//! Data includes all kinds of caches, namely:
+//! - (in-memory layers)
+//! - on-demand downloaded layer files on disk
+//! - (cached layer file pages)
+//! - derived data from layer file contents, namely:
+//!     - initial logical size
+//!     - partitioning
+//!     - (other currently missing unknowns)
+//!
+//! Items with parentheses are not (yet) touched by this task.
+//!
+//! See write-up on restart on-demand download spike: <https://gist.github.com/problame/2265bf7b8dc398be834abfead36c76b5>
 use std::{
     ops::ControlFlow,
     sync::Arc,
@@ -11,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
+    context::{DownloadBehavior, RequestContext},
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
@@ -19,6 +33,11 @@ use crate::{
 };
 
 use super::Timeline;
+
+#[derive(Default)]
+pub struct EvictionTaskTimelineState {
+    last_refresh_required_in_restart: Option<tokio::time::Instant>,
+}
 
 impl Timeline {
     pub(super) fn launch_eviction_task(self: &Arc<Self>) {
@@ -53,9 +72,10 @@ impl Timeline {
             }
         }
 
+        let ctx = RequestContext::new(TaskKind::Eviction, DownloadBehavior::Warn);
         loop {
             let policy = self.get_eviction_policy();
-            let cf = self.eviction_iteration(&policy, cancel.clone()).await;
+            let cf = self.eviction_iteration(&policy, &cancel, &ctx).await;
 
             match cf {
                 ControlFlow::Break(()) => break,
@@ -76,7 +96,8 @@ impl Timeline {
     async fn eviction_iteration(
         self: &Arc<Self>,
         policy: &EvictionPolicy,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> ControlFlow<(), Instant> {
         debug!("eviction iteration: {policy:?}");
         match policy {
@@ -86,7 +107,7 @@ impl Timeline {
             }
             EvictionPolicy::LayerAccessThreshold(p) => {
                 let start = Instant::now();
-                match self.eviction_iteration_threshold(p, cancel).await {
+                match self.eviction_iteration_threshold(p, cancel, ctx).await {
                     ControlFlow::Break(()) => return ControlFlow::Break(()),
                     ControlFlow::Continue(()) => (),
                 }
@@ -100,7 +121,8 @@ impl Timeline {
     async fn eviction_iteration_threshold(
         self: &Arc<Self>,
         p: &EvictionPolicyLayerAccessThreshold,
-        cancel: CancellationToken,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
     ) -> ControlFlow<()> {
         let now = SystemTime::now();
 
@@ -113,6 +135,28 @@ impl Timeline {
             not_evictable: usize,
             skipped_for_shutdown: usize,
         }
+
+        // what we want is to invalidate any caches which haven't been accessed for `p.threshold`,
+        // but we cannot actually do it for current limitations except by restarting pageserver. we
+        // just recompute the values which would be recomputed on startup.
+        //
+        // for active tenants this will likely materialized page cache or in-memory layers. for
+        // inactive tenants it will refresh the last_access timestamps so that we will not evict
+        // and re-download on restart these layers.
+        let mut state = self.eviction_task_timeline_state.lock().await;
+        match state.last_refresh_required_in_restart {
+            Some(ts) if ts.elapsed() < p.threshold => { /* no need to run */ }
+            _ => {
+                self.refresh_layers_required_in_restart(cancel, ctx).await;
+                state.last_refresh_required_in_restart = Some(tokio::time::Instant::now())
+            }
+        }
+        drop(state);
+
+        if cancel.is_cancelled() {
+            return ControlFlow::Break(());
+        }
+
         let mut stats = EvictionStats::default();
         // Gather layers for eviction.
         // NB: all the checks can be invalidated as soon as we release the layer map lock.
@@ -167,7 +211,7 @@ impl Timeline {
         };
 
         let results = match self
-            .evict_layer_batch(remote_client, &candidates[..], cancel)
+            .evict_layer_batch(remote_client, &candidates[..], cancel.clone())
             .await
         {
             Err(pre_err) => {
@@ -208,5 +252,41 @@ impl Timeline {
             info!(stats=?stats, "eviction iteration complete");
         }
         ControlFlow::Continue(())
+    }
+
+    /// Recompute the values which would cause on-demand downloads during restart.
+    async fn refresh_layers_required_in_restart(
+        &self,
+        cancel: &CancellationToken,
+        ctx: &RequestContext,
+    ) {
+        let lsn = self.get_last_record_lsn();
+
+        // imitiate on-restart initial logical size
+        let size = self.calculate_logical_size(lsn, cancel.clone(), ctx).await;
+
+        match &size {
+            Ok(_size) => {
+                // good, don't log it to avoid confusion
+            }
+            Err(_) => {
+                // we have known issues for which we already log this on consumption metrics,
+                // gc, and compaction. leave logging out for now.
+                //
+                // https://github.com/neondatabase/neon/issues/2539
+            }
+        }
+
+        // imitiate repartiting on first compactation
+        if let Err(e) = self.collect_keyspace(lsn, ctx).await {
+            // if this failed, we probably failed logical size because these use the same keys
+            if size.is_err() {
+                // ignore, see above comment
+            } else {
+                warn!(
+                    "failed to collect keyspace but succeeded in calculating logical size: {e:#}"
+                );
+            }
+        }
     }
 }

@@ -586,7 +586,6 @@ pub struct TimelineMetrics {
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
-    pub init_logical_size_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
@@ -619,8 +618,6 @@ impl TimelineMetrics {
         let compact_time_histo = StorageTimeMetrics::new("compact", &tenant_id, &timeline_id);
         let create_images_time_histo =
             StorageTimeMetrics::new("create images", &tenant_id, &timeline_id);
-        let init_logical_size_histo =
-            StorageTimeMetrics::new("init logical size", &tenant_id, &timeline_id);
         let logical_size_histo = StorageTimeMetrics::new("logical size", &tenant_id, &timeline_id);
         let load_layer_map_histo =
             StorageTimeMetrics::new("load layer map", &tenant_id, &timeline_id);
@@ -657,7 +654,6 @@ impl TimelineMetrics {
             flush_time_histo,
             compact_time_histo,
             create_images_time_histo,
-            init_logical_size_histo,
             logical_size_histo,
             garbage_collect_histo,
             load_layer_map_histo,

@@ -73,6 +73,8 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use walreceiver::spawn_connection_manager_task;
 
+use self::eviction_task::EvictionTaskTimelineState;
+
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -218,6 +220,8 @@ pub struct Timeline {
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
     state: watch::Sender<TimelineState>,
+
+    eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -330,27 +334,12 @@ impl LogicalSize {
             .fetch_add(delta, AtomicOrdering::SeqCst);
     }
 
-    /// Returns the initialized (already calculated) value, if any.
-    fn initialized_size(&self) -> Option<u64> {
-        self.initial_logical_size.get().copied()
-    }
-}
-
-/// Returned by [`Timeline::layer_size_sum`]
-pub enum LayerSizeSum {
-    /// The result is accurate.
-    Accurate(u64),
-    // We don't know the layer file size of one or more layers.
-    // They contribute to the sum with a value of 0.
-    // Hence, the sum is a lower bound for the actualy layer file size sum.
-    ApproximateLowerBound(u64),
-}
-
-impl LayerSizeSum {
-    pub fn approximate_is_ok(self) -> u64 {
-        match self {
-            LayerSizeSum::Accurate(v) => v,
-            LayerSizeSum::ApproximateLowerBound(v) => v,
+    /// Make the value computed by initial logical size computation
+    /// available for re-use. This doesn't contain the incremental part.
+    fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
+        match self.initial_part_end {
+            Some(v) if v == lsn => self.initial_logical_size.get().copied(),
+            _ => None,
         }
     }
 }
@@ -552,20 +541,13 @@ impl Timeline {
     /// The sum of the file size of all historic layers in the layer map.
     /// This method makes no distinction between local and remote layers.
     /// Hence, the result **does not represent local filesystem usage**.
-    pub fn layer_size_sum(&self) -> LayerSizeSum {
+    pub fn layer_size_sum(&self) -> u64 {
         let layer_map = self.layers.read().unwrap();
         let mut size = 0;
-        let mut no_size_cnt = 0;
         for l in layer_map.iter_historic_layers() {
-            let (l_size, l_no_size) = l.file_size().map(|s| (s, 0)).unwrap_or((0, 1));
-            size += l_size;
-            no_size_cnt += l_no_size;
+            size += l.file_size();
         }
-        if no_size_cnt == 0 {
-            LayerSizeSum::Accurate(size)
-        } else {
-            LayerSizeSum::ApproximateLowerBound(size)
-        }
+        size
     }
 
     pub fn get_resident_physical_size(&self) -> u64 {
@@ -834,11 +816,11 @@ impl Timeline {
 
         let mut is_exact = true;
         let size = current_size.size();
-        if let (CurrentLogicalSize::Approximate(_), Some(init_lsn)) =
+        if let (CurrentLogicalSize::Approximate(_), Some(initial_part_end)) =
             (current_size, self.current_logical_size.initial_part_end)
         {
             is_exact = false;
-            self.try_spawn_size_init_task(init_lsn, ctx);
+            self.try_spawn_size_init_task(initial_part_end, ctx);
         }
 
         Ok((size, is_exact))
@@ -1079,9 +1061,7 @@ impl Timeline {
             return Ok(false);
         }
 
-        let layer_file_size = local_layer
-            .file_size()
-            .expect("Local layer should have a file size");
+        let layer_file_size = local_layer.file_size();
 
         let local_layer_mtime = local_layer
             .local_path()
@@ -1223,7 +1203,7 @@ impl Timeline {
     pub(super) fn new(
         conf: &'static PageServerConf,
         tenant_conf: Arc<RwLock<TenantConfOpt>>,
-        metadata: TimelineMetadata,
+        metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         timeline_id: TimelineId,
         tenant_id: TenantId,
@@ -1308,6 +1288,10 @@ impl Timeline {
                 download_all_remote_layers_task_info: RwLock::new(None),
 
                 state,
+
+                eviction_task_timeline_state: tokio::sync::Mutex::new(
+                    EvictionTaskTimelineState::default(),
+                ),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
@@ -1546,7 +1530,12 @@ impl Timeline {
                 .layer_metadata
                 .get(remote_layer_name)
                 .map(LayerFileMetadata::from)
-                .unwrap_or(LayerFileMetadata::MISSING);
+                .with_context(|| {
+                    format!(
+                        "No remote layer metadata found for layer {}",
+                        remote_layer_name.file_name()
+                    )
+                })?;
 
             // Is the local layer's size different from the size stored in the
             // remote index file?
@@ -1562,34 +1551,27 @@ impl Timeline {
                     local_layer_path.display()
                 );
 
-                if let Some(remote_size) = remote_layer_metadata.file_size() {
-                    let metadata = local_layer_path.metadata().with_context(|| {
-                        format!(
-                            "get file size of local layer {}",
-                            local_layer_path.display()
-                        )
-                    })?;
-                    let local_size = metadata.len();
-                    if local_size != remote_size {
-                        warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
-                        if let Err(err) = rename_to_backup(&local_layer_path) {
-                            assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
-                            anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
-                        } else {
-                            self.metrics.resident_physical_size_gauge.sub(local_size);
-                            updates.remove_historic(local_layer);
-                            // fall-through to adding the remote layer
-                        }
+                let remote_size = remote_layer_metadata.file_size();
+                let metadata = local_layer_path.metadata().with_context(|| {
+                    format!(
+                        "get file size of local layer {}",
+                        local_layer_path.display()
+                    )
+                })?;
+                let local_size = metadata.len();
+                if local_size != remote_size {
+                    warn!("removing local file {local_layer_path:?} because it has unexpected length {local_size}; length in remote index is {remote_size}");
+                    if let Err(err) = rename_to_backup(&local_layer_path) {
+                        assert!(local_layer_path.exists(), "we would leave the local_layer without a file if this does not hold: {}", local_layer_path.display());
+                        anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                     } else {
-                        debug!(
-                            "layer is present locally and file size matches remote, using it: {}",
-                            local_layer_path.display()
-                        );
-                        continue;
+                        self.metrics.resident_physical_size_gauge.sub(local_size);
+                        updates.remove_historic(local_layer);
+                        // fall-through to adding the remote layer
                     }
                 } else {
                     debug!(
-                        "layer is present locally and remote does not have file size, using it: {}",
+                        "layer is present locally and file size matches remote, using it: {}",
                         local_layer_path.display()
                     );
                     continue;
@@ -1691,6 +1673,8 @@ impl Timeline {
             .map(|l| (l.filename(), l))
             .collect::<HashMap<_, _>>();
 
+        // If no writes happen, new branches do not have any layers, only the metadata file.
+        let has_local_layers = !local_layers.is_empty();
         let local_only_layers = match index_part {
             Some(index_part) => {
                 info!(
@@ -1708,28 +1692,47 @@ impl Timeline {
             }
         };
 
-        // Are there local files that don't exist remotely? Schedule uploads for them
-        for (layer_name, layer) in &local_only_layers {
-            // XXX solve this in the type system
-            let layer_path = layer
-                .local_path()
-                .expect("local_only_layers only contains local layers");
-            let layer_size = layer_path
-                .metadata()
-                .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
-                .len();
-            info!("scheduling {layer_path:?} for upload");
-            remote_client
-                .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
+        if has_local_layers {
+            // Are there local files that don't exist remotely? Schedule uploads for them.
+            // Local timeline metadata will get uploaded to remove along witht he layers.
+            for (layer_name, layer) in &local_only_layers {
+                // XXX solve this in the type system
+                let layer_path = layer
+                    .local_path()
+                    .expect("local_only_layers only contains local layers");
+                let layer_size = layer_path
+                    .metadata()
+                    .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
+                    .len();
+                info!("scheduling {layer_path:?} for upload");
+                remote_client
+                    .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
+            }
+            remote_client.schedule_index_upload_for_file_changes()?;
+        } else if index_part.is_none() {
+            // No data on the remote storage, no local layers, local metadata file.
+            //
+            // TODO https://github.com/neondatabase/neon/issues/3865
+            // Currently, console does not wait for the timeline data upload to the remote storage
+            // and considers the timeline created, expecting other pageserver nodes to work with it.
+            // Branch metadata upload could get interrupted (e.g pageserver got killed),
+            // hence any locally existing branch metadata with no remote counterpart should be uploaded,
+            // otherwise any other pageserver won't see the branch on `attach`.
+            //
+            // After the issue gets implemented, pageserver should rather remove the branch,
+            // since absence on S3 means we did not acknowledge the branch creation and console will have to retry,
+            // no need to keep the old files.
+            remote_client.schedule_index_upload_for_metadata_update(up_to_date_metadata)?;
+        } else {
+            // Local timeline has a metadata file, remote one too, both have no layers to sync.
         }
-        remote_client.schedule_index_upload_for_file_changes()?;
 
         info!("Done");
 
         Ok(())
     }
 
-    fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn, ctx: &RequestContext) {
+    fn try_spawn_size_init_task(self: &Arc<Self>, lsn: Lsn, ctx: &RequestContext) {
         let permit = match Arc::clone(&self.current_logical_size.initial_size_computation)
             .try_acquire_owned()
         {
@@ -1767,7 +1770,7 @@ impl Timeline {
             // NB: don't log errors here, task_mgr will do that.
             async move {
                 let calculated_size = match self_clone
-                    .logical_size_calculation_task(init_lsn, &background_ctx)
+                    .logical_size_calculation_task(lsn, &background_ctx)
                     .await
                 {
                     Ok(s) => s,
@@ -1852,7 +1855,7 @@ impl Timeline {
     #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
-        init_lsn: Lsn,
+        lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         let mut timeline_state_updates = self.subscribe_for_state_updates();
@@ -1863,7 +1866,7 @@ impl Timeline {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(init_lsn, cancel, &ctx)
+                .calculate_logical_size(lsn, cancel, &ctx)
                 .await
         };
         let timeline_state_cancellation = async {
@@ -1947,21 +1950,12 @@ impl Timeline {
             // need to return something
             Ok(0)
         });
-        let timer = if up_to_lsn == self.initdb_lsn {
-            if let Some(size) = self.current_logical_size.initialized_size() {
-                if size != 0 {
-                    // non-zero size means that the size has already been calculated by this method
-                    // after startup. if the logical size is for a new timeline without layers the
-                    // size will be zero, and we cannot use that, or this caching strategy until
-                    // pageserver restart.
-                    return Ok(size);
-                }
-            }
-
-            self.metrics.init_logical_size_histo.start_timer()
-        } else {
-            self.metrics.logical_size_histo.start_timer()
-        };
+        // See if we've already done the work for initial size calculation.
+        // This is a short-cut for timelines that are mostly unused.
+        if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
+            return Ok(size);
+        }
+        let timer = self.metrics.logical_size_histo.start_timer();
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
             .await?;
@@ -2016,9 +2010,7 @@ impl Timeline {
     ) -> anyhow::Result<()> {
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
-            let layer_file_size = layer
-                .file_size()
-                .expect("Local layer should have a file size");
+            let layer_file_size = layer.file_size();
             self.metrics
                 .resident_physical_size_gauge
                 .sub(layer_file_size);
