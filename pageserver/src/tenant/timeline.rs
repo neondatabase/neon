@@ -328,9 +328,13 @@ impl LogicalSize {
             .fetch_add(delta, AtomicOrdering::SeqCst);
     }
 
-    /// Returns the initialized (already calculated) value, if any.
-    fn initialized_size(&self) -> Option<u64> {
-        self.initial_logical_size.get().copied()
+    /// Make the value computed by initial logical size computation
+    /// available for re-use. This doesn't contain the incremental part.
+    fn initialized_size(&self, lsn: Lsn) -> Option<u64> {
+        match self.initial_part_end {
+            Some(v) if v == lsn => self.initial_logical_size.get().copied(),
+            _ => None,
+        }
     }
 }
 
@@ -806,11 +810,11 @@ impl Timeline {
 
         let mut is_exact = true;
         let size = current_size.size();
-        if let (CurrentLogicalSize::Approximate(_), Some(init_lsn)) =
+        if let (CurrentLogicalSize::Approximate(_), Some(initial_part_end)) =
             (current_size, self.current_logical_size.initial_part_end)
         {
             is_exact = false;
-            self.try_spawn_size_init_task(init_lsn, ctx);
+            self.try_spawn_size_init_task(initial_part_end, ctx);
         }
 
         Ok((size, is_exact))
@@ -1688,7 +1692,7 @@ impl Timeline {
         Ok(())
     }
 
-    fn try_spawn_size_init_task(self: &Arc<Self>, init_lsn: Lsn, ctx: &RequestContext) {
+    fn try_spawn_size_init_task(self: &Arc<Self>, lsn: Lsn, ctx: &RequestContext) {
         let permit = match Arc::clone(&self.current_logical_size.initial_size_computation)
             .try_acquire_owned()
         {
@@ -1726,7 +1730,7 @@ impl Timeline {
             // NB: don't log errors here, task_mgr will do that.
             async move {
                 let calculated_size = match self_clone
-                    .logical_size_calculation_task(init_lsn, &background_ctx)
+                    .logical_size_calculation_task(lsn, &background_ctx)
                     .await
                 {
                     Ok(s) => s,
@@ -1811,7 +1815,7 @@ impl Timeline {
     #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
-        init_lsn: Lsn,
+        lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
         let mut timeline_state_updates = self.subscribe_for_state_updates();
@@ -1822,7 +1826,7 @@ impl Timeline {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(init_lsn, cancel, &ctx)
+                .calculate_logical_size(lsn, cancel, &ctx)
                 .await
         };
         let timeline_state_cancellation = async {
@@ -1906,21 +1910,12 @@ impl Timeline {
             // need to return something
             Ok(0)
         });
-        let timer = if up_to_lsn == self.initdb_lsn {
-            if let Some(size) = self.current_logical_size.initialized_size() {
-                if size != 0 {
-                    // non-zero size means that the size has already been calculated by this method
-                    // after startup. if the logical size is for a new timeline without layers the
-                    // size will be zero, and we cannot use that, or this caching strategy until
-                    // pageserver restart.
-                    return Ok(size);
-                }
-            }
-
-            self.metrics.init_logical_size_histo.start_timer()
-        } else {
-            self.metrics.logical_size_histo.start_timer()
-        };
+        // See if we've already done the work for initial size calculation.
+        // This is a short-cut for timelines that are mostly unused.
+        if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
+            return Ok(size);
+        }
+        let timer = self.metrics.logical_size_histo.start_timer();
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
             .await?;
