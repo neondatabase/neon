@@ -1189,9 +1189,7 @@ pub fn make_router(
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
 #[cfg(feature = "testing")]
 async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiError> {
-    use std::str::FromStr;
-    let tenant_id = get_request_param(&r, "tenant_id")?;
-    let tenant_id = TenantId::from_str(tenant_id).map_err(|e| ApiError::BadRequest(e.into()))?;
+    let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
 
     let tenant = crate::tenant::mgr::get_tenant(tenant_id, true)
         .await
