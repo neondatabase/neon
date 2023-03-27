@@ -42,6 +42,11 @@ pub struct EvictionTaskTimelineState {
     last_refresh_required_in_restart: Option<tokio::time::Instant>,
 }
 
+#[derive(Default)]
+pub struct EvictionTaskTenantState {
+    last_layer_access_imitation: Option<Instant>,
+}
+
 impl Timeline {
     pub(super) fn launch_eviction_task(self: &Arc<Self>) {
         let self_clone = Arc::clone(self);
@@ -300,16 +305,16 @@ impl Timeline {
             // likely, we're shutting down
             return ControlFlow::Break(());
         };
-        let mut g = tenant.eviction_task_synthetic_size.lock().await;
-        match *g {
+        let mut state = tenant.eviction_task_tenant_state.lock().await;
+        match state.last_layer_access_imitation {
             Some(ts) if ts.elapsed() < p.threshold => { /* no need to run */ }
             _ => {
                 self.imitate_synthetic_size_calculation_worker(&tenant, ctx, cancel)
                     .await;
-                *g = Some(std::time::Instant::now());
+                state.last_layer_access_imitation = Some(tokio::time::Instant::now());
             }
         }
-        drop(g);
+        drop(state);
 
         if cancel.is_cancelled() {
             return ControlFlow::Break(());

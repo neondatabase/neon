@@ -71,6 +71,7 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use walreceiver::spawn_connection_manager_task;
 
+pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
 
 use super::layer_map::BatchedUpdates;

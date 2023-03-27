@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 use self::config::TenantConf;
 use self::metadata::TimelineMetadata;
 use self::remote_timeline_client::RemoteTimelineClient;
+use self::timeline::EvictionTaskTenantState;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
@@ -142,9 +143,8 @@ pub struct Tenant {
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
     cached_synthetic_tenant_size: Arc<AtomicU64>,
-    /// Used by eviction tasks of this tenants timelines to synchronize calls to
-    /// `tenant::size::gather_inputs`.
-    eviction_task_synthetic_size: tokio::sync::Mutex<Option<Instant>>,
+
+    eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 }
 
 /// A timeline with some of its files on disk, being initialized.
@@ -1784,7 +1784,7 @@ impl Tenant {
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
-            eviction_task_synthetic_size: tokio::sync::Mutex::new(None),
+            eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
         }
     }
 
