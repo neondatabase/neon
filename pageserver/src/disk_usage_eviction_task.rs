@@ -38,7 +38,7 @@ use sync_wrapper::SyncWrapper;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::{approx_accurate::ApproxAccurate, id::TenantId, serde_percent};
+use utils::{approx_accurate::ApproxAccurate, id::TenantId, serde_percent::Percent};
 
 use crate::{
     config::PageServerConf,
@@ -48,7 +48,7 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskUsageEvictionTaskConfig {
-    pub max_usage_pct: serde_percent::Value,
+    pub max_usage_pct: Percent,
     pub min_avail_bytes: u64,
     #[serde(with = "humantime_serde")]
     pub period: Duration,

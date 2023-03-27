@@ -1,6 +1,6 @@
 //! A serde::Desierialize type for percentages.
 //!
-//! See [`Value`] for details.
+//! See [`Percent`] for details.
 
 use serde::{Deserialize, Serialize};
 
@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 /// deserialization fails with a descriptive error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Value(#[serde(deserialize_with = "deserialize_pct_0_to_100")] u8);
+pub struct Percent(#[serde(deserialize_with = "deserialize_pct_0_to_100")] u8);
 
-impl Value {
+impl Percent {
     pub fn get(&self) -> u8 {
         self.0
     }
@@ -31,11 +31,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Value;
+    use super::Percent;
 
     #[derive(serde::Deserialize, serde::Serialize, Debug, PartialEq, Eq)]
     struct Foo {
-        bar: Value,
+        bar: Percent,
     }
 
     #[test]
