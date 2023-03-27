@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Tuple
+from typing import Dict, Iterator, Tuple
 
 import pytest
 from fixtures.log_helper import log
