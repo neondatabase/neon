@@ -94,7 +94,7 @@ static shmem_startup_hook_type prev_shmem_startup_hook;
 #if PG_VERSION_NUM>=150000
 static shmem_request_hook_type prev_shmem_request_hook;
 #endif
-static int   lfc_shrinking_factor; /* power of two by which local cache size will be srinked when lfc_free_space_watermark is reached */
+static int   lfc_shrinking_factor; /* power of two by which local cache size will be shrinked when lfc_free_space_watermark is reached */
 
 static void
 lfc_shmem_startup(void)
