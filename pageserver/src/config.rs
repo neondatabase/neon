@@ -165,6 +165,10 @@ pub struct PageServerConf {
 
     /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
+    /// Limit of concurrent [`Tenant::gather_size_inputs`] issued by module `eviction_task`.
+    /// The number of permits is the same as `concurrent_tenant_size_logical_size_queries`.
+    /// See the comment in `eviction_task` for details.
+    pub eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore,
 
     // How often to collect metrics and send them to the metrics endpoint.
     pub metric_collection_interval: Duration,
@@ -239,7 +243,7 @@ struct PageServerConfigBuilder {
 
     log_format: BuilderValue<LogFormat>,
 
-    concurrent_tenant_size_logical_size_queries: BuilderValue<ConfigurableSemaphore>,
+    concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
 
     metric_collection_interval: BuilderValue<Duration>,
     cached_metric_collection_interval: BuilderValue<Duration>,
@@ -286,7 +290,9 @@ impl Default for PageServerConfigBuilder {
             .expect("cannot parse default keepalive interval")),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
-            concurrent_tenant_size_logical_size_queries: Set(ConfigurableSemaphore::default()),
+            concurrent_tenant_size_logical_size_queries: Set(
+                ConfigurableSemaphore::DEFAULT_INITIAL,
+            ),
             metric_collection_interval: Set(humantime::parse_duration(
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
@@ -389,7 +395,7 @@ impl PageServerConfigBuilder {
         self.log_format = BuilderValue::Set(log_format)
     }
 
-    pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: ConfigurableSemaphore) {
+    pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: NonZeroUsize) {
         self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
     }
 
@@ -434,6 +440,11 @@ impl PageServerConfigBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
+        let concurrent_tenant_size_logical_size_queries = self
+            .concurrent_tenant_size_logical_size_queries
+            .ok_or(anyhow!(
+                "missing concurrent_tenant_size_logical_size_queries"
+            ))?;
         Ok(PageServerConf {
             listen_pg_addr: self
                 .listen_pg_addr
@@ -481,11 +492,12 @@ impl PageServerConfigBuilder {
                 .broker_keepalive_interval
                 .ok_or(anyhow!("No broker keepalive interval provided"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
-            concurrent_tenant_size_logical_size_queries: self
-                .concurrent_tenant_size_logical_size_queries
-                .ok_or(anyhow!(
-                    "missing concurrent_tenant_size_logical_size_queries"
-                ))?,
+            concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
+                concurrent_tenant_size_logical_size_queries,
+            ),
+            eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
+                concurrent_tenant_size_logical_size_queries,
+            ),
             metric_collection_interval: self
                 .metric_collection_interval
                 .ok_or(anyhow!("missing metric_collection_interval"))?,
@@ -680,8 +692,7 @@ impl PageServerConf {
                 "concurrent_tenant_size_logical_size_queries" => builder.concurrent_tenant_size_logical_size_queries({
                     let input = parse_toml_string(key, item)?;
                     let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
-                    let permits = NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
-                    ConfigurableSemaphore::new(permits)
+                    NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
                 }),
                 "metric_collection_interval" => builder.metric_collection_interval(parse_toml_duration(key, item)?),
                 "cached_metric_collection_interval" => builder.cached_metric_collection_interval(parse_toml_duration(key, item)?),
@@ -829,6 +840,8 @@ impl PageServerConf {
             broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+            eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
+            ),
             metric_collection_interval: Duration::from_secs(60),
             cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
@@ -920,6 +933,11 @@ impl ConfigurableSemaphore {
             initial_permits,
             inner: std::sync::Arc::new(tokio::sync::Semaphore::new(initial_permits.get())),
         }
+    }
+
+    /// Returns the configured amount of permits.
+    pub fn initial_permits(&self) -> NonZeroUsize {
+        self.initial_permits
     }
 }
 
@@ -1025,6 +1043,8 @@ log_format = 'json'
                 )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                eviction_task_immitated_concurrent_logical_size_queries:
+                    ConfigurableSemaphore::default(),
                 metric_collection_interval: humantime::parse_duration(
                     defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
                 )?,
@@ -1085,6 +1105,8 @@ log_format = 'json'
                 broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                eviction_task_immitated_concurrent_logical_size_queries:
+                    ConfigurableSemaphore::default(),
                 metric_collection_interval: Duration::from_secs(222),
                 cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),

@@ -71,6 +71,7 @@ use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
 use walreceiver::spawn_connection_manager_task;
 
+pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
 
 use super::layer_map::BatchedUpdates;
@@ -1737,8 +1738,11 @@ impl Timeline {
             false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
+                // no cancellation here, because nothing really waits for this to complete compared
+                // to spawn_ondemand_logical_size_calculation.
+                let cancel = CancellationToken::new();
                 let calculated_size = match self_clone
-                    .logical_size_calculation_task(lsn, &background_ctx)
+                    .logical_size_calculation_task(lsn, &background_ctx, cancel)
                     .await
                 {
                     Ok(s) => s,
@@ -1793,6 +1797,7 @@ impl Timeline {
         self: &Arc<Self>,
         lsn: Lsn,
         ctx: RequestContext,
+        cancel: CancellationToken,
     ) -> oneshot::Receiver<Result<u64, CalculateLogicalSizeError>> {
         let (sender, receiver) = oneshot::channel();
         let self_clone = Arc::clone(self);
@@ -1812,7 +1817,9 @@ impl Timeline {
             "ondemand logical size calculation",
             false,
             async move {
-                let res = self_clone.logical_size_calculation_task(lsn, &ctx).await;
+                let res = self_clone
+                    .logical_size_calculation_task(lsn, &ctx, cancel)
+                    .await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
             },
@@ -1825,10 +1832,10 @@ impl Timeline {
         self: &Arc<Self>,
         lsn: Lsn,
         ctx: &RequestContext,
+        cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
-        let cancel = CancellationToken::new();
 
         let calculation = async {
             let cancel = cancel.child_token();
