@@ -486,6 +486,11 @@ enum Mode {
     GlobalLru,
 }
 
+/// Figure out eviction candidates for the given tenant and append them to `lru_candidates`.
+///
+/// The `scratch` vector is temporary storage and taken as an argument to avoid allocations.
+/// It must be empty when calling this function. It is guaranteed to be empty when we
+/// return `ControlFlow::Continue`.
 #[instrument(skip_all, fields(?mode, %tenant_id))]
 async fn extend_lru_candidates(
     mode: Mode,
