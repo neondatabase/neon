@@ -1,4 +1,4 @@
-//! A serde::Desierialize type for percentages.
+//! A serde::Deserialize type for percentages.
 //!
 //! See [`Percent`] for details.
 
