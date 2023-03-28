@@ -14,7 +14,7 @@
  */
 
 #include <sys/file.h>
-#include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -204,7 +204,7 @@ lfc_change_limit_hook(int newval, void *extra)
  *
  * Interval of poooling cache state is calculated as minimal time needed to consume lfc_free_space_watermark
  * disk space with maximal possible disk write speed (1Gb/sec). But not larger than 1 second.
- * Callinng statfs each second should not add some noticable overhead.
+ * Callinng statvfs each second should not add some noticable overhead.
  */
 void
 FileCacheMonitorMain(Datum main_arg)
@@ -226,8 +226,8 @@ FileCacheMonitorMain(Datum main_arg)
 	{
 		if (lfc_size_limit != 0)
 		{
-			struct statfs sfs;
-			if (statfs(lfc_path, &sfs) < 0)
+			struct statvfs sfs;
+			if (statvfs(lfc_path, &sfs) < 0)
 			{
 				elog(WARNING, "Failed to obtain status of %s: %m", lfc_path);
 			}
