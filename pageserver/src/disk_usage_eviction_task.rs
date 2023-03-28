@@ -71,15 +71,15 @@ pub struct DiskUsageEvictionTaskConfig {
 }
 
 #[derive(Default)]
-pub struct DiskUsageEvictionState {
-    /// Prevent mgmt API requests and the background loop from running eviction at the same time.
+pub struct State {
+    /// Exclude http requests and background task from running at the same time.
     mutex: tokio::sync::Mutex<()>,
 }
 
 pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
-    state: Arc<DiskUsageEvictionState>,
+    state: Arc<State>,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
@@ -124,7 +124,7 @@ pub fn launch_disk_usage_global_eviction_task(
 
 #[instrument(skip_all)]
 async fn disk_usage_eviction_task(
-    state: &DiskUsageEvictionState,
+    state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: GenericRemoteStorage,
     tenants_dir_fd: Dir,
@@ -192,7 +192,7 @@ pub trait Usage: Clone + Copy + std::fmt::Debug {
 }
 
 async fn disk_usage_eviction_task_iteration(
-    state: &DiskUsageEvictionState,
+    state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
     tenants_dir_fd: &mut SyncWrapper<Dir>,
@@ -284,7 +284,7 @@ struct LayerCount {
 
 #[allow(clippy::needless_late_init)]
 pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
-    state: &DiskUsageEvictionState,
+    state: &State,
     storage: &GenericRemoteStorage,
     usage_pre: U,
     cancel: &CancellationToken,

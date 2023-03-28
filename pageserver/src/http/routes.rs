@@ -18,7 +18,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::disk_usage_eviction_task::DiskUsageEvictionState;
+use crate::disk_usage_eviction_task;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
@@ -49,7 +49,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
-    disk_usage_eviction_state: Arc<DiskUsageEvictionState>,
+    disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 }
 
 impl State {
@@ -57,7 +57,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
-        disk_usage_eviction_state: Arc<DiskUsageEvictionState>,
+        disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -1175,7 +1175,7 @@ pub fn make_router(
     launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
     remote_storage: Option<GenericRemoteStorage>,
-    disk_usage_eviction_state: Arc<DiskUsageEvictionState>,
+    disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");

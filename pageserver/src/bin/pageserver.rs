@@ -8,9 +8,7 @@ use anyhow::{anyhow, Context};
 use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
-use pageserver::disk_usage_eviction_task::{
-    launch_disk_usage_global_eviction_task, DiskUsageEvictionState,
-};
+use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
@@ -326,7 +324,7 @@ fn start_pageserver(
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
     // is still accessible even if background task is not configured as long as remote storage has
     // been configured.
-    let disk_usage_eviction_state: Arc<DiskUsageEvictionState> = Arc::default();
+    let disk_usage_eviction_state: Arc<disk_usage_eviction_task::State> = Arc::default();
 
     if let Some(remote_storage) = &remote_storage {
         launch_disk_usage_global_eviction_task(
