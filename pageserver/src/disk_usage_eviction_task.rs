@@ -39,12 +39,7 @@
 // - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
-use std::{
-    collections::HashMap,
-    ops::ControlFlow,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, ops::ControlFlow, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use nix::dir::Dir;
@@ -54,7 +49,7 @@ use sync_wrapper::SyncWrapper;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::{approx_accurate::ApproxAccurate, id::TenantId, serde_percent::Percent};
+use utils::{id::TenantId, serde_percent::Percent};
 
 use crate::{
     config::PageServerConf,
@@ -511,7 +506,7 @@ async fn extend_lru_candidates(
         return ControlFlow::Break(());
     }
 
-    let mut max_layer_size = ApproxAccurate::default();
+    let mut max_layer_size: Option<u64> = None;
     for tl in tenant.list_timelines() {
         if !tl.is_active() {
             continue;
@@ -523,7 +518,11 @@ async fn extend_lru_candidates(
                 .into_iter()
                 .map(|layer_infos| (tl.clone(), layer_infos)),
         );
-        max_layer_size = max_layer_size.max(info.max_layer_size.accurate());
+        max_layer_size = match (max_layer_size, info.max_layer_size) {
+            (Some(x), Some(y)) => Some(x.max(y)),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        };
 
         if cancel.is_cancelled() {
             return ControlFlow::Break(());
@@ -538,21 +537,28 @@ async fn extend_lru_candidates(
         Mode::RespectTenantMinResidentSize => match tenant.get_min_resident_size_override() {
             Some(size) => size,
             None => {
-                match max_layer_size.accurate() {
+                match max_layer_size {
                     Some(size) => size,
                     None => {
-                        let prod_max_layer_file_size = 332_880_000;
-                        // rate-limit warning in case above comment is wrong and we're missing `LayerMetadata` for many layers
-                        static LAST_WARNED: Mutex<Option<Instant>> = Mutex::new(None);
-                        let mut last_warned = LAST_WARNED.lock().unwrap();
-                        if last_warned
-                            .map(|v| v.elapsed() > Duration::from_secs(60))
-                            .unwrap_or(true)
-                        {
-                            warn!(value=prod_max_layer_file_size, "some layers don't have LayerMetadata to calculate max_layer_file_size, using default value");
-                            *last_warned = Some(Instant::now());
+                        if !scratch.is_empty() {
+                            // soft assert
+                            warn!("BUG: no maximum layer size, but still found layers");
+                            scratch.clear();
                         }
-                        prod_max_layer_file_size
+                        return ControlFlow::Continue(());
+
+                        // let prod_max_layer_file_size = 332_880_000;
+                        // // rate-limit warning in case above comment is wrong and we're missing `LayerMetadata` for many layers
+                        // static LAST_WARNED: Mutex<Option<Instant>> = Mutex::new(None);
+                        // let mut last_warned = LAST_WARNED.lock().unwrap();
+                        // if last_warned
+                        //     .map(|v| v.elapsed() > Duration::from_secs(60))
+                        //     .unwrap_or(true)
+                        // {
+                        //     warn!(value=prod_max_layer_file_size, "some layers don't have LayerMetadata to calculate max_layer_file_size, using default value");
+                        //     *last_warned = Some(Instant::now());
+                        // }
+                        // prod_max_layer_file_size
                     }
                 }
             }
