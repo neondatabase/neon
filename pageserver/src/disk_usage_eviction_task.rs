@@ -534,35 +534,32 @@ async fn extend_lru_candidates(
             lru_candidates.append(scratch);
             return ControlFlow::Continue(());
         }
-        Mode::RespectTenantMinResidentSize => match tenant.get_min_resident_size_override() {
-            Some(size) => size,
-            None => {
-                match max_layer_size {
-                    Some(size) => size,
-                    None => {
-                        if !scratch.is_empty() {
-                            // soft assert
-                            warn!("BUG: no maximum layer size, but still found layers");
-                            scratch.clear();
-                        }
-                        return ControlFlow::Continue(());
-
-                        // let prod_max_layer_file_size = 332_880_000;
-                        // // rate-limit warning in case above comment is wrong and we're missing `LayerMetadata` for many layers
-                        // static LAST_WARNED: Mutex<Option<Instant>> = Mutex::new(None);
-                        // let mut last_warned = LAST_WARNED.lock().unwrap();
-                        // if last_warned
-                        //     .map(|v| v.elapsed() > Duration::from_secs(60))
-                        //     .unwrap_or(true)
-                        // {
-                        //     warn!(value=prod_max_layer_file_size, "some layers don't have LayerMetadata to calculate max_layer_file_size, using default value");
-                        //     *last_warned = Some(Instant::now());
-                        // }
-                        // prod_max_layer_file_size
+        Mode::RespectTenantMinResidentSize => {
+            match tenant.get_min_resident_size_override().or(max_layer_size) {
+                Some(size) => size,
+                None => {
+                    if !scratch.is_empty() {
+                        // soft assert
+                        warn!("BUG: no maximum layer size, but still found layers");
+                        scratch.clear();
                     }
+                    return ControlFlow::Continue(());
+
+                    // let prod_max_layer_file_size = 332_880_000;
+                    // // rate-limit warning in case above comment is wrong and we're missing `LayerMetadata` for many layers
+                    // static LAST_WARNED: Mutex<Option<Instant>> = Mutex::new(None);
+                    // let mut last_warned = LAST_WARNED.lock().unwrap();
+                    // if last_warned
+                    //     .map(|v| v.elapsed() > Duration::from_secs(60))
+                    //     .unwrap_or(true)
+                    // {
+                    //     warn!(value=prod_max_layer_file_size, "some layers don't have LayerMetadata to calculate max_layer_file_size, using default value");
+                    //     *last_warned = Some(Instant::now());
+                    // }
+                    // prod_max_layer_file_size
                 }
             }
-        },
+        }
     };
 
     scratch.sort_unstable_by_key(|(_, layer_info)| layer_info.last_activity_ts);
