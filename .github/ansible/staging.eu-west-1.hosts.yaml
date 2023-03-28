@@ -8,6 +8,14 @@ storage:
       pg_distrib_dir: /usr/local
       metric_collection_endpoint: http://neon-internal-api.aws.neon.build/billing/api/v1/usage_events
       metric_collection_interval: 10min
+      disk_usage_based_eviction:
+        max_usage_pct: 80
+        # TODO: learn typical resident-size growth rate [GiB/minute] and configure
+        # min_avail_bytes such that we have X minutes of headroom.
+        min_avail_bytes: 0
+        # We assume that the worst-case growth rate is small enough that we can
+        # catch above-threshold conditions by checking every 10s.
+        period: "10s"
       tenant_config:
         eviction_policy:
           kind: "LayerAccessThreshold"
