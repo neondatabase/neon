@@ -208,7 +208,7 @@ def test_pageserver_respects_overridden_resident_size(eviction_env: EvictionEnv)
 
     # give the larger tenant a haircut while preventing the smaller tenant from getting one
     min_resident_size = du_by_timeline[small_tenant]
-    target = int((du_by_timeline[large_tenant] - du_by_timeline[small_tenant]) * 0.75)
+    target = (du_by_timeline[large_tenant] - du_by_timeline[small_tenant]) - 2*env.layer_size
     assert any(
         [du > min_resident_size for du in du_by_timeline.values()]
     ), "ensure the larger tenant will get a haircut"
