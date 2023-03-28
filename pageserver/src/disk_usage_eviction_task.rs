@@ -298,7 +298,6 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let mut usage_planned_global_lru = None;
     // achieved post-eviction usage according to internal accounting
     let mut usage_assumed = usage_pre;
-    // actual usage read after batched evictions
 
     debug!(?usage_pre, "disk usage");
 
