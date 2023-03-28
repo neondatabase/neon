@@ -56,7 +56,6 @@ use pageserver_api::reltag::RelTag;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::to_pg_timestamp;
 use utils::{
-    approx_accurate::ApproxAccurate,
     id::{TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
@@ -4040,7 +4039,7 @@ impl Timeline {
 
 pub struct DiskUsageEvictionInfo {
     /// Timeline's largest layer (remote or resident)
-    pub max_layer_size: ApproxAccurate<u64>,
+    pub max_layer_size: Option<u64>,
     /// Timeline's resident layers
     pub resident_layers: Vec<LocalLayerInfoForDiskUsageEviction>,
 }
@@ -4073,11 +4072,12 @@ impl Timeline {
     pub(crate) fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
         let layers = self.layers.read().unwrap();
 
-        let mut max_layer_size = ApproxAccurate::default();
+        let mut max_layer_size: Option<u64> = None;
         let mut resident_layers = Vec::new();
 
         for l in layers.iter_historic_layers() {
-            max_layer_size = max_layer_size.max(Some(l.file_size()));
+            let file_size = l.file_size();
+            max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
             if l.is_remote_layer() {
                 continue;
