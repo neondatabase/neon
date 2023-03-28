@@ -488,6 +488,12 @@ enum Mode {
 
 /// Figure out eviction candidates for the given tenant and append them to `lru_candidates`.
 ///
+/// The `mode` argument controls which layers get appended to `lru_candidates`.
+/// Read its type's doc comments for more details.
+///
+/// The caller is responsible for sorting `lru_candidates` once it has called this function
+/// for all tenants.
+///
 /// The `scratch` vector is temporary storage and taken as an argument to avoid allocations.
 /// It must be empty when calling this function. It is guaranteed to be empty when we
 /// return `ControlFlow::Continue`.
