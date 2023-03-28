@@ -481,10 +481,21 @@ impl RemoteStorage for S3Bucket {
     }
 }
 
+/// A set of utility constants and methods to use in the e2e tests.
+///
+/// `#[cfg(test)]` modules do not get shared across all things that `cargo test` launches, in particular,
+/// integrationt tests under `tests/` would not see it.
+/// Similarly, `pub(crate)` modified would not work with integration tests.
+/// So keep it plain `pub` to reuse the knowledge in e2e tests, but avoid using it in real code.
 pub mod test_consts {
+    /// Default AWS S3 pagination limit is 1000, make it lower to test that our client works correctly with the pagination tokens,
+    /// returned during S3 list response.
     pub const MAX_KEYS_PER_RESPONSE: i32 = 100;
+    /// An env variable that enables tests on the real S3.
     pub const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
 
+    /// Use it for `max-keys` URL param to limit the keys in the response, and force pagination if more than [`MAX_KEYS_PER_RESPONSE`] returned.
+    /// See https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax for the requets details.
     pub fn custom_max_keys_per_response() -> Option<i32> {
         if is_real_s3_enabled() {
             Some(MAX_KEYS_PER_RESPONSE)
@@ -493,6 +504,8 @@ pub mod test_consts {
         }
     }
 
+    /// Currently, pagination gets enabled only when this env variable is present,
+    /// also the e2e test itself gets skipped if this variable is not present.
     pub fn is_real_s3_enabled() -> bool {
         std::env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_ok()
     }
