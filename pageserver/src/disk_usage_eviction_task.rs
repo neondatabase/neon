@@ -58,7 +58,7 @@ use utils::serde_percent::Percent;
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::{self, Timeline, storage_layer::PersistentLayer},
+    tenant::{self, storage_layer::PersistentLayer, Timeline},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,13 +304,16 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // XXX: Print the whole list, for debbugging
     let now: SystemTime = SystemTime::now();
     for (i, candidate) in all_candidates.iter().enumerate() {
-        debug!("cand {}/{}: {}, size {}, at {}, overage {}",
-              i,
-              all_candidates.len(),
-              candidate.layer.local_path().unwrap().display(),
-              candidate.layer.file_size(),
-              now.duration_since(candidate.last_activity_ts).unwrap().as_micros(),
-              candidate.tenant_resident_size_overage
+        debug!(
+            "cand {}/{}: {}, size {}, at {}, overage {}",
+            i,
+            all_candidates.len(),
+            candidate.layer.local_path().unwrap().display(),
+            candidate.layer.file_size(),
+            now.duration_since(candidate.last_activity_ts)
+                .unwrap()
+                .as_micros(),
+            candidate.tenant_resident_size_overage
         );
     }
 
@@ -357,7 +360,8 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
     let usage_planned = if min_resident_size_violated {
         PlannedUsage {
-            respecting_tenant_min_resident_size: usage_planned_min_resident_size_respecting.unwrap(),
+            respecting_tenant_min_resident_size: usage_planned_min_resident_size_respecting
+                .unwrap(),
             fallback_to_global_lru: Some(usage_planned),
         }
     } else {
@@ -480,7 +484,7 @@ struct EvictionCandidate {
 /// should check for `cancel.is_cancelled`.
 ///
 async fn collect_eviction_candidates(
-    cancel: &CancellationToken
+    cancel: &CancellationToken,
 ) -> anyhow::Result<Vec<EvictionCandidate>> {
     // get a snapshot of the list of tenants
     let tenants = tenant::mgr::list_tenants()
@@ -525,12 +529,24 @@ async fn collect_eviction_candidates(
         tenant_candidates.sort_unstable_by_key(|(_, layer_info)| layer_info.last_activity_ts);
 
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
-            info!("using overridden min resident size {} for tenant {}", s, tenant.tenant_id());
+            info!(
+                "using overridden min resident size {} for tenant {}",
+                s,
+                tenant.tenant_id()
+            );
             s
         } else {
             // By default, use the size of the largest resident layer
-            let s = tenant_candidates.iter().map(|(_, layer_info)| layer_info.file_size()).max().unwrap_or(0);
-            info!("using max layer size {} for tenant {}", s, tenant.tenant_id());
+            let s = tenant_candidates
+                .iter()
+                .map(|(_, layer_info)| layer_info.file_size())
+                .max()
+                .unwrap_or(0);
+            info!(
+                "using max layer size {} for tenant {}",
+                s,
+                tenant.tenant_id()
+            );
             s
         };
 
@@ -542,7 +558,8 @@ async fn collect_eviction_candidates(
                 last_activity_ts: layer_info.last_activity_ts,
                 layer: layer_info.layer,
                 tenant_resident_size_overage: cumulative_resident_size_overage
-                    .clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+                    .clamp(i64::MIN as i128, i64::MAX as i128)
+                    as i64,
             });
             cumulative_resident_size_overage += i128::from(file_size);
         }
@@ -551,7 +568,10 @@ async fn collect_eviction_candidates(
     // Final sort. Layers above their tenant's min-resident size threshold first, in
     // LRU order, and then all the rest also in LRU order
     candidates.sort_unstable_by_key(|candidate| {
-        (candidate.tenant_resident_size_overage < 0, candidate.last_activity_ts)
+        (
+            candidate.tenant_resident_size_overage < 0,
+            candidate.last_activity_ts,
+        )
     });
 
     Ok(candidates)

@@ -4085,9 +4085,7 @@ impl Timeline {
             });
         }
 
-        DiskUsageEvictionInfo {
-            resident_layers,
-        }
+        DiskUsageEvictionInfo { resident_layers }
     }
 }
 
