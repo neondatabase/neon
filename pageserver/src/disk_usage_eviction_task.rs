@@ -599,14 +599,14 @@ async fn collect_eviction_candidates(
         // The default can be overriden with a fixed value in the tenant conf.
         // A default override can be put in the default tenant conf in the pageserver.toml.
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
-            info!(
+            debug!(
                 "using overridden min resident size {} for tenant {}",
                 s,
                 tenant.tenant_id()
             );
             s
         } else {
-            info!(
+            debug!(
                 "using max layer size {} for tenant {}",
                 max_layer_size,
                 tenant.tenant_id()
