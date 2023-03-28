@@ -549,6 +549,7 @@ impl WalreceiverState {
     /// * if connected safekeeper is not present, pick the candidate
     /// * if we haven't received any updates for some time, pick the candidate
     /// * if the candidate commit_lsn is much higher than the current one, pick the candidate
+    /// * if the candidate commit_lsn is same, but candidate is located in the same AZ as the pageserver, pick the candidate
     /// * if connected safekeeper stopped sending us new WAL which is available on other safekeeper, pick the candidate
     ///
     /// This way we ensure to keep up with the most up-to-date safekeeper and don't try to jump from one safekeeper to another too frequently.
@@ -1373,7 +1374,7 @@ mod tests {
         assert_eq!(
             next_candidate.reason,
             ReconnectReason::SwitchAvailabilityZone,
-            "Should select bigger WAL safekeeper if it starts to lag enough"
+            "Should switch to the safekeeper in the same availability zone, if it has the same commit_lsn"
         );
         assert_eq!(
             next_candidate.wal_source_connconf.host(),
