@@ -315,16 +315,11 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
     // Debug-log the list of candidates
     let now = SystemTime::now();
-    for (i, (partition, candidate)) in candidates
-        // XXX this clone is costly
-        .clone()
-        .into_iter_in_eviction_order()
-        .enumerate()
-    {
+    for (i, (partition, candidate)) in candidates.iter().enumerate() {
         debug!(
             "cand {}/{}: size={}, no_access_for={}us, parition={:?}, tenant={} timeline={} layer={}",
             i + 1,
-            candidates.num_candidates(),
+            candidates.len(),
             candidate.layer.file_size(),
             now.duration_since(candidate.last_activity_ts)
                 .unwrap()
@@ -349,7 +344,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     let mut batched: HashMap<_, Vec<Arc<dyn PersistentLayer>>> = HashMap::new();
     let mut warned = None;
     let mut usage_planned = usage_pre;
-    for (i, (partition, candidate)) in candidates.into_iter_in_eviction_order().enumerate() {
+    for (i, (partition, candidate)) in candidates.into_iter().enumerate() {
         if !usage_planned.has_pressure() {
             debug!(
                 no_candidates_evicted = i,
@@ -455,13 +450,7 @@ struct EvictionCandidate {
     last_activity_ts: SystemTime,
 }
 
-#[derive(Clone)]
-struct MinResidentSizePartitionedCandidates {
-    above: Vec<EvictionCandidate>,
-    below: Vec<EvictionCandidate>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MinResidentSizePartition {
     Above,
     Below,
@@ -469,15 +458,14 @@ enum MinResidentSizePartition {
 
 enum EvictionCandidates {
     Cancelled,
-    Finished(MinResidentSizePartitionedCandidates),
+    Finished(Vec<(MinResidentSizePartition, EvictionCandidate)>),
 }
 
 /// Gather the eviction candidates.
 ///
-/// The returned `Ok(EvictionCandidates::Finished(candidates))` allows iteration over
-/// the candidates in eviction order, using `candidates.into_iter_in_eviction_order()`.
-/// A caller that evicts in that order implements the eviction policy outlined in the
-/// module comment.
+/// The returned `Ok(EvictionCandidates::Finished(candidates))` is sorted in eviction
+/// order. A caller that evicts in that order, until pressure is relieved, implements
+/// the eviction policy outlined in the module comment.
 ///
 /// # Example
 ///
@@ -514,8 +502,7 @@ async fn collect_eviction_candidates(
         .await
         .context("get list of tenants")?;
 
-    let mut above_min_resident_size: Vec<EvictionCandidate> = Vec::new();
-    let mut below_min_resident_size: Vec<EvictionCandidate> = Vec::new();
+    let mut candidates = Vec::new();
 
     for (tenant_id, _state) in &tenants {
         if cancel.is_cancelled() {
@@ -583,10 +570,10 @@ async fn collect_eviction_candidates(
             max_layer_size
         };
 
-        // Sort layers most-recently-used first
+        // Sort layers most-recently-used first, then partition by
+        // cumsum above/below min_resident_size.
         tenant_candidates
             .sort_unstable_by_key(|(_, layer_info)| std::cmp::Reverse(layer_info.last_activity_ts));
-
         let mut cumsum: i128 = 0;
         for (timeline, layer_info) in tenant_candidates.into_iter() {
             let file_size = layer_info.file_size();
@@ -595,53 +582,20 @@ async fn collect_eviction_candidates(
                 last_activity_ts: layer_info.last_activity_ts,
                 layer: layer_info.layer,
             };
-            if cumsum > min_resident_size as i128 {
-                above_min_resident_size.push(candidate);
+            let partition = if cumsum > min_resident_size as i128 {
+                MinResidentSizePartition::Above
             } else {
-                below_min_resident_size.push(candidate);
-            }
+                MinResidentSizePartition::Below
+            };
+            candidates.push((partition, candidate));
             cumsum += i128::from(file_size);
         }
     }
 
-    // The MinResidentSizePartitionedCandidates struct expects these to be sorted this way
-    above_min_resident_size.sort_unstable_by_key(|c| c.last_activity_ts);
-    below_min_resident_size.sort_unstable_by_key(|c| c.last_activity_ts);
+    candidates
+        .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
 
-    Ok(EvictionCandidates::Finished(
-        MinResidentSizePartitionedCandidates {
-            above: above_min_resident_size,
-            below: below_min_resident_size,
-        },
-    ))
-}
-
-impl MinResidentSizePartitionedCandidates {
-    pub fn num_candidates(&self) -> usize {
-        self.above.len() + self.below.len()
-    }
-
-    /// See comment on [`collect_eviction_candidates`].
-    pub fn into_iter_in_eviction_order(
-        self,
-    ) -> impl Iterator<Item = (MinResidentSizePartition, EvictionCandidate)> {
-        debug_assert!(is_sorted::IsSorted::is_sorted_by_key(
-            &mut self.above.iter(),
-            |c| c.last_activity_ts
-        ));
-        debug_assert!(is_sorted::IsSorted::is_sorted_by_key(
-            &mut self.below.iter(),
-            |c| c.last_activity_ts
-        ));
-        self.above
-            .into_iter()
-            .map(|c| (MinResidentSizePartition::Above, c))
-            .chain(
-                self.below
-                    .into_iter()
-                    .map(|c| (MinResidentSizePartition::Below, c)),
-            )
-    }
+    Ok(EvictionCandidates::Finished(candidates))
 }
 
 struct TimelineKey(Arc<Timeline>);
