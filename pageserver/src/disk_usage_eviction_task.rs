@@ -510,7 +510,7 @@ async fn extend_lru_candidates(
     // for example because we're shutting down, then `max_layer_size` can be too small.
     // That's OK. This code only runs under a disk pressure situation, and being
     // a little unfair to tenants during shutdown in such a situation is tolerable.
-    let mut max_layer_size: Option<u64> = None;
+    let mut max_layer_size = 0;
     for tl in tenant.list_timelines() {
         if !tl.is_active() {
             continue;
@@ -522,11 +522,7 @@ async fn extend_lru_candidates(
                 .into_iter()
                 .map(|layer_infos| (tl.clone(), layer_infos)),
         );
-        max_layer_size = match (max_layer_size, info.max_layer_size) {
-            (Some(x), Some(y)) => Some(x.max(y)),
-            (Some(only), None) | (None, Some(only)) => Some(only),
-            (None, None) => None,
-        };
+        max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
 
         if cancel.is_cancelled() {
             return ControlFlow::Break(());
@@ -538,24 +534,9 @@ async fn extend_lru_candidates(
             lru_candidates.append(scratch);
             return ControlFlow::Continue(());
         }
-        Mode::RespectTenantMinResidentSize => {
-            match tenant.get_min_resident_size_override().or(max_layer_size) {
-                Some(size) => size,
-                None => {
-                    // the tenant has no layers at all. it's very unlikely but allowed by the
-                    // types.
-                    if !scratch.is_empty() {
-                        // soft assert
-                        warn!(
-                            layers = scratch.len(),
-                            "BUG: no maximum layer size, but still found layers"
-                        );
-                        scratch.clear();
-                    }
-                    return ControlFlow::Continue(());
-                }
-            }
-        }
+        Mode::RespectTenantMinResidentSize => tenant
+            .get_min_resident_size_override()
+            .unwrap_or(max_layer_size),
     };
 
     scratch.sort_unstable_by_key(|(_, layer_info)| layer_info.last_activity_ts);
