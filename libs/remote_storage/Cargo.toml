@@ -26,3 +26,4 @@ workspace_hack.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+test-context.workspace = true

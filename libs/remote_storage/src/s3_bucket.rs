@@ -102,6 +102,7 @@ pub struct S3Bucket {
     client: Client,
     bucket_name: String,
     prefix_in_bucket: Option<String>,
+    max_keys_per_list_response: Option<i32>,
     // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
     // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
     // The helps to ensure we don't exceed the thresholds.
@@ -164,6 +165,7 @@ impl S3Bucket {
         Ok(Self {
             client,
             bucket_name: aws_config.bucket_name.clone(),
+            max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
             concurrency_limiter: Arc::new(Semaphore::new(aws_config.concurrency_limit.get())),
         })
@@ -286,11 +288,6 @@ impl RemoteStorage for S3Bucket {
 
             metrics::inc_list_objects();
 
-            #[cfg(not(test))]
-            let response_key_limit = None;
-            #[cfg(test)]
-            let response_key_limit = test_consts::custom_max_keys_per_response();
-
             let fetch_response = self
                 .client
                 .list_objects_v2()
@@ -298,7 +295,7 @@ impl RemoteStorage for S3Bucket {
                 .set_prefix(self.prefix_in_bucket.clone())
                 .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
                 .set_continuation_token(continuation_token)
-                .set_max_keys(response_key_limit)
+                .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
                 .map_err(|e| {
@@ -343,11 +340,6 @@ impl RemoteStorage for S3Bucket {
 
         let mut document_keys = Vec::new();
 
-        #[cfg(not(test))]
-        let response_key_limit = None;
-        #[cfg(test)]
-        let response_key_limit = test_consts::custom_max_keys_per_response();
-
         let mut continuation_token = None;
         loop {
             let _guard = self
@@ -366,7 +358,7 @@ impl RemoteStorage for S3Bucket {
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
                 .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
-                .set_max_keys(response_key_limit)
+                .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
                 .map_err(|e| {
@@ -478,35 +470,5 @@ impl RemoteStorage for S3Bucket {
                 e
             })?;
         Ok(())
-    }
-}
-
-/// A set of utility constants and methods to use in the e2e tests.
-///
-/// `#[cfg(test)]` modules do not get shared across all things that `cargo test` launches, in particular,
-/// integrationt tests under `tests/` would not see it.
-/// Similarly, `pub(crate)` modified would not work with integration tests.
-/// So keep it plain `pub` to reuse the knowledge in e2e tests, but avoid using it in real code.
-pub mod test_consts {
-    /// Default AWS S3 pagination limit is 1000, make it lower to test that our client works correctly with the pagination tokens,
-    /// returned during S3 list response.
-    pub const MAX_KEYS_PER_RESPONSE: i32 = 100;
-    /// An env variable that enables tests on the real S3.
-    pub const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
-
-    /// Use it for `max-keys` URL param to limit the keys in the response, and force pagination if more than [`MAX_KEYS_PER_RESPONSE`] returned.
-    /// See https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax for the requets details.
-    pub fn custom_max_keys_per_response() -> Option<i32> {
-        if is_real_s3_enabled() {
-            Some(MAX_KEYS_PER_RESPONSE)
-        } else {
-            None
-        }
-    }
-
-    /// Currently, pagination gets enabled only when this env variable is present,
-    /// also the e2e test itself gets skipped if this variable is not present.
-    pub fn is_real_s3_enabled() -> bool {
-        std::env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_ok()
     }
 }

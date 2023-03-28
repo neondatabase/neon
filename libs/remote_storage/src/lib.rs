@@ -25,11 +25,7 @@ use tokio::io;
 use toml_edit::Item;
 use tracing::info;
 
-pub use self::{
-    local_fs::LocalFs,
-    s3_bucket::{test_consts, S3Bucket},
-    simulate_failures::UnreliableWrapper,
-};
+pub use self::{local_fs::LocalFs, s3_bucket::S3Bucket, simulate_failures::UnreliableWrapper};
 
 /// How many different timelines can be processed simultaneously when synchronizing layers with the remote storage.
 /// During regular work, pageserver produces one layer file per timeline checkpoint, with bursts of concurrency
@@ -43,6 +39,9 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
 /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
+/// No limits on the client side, which currenltly means 1000 for AWS S3.
+/// https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax
+pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
@@ -67,6 +66,10 @@ impl RemotePath {
 
     pub fn object_name(&self) -> Option<&str> {
         self.0.file_name().and_then(|os_str| os_str.to_str())
+    }
+
+    pub fn join(&self, segment: &Path) -> Self {
+        Self(self.0.join(segment))
     }
 }
 
@@ -270,6 +273,7 @@ pub struct S3Config {
     /// AWS S3 has various limits on its API calls, we need not to exceed those.
     /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
     pub concurrency_limit: NonZeroUsize,
+    pub max_keys_per_list_response: Option<i32>,
 }
 
 impl Debug for S3Config {
@@ -279,6 +283,10 @@ impl Debug for S3Config {
             .field("bucket_region", &self.bucket_region)
             .field("prefix_in_bucket", &self.prefix_in_bucket)
             .field("concurrency_limit", &self.concurrency_limit)
+            .field(
+                "max_keys_per_list_response",
+                &self.max_keys_per_list_response,
+            )
             .finish()
     }
 }
@@ -307,6 +315,11 @@ impl RemoteStorageConfig {
         )
         .context("Failed to parse 'concurrency_limit' as a positive integer")?;
 
+        let max_keys_per_list_response =
+            parse_optional_integer::<i32, _>("max_keys_per_list_response", toml)
+                .context("Failed to parse 'max_keys_per_list_response' as a positive integer")?
+                .or(DEFAULT_MAX_KEYS_PER_LIST_RESPONSE);
+
         let storage = match (local_path, bucket_name, bucket_region) {
             // no 'local_path' nor 'bucket_name' options are provided, consider this remote storage disabled
             (None, None, None) => return Ok(None),
@@ -328,6 +341,7 @@ impl RemoteStorageConfig {
                     .map(|endpoint| parse_toml_string("endpoint", endpoint))
                     .transpose()?,
                 concurrency_limit,
+                max_keys_per_list_response,
             }),
             (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
                 parse_toml_string("local_path", local_path)?,

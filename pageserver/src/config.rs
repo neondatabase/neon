@@ -1216,6 +1216,7 @@ broker_endpoint = '{broker_endpoint}'
                         prefix_in_bucket: Some(prefix_in_bucket.clone()),
                         endpoint: Some(endpoint.clone()),
                         concurrency_limit: s3_concurrency_limit,
+                        max_keys_per_list_response: None,
                     }),
                 },
                 "Remote storage config should correctly parse the S3 config"
