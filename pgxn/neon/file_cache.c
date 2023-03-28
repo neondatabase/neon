@@ -204,7 +204,7 @@ lfc_change_limit_hook(int newval, void *extra)
  *
  * Interval of poooling cache state is calculated as minimal time needed to consume lfc_free_space_watermark
  * disk space with maximal possible disk write speed (1Gb/sec). But not larger than 1 second.
- * Callinng statvfs each second should not add some noticable overhead.
+ * Calling statvfs each second should not add any noticeable overhead.
  */
 void
 FileCacheMonitorMain(Datum main_arg)
