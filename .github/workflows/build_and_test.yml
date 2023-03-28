@@ -21,8 +21,6 @@ env:
   COPT: '-Werror'
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
-  REAL_S3_BUCKET: ci-tests-s3
-  REAL_S3_REGION: us-west-2
 
 jobs:
   tag:
@@ -250,8 +248,8 @@ jobs:
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=${{ env.REAL_S3_BUCKET }}
-          export REMOTE_STORAGE_S3_REGION=${{ env.REAL_S3_REGION }}
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-public-dev
+          export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test pagination_tests -- s3_pagination_should_work --exact
 
@@ -333,8 +331,8 @@ jobs:
           test_selection: regress
           needs_postgres_source: true
           run_with_real_s3: true
-          real_s3_bucket: ${{ env.REAL_S3_BUCKET }}
-          real_s3_region: ${{ env.REAL_S3_REGION }}
+          real_s3_bucket: ci-tests-s3
+          real_s3_region: us-west-2
           real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
 
