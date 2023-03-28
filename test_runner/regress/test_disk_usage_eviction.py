@@ -16,6 +16,8 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.types import TenantId, TimelineId
 
+GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
+
 
 @pytest.mark.parametrize("config_level_override", [None, 400])
 def test_min_resident_size_override_handling(
@@ -220,7 +222,7 @@ def test_pageserver_respects_overridden_resident_size(eviction_env: EvictionEnv)
 
     time.sleep(1)  # give log time to flush
     assert not env.neon_env.pageserver.log_contains(
-        "falling back to global LRU"
+        GLOBAL_LRU_LOG_LINE,
     ), "this test is pointless if it fell back to global LRU"
 
     (later_total_on_disk, _, _) = env.timelines_du()
@@ -246,8 +248,8 @@ def test_pageserver_respects_overridden_resident_size(eviction_env: EvictionEnv)
 
 def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv):
     """
-    The pageserver should fall back to global LRU if the tenant_min_resident_size-respecting eviction
-    wouldn't evict enough.
+    If we can't relieve pressure using tenant_min_resident_size-respecting eviction,
+    we should continue to evict layers following global LRU.
     """
     env = eviction_env
     ps_http = env.pageserver_http
@@ -264,8 +266,8 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv):
     assert actual_change >= target, "eviction must always evict more than target"
 
     time.sleep(1)  # give log time to flush
-    assert env.neon_env.pageserver.log_contains("falling back to global LRU")
-    env.neon_env.pageserver.allowed_errors.append(".*falling back to global LRU")
+    assert env.neon_env.pageserver.log_contains(GLOBAL_LRU_LOG_LINE)
+    env.neon_env.pageserver.allowed_errors.append(".*" + GLOBAL_LRU_LOG_LINE)
 
 
 def test_partial_evict_tenant(eviction_env: EvictionEnv):

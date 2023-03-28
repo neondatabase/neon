@@ -25,13 +25,10 @@
 //!
 //! The iteration evicts layers in LRU fashion, but, with a weak reservation per tenant.
 //! The reservation is to keep the most recently accessed X bytes per tenant resident.
-//! All layers that don't make the cut are put on a list and become eviction candidates.
-//! We evict until we're below the two thresholds.
+//! If we cannot relieve pressure by evicting layers outside of the reservation, we
+//! start evicting layers that are part of the reservation, LRU first.
 //!
-//! If the above strategy wouldn't free enough space, we fall back to global LRU right away,
-//! not respecting any per-tenant reservations.
-//!
-//! This value for the per-tenant reservation is referred to as `tenant_min_resident_size`
+//! The value for the per-tenant reservation is referred to as `tenant_min_resident_size`
 //! throughout the code, but, no actual variable carries that name.
 //! The per-tenant default value is the `max(tenant's layer file sizes, regardless of local or remote)`.
 //! The idea is to allow at least one layer to be resident per tenant, to ensure it can make forward progress
@@ -308,26 +305,33 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         "running disk usage based eviction due to pressure"
     );
 
-    // Collect list of all layers in the system, sorted in the order that they should
-    // be evicted.
-    let all_candidates = collect_eviction_candidates(cancel).await?;
-    if cancel.is_cancelled() {
-        return Ok(IterationOutcome::Cancelled);
-    }
+    let candidates = match collect_eviction_candidates(cancel).await? {
+        EvictionCandidates::Cancelled => {
+            return Ok(IterationOutcome::Cancelled);
+        }
+        EvictionCandidates::Finished(partitioned) => partitioned,
+    };
 
-    // XXX: Print the whole list, for debbugging
-    let now: SystemTime = SystemTime::now();
-    for (i, candidate) in all_candidates.iter().enumerate() {
+    // Debug-log the list of candidates
+    let now = SystemTime::now();
+    for (i, (partition, candidate)) in candidates
+        // XXX this clone is costly
+        .clone()
+        .into_iter_in_eviction_order()
+        .enumerate()
+    {
         debug!(
-            "cand {}/{}: {}, size {}, at {}, overage {}",
-            i,
-            all_candidates.len(),
-            candidate.layer.local_path().unwrap().display(),
+            "cand {}/{}: size={}, no_access_for={}us, parition={:?}, tenant={} timeline={} layer={}",
+            i + 1,
+            candidates.num_candidates(),
             candidate.layer.file_size(),
             now.duration_since(candidate.last_activity_ts)
                 .unwrap()
                 .as_micros(),
-            candidate.tenant_resident_size_overage
+            partition,
+            candidate.layer.get_tenant_id(),
+            candidate.layer.get_timeline_id(),
+            candidate.layer.filename().file_name(),
         );
     }
 
@@ -342,10 +346,9 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
     let mut batched: HashMap<_, Vec<Arc<dyn PersistentLayer>>> = HashMap::new();
-    let mut min_resident_size_violated = false;
+    let mut warned = None;
     let mut usage_planned = usage_pre;
-    let mut usage_planned_min_resident_size_respecting = None;
-    for (i, candidate) in all_candidates.into_iter().enumerate() {
+    for (i, (partition, candidate)) in candidates.into_iter_in_eviction_order().enumerate() {
         if !usage_planned.has_pressure() {
             debug!(
                 no_candidates_evicted = i,
@@ -354,16 +357,11 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             break;
         }
 
-        if !min_resident_size_violated {
-            if candidate.tenant_resident_size_overage < 0 {
-                warn!(?usage_pre, ?usage_planned, "tenant_min_resident_size-respecting LRU would not relieve pressure, falling back to global LRU at {}", i);
-                min_resident_size_violated = true;
-                usage_planned_min_resident_size_respecting = Some(usage_planned.clone());
-            }
-        } else {
-            // all layers with overage >= 0 should come first
-            assert!(candidate.tenant_resident_size_overage < 0);
+        if partition == MinResidentSizePartition::Below && warned.is_none() {
+            warn!(?usage_pre, ?usage_planned, candidate_no=i, "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy");
+            warned = Some(usage_planned);
         }
+
         usage_planned.add_available_bytes(candidate.layer.file_size());
 
         batched
@@ -372,17 +370,15 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             .push(candidate.layer);
     }
 
-    let usage_planned = if min_resident_size_violated {
-        PlannedUsage {
-            respecting_tenant_min_resident_size: usage_planned_min_resident_size_respecting
-                .unwrap(),
+    let usage_planned = match warned {
+        Some(respecting_tenant_min_resident_size) => PlannedUsage {
+            respecting_tenant_min_resident_size,
             fallback_to_global_lru: Some(usage_planned),
-        }
-    } else {
-        PlannedUsage {
+        },
+        None => PlannedUsage {
             respecting_tenant_min_resident_size: usage_planned,
             fallback_to_global_lru: None,
-        }
+        },
     };
     debug!(?usage_planned, "usage planned");
 
@@ -455,11 +451,54 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 //
 // `collect_eviction_candidates' returns a vector of these, in the preference order
 // that they should be evicted.
+#[derive(Clone)]
 struct EvictionCandidate {
     timeline: Arc<Timeline>,
     layer: Arc<dyn PersistentLayer>,
     last_activity_ts: SystemTime,
-    tenant_resident_size_overage: i64,
+}
+
+#[derive(Clone)]
+struct MinResidentSizePartitionedCandidates {
+    above: Vec<EvictionCandidate>,
+    below: Vec<EvictionCandidate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MinResidentSizePartition {
+    Above,
+    Below,
+}
+
+impl MinResidentSizePartitionedCandidates {
+    pub fn num_candidates(&self) -> usize {
+        self.above.len() + self.below.len()
+    }
+    pub fn into_iter_in_eviction_order(
+        self,
+    ) -> impl Iterator<Item = (MinResidentSizePartition, EvictionCandidate)> {
+        debug_assert!(is_sorted::IsSorted::is_sorted_by_key(
+            &mut self.above.iter(),
+            |c| c.last_activity_ts
+        ));
+        debug_assert!(is_sorted::IsSorted::is_sorted_by_key(
+            &mut self.below.iter(),
+            |c| c.last_activity_ts
+        ));
+        self.above
+            .into_iter()
+            .map(|c| (MinResidentSizePartition::Above, c))
+            .chain(
+                self.below
+                    .into_iter()
+                    .map(|c| (MinResidentSizePartition::Below, c)),
+            )
+    }
+}
+
+enum EvictionCandidates {
+    Cancelled,
+    Finished(MinResidentSizePartitionedCandidates),
 }
 
 /// Collect a list of all non-remote layers in the system, from all timelines in all tenants.
@@ -499,16 +538,18 @@ struct EvictionCandidate {
 ///
 async fn collect_eviction_candidates(
     cancel: &CancellationToken,
-) -> anyhow::Result<Vec<EvictionCandidate>> {
+) -> anyhow::Result<EvictionCandidates> {
     // get a snapshot of the list of tenants
     let tenants = tenant::mgr::list_tenants()
         .await
         .context("get list of tenants")?;
 
-    let mut candidates: Vec<EvictionCandidate> = Vec::new();
+    let mut above_min_resident_size: Vec<EvictionCandidate> = Vec::new();
+    let mut below_min_resident_size: Vec<EvictionCandidate> = Vec::new();
+
     for (tenant_id, _state) in &tenants {
         if cancel.is_cancelled() {
-            return Ok(candidates);
+            return Ok(EvictionCandidates::Cancelled);
         }
         let tenant = match tenant::mgr::get_tenant(*tenant_id, true).await {
             Ok(tenant) => tenant,
@@ -534,13 +575,9 @@ async fn collect_eviction_candidates(
             );
 
             if cancel.is_cancelled() {
-                return Ok(candidates);
+                return Ok(EvictionCandidates::Cancelled);
             }
         }
-
-        // sort this tenant's layers by last_activity_ts, calculate the "overage" for each
-        // layer, and add them to the result.
-        tenant_candidates.sort_unstable_by_key(|(_, layer_info)| layer_info.last_activity_ts);
 
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
             info!(
@@ -564,31 +601,37 @@ async fn collect_eviction_candidates(
             s
         };
 
-        let mut cumulative_resident_size_overage: i128 = -i128::from(min_resident_size);
+        // Sort layers most-recently-used first
+        tenant_candidates
+            .sort_unstable_by_key(|(_, layer_info)| std::cmp::Reverse(layer_info.last_activity_ts));
+
+        let mut cumsum: i128 = 0;
         for (timeline, layer_info) in tenant_candidates.into_iter() {
             let file_size = layer_info.file_size();
-            candidates.push(EvictionCandidate {
+            let candidate = EvictionCandidate {
                 timeline,
                 last_activity_ts: layer_info.last_activity_ts,
                 layer: layer_info.layer,
-                tenant_resident_size_overage: cumulative_resident_size_overage
-                    .clamp(i64::MIN as i128, i64::MAX as i128)
-                    as i64,
-            });
-            cumulative_resident_size_overage += i128::from(file_size);
+            };
+            if cumsum > min_resident_size as i128 {
+                above_min_resident_size.push(candidate);
+            } else {
+                below_min_resident_size.push(candidate);
+            }
+            cumsum += i128::from(file_size);
         }
     }
 
-    // Final sort. Layers above their tenant's min-resident size threshold first, in
-    // LRU order, and then all the rest also in LRU order
-    candidates.sort_unstable_by_key(|candidate| {
-        (
-            candidate.tenant_resident_size_overage < 0,
-            candidate.last_activity_ts,
-        )
-    });
+    // The MinResidentSizePartitionedCandidates struct expects these to be sorted this way
+    above_min_resident_size.sort_unstable_by_key(|c| c.last_activity_ts);
+    below_min_resident_size.sort_unstable_by_key(|c| c.last_activity_ts);
 
-    Ok(candidates)
+    Ok(EvictionCandidates::Finished(
+        MinResidentSizePartitionedCandidates {
+            above: above_min_resident_size,
+            below: below_min_resident_size,
+        },
+    ))
 }
 
 struct TimelineKey(Arc<Timeline>);
