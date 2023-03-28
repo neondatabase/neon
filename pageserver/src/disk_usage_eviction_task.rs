@@ -289,6 +289,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     usage_pre: U,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome<U>> {
+    // use tokio's mutex to get a Sync guard (instead of std::sync::Mutex)
     let _g = state
         .mutex
         .try_lock()
@@ -561,7 +562,13 @@ async fn collect_eviction_candidates(
         };
 
         // collect layers from all timelines in this tenant
+        //
+        // If one of the timelines becomes `!is_active()` during the iteration,
+        // for example because we're shutting down, then `max_layer_size` can be too small.
+        // That's OK. This code only runs under a disk pressure situation, and being
+        // a little unfair to tenants during shutdown in such a situation is tolerable.
         let mut tenant_candidates = Vec::new();
+        let mut max_layer_size = 0;
         for tl in tenant.list_timelines() {
             if !tl.is_active() {
                 continue;
@@ -573,12 +580,24 @@ async fn collect_eviction_candidates(
                     .into_iter()
                     .map(|layer_infos| (tl.clone(), layer_infos)),
             );
+            max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
 
             if cancel.is_cancelled() {
                 return Ok(EvictionCandidates::Cancelled);
             }
         }
 
+        // `min_resident_size` defaults to maximum layer file size of the tenant.
+        // This ensures that each tenant can have at least one layer resident at a given time,
+        // ensuring forward progress for a single Timeline::get in that tenant.
+        // It's a questionable heuristic since there are many Timeline::get
+        // requests going on and multiple layers are needed, and, at least in Neon prod,
+        // the median layer file size is much smaller than the compaction target size.
+        // We could be better here, e.g., sum of all L0 layers + most recent L1 layer.
+        // That's what's typically used by the various background loops.
+        //
+        // The default can be overriden with a fixed value in the tenant conf.
+        // A default override can be put in the default tenant conf in the pageserver.toml.
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
             info!(
                 "using overridden min resident size {} for tenant {}",
@@ -587,18 +606,12 @@ async fn collect_eviction_candidates(
             );
             s
         } else {
-            // By default, use the size of the largest resident layer
-            let s = tenant_candidates
-                .iter()
-                .map(|(_, layer_info)| layer_info.file_size())
-                .max()
-                .unwrap_or(0);
             info!(
                 "using max layer size {} for tenant {}",
-                s,
+                max_layer_size,
                 tenant.tenant_id()
             );
-            s
+            max_layer_size
         };
 
         // Sort layers most-recently-used first
