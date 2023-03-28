@@ -592,6 +592,7 @@ async fn collect_eviction_candidates(
         }
     }
 
+    debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below);
     candidates
         .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
 
