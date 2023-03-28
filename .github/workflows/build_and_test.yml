@@ -186,10 +186,10 @@ jobs:
           CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-            CARGO_FLAGS="--locked $CARGO_FEATURES"
+            CARGO_FLAGS="--locked"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
-            CARGO_FLAGS="--locked --release $CARGO_FEATURES"
+            CARGO_FLAGS="--locked --release"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
@@ -242,16 +242,17 @@ jobs:
 
       - name: Run cargo build
         run: |
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run cargo test
         run: |
-          ${cov_prefix} cargo test $CARGO_FLAGS
+          ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES
 
           # Run separate tests for real S3
           export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=${{ env.real_s3_bucket }}
-          export REMOTE_STORAGE_S3_REGION=${{ env.real_s3_region }}
+          export REMOTE_STORAGE_S3_BUCKET=${{ env.REAL_S3_BUCKET }}
+          export REMOTE_STORAGE_S3_REGION=${{ env.REAL_S3_REGION }}
+          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
           ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test pagination_tests -- s3_pagination_should_work --exact
 
       - name: Install rust binaries
@@ -276,7 +277,7 @@ jobs:
             mkdir -p /tmp/neon/test_bin/
 
             test_exe_paths=$(
-              ${cov_prefix} cargo test $CARGO_FLAGS --message-format=json --no-run |
+              ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES --message-format=json --no-run |
               jq -r '.executable | select(. != null)'
             )
             for bin in $test_exe_paths; do
