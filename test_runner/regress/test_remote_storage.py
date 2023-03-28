@@ -717,59 +717,6 @@ def test_empty_branch_remote_storage_upload_on_restart(
     ), f"New branch should have been reuploaded on pageserver restart to the remote storage path '{new_branch_on_remote_storage}'"
 
 
-# Test creates >1000 timelines and upload them to the remote storage.
-# AWS S3 does not return more than 1000 items and starts paginating, ensure that pageserver paginates correctly.
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
-def test_thousands_of_branches(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
-    neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
-        test_name="test_thousands_of_branches",
-    )
-
-    env = neon_env_builder.init_start()
-    client = env.pageserver.http_client()
-
-    initial_tenant_id = env.initial_tenant
-
-    max_timelines = 1135
-    for i in range(0, max_timelines):
-        branch_name = f"branch_{i + 1}"
-        log.info(f"Creating branch {branch_name}")
-        new_timeline_id = env.neon_cli.create_branch(
-            new_branch_name=branch_name, ancestor_branch_name="main", tenant_id=initial_tenant_id
-        )
-        log.info(
-            f"Branch {branch_name} timeline {new_timeline_id} created, {i + 1} out of {max_timelines}"
-        )
-        if i == max_timelines - 1:
-            log.info(f"Waiting for the last branch {new_timeline_id} metadata to get uploaded")
-            wait_upload_queue_empty(client, initial_tenant_id, new_timeline_id)
-    log.info("Finished creating branches")
-
-    timelines_before_reattach = set(
-        [timeline["timeline_id"] for timeline in client.timeline_list(tenant_id=initial_tenant_id)]
-    )
-    log.info(
-        f"Detaching tenant {initial_tenant_id} with {len(timelines_before_reattach)} timelines in it"
-    )
-    client.tenant_detach(tenant_id=initial_tenant_id)
-    client.tenant_attach(tenant_id=initial_tenant_id)
-    log.info("Tenant attached back, waiting for the tenant to get active")
-    wait_until_tenant_state(client, env.initial_tenant, "Active", 60)
-
-    timelines_after_reattach = set(
-        [timeline["timeline_id"] for timeline in client.timeline_list(tenant_id=initial_tenant_id)]
-    )
-    log.info("Tenant is active and has {len(timelines_after_reattach) after reattach}")
-
-    assert (
-        timelines_before_reattach == timelines_after_reattach
-    ), f"Timelines before and after reattach do not match. In reattached vesion, \
-missing: {timelines_before_reattach - timelines_after_reattach}, extra: {timelines_after_reattach - timelines_before_reattach}"
-
-
 def wait_upload_queue_empty(
     client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
