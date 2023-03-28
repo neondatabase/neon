@@ -237,11 +237,7 @@ async fn connection_manager_loop_step(
         if let Some(new_candidate) = walreceiver_state.next_connection_candidate() {
             info!("Switching to new connection candidate: {new_candidate:?}");
             walreceiver_state
-                .change_connection(
-                    new_candidate.safekeeper_id,
-                    new_candidate.wal_source_connconf,
-                    ctx,
-                )
+                .change_connection(new_candidate, ctx)
                 .await
         }
     }
@@ -407,12 +403,7 @@ impl WalreceiverState {
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
-    async fn change_connection(
-        &mut self,
-        new_sk_id: NodeId,
-        new_wal_source_connconf: PgConnectionConfig,
-        ctx: &RequestContext,
-    ) {
+    async fn change_connection(&mut self, new_sk: NewWalConnectionCandidate, ctx: &RequestContext) {
         self.drop_old_connection(true).await;
 
         let id = self.id;
@@ -426,7 +417,7 @@ impl WalreceiverState {
             async move {
                 super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
-                    new_wal_source_connconf,
+                    new_sk.wal_source_connconf,
                     events_sender,
                     cancellation,
                     connect_timeout,
@@ -435,14 +426,16 @@ impl WalreceiverState {
                 .await
                 .context("walreceiver connection handling failure")
             }
-            .instrument(info_span!("walreceiver_connection", id = %id, node_id = %new_sk_id))
+            .instrument(
+                info_span!("walreceiver_connection", id = %id, node_id = %new_sk.safekeeper_id),
+            )
         });
 
         let now = Utc::now().naive_utc();
         self.wal_connection = Some(WalConnection {
             started_at: now,
-            sk_id: new_sk_id,
-            availability_zone: None,
+            sk_id: new_sk.safekeeper_id,
+            availability_zone: new_sk.availability_zone,
             status: WalConnectionStatus {
                 is_connected: false,
                 has_processed_wal: false,
@@ -563,6 +556,8 @@ impl WalreceiverState {
 
                 let (new_sk_id, new_safekeeper_broker_data, new_wal_source_connconf) =
                     self.select_connection_candidate(Some(connected_sk_node))?;
+                let new_availability_zone =
+                    availability_zone_from_broker_info(new_safekeeper_broker_data);
 
                 let now = Utc::now().naive_utc();
                 if let Ok(latest_interaciton) =
@@ -573,6 +568,7 @@ impl WalreceiverState {
                         return Some(NewWalConnectionCandidate {
                             safekeeper_id: new_sk_id,
                             wal_source_connconf: new_wal_source_connconf,
+                            availability_zone: new_availability_zone,
                             reason: ReconnectReason::NoKeepAlives {
                                 last_keep_alive: Some(
                                     existing_wal_connection.status.latest_connection_update,
@@ -598,6 +594,7 @@ impl WalreceiverState {
                                 return Some(NewWalConnectionCandidate {
                                     safekeeper_id: new_sk_id,
                                     wal_source_connconf: new_wal_source_connconf,
+                                    availability_zone: new_availability_zone,
                                     reason: ReconnectReason::LaggingWal {
                                         current_commit_lsn,
                                         new_commit_lsn,
@@ -610,11 +607,11 @@ impl WalreceiverState {
                             if self.availability_zone.is_some()
                                 && existing_wal_connection.availability_zone
                                     != self.availability_zone
-                                && Some(&new_safekeeper_broker_data.availability_zone)
-                                    == self.availability_zone.as_ref()
+                                && self.availability_zone == new_availability_zone
                             {
                                 return Some(NewWalConnectionCandidate {
                                     safekeeper_id: new_sk_id,
+                                    availability_zone: new_availability_zone,
                                     wal_source_connconf: new_wal_source_connconf,
                                     reason: ReconnectReason::SwitchAvailabilityZone,
                                 });
@@ -686,6 +683,7 @@ impl WalreceiverState {
                             return Some(NewWalConnectionCandidate {
                                 safekeeper_id: new_sk_id,
                                 wal_source_connconf: new_wal_source_connconf,
+                                availability_zone: new_availability_zone,
                                 reason: ReconnectReason::NoWalTimeout {
                                     current_lsn,
                                     current_commit_lsn,
@@ -704,10 +702,13 @@ impl WalreceiverState {
                 self.wal_connection.as_mut().unwrap().discovered_new_wal = discovered_new_wal;
             }
             None => {
-                let (new_sk_id, _, new_wal_source_connconf) =
+                let (new_sk_id, new_safekeeper_broker_data, new_wal_source_connconf) =
                     self.select_connection_candidate(None)?;
+                let new_availability_zone =
+                    availability_zone_from_broker_info(new_safekeeper_broker_data);
                 return Some(NewWalConnectionCandidate {
                     safekeeper_id: new_sk_id,
+                    availability_zone: new_availability_zone,
                     wal_source_connconf: new_wal_source_connconf,
                     reason: ReconnectReason::NoExistingConnection,
                 });
@@ -812,6 +813,7 @@ impl WalreceiverState {
 struct NewWalConnectionCandidate {
     safekeeper_id: NodeId,
     wal_source_connconf: PgConnectionConfig,
+    availability_zone: Option<String>,
     // This field is used in `derive(Debug)` only.
     #[allow(dead_code)]
     reason: ReconnectReason,
@@ -867,6 +869,14 @@ fn wal_stream_connection_config(
     }
 
     Ok(connstr)
+}
+
+// Takes availability_zone from proto structure and converts empty string to None.
+fn availability_zone_from_broker_info(info: &SafekeeperTimelineInfo) -> Option<String> {
+    match &info.availability_zone {
+        x if x.is_empty() => None,
+        x => Some(x.clone()),
+    }
 }
 
 #[cfg(test)]
