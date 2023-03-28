@@ -58,7 +58,7 @@ jobs:
       with:
         name: neon-${{ runner.os }}-release-artifact
         path: /tmp/neon/
-        prefix: latest
+        prefix: latest-artifacts
 
     - name: Create Neon Project
       id: create-neon-project
@@ -152,7 +152,7 @@ jobs:
       with:
         name: neon-${{ runner.os }}-release-artifact
         path: /tmp/neon/
-        prefix: latest
+        prefix: latest-artifacts
 
     - name: Add Postgres binaries to PATH
       run: |
@@ -309,7 +309,7 @@ jobs:
       with:
         name: neon-${{ runner.os }}-release-artifact
         path: /tmp/neon/
-        prefix: latest
+        prefix: latest-artifacts
 
     - name: Add Postgres binaries to PATH
       run: |
@@ -420,7 +420,7 @@ jobs:
       with:
         name: neon-${{ runner.os }}-release-artifact
         path: /tmp/neon/
-        prefix: latest
+        prefix: latest-artifacts
 
     - name: Add Postgres binaries to PATH
       run: |
@@ -525,7 +525,7 @@ jobs:
       with:
         name: neon-${{ runner.os }}-release-artifact
         path: /tmp/neon/
-        prefix: latest
+        prefix: latest-artifacts
 
     - name: Add Postgres binaries to PATH
       run: |
