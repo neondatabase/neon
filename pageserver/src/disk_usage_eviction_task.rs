@@ -538,9 +538,14 @@ async fn extend_lru_candidates(
             match tenant.get_min_resident_size_override().or(max_layer_size) {
                 Some(size) => size,
                 None => {
+                    // the tenant has no layers at all. it's very unlikely but allowed by the
+                    // types.
                     if !scratch.is_empty() {
                         // soft assert
-                        warn!("BUG: no maximum layer size, but still found layers");
+                        warn!(
+                            layers = scratch.len(),
+                            "BUG: no maximum layer size, but still found layers"
+                        );
                         scratch.clear();
                     }
                     return ControlFlow::Continue(());
