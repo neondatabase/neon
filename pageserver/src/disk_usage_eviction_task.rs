@@ -448,10 +448,6 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     }))
 }
 
-// Result type of `collect_eviction_candidates`
-//
-// `collect_eviction_candidates' returns a vector of these, in the preference order
-// that they should be evicted.
 #[derive(Clone)]
 struct EvictionCandidate {
     timeline: Arc<Timeline>,
@@ -471,72 +467,45 @@ enum MinResidentSizePartition {
     Below,
 }
 
-impl MinResidentSizePartitionedCandidates {
-    pub fn num_candidates(&self) -> usize {
-        self.above.len() + self.below.len()
-    }
-    pub fn into_iter_in_eviction_order(
-        self,
-    ) -> impl Iterator<Item = (MinResidentSizePartition, EvictionCandidate)> {
-        debug_assert!(is_sorted::IsSorted::is_sorted_by_key(
-            &mut self.above.iter(),
-            |c| c.last_activity_ts
-        ));
-        debug_assert!(is_sorted::IsSorted::is_sorted_by_key(
-            &mut self.below.iter(),
-            |c| c.last_activity_ts
-        ));
-        self.above
-            .into_iter()
-            .map(|c| (MinResidentSizePartition::Above, c))
-            .chain(
-                self.below
-                    .into_iter()
-                    .map(|c| (MinResidentSizePartition::Below, c)),
-            )
-    }
-}
-
 enum EvictionCandidates {
     Cancelled,
     Finished(MinResidentSizePartitionedCandidates),
 }
 
-/// Collect a list of all non-remote layers in the system, from all timelines in all tenants.
+/// Gather the eviction candidates.
 ///
-/// Returns all layers in the order that they should be evicted. The current policy is to
-/// first evict layers in global LRU order, but retain at least min_resident_size bytes of
-/// data for each tenant. After that, if necessary, we evict the remaining layers, also in
-/// global LRU order. A different policy could be implemented by changing the returned order
-/// here.
+/// The returned `Ok(EvictionCandidates::Finished(candidates))` allows iteration over
+/// the candidates in eviction order, using `candidates.into_iter_in_eviction_order()`.
+/// A caller that evicts in that order implements the eviction policy outlined in the
+/// module comment.
 ///
-/// For each layer, we return its last-activity timestamp, and its "overage" over the
-/// tenant's min resident size limit. In other words, 'tenant_resident_size_overage'
-/// means: If we evicted this layer, and all the layers of this tenant in the result list
-/// before this one, how much would the total size of all the tenant's remaining layers
-/// exceed the the tenant's min resident size? Layers that belong to the "reservation",
-/// 'tenant_resident_size_overage' is negative.
+/// # Example
 ///
-/// For example, imagine that there are two tenants, A and B, with five layers each, a-e.
+/// Imagine that there are two tenants, A and B, with five layers each, a-e.
 /// Each layer has size 100, and both tenant's min_resident_size is 150.
-/// `collect_eviction_candidates` would return them in this order:
+/// The eviction order would be
 ///
-/// last_activity_ts    tenant/layer    overage
-/// 18:30               A/c        250
-/// 19:00               A/b        150
-/// 18:29               B/c        250
-/// 19:05               B/b        150
-/// 20:00               B/a         50
-/// 20:03               A/a         50
-/// --- min resident size respecting cutoff point  ---
-/// 20:30               A/d        -50
-/// 20:40               B/d        -50
-/// 20:45               B/e       -150
-/// 20:58               A/e       -150
+/// ```text
+/// partition last_activity_ts    tenant/layer
+/// Above     18:30               A/c
+/// Above     19:00               A/b
+/// Above     18:29               B/c
+/// Above     19:05               B/b
+/// Above     20:00               B/a
+/// Above     20:03               A/a
+/// Below     20:30               A/d
+/// Below     20:40               B/d
+/// Below     20:45               B/e
+/// Below     20:58               A/e
+/// ```
 ///
-/// If the task is cancelled by the `cancel` token, returns an empty Vec. The caller
-/// should check for `cancel.is_cancelled`.
+/// Now, if we need to evict 300 bytes to relieve pressure, we'd evict `A/c, A/b, B/c`.
+/// They are all in the `Above` partition, so, we respected each tenant's min_resident_size.
 ///
+/// But, if we need to evict 900 bytes to relieve pressure, we'd evict
+/// `A/c, A/b, B/c, B/b, B/a, A/a, A/d, B/d, B/e`, reaching into the `Below` partition
+/// after exhauting the `Above` partition.
+/// So, we did not respect each tenant's min_resident_size.
 async fn collect_eviction_candidates(
     cancel: &CancellationToken,
 ) -> anyhow::Result<EvictionCandidates> {
@@ -645,6 +614,34 @@ async fn collect_eviction_candidates(
             below: below_min_resident_size,
         },
     ))
+}
+
+impl MinResidentSizePartitionedCandidates {
+    pub fn num_candidates(&self) -> usize {
+        self.above.len() + self.below.len()
+    }
+
+    /// See comment on [`collect_eviction_candidates`].
+    pub fn into_iter_in_eviction_order(
+        self,
+    ) -> impl Iterator<Item = (MinResidentSizePartition, EvictionCandidate)> {
+        debug_assert!(is_sorted::IsSorted::is_sorted_by_key(
+            &mut self.above.iter(),
+            |c| c.last_activity_ts
+        ));
+        debug_assert!(is_sorted::IsSorted::is_sorted_by_key(
+            &mut self.below.iter(),
+            |c| c.last_activity_ts
+        ));
+        self.above
+            .into_iter()
+            .map(|c| (MinResidentSizePartition::Above, c))
+            .chain(
+                self.below
+                    .into_iter()
+                    .map(|c| (MinResidentSizePartition::Below, c)),
+            )
+    }
 }
 
 struct TimelineKey(Arc<Timeline>);
