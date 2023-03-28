@@ -288,6 +288,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     usage_pre: U,
     cancel: &CancellationToken,
 ) -> anyhow::Result<IterationOutcome<U>> {
+    // use tokio's mutex to get a Sync guard (instead of std::sync::Mutex)
     let _g = state
         .mutex
         .try_lock()
