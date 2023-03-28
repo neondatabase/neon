@@ -1,5 +1,7 @@
 //! This module implements the pageserver-global disk-usage-based layer eviction task.
 //!
+//! # Mechanics
+//!
 //! Function `launch_disk_usage_global_eviction_task` starts a pageserver-global background
 //! loop that evicts layers in response to a shortage of available bytes
 //! in the $repo/tenants directory's filesystem.
@@ -12,6 +14,8 @@
 //! We cross-check this internal accounting with the real world by making another `statvfs` at the end of the iteration.
 //! We're good if that second statvfs shows that we're _actually_ below the configured thresholds.
 //! If we're still above one or more thresholds, we emit a warning log message, leaving it to the operator to investigate further.
+//!
+//! # Eviction Policy
 //!
 //! There are two thresholds:
 //! `max_usage_pct` is the relative available space, expressed in percent of the total filesystem space.
