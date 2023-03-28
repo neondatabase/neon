@@ -76,6 +76,10 @@ pub async fn task_main(
 
     let mut connections = tokio::task::JoinSet::new();
     let cancel_map = Arc::new(CancelMap::default());
+    // The idle flag is used to avoid spinning in an infinite loop if
+    // we have no active connections but cancellation_token hasn't been
+    // triggered yet.
+    let mut idle = true;
 
     loop {
         tokio::select! {
@@ -100,19 +104,19 @@ pub async fn task_main(
                         error!("per-client task finished with an error: {e:#}");
                     }),
                 );
+                idle = false;
             }
-            maybe_exited = connections.join_next() => {
+            maybe_exited = connections.join_next(), if !idle => {
                 match maybe_exited {
                     Some(Ok(())) => {},
                     Some(Err(e)) if e.is_cancelled() => unreachable!("we do not deschedule tasks which is different from them reacting to cancellation token and deciding to exit themselves"),
                     Some(Err(e)) if e.is_panic() => { /* panic has already been logged by panic hook */ },
                     Some(Err(e)) => { warn!("unexpected error from joined connection task: {e:?}"); },
-                    None => {
-                        if cancellation_token.is_cancelled() {
-                            bail!("All connections closed, exiting");
-                        }
-                    }
+                    None => { idle = true; }
                 }
+            }
+            _ = cancellation_token.cancelled(), if idle => {
+                bail!("All connections closed, exiting");
             }
         }
     }
