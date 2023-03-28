@@ -506,6 +506,10 @@ async fn extend_lru_candidates(
         return ControlFlow::Break(());
     }
 
+    // If one of the timelines becomes `!is_active()` during the iteration,
+    // for example because we're shutting down, then `max_layer_size` can be too small.
+    // That's OK. This code only runs under a disk pressure situation, and being
+    // a little unfair to tenants during shutdown in such a situation is tolerable.
     let mut max_layer_size: Option<u64> = None;
     for tl in tenant.list_timelines() {
         if !tl.is_active() {
