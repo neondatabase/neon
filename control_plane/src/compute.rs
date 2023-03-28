@@ -80,6 +80,7 @@ impl ComputeControlPlane {
         lsn: Option<Lsn>,
         port: Option<u16>,
         pg_version: u32,
+        pg_config: Option<PostgresConf>,
     ) -> Result<Arc<PostgresNode>> {
         let port = port.unwrap_or_else(|| self.get_port());
         let node = Arc::new(PostgresNode {
@@ -96,7 +97,7 @@ impl ComputeControlPlane {
         });
 
         node.create_pgdata()?;
-        node.setup_pg_conf()?;
+        node.setup_pg_conf(pg_config)?;
 
         self.nodes
             .insert((tenant_id, node.name.clone()), Arc::clone(&node));
@@ -277,7 +278,7 @@ impl PostgresNode {
 
     // Write postgresql.conf with default configuration
     // and PG_VERSION file to the data directory of a new node.
-    fn setup_pg_conf(&self) -> Result<()> {
+    fn setup_pg_conf(&self, pg_config: Option<PostgresConf>) -> Result<()> {
         let mut conf = PostgresConf::new();
         conf.append("max_wal_senders", "10");
         conf.append("wal_log_hints", "off");
@@ -295,6 +296,10 @@ impl PostgresNode {
         conf.append("wal_keep_size", "0");
         // walproposer panics when basebackup is invalid, it is pointless to restart in this case.
         conf.append("restart_after_crash", "off");
+
+        conf.append("neon.max_file_cache_size", "1024");
+        conf.append("neon.file_cache_size_limit", "1024");
+        conf.append("max_prepared_transactions", "100");
 
         // Configure the node to fetch pages from pageserver
         let pageserver_connstr = {
@@ -354,6 +359,8 @@ impl PostgresNode {
             // testing.
             conf.append("synchronous_standby_names", "pageserver");
         }
+
+        conf.override_conf(pg_config);
 
         let mut file = File::create(self.pgdata().join("postgresql.conf"))?;
         file.write_all(conf.to_string().as_bytes())?;

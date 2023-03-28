@@ -19,6 +19,10 @@ pub struct PostgresConf {
     hash: HashMap<String, String>,
 }
 
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("PostgresConfParseError")]
+pub struct PostgresConfParseError;
+
 static CONF_LINE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^((?:\w|\.)+)\s*=\s*(\S+)$").unwrap());
 
 impl PostgresConf {
@@ -112,6 +116,25 @@ impl PostgresConf {
     pub fn append_line(&mut self, line: &str) {
         self.lines.push(line.to_string());
     }
+
+    /// Override the config by user sepefic config
+    pub fn override_conf(&mut self, user_config: Option<PostgresConf>) {
+        let Some(user_config) = user_config else { return };
+        for (name, value) in user_config.hash.iter() {
+            let old_value = self.hash.insert(name.to_string(), value.to_string());
+
+            if old_value.is_none() {
+                continue;
+            }
+
+            let old_line = format!("{}={}\n", name.to_string(), escape_str(&old_value.unwrap()));
+            for x in &mut self.lines {
+                if *x == old_line {
+                    *x = format!("{}={}\n", name.to_string(), escape_str(&value));
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Display for PostgresConf {
@@ -121,6 +144,37 @@ impl fmt::Display for PostgresConf {
             f.write_str(line)?;
         }
         Ok(())
+    }
+}
+
+impl FromStr for PostgresConf {
+    type Err = PostgresConfParseError;
+
+    /// Parse an PostgresConf from a string in the form `parameter1=value1;parameter2=value2`
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut result = PostgresConf::new();
+        let mut splitter = s.trim().split(';');
+        while let Some(line) = splitter.next() {
+            let line = line.trim();
+
+            if line.starts_with('#') {
+                continue;
+            } else if let Some(caps) = CONF_LINE_RE.captures(line) {
+                let name = caps.get(1).unwrap().as_str();
+                let raw_val = caps.get(2).unwrap().as_str();
+
+                if let Ok(val) = deescape_str(raw_val) {
+                    // Note: if there's already an entry in the hash map for
+                    // this key, this will replace it. That's the behavior what
+                    // we want; when PostgreSQL reads the file, each line
+                    // overrides any previous value for the same setting.
+                    result.hash.insert(name.to_string(), val.to_string());
+                }
+            } else {
+                return Err(PostgresConfParseError);
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -221,6 +275,61 @@ fn test_postgresql_conf_escapes() -> Result<()> {
 
     // octal-escapes are currently not supported
     assert!(deescape_str("'foo\\7\\07\\007'").is_err());
+
+    Ok(())
+}
+
+#[test]
+fn test_postgresql_conf_override() -> Result<()> {
+    let mut conf = PostgresConf::new();
+    conf.append("max_wal_senders", "10");
+    conf.append("wal_log_hints", "off");
+    conf.append("shared_buffer", "20MB");
+    conf.append("neon.timeline_id", "'34a15221af534185b74b82b9b34685dc'");
+
+    // multi-parameters
+    match PostgresConf::from_str(
+        "max_wal_senders=20;wal_log_hints=on;neon.timeline_id='00000000000000000000000'",
+    ) {
+        Ok(user_config) => {
+            conf.override_conf(Some(user_config));
+
+            assert_eq!(conf.get("max_wal_senders"), Some("20"));
+            assert_eq!(conf.get("wal_log_hints"), Some("on"));
+            assert_eq!(
+                conf.get("neon.timeline_id"),
+                Some("00000000000000000000000")
+            );
+            assert_eq!(conf.get("shared_buffer"), Some("20MB"));
+        }
+        Err(error) => {
+            assert!(false, "should not get error{}", error.to_string());
+        }
+    }
+
+    // single-parameters
+    match PostgresConf::from_str("shared_buffer=100MB") {
+        Ok(user_config) => {
+            conf.override_conf(Some(user_config));
+
+            assert_eq!(conf.get("max_wal_senders"), Some("20"));
+            assert_eq!(conf.get("wal_log_hints"), Some("on"));
+            assert_eq!(conf.get("shared_buffer"), Some("100MB"));
+        }
+        Err(error) => {
+            assert!(false, "should not get error{}", error.to_string());
+        }
+    }
+
+    // parse parameter failed
+    match PostgresConf::from_str("shared_buffer") {
+        Ok(_) => {
+            assert!(true, "should not be here");
+        }
+        Err(error) => {
+            assert_eq!(error.to_string(), PostgresConfParseError.to_string());
+        }
+    }
 
     Ok(())
 }

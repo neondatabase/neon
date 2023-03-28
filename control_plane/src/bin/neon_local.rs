@@ -10,6 +10,7 @@ use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::compute::ComputeControlPlane;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
+use control_plane::postgresql_conf::PostgresConf;
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::{broker, local_env};
 use pageserver_api::models::TimelineInfo;
@@ -473,7 +474,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             println!("Creating node for imported timeline ...");
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
-            cplane.new_node(tenant_id, name, timeline_id, None, None, pg_version)?;
+            cplane.new_node(tenant_id, name, timeline_id, None, None, pg_version, None)?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -618,7 +619,21 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            cplane.new_node(tenant_id, &node_name, timeline_id, lsn, port, pg_version)?;
+            let pg_config = sub_args
+                .get_one::<String>("pg-config")
+                .map(|config_str| PostgresConf::from_str(config_str))
+                .transpose()
+                .context("Failed to parse `pg-config` from the request")?;
+
+            cplane.new_node(
+                tenant_id,
+                &node_name,
+                timeline_id,
+                lsn,
+                port,
+                pg_version,
+                pg_config,
+            )?;
         }
         "start" => {
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
@@ -658,6 +673,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     .get_one::<u32>("pg-version")
                     .copied()
                     .context("Failed to `pg-version` from the argument string")?;
+
                 // when used with custom port this results in non obvious behaviour
                 // port is remembered from first start command, i e
                 // start --port X
@@ -665,8 +681,15 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 // start <-- will also use port X even without explicit port argument
                 println!("Starting new postgres (v{pg_version}) {node_name} on timeline {timeline_id} ...");
 
-                let node =
-                    cplane.new_node(tenant_id, node_name, timeline_id, lsn, port, pg_version)?;
+                let node = cplane.new_node(
+                    tenant_id,
+                    node_name,
+                    timeline_id,
+                    lsn,
+                    port,
+                    pg_version,
+                    None,
+                )?;
                 node.start(&auth_token)?;
             }
         }
@@ -893,6 +916,11 @@ fn cli() -> Command {
         .value_parser(value_parser!(u32))
         .default_value(DEFAULT_PG_VERSION);
 
+    let pg_config_arg = Arg::new("pg-config")
+        .long("pg-config")
+        .help("Set postgres config parameters, multi-parameter seperate with \";\"")
+        .required(false);
+
     let port_arg = Arg::new("port")
         .long("port")
         .required(false)
@@ -1043,6 +1071,7 @@ fn cli() -> Command {
                             .long("config-only")
                             .required(false))
                     .arg(pg_version_arg.clone())
+                    .arg(pg_config_arg.clone())
                 )
                 .subcommand(Command::new("start")
                     .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
