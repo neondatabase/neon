@@ -385,9 +385,9 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
     // phase2: evict victims batched by timeline
 
-    // achieved post-eviction usage according to internal accounting
+    // After the loop, `usage_assumed` is the post-eviction usage,
+    // according to internal accounting.
     let mut usage_assumed = usage_pre;
-
     let mut evictions_failed = LayerCount::default();
     for (timeline, batch) in batched {
         let tenant_id = timeline.tenant_id;
