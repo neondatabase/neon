@@ -90,7 +90,6 @@ impl ComputeControlPlane {
             timeline_id,
             lsn,
             tenant_id,
-            uses_wal_proposer: false,
             pg_version,
         });
 
@@ -115,7 +114,6 @@ pub struct PostgresNode {
     pub timeline_id: TimelineId,
     pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
     pub tenant_id: TenantId,
-    uses_wal_proposer: bool,
     pg_version: u32,
 }
 
@@ -149,7 +147,6 @@ impl PostgresNode {
         let port: u16 = conf.parse_field("port", &context)?;
         let timeline_id: TimelineId = conf.parse_field("neon.timeline_id", &context)?;
         let tenant_id: TenantId = conf.parse_field("neon.tenant_id", &context)?;
-        let uses_wal_proposer = conf.get("neon.safekeepers").is_some();
 
         // Read postgres version from PG_VERSION file to determine which postgres version binary to use.
         // If it doesn't exist, assume broken data directory and use default pg version.
@@ -172,7 +169,6 @@ impl PostgresNode {
             timeline_id,
             lsn: recovery_target_lsn,
             tenant_id,
-            uses_wal_proposer,
             pg_version,
         })
     }
@@ -364,7 +360,7 @@ impl PostgresNode {
     fn load_basebackup(&self, auth_token: &Option<String>) -> Result<()> {
         let backup_lsn = if let Some(lsn) = self.lsn {
             Some(lsn)
-        } else if self.uses_wal_proposer {
+        } else if !self.env.safekeepers.is_empty() {
             // LSN 0 means that it is bootstrap and we need to download just
             // latest data from the pageserver. That is a bit clumsy but whole bootstrap
             // procedure evolves quite actively right now, so let's think about it again
