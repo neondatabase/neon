@@ -107,7 +107,7 @@ pub fn launch_disk_usage_global_eviction_task(
         false,
         async move {
             disk_usage_eviction_task(
-                &*state,
+                &state,
                 task_config,
                 storage,
                 tenants_dir_fd,
