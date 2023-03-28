@@ -286,6 +286,11 @@ impl RemoteStorage for S3Bucket {
 
             metrics::inc_list_objects();
 
+            #[cfg(not(test))]
+            let response_key_limit = None;
+            #[cfg(test)]
+            let response_key_limit = test_consts::custom_max_keys_per_response();
+
             let fetch_response = self
                 .client
                 .list_objects_v2()
@@ -293,6 +298,7 @@ impl RemoteStorage for S3Bucket {
                 .set_prefix(self.prefix_in_bucket.clone())
                 .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
                 .set_continuation_token(continuation_token)
+                .set_max_keys(response_key_limit)
                 .send()
                 .await
                 .map_err(|e| {
@@ -337,6 +343,11 @@ impl RemoteStorage for S3Bucket {
 
         let mut document_keys = Vec::new();
 
+        #[cfg(not(test))]
+        let response_key_limit = None;
+        #[cfg(test)]
+        let response_key_limit = test_consts::custom_max_keys_per_response();
+
         let mut continuation_token = None;
         loop {
             let _guard = self
@@ -355,6 +366,7 @@ impl RemoteStorage for S3Bucket {
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
                 .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
+                .set_max_keys(response_key_limit)
                 .send()
                 .await
                 .map_err(|e| {
@@ -466,5 +478,22 @@ impl RemoteStorage for S3Bucket {
                 e
             })?;
         Ok(())
+    }
+}
+
+pub mod test_consts {
+    pub const MAX_KEYS_PER_RESPONSE: i32 = 100;
+    pub const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
+
+    pub fn custom_max_keys_per_response() -> Option<i32> {
+        if is_real_s3_enabled() {
+            Some(MAX_KEYS_PER_RESPONSE)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_real_s3_enabled() -> bool {
+        std::env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_ok()
     }
 }
