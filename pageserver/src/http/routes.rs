@@ -18,6 +18,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::disk_usage_eviction_task;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
@@ -48,6 +49,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
+    disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 }
 
 impl State {
@@ -55,6 +57,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
+        disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -65,6 +68,7 @@ impl State {
             auth,
             allowlist_routes,
             remote_storage,
+            disk_usage_eviction_state,
         })
     }
 }
@@ -1124,6 +1128,8 @@ async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>,
         )))
     };
 
+    let state = state.disk_usage_eviction_state.clone();
+
     let cancel = CancellationToken::new();
     let child_cancel = cancel.clone();
     let _g = cancel.drop_guard();
@@ -1137,6 +1143,7 @@ async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>,
         false,
         async move {
             let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
+                &state,
                 &storage,
                 usage,
                 &child_cancel,
@@ -1168,6 +1175,7 @@ pub fn make_router(
     launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
     remote_storage: Option<GenericRemoteStorage>,
+    disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
@@ -1212,7 +1220,8 @@ pub fn make_router(
 
     Ok(router
         .data(Arc::new(
-            State::new(conf, auth, remote_storage).context("Failed to initialize router state")?,
+            State::new(conf, auth, remote_storage, disk_usage_eviction_state)
+                .context("Failed to initialize router state")?,
         ))
         .get("/v1/status", |r| RequestSpan(status_handler).handle(r))
         .put(
