@@ -156,7 +156,7 @@ impl SafekeeperNode {
         }
 
         background_process::start_process(
-            &format!("safekeeper {id}"),
+            &format!("safekeeper-{id}"),
             &datadir,
             &self.env.safekeeper_bin(),
             &args,

@@ -210,7 +210,6 @@ pub use download::{is_temp_download_file, list_remote_timelines};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::ensure;
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use std::ops::DerefMut;
 use tokio::runtime::Runtime;
@@ -347,7 +346,7 @@ impl RemoteTimelineClient {
                 .layer_metadata
                 .values()
                 // If we don't have the file size for the layer, don't account for it in the metric.
-                .map(|ilmd| ilmd.file_size.unwrap_or(0))
+                .map(|ilmd| ilmd.file_size)
                 .sum()
         } else {
             0
@@ -419,34 +418,6 @@ impl RemoteTimelineClient {
             )
             .await?
         };
-
-        // Update the metadata for given layer file. The remote index file
-        // might be missing some information for the file; this allows us
-        // to fill in the missing details.
-        if layer_metadata.file_size().is_none() {
-            let new_metadata = LayerFileMetadata::new(downloaded_size);
-            let mut guard = self.upload_queue.lock().unwrap();
-            let upload_queue = guard.initialized_mut()?;
-            if let Some(upgraded) = upload_queue.latest_files.get_mut(layer_file_name) {
-                if upgraded.merge(&new_metadata) {
-                    upload_queue.latest_files_changes_since_metadata_upload_scheduled += 1;
-                }
-                // If we don't do an index file upload inbetween here and restart,
-                // the value will go back down after pageserver restart, since we will
-                // have lost this data point.
-                // But, we upload index part fairly frequently, and restart pageserver rarely.
-                // So, by accounting eagerly, we present a most-of-the-time-more-accurate value sooner.
-                self.metrics
-                    .remote_physical_size_gauge()
-                    .add(downloaded_size);
-            } else {
-                // The file should exist, since we just downloaded it.
-                warn!(
-                    "downloaded file {:?} not found in local copy of the index file",
-                    layer_file_name
-                );
-            }
-        }
 
         REMOTE_ONDEMAND_DOWNLOADED_LAYERS.inc();
         REMOTE_ONDEMAND_DOWNLOADED_BYTES.inc_by(downloaded_size);
@@ -549,13 +520,6 @@ impl RemoteTimelineClient {
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
-
-        // The file size can be missing for files that were created before we tracked that
-        // in the metadata, but it should be present for any new files we create.
-        ensure!(
-            layer_metadata.file_size().is_some(),
-            "file size not initialized in metadata"
-        );
 
         upload_queue
             .latest_files

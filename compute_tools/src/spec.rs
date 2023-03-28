@@ -24,6 +24,8 @@ pub struct ComputeSpec {
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
 
+    pub storage_auth_token: Option<String>,
+
     pub startup_tracing_context: Option<HashMap<String, String>>,
 }
 

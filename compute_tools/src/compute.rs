@@ -45,6 +45,7 @@ pub struct ComputeNode {
     pub tenant: String,
     pub timeline: String,
     pub pageserver_connstr: String,
+    pub storage_auth_token: Option<String>,
     pub metrics: ComputeMetrics,
     /// Volatile part of the `ComputeNode` so should be used under `RwLock`
     /// to allow HTTP API server to serve status requests, while configuration
@@ -129,18 +130,14 @@ impl ComputeNode {
 
         let mut config = postgres::Config::from_str(&self.pageserver_connstr)?;
 
-        // Like in the neon extension, if the $NEON_AUTH_TOKEN env variable is
-        // set, use it as the password when connecting to pageserver.
-        //
+        // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.
-        match std::env::var("NEON_AUTH_TOKEN") {
-            Ok(val) => {
-                info!("Got pageserver auth token from NEON_AUTH_TOKEN env variable");
-                config.password(val);
-            }
-            Err(std::env::VarError::NotPresent) => info!("NEON_AUTH_TOKEN env variable not set"),
-            Err(e) => info!("could not parse NEON_AUTH_TOKEN env variable: {}", e),
-        };
+        if let Some(storage_auth_token) = &self.storage_auth_token {
+            info!("Got storage auth token from spec file");
+            config.password(storage_auth_token);
+        } else {
+            info!("Storage auth token not set");
+        }
 
         let mut client = config.connect(NoTls)?;
         let basebackup_cmd = match lsn {
@@ -179,6 +176,11 @@ impl ComputeNode {
         let sync_handle = Command::new(&self.pgbin)
             .args(["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
+            .envs(if let Some(storage_auth_token) = &self.storage_auth_token {
+                vec![("NEON_AUTH_TOKEN", storage_auth_token)]
+            } else {
+                vec![]
+            })
             .stdout(Stdio::piped())
             .spawn()
             .expect("postgres --sync-safekeepers failed to start");
@@ -256,6 +258,11 @@ impl ComputeNode {
         // Run postgres as a child process.
         let mut pg = Command::new(&self.pgbin)
             .args(["-D", &self.pgdata])
+            .envs(if let Some(storage_auth_token) = &self.storage_auth_token {
+                vec![("NEON_AUTH_TOKEN", storage_auth_token)]
+            } else {
+                vec![]
+            })
             .spawn()
             .expect("cannot start postgres process");
 

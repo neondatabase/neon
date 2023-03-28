@@ -264,8 +264,10 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     with pytest.raises(
         expected_exception=PageserverApiException,
         match=f"NotFound: tenant {tenant_id}",
-    ):
+    ) as excinfo:
         pageserver_http.tenant_detach(tenant_id)
+
+    assert excinfo.value.status_code == 404
 
     # the error will be printed to the log too
     env.pageserver.allowed_errors.append(".*NotFound: tenant *")
@@ -325,7 +327,91 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 
 
-#
+# Creates and ignores a tenant, then detaches it: first, with no parameters (should fail),
+# then with parameters to force ignored tenant detach (should not fail).
+def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    client = env.pageserver.http_client()
+
+    # create a new tenant
+    tenant_id, _ = env.neon_cli.create_tenant()
+
+    # assert tenant exists on disk
+    assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    # we rely upon autocommit after each statement
+    pg.safe_psql_many(
+        queries=[
+            "CREATE TABLE t(key int primary key, value text)",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        ]
+    )
+
+    # ignore tenant
+    client.tenant_ignore(tenant_id)
+    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
+    # ensure tenant couldn't be detached without the special flag for ignored tenant
+    log.info("detaching ignored tenant WITHOUT required flag")
+    with pytest.raises(
+        expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
+    ):
+        client.tenant_detach(tenant_id)
+
+    log.info("tenant detached failed as expected")
+
+    # ensure tenant is detached with ignore state
+    log.info("detaching ignored tenant with required flag")
+    client.tenant_detach(tenant_id, True)
+    log.info("ignored tenant detached without error")
+
+    # check that nothing is left on disk for deleted tenant
+    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    # assert the tenant does not exists in the Pageserver
+    tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
+    assert (
+        tenant_id not in tenants_after_detach
+    ), f"Ignored and then detached tenant {tenant_id} \
+        should not be present in pageserver's memory"
+
+
+# Creates a tenant, and detaches it with extra paremeter that forces ignored tenant detach.
+# Tenant should be detached without issues.
+def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    client = env.pageserver.http_client()
+
+    # create a new tenant
+    tenant_id, _ = env.neon_cli.create_tenant()
+
+    # assert tenant exists on disk
+    assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    # we rely upon autocommit after each statement
+    pg.safe_psql_many(
+        queries=[
+            "CREATE TABLE t(key int primary key, value text)",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        ]
+    )
+
+    log.info("detaching regular tenant with detach ignored flag")
+    client.tenant_detach(tenant_id, True)
+    log.info("regular tenant detached without error")
+
+    # check that nothing is left on disk for deleted tenant
+    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    # assert the tenant does not exists in the Pageserver
+    tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
+    assert (
+        tenant_id not in tenants_after_detach
+    ), f"Ignored and then detached tenant {tenant_id} \
+        should not be present in pageserver's memory"
+
+
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_detach_while_attaching(
     neon_env_builder: NeonEnvBuilder,

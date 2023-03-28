@@ -10,7 +10,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     env.pageserver.allowed_errors.append(".*Timeline .* was not found.*")
     env.pageserver.allowed_errors.append(".*timeline not found.*")
     env.pageserver.allowed_errors.append(".*Cannot delete timeline which has child timelines.*")
-    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
+    env.pageserver.allowed_errors.append(".*Precondition failed: Requested tenant is missing.*")
 
     ps_http = env.pageserver.http_client()
 
@@ -24,9 +24,11 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     invalid_tenant_id = TenantId.generate()
     with pytest.raises(
         PageserverApiException,
-        match=f"NotFound: tenant {invalid_tenant_id}",
-    ):
+        match="Precondition failed: Requested tenant is missing",
+    ) as exc:
         ps_http.timeline_delete(tenant_id=invalid_tenant_id, timeline_id=invalid_timeline_id)
+
+    assert exc.value.status_code == 412
 
     # construct pair of branches to validate that pageserver prohibits
     # deletion of ancestor timelines when they have child branches
@@ -39,7 +41,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     ps_http = env.pageserver.http_client()
     with pytest.raises(
         PageserverApiException, match="Cannot delete timeline which has child timelines"
-    ):
+    ) as exc:
         timeline_path = (
             env.repo_dir
             / "tenants"
@@ -52,6 +54,8 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         ps_http.timeline_delete(env.initial_tenant, parent_timeline_id)
 
         assert not timeline_path.exists()
+
+    assert exc.value.status_code == 400
 
     timeline_path = (
         env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
@@ -71,7 +75,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     with pytest.raises(
         PageserverApiException,
         match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
-    ):
+    ) as exc:
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 
         # FIXME leaves tenant without timelines, should we prevent deletion of root timeline?
@@ -80,3 +84,5 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
             interval=0.2,
             func=lambda: ps_http.timeline_delete(env.initial_tenant, parent_timeline_id),
         )
+
+    assert exc.value.status_code == 404

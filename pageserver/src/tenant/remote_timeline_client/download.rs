@@ -21,7 +21,7 @@ use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
-use super::index::{IndexPart, IndexPartUnclean, LayerFileMetadata};
+use super::index::{IndexPart, LayerFileMetadata};
 use super::{FAILED_DOWNLOAD_RETRIES, FAILED_DOWNLOAD_WARN_THRESHOLD};
 
 async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
@@ -113,16 +113,11 @@ pub async fn download_layer_file<'a>(
         })
         .map_err(DownloadError::Other)?;
 
-    match layer_metadata.file_size() {
-        Some(expected) if expected != bytes_amount => {
-            return Err(DownloadError::Other(anyhow!(
-                "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file '{}'",
-                temp_file_path.display()
-            )));
-        }
-        Some(_) | None => {
-            // matches, or upgrading from an earlier IndexPart version
-        }
+    let expected = layer_metadata.file_size();
+    if expected != bytes_amount {
+        return Err(DownloadError::Other(anyhow!(
+            "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {temp_file_path:?}",
+        )));
     }
 
     // not using sync_data because it can lose file size update
@@ -261,13 +256,11 @@ pub(super) async fn download_index_part(
     )
     .await?;
 
-    let index_part: IndexPartUnclean = serde_json::from_slice(&index_part_bytes)
+    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
         .with_context(|| {
             format!("Failed to deserialize index part file into file {index_part_path:?}")
         })
         .map_err(DownloadError::Other)?;
-
-    let index_part = index_part.remove_unclean_layer_file_names();
 
     Ok(index_part)
 }

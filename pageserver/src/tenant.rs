@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 use self::config::TenantConf;
 use self::metadata::TimelineMetadata;
 use self::remote_timeline_client::RemoteTimelineClient;
+use self::timeline::EvictionTaskTenantState;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
@@ -142,6 +143,8 @@ pub struct Tenant {
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
     cached_synthetic_tenant_size: Arc<AtomicU64>,
+
+    eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 }
 
 /// A timeline with some of its files on disk, being initialized.
@@ -431,6 +434,16 @@ remote:
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteTimelineError {
+    #[error("NotFound")]
+    NotFound,
+    #[error("HasChildren")]
+    HasChildren,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 struct RemoteStartupData {
     index_part: IndexPart,
     remote_metadata: TimelineMetadata,
@@ -478,7 +491,7 @@ impl Tenant {
 
             let dummy_timeline = self.create_timeline_data(
                 timeline_id,
-                up_to_date_metadata.clone(),
+                up_to_date_metadata,
                 ancestor.clone(),
                 remote_client,
             )?;
@@ -503,7 +516,7 @@ impl Tenant {
                     let broken_timeline = self
                         .create_timeline_data(
                             timeline_id,
-                            up_to_date_metadata.clone(),
+                            up_to_date_metadata,
                             ancestor.clone(),
                             None,
                         )
@@ -1142,7 +1155,7 @@ impl Tenant {
         );
         self.prepare_timeline(
             new_timeline_id,
-            new_metadata,
+            &new_metadata,
             timeline_uninit_mark,
             true,
             None,
@@ -1307,7 +1320,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         _ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DeleteTimelineError> {
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
         let timeline = {
@@ -1319,13 +1332,13 @@ impl Tenant {
                 .iter()
                 .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
 
-            anyhow::ensure!(
-                !children_exist,
-                "Cannot delete timeline which has child timelines"
-            );
+            if children_exist {
+                return Err(DeleteTimelineError::HasChildren);
+            }
+
             let timeline_entry = match timelines.entry(timeline_id) {
                 Entry::Occupied(e) => e,
-                Entry::Vacant(_) => bail!("timeline not found"),
+                Entry::Vacant(_) => return Err(DeleteTimelineError::NotFound),
             };
 
             let timeline = Arc::clone(timeline_entry.get());
@@ -1700,7 +1713,7 @@ impl Tenant {
     fn create_timeline_data(
         &self,
         new_timeline_id: TimelineId,
-        new_metadata: TimelineMetadata,
+        new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
     ) -> anyhow::Result<Arc<Timeline>> {
@@ -1771,6 +1784,7 @@ impl Tenant {
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
+            eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
         }
     }
 
@@ -2160,13 +2174,25 @@ impl Tenant {
         let new_timeline = self
             .prepare_timeline(
                 dst_id,
-                metadata,
+                &metadata,
                 timeline_uninit_mark,
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
             .initialize_with_lock(&mut timelines, true, true)?;
         drop(timelines);
+
+        // Root timeline gets its layers during creation and uploads them along with the metadata.
+        // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
+        // We still need to upload its metadata eagerly: if other nodes `attach` the tenant and miss this timeline, their GC
+        // could get incorrect information and remove more layers, than needed.
+        // See also https://github.com/neondatabase/neon/issues/3865
+        if let Some(remote_client) = new_timeline.remote_client.as_ref() {
+            remote_client
+                .schedule_index_upload_for_metadata_update(&metadata)
+                .context("branch initial metadata upload")?;
+        }
+
         info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
 
         Ok(new_timeline)
@@ -2229,7 +2255,7 @@ impl Tenant {
             pg_version,
         );
         let raw_timeline =
-            self.prepare_timeline(timeline_id, new_metadata, timeline_uninit_mark, true, None)?;
+            self.prepare_timeline(timeline_id, &new_metadata, timeline_uninit_mark, true, None)?;
 
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
@@ -2283,7 +2309,7 @@ impl Tenant {
     fn prepare_timeline(
         &self,
         new_timeline_id: TimelineId,
-        new_metadata: TimelineMetadata,
+        new_metadata: &TimelineMetadata,
         uninit_mark: TimelineUninitMark,
         init_layers: bool,
         ancestor: Option<Arc<Timeline>>,
@@ -2297,7 +2323,7 @@ impl Tenant {
                 tenant_id,
                 new_timeline_id,
             );
-            remote_client.init_upload_queue_for_empty_remote(&new_metadata)?;
+            remote_client.init_upload_queue_for_empty_remote(new_metadata)?;
             Some(remote_client)
         } else {
             None
@@ -2336,17 +2362,12 @@ impl Tenant {
         &self,
         timeline_path: &Path,
         new_timeline_id: TimelineId,
-        new_metadata: TimelineMetadata,
+        new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_data = self
-            .create_timeline_data(
-                new_timeline_id,
-                new_metadata.clone(),
-                ancestor,
-                remote_client,
-            )
+            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client)
             .context("Failed to create timeline data structure")?;
         crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
 
@@ -2358,7 +2379,7 @@ impl Tenant {
             self.conf,
             new_timeline_id,
             self.tenant_id,
-            &new_metadata,
+            new_metadata,
             true,
         )
         .context("Failed to create timeline metadata")?;

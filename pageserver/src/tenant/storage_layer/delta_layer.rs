@@ -444,8 +444,8 @@ impl PersistentLayer for DeltaLayer {
         Ok(())
     }
 
-    fn file_size(&self) -> Option<u64> {
-        Some(self.file_size)
+    fn file_size(&self) -> u64 {
+        self.file_size
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
@@ -456,7 +456,7 @@ impl PersistentLayer for DeltaLayer {
 
         HistoricLayerInfo::Delta {
             layer_file_name,
-            layer_file_size: Some(self.file_size),
+            layer_file_size: self.file_size,
             lsn_start: lsn_range.start,
             lsn_end: lsn_range.end,
             remote: false,
