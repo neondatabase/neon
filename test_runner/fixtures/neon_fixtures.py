@@ -77,7 +77,7 @@ DEFAULT_BRANCH_NAME: str = "main"
 DEFAULT_PG_VERSION_DEFAULT: str = "14"
 
 BASE_PORT: int = 15000
-WORKER_PORT_NUM: int = 1000
+WORKER_PORT_NUM: int = 10000
 
 
 def pytest_configure(config: Config):

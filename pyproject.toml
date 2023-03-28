@@ -34,6 +34,7 @@ types-psutil = "^5.9.5.4"
 types-toml = "^0.10.8"
 pytest-httpserver = "^1.0.6"
 aiohttp = "3.7.4"
+pytest-repeat = "^0.9.1"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.1.0"
