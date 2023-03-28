@@ -72,7 +72,7 @@ pub struct DiskUsageEvictionTaskConfig {
 
 #[derive(Default)]
 pub struct DiskUsageEvictionState {
-    /// Exclude http requests and background task from running at the same time.
+    /// Prevent mgmt API requests and the background loop from running eviction at the same time.
     mutex: tokio::sync::Mutex<()>,
 }
 

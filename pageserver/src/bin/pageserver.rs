@@ -322,7 +322,8 @@ fn start_pageserver(
     // Scan the local 'tenants/' directory and start loading the tenants
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
 
-    // shared state between the background task and the http endpoint; note that the http endpoint
+    // shared state between the disk-usage backed eviction background task and the http endpoint
+    // that allows triggering disk-usage based eviction manually. note that the http endpoint
     // is still accessible even if background task is not configured as long as remote storage has
     // been configured.
     let disk_usage_eviction_state: Arc<DiskUsageEvictionState> = Arc::default();
