@@ -413,6 +413,9 @@ def poor_mans_du(
 
 
 def test_statvfs_error_handling(eviction_env: EvictionEnv):
+    """
+    We should log an error that statvfs fails.
+    """
     env = eviction_env
     env.neon_env.pageserver.stop()
     env.pageserver_start_with_mocked_statvfs(
@@ -425,3 +428,86 @@ def test_statvfs_error_handling(eviction_env: EvictionEnv):
 
     assert env.neon_env.pageserver.log_contains(".*statvfs failed.*EIO")
     env.neon_env.pageserver.allowed_errors.append(".*statvfs failed.*EIO")
+
+
+def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
+    """
+    If statvfs data shows 100% usage, the eviction task will drive it down to
+    the configured max_usage_pct.
+    """
+    env = eviction_env
+
+    env.neon_env.pageserver.stop()
+
+    # make it seem like we're at 100% utilization by setting total bytes to the used bytes
+    total_size, _, _ = env.timelines_du()
+    blocksize = 512
+    total_blocks = (total_size + (blocksize - 1)) // blocksize
+
+    env.pageserver_start_with_mocked_statvfs(
+        'disk_usage_based_eviction={ period = "1s", max_usage_pct = 50, min_avail_bytes = 0 }',
+        {
+            "type": "Success",
+            "blocksize": blocksize,
+            "total_blocks": total_blocks,
+            "used": {
+                "type": "WalkDir",
+                "path": str((env.neon_env.repo_dir / "tenants").absolute()),
+                # timelines_du() only reports layer files, do the same here
+                "name_filter": ".*__.*",
+            },
+        },
+    )
+
+    def relieved_log_message():
+        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved")
+
+    wait_until(10, 1, relieved_log_message)
+
+    post_eviction_total_size, _, _ = env.timelines_du()
+
+    assert post_eviction_total_size <= 0.5 * total_size, "we requested max 50% usage"
+
+
+def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
+    """
+    If statvfs data shows 100% usage, the eviction task will drive it down to
+    at least the configured min_avail_bytes.
+    """
+    env = eviction_env
+
+    env.neon_env.pageserver.stop()
+
+    # make it seem like we're at 100% utilization by setting total bytes to the used bytes
+    total_size, _, _ = env.timelines_du()
+    blocksize = 512
+    total_blocks = (total_size + (blocksize - 1)) // blocksize
+
+    min_avail_bytes = total_size // 2
+
+    env.pageserver_start_with_mocked_statvfs(
+        'disk_usage_based_eviction={ period = "1s", max_usage_pct = 100, min_avail_bytes = %s }'
+        % (min_avail_bytes),
+        {
+            "type": "Success",
+            "blocksize": blocksize,
+            "total_blocks": total_blocks,
+            "used": {
+                "type": "WalkDir",
+                "path": str((env.neon_env.repo_dir / "tenants").absolute()),
+                # timelines_du() only reports layer files, do the same here
+                "name_filter": ".*__.*",
+            },
+        },
+    )
+
+    def relieved_log_message():
+        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved")
+
+    wait_until(10, 1, relieved_log_message)
+
+    post_eviction_total_size, _, _ = env.timelines_du()
+
+    assert (
+        total_size - post_eviction_total_size >= min_avail_bytes
+    ), "we requested at least min_avail_bytes worth of free space"
