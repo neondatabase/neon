@@ -16,6 +16,7 @@ enum UsedBytesSource {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::upper_case_acronyms)]
 enum MockedError {
     EIO,
 }
@@ -57,6 +58,7 @@ struct Status<'a> {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn fstatvfs(_fd: libc::c_int, buf: *mut libc::statvfs64) -> libc::c_int {
     use std::mem::MaybeUninit;
 
@@ -108,12 +110,12 @@ pub extern "C" fn fstatvfs(_fd: libc::c_int, buf: *mut libc::statvfs64) -> libc:
             unsafe {
                 buf.write(ret);
             }
-            return 0;
+            0
         }
         Mock::Failure { mocked_error } => {
             // SAFETY: we mock the libc, we're allowed to set errno
             unsafe { libc::__errno_location().write(mocked_error.into()) };
-            return -1;
+            -1
         }
     }
 }
@@ -124,7 +126,7 @@ impl UsedBytesSource {
             UsedBytesSource::Fixed { value } => Ok(*value),
             UsedBytesSource::WalkDir { path, name_filter } => {
                 let mut total = 0;
-                let filter_compiled = name_filter.as_ref().map(|n| regex::Regex::new(&n).unwrap());
+                let filter_compiled = name_filter.as_ref().map(|n| regex::Regex::new(n).unwrap());
                 for entry in walkdir::WalkDir::new(path) {
                     let entry = entry?;
                     if !entry.file_type().is_file() {
