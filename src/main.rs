@@ -10,13 +10,18 @@ use s3_deleter::delete_batch_producer::DeleteBatchProducer;
 use s3_deleter::{
     get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, S3Deleter, S3Target,
 };
-use tracing::{info, warn};
+use tracing::{info, info_span, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let dry_run = !env::args().skip(1).any(|arg| arg == "--delete");
-
+    let mut args = env::args();
+    let binary_name = args
+        .next()
+        .context("binary name in not the first argument")?;
+    let dry_run = !args.any(|arg| arg == "--delete");
     let _guard = init_logging(dry_run);
+
+    let _main_span = info_span!("main", binary = %binary_name, %dry_run).entered();
     if dry_run {
         info!("Dry run, not removing items for real");
     } else {
@@ -46,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         unknown => anyhow::bail!("Unknown node type {unknown}"),
     };
 
-    info!("Starting S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}'");
+    info!("Starting extra tenant S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}'");
     let cloud_admin_api_client = CloudAdminApiClient::new(
         get_cloud_admin_api_token_or_exit(),
         cloud_admin_api_url_param,
