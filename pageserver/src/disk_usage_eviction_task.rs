@@ -282,7 +282,6 @@ struct LayerCount {
     count: usize,
 }
 
-#[allow(clippy::needless_late_init)]
 pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     state: &State,
     storage: &GenericRemoteStorage,
