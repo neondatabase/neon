@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -677,8 +678,7 @@ impl Timeline {
 
             let mut failed = 0;
 
-            let cancelled = task_mgr::shutdown_watcher();
-            tokio::pin!(cancelled);
+            let mut cancelled = pin!(task_mgr::shutdown_watcher());
 
             loop {
                 tokio::select! {
@@ -1837,13 +1837,13 @@ impl Timeline {
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
 
-        let calculation = async {
+        let mut calculation = pin!(async {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
                 .calculate_logical_size(lsn, cancel, &ctx)
                 .await
-        };
+        });
         let timeline_state_cancellation = async {
             loop {
                 match timeline_state_updates.changed().await {
@@ -1872,7 +1872,6 @@ impl Timeline {
             "aborted because task_mgr shutdown requested".to_string()
         };
 
-        tokio::pin!(calculation);
         loop {
             tokio::select! {
                 res = &mut calculation => { return res }
