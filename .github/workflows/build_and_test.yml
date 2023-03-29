@@ -240,7 +240,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS
 
       - name: Run cargo test
         run: |
