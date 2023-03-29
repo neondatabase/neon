@@ -113,7 +113,7 @@ runs:
         tar -C ${TEST_OUTPUT}/allure/results -cf ${ARCHIVE} --zstd .
         aws s3 mv --only-show-errors ${ARCHIVE} "s3://${BUCKET}/${RAW_PREFIX}/${ARCHIVE}"
 
-    # Potentially we could have several running build for the same key (for example for the main branch),  so we use improvised lock for this
+    # Potentially we could have several running build for the same key (for example for the main branch), so we use improvised lock for this
     - name: Acquire Allure lock
       if: ${{ inputs.action == 'generate' }}
       shell: bash -euxo pipefail {0}

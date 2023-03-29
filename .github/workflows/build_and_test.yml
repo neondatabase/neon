@@ -371,7 +371,7 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
-  merge-allure-report:
+  create-test-report:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
@@ -398,8 +398,30 @@ jobs:
           action: generate
           build_type: release
 
+      - uses: actions/github-script@v6
+        if: >
+          !cancelled() &&
+          github.event_name == 'pull_request' && (
+            steps.create-allure-report-debug.outputs.report-url ||
+            steps.create-allure-report-release.outputs.report-url
+          )
+        with:
+          script: |
+            const script = require("./scripts/pr-comment-test-report.js")
+            await script({
+                github,
+                context,
+                fetch,
+                reportUrlDebug: "${{ steps.create-allure-report-debug.outputs.report-url }}",
+                reportUrlRelease: "${{ steps.create-allure-report-release.outputs.report-url }}",
+            })
+
       - name: Store Allure test stat in the DB
-        if: ${{ steps.create-allure-report-debug.outputs.report-url || steps.create-allure-report-release.outputs.report-url }}
+        if: >
+          !cancelled() && (
+            steps.create-allure-report-debug.outputs.report-url ||
+            steps.create-allure-report-release.outputs.report-url
+          )
         env:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           REPORT_URL_DEBUG: ${{ steps.create-allure-report-debug.outputs.report-url }}
