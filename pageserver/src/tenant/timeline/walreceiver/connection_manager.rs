@@ -556,8 +556,7 @@ impl WalreceiverState {
 
                 let (new_sk_id, new_safekeeper_broker_data, new_wal_source_connconf) =
                     self.select_connection_candidate(Some(connected_sk_node))?;
-                let new_availability_zone =
-                    availability_zone_from_broker_info(new_safekeeper_broker_data);
+                let new_availability_zone = new_safekeeper_broker_data.availability_zone.clone();
 
                 let now = Utc::now().naive_utc();
                 if let Ok(latest_interaciton) =
@@ -704,11 +703,9 @@ impl WalreceiverState {
             None => {
                 let (new_sk_id, new_safekeeper_broker_data, new_wal_source_connconf) =
                     self.select_connection_candidate(None)?;
-                let new_availability_zone =
-                    availability_zone_from_broker_info(new_safekeeper_broker_data);
                 return Some(NewWalConnectionCandidate {
                     safekeeper_id: new_sk_id,
-                    availability_zone: new_availability_zone,
+                    availability_zone: new_safekeeper_broker_data.availability_zone.clone(),
                     wal_source_connconf: new_wal_source_connconf,
                     reason: ReconnectReason::NoExistingConnection,
                 });
@@ -871,14 +868,6 @@ fn wal_stream_connection_config(
     Ok(connstr)
 }
 
-// Takes availability_zone from proto structure and converts empty string to None.
-fn availability_zone_from_broker_info(info: &SafekeeperTimelineInfo) -> Option<String> {
-    match &info.availability_zone {
-        x if x.is_empty() => None,
-        x => Some(x.clone()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,7 +891,7 @@ mod tests {
                 peer_horizon_lsn: 0,
                 local_start_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
-                availability_zone: String::new(),
+                availability_zone: None,
             },
             latest_update,
         }
@@ -1328,11 +1317,11 @@ mod tests {
     async fn switch_to_same_availability_zone() -> anyhow::Result<()> {
         // Pageserver and one of safekeepers will be in the same availability zone
         // and pageserver should prefer to connect to it.
-        let test_az = "test_az".to_owned();
+        let test_az = Some("test_az".to_owned());
 
         let harness = TenantHarness::create("switch_to_same_availability_zone")?;
         let mut state = dummy_state(&harness).await;
-        state.availability_zone = Some(test_az.clone());
+        state.availability_zone = test_az.clone();
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
 

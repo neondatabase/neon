@@ -37,7 +37,7 @@ message SafekeeperTimelineInfo {
     // A connection string to use for WAL receiving.
     string safekeeper_connstr = 10;
     // Availability zone of a safekeeper.
-    string availability_zone = 11;
+    optional string availability_zone = 11;
 }
 
 message TenantTimelineId {

@@ -337,7 +337,7 @@ impl SharedState {
             safekeeper_connstr: conf.listen_pg_addr.clone(),
             backup_lsn: self.sk.inmem.backup_lsn.0,
             local_start_lsn: self.sk.state.local_start_lsn.0,
-            availability_zone: conf.availability_zone.clone().unwrap_or_default(),
+            availability_zone: conf.availability_zone.clone(),
         }
     }
 }
