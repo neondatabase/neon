@@ -592,7 +592,8 @@ async fn collect_eviction_candidates(
         }
     }
 
-    debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below);
+    debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
+        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
     candidates
         .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
 
