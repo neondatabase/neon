@@ -13,8 +13,9 @@ from fixtures.neon_fixtures import (
     PgBin,
     RemoteStorageKind,
     wait_for_last_flush_lsn,
+    wait_for_upload_queue_empty,
 )
-from fixtures.types import TenantId, TimelineId
+from fixtures.types import Lsn, TenantId, TimelineId
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
 
@@ -70,6 +71,7 @@ class EvictionEnv:
     pg_bin: PgBin
     pageserver_http: PageserverHttpClient
     layer_size: int
+    pgbench_init_lsns: Dict[TenantId, Lsn]
 
     def timelines_du(self) -> Tuple[int, int, int]:
         return poor_mans_du(self.neon_env, [(tid, tlid) for tid, tlid, _ in self.timelines])
@@ -79,6 +81,15 @@ class EvictionEnv:
             (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)])[0]
             for tid, tlid, _ in self.timelines
         }
+
+    def warm_up_tenant(self, tenant_id: TenantId):
+        """
+        Start a read-only compute at the LSN after pgbench -i, and run pgbench -S against it.
+        This assumes that the tenant is still at the state after pbench -i.
+        """
+        lsn = self.pgbench_init_lsns[tenant_id]
+        with self.neon_env.postgres.create_start("main", tenant_id=tenant_id, lsn=lsn) as pg:
+            self.pg_bin.run(["pgbench", "-S", pg.connstr()])
 
 
 @pytest.fixture
@@ -120,6 +131,8 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> It
     pgbench_scales = [4, 6]
     layer_size = 5 * 1024**2
 
+    pgbench_init_lsns = {}
+
     for scale in pgbench_scales:
         tenant_id, timeline_id = env.neon_cli.create_tenant(
             conf={
@@ -136,6 +149,12 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> It
             wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+        wait_for_upload_queue_empty(env.pageserver, tenant_id, timeline_id)
+        tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
+        assert tl_info["last_record_lsn"] == tl_info["disk_consistent_lsn"]
+        assert tl_info["disk_consistent_lsn"] == tl_info["remote_consistent_lsn"]
+        pgbench_init_lsns[tenant_id] = Lsn(tl_info["last_record_lsn"])
+
         layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
         log.info(f"{layers}")
         assert len(layers.historic_layers) >= 4
@@ -148,6 +167,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> It
         pageserver_http=pageserver_http,
         layer_size=layer_size,
         pg_bin=pg_bin,
+        pgbench_init_lsns=pgbench_init_lsns,
     )
 
     yield eviction_env
@@ -219,9 +239,8 @@ def test_pageserver_respects_overridden_resident_size(eviction_env: EvictionEnv)
     ps_http.set_tenant_config(large_tenant[0], {"min_resident_size_override": min_resident_size})
 
     # Make the large tenant more-recently used. An incorrect implemention would try to evict
-    # from the smaller tenant first, since its layers would be the least-recently-used
-    with env.neon_env.postgres.create_start("main", tenant_id=large_tenant[0]) as pg:
-        env.pg_bin.run(["pgbench", "-S", pg.connstr()])
+    # from the smaller tenant first, since its layers would be the least-recently-used.
+    env.warm_up_tenant(large_tenant[0])
 
     # do one run
     response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
@@ -290,8 +309,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     tenant_usage = du_by_timeline[our_tenant]
 
     # make our tenant more recently used than the other one
-    with env.neon_env.postgres.create_start("main", tenant_id=tenant_id) as pg:
-        env.pg_bin.run(["pgbench", "-S", pg.connstr()])
+    env.warm_up_tenant(tenant_id)
 
     target = total_on_disk - (tenant_usage // 2)
     response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
