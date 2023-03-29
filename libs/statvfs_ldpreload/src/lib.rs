@@ -3,9 +3,16 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum AvailBytesSource {
-    Fixed(u64),
-    WalkDir(PathBuf),
+#[serde(tag = "type")]
+enum UsedBytesSource {
+    Fixed {
+        value: u64,
+    },
+    WalkDir {
+        path: PathBuf,
+        // only count files whose names match this regex
+        name_filter: Option<String>,
+    },
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -27,7 +34,7 @@ enum Mock {
     Success {
         blocksize: u64,
         total_blocks: u64,
-        avail: AvailBytesSource,
+        used: UsedBytesSource,
     },
     Failure {
         mocked_error: MockedError,
@@ -75,18 +82,18 @@ pub extern "C" fn fstatvfs(_fd: libc::c_int, buf: *mut libc::statvfs64) -> libc:
         Mock::Success {
             blocksize,
             total_blocks,
-            avail,
+            used,
         } => {
-            let avail_bytes = avail.get().unwrap();
+            let used_bytes = used.get().unwrap();
 
             // round it up to the nearest block multiple
-            let avail_blocks = (avail_bytes + (blocksize - 1)) / blocksize;
+            let used_blocks = (used_bytes + (blocksize - 1)) / blocksize;
 
-            if avail_blocks > total_blocks {
-                panic!(
-                    "mocking error: avail_blocks > total_blocks: {avail_blocks} > {total_blocks}"
-                );
+            if used_blocks > total_blocks {
+                panic!("mocking error: used_blocks > total_blocks: {used_blocks} > {total_blocks}");
             }
+
+            let avail_blocks = total_blocks - used_blocks;
 
             // SAFETY: for the purposes of mocking, zeroed values for the fields which we
             // don't set below are fine.
@@ -111,20 +118,29 @@ pub extern "C" fn fstatvfs(_fd: libc::c_int, buf: *mut libc::statvfs64) -> libc:
     }
 }
 
-impl AvailBytesSource {
+impl UsedBytesSource {
     fn get(&self) -> anyhow::Result<u64> {
         match self {
-            AvailBytesSource::Fixed(n) => Ok(*n),
-            AvailBytesSource::WalkDir(path) => {
+            UsedBytesSource::Fixed { value } => Ok(*value),
+            UsedBytesSource::WalkDir { path, name_filter } => {
                 let mut total = 0;
+                let filter_compiled = name_filter.as_ref().map(|n| regex::Regex::new(&n).unwrap());
                 for entry in walkdir::WalkDir::new(path) {
                     let entry = entry?;
-                    if entry.file_type().is_file() {
-                        total += entry
-                            .metadata()
-                            .with_context(|| format!("get metadata of {:?}", entry.path()))?
-                            .len();
+                    if !entry.file_type().is_file() {
+                        continue;
                     }
+                    if !filter_compiled
+                        .as_ref()
+                        .map(|filter| filter.is_match(entry.file_name().to_str().unwrap()))
+                        .unwrap_or(true)
+                    {
+                        continue;
+                    }
+                    total += entry
+                        .metadata()
+                        .with_context(|| format!("get metadata of {:?}", entry.path()))?
+                        .len();
                 }
                 Ok(total)
             }
