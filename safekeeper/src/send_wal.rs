@@ -11,7 +11,7 @@ use postgres_backend::PostgresBackend;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
-use pq_proto::{BeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
+use pq_proto::{BeMessage, PageserverFeedback, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -319,11 +319,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                 // pageserver sends this.
                 // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
                 let buf = Bytes::copy_from_slice(&msg[9..]);
-                let reply = ReplicationFeedback::parse(buf);
+                let reply = PageserverFeedback::parse(buf);
 
-                trace!("ReplicationFeedback is {:?}", reply);
-                // Only pageserver sends ReplicationFeedback, so set the flag.
-                // This replica is the source of information to resend to compute.
+                trace!("PageserverFeedback is {:?}", reply);
                 self.feedback.pageserver_feedback = Some(reply);
 
                 self.tli
