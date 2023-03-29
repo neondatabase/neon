@@ -206,15 +206,22 @@ def test_pageserver_respects_overridden_resident_size(eviction_env: EvictionEnv)
         du_by_timeline[large_tenant] - du_by_timeline[small_tenant] > 5 * env.layer_size
     ), "ensure this test will do more than 1 eviction"
 
-    # give the larger tenant a haircut while preventing the smaller tenant from getting one
+    # Give the larger tenant a haircut while preventing the smaller tenant from getting one.
+    # To prevent the smaller from getting a haircut, we set min_resident_size to its current size.
+    # To ensure the larger tenant is getting a haircut, any non-zero `target` will do.
     min_resident_size = du_by_timeline[small_tenant]
-    target = (du_by_timeline[large_tenant] - du_by_timeline[small_tenant]) - 2*env.layer_size
+    target = 1
     assert any(
         [du > min_resident_size for du in du_by_timeline.values()]
     ), "ensure the larger tenant will get a haircut"
 
     ps_http.set_tenant_config(small_tenant[0], {"min_resident_size_override": min_resident_size})
     ps_http.set_tenant_config(large_tenant[0], {"min_resident_size_override": min_resident_size})
+
+    # Make the large tenant more-recently used. An incorrect implemention would try to evict
+    # from the smaller tenant first, since its layers would be the least-recently-used
+    with env.neon_env.postgres.create_start("main", tenant_id=large_tenant[0]) as pg:
+        env.pg_bin.run(["pgbench", "-S", pg.connstr()])
 
     # do one run
     response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
