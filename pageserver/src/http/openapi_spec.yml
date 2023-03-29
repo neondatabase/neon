@@ -873,13 +873,9 @@ components:
       type: object
       properties:
         tenant_specific_overrides:
-          type: object
-          schema:
-            $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfigInfo"
         effective_config:
-          type: object
-          schema:
-            $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfigInfo"
     TimelineInfo:
       type: object
       required:
