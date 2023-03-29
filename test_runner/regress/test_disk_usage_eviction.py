@@ -1,5 +1,6 @@
 import json
 import shutil
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -412,6 +413,9 @@ def poor_mans_du(
     return (total_on_disk, largest_layer, smallest_layer or 0)
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="LD_PRELOAD hack currently only supported on Linux"
+)
 def test_statvfs_error_handling(eviction_env: EvictionEnv):
     """
     We should log an error that statvfs fails.
@@ -430,6 +434,9 @@ def test_statvfs_error_handling(eviction_env: EvictionEnv):
     env.neon_env.pageserver.allowed_errors.append(".*statvfs failed.*EIO")
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="LD_PRELOAD hack currently only supported on Linux"
+)
 def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     """
     If statvfs data shows 100% usage, the eviction task will drive it down to
@@ -469,6 +476,9 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     assert post_eviction_total_size <= 0.5 * total_size, "we requested max 50% usage"
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="LD_PRELOAD hack currently only supported on Linux"
+)
 def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
     """
     If statvfs data shows 100% usage, the eviction task will drive it down to
