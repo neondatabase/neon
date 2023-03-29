@@ -563,9 +563,9 @@ async fn collect_eviction_candidates(
             s
         } else {
             debug!(
-                "using max layer size {} for tenant {}",
-                max_layer_size,
-                tenant.tenant_id()
+                tenant_id=%tenant.tenant_id(),
+                max_layer_size,                
+                "using max layer size as min_resident_size for tenant",
             );
             max_layer_size
         };
