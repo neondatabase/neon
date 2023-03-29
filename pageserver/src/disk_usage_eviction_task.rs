@@ -360,7 +360,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         usage_planned.add_available_bytes(candidate.layer.file_size());
 
         batched
-            .entry(TimelineKey(candidate.timeline.clone()))
+            .entry(TimelineKey(candidate.timeline))
             .or_default()
             .push(candidate.layer);
     }
