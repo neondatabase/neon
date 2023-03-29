@@ -260,6 +260,16 @@ jobs:
             cp "$SRC" "$DST"
           done
 
+          cdylibs=$(
+            ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
+            jq -r '.packages[].targets[] | select(.kind | index("cdylib")) | .name'
+          )
+          for lib in $cdylibs; do
+            SRC=target/$BUILD_TYPE/$lib.so
+            DST=/tmp/neon/bin/$lib.so
+            cp "$SRC" "$DST"
+          done
+
           # Install test executables and write list of all binaries (for code coverage)
           if [[ $BUILD_TYPE == "debug" ]]; then
             # Keep bloated coverage data files away from the rest of the artifact
