@@ -936,35 +936,40 @@ impl<'a> BeMessage<'a> {
     }
 }
 
-// Neon extension of postgres replication protocol
-// See NEON_STATUS_UPDATE_TAG_BYTE
+/// Feedback pageserver sends to safekeeper and safekeeper resends to compute.
+/// Serialized in custom flexible key/value format. In replication protocol, it
+/// is marked with NEON_STATUS_UPDATE_TAG_BYTE to differentiate from postgres
+/// Standby status update / Hot standby feedback messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplicationFeedback {
-    // Last known size of the timeline. Used to enforce timeline size limit.
+pub struct PageserverFeedback {
+    /// Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,
-    // Parts of StandbyStatusUpdate we resend to compute via safekeeper
-    pub ps_writelsn: u64,
-    pub ps_applylsn: u64,
-    pub ps_flushlsn: u64,
-    pub ps_replytime: SystemTime,
+    /// LSN last received and ingested by the pageserver.
+    pub last_received_lsn: u64,
+    /// LSN up to which data is persisted by the pageserver to its local disc.
+    pub disk_consistent_lsn: u64,
+    /// LSN up to which data is persisted by the pageserver on s3; safekeepers
+    /// consider WAL before it can be removed.
+    pub remote_consistent_lsn: u64,
+    pub replytime: SystemTime,
 }
 
-// NOTE: Do not forget to increment this number when adding new fields to ReplicationFeedback.
+// NOTE: Do not forget to increment this number when adding new fields to PageserverFeedback.
 // Do not remove previously available fields because this might be backwards incompatible.
-pub const REPLICATION_FEEDBACK_FIELDS_NUMBER: u8 = 5;
+pub const PAGESERVER_FEEDBACK_FIELDS_NUMBER: u8 = 5;
 
-impl ReplicationFeedback {
-    pub fn empty() -> ReplicationFeedback {
-        ReplicationFeedback {
+impl PageserverFeedback {
+    pub fn empty() -> PageserverFeedback {
+        PageserverFeedback {
             current_timeline_size: 0,
-            ps_writelsn: 0,
-            ps_applylsn: 0,
-            ps_flushlsn: 0,
-            ps_replytime: SystemTime::now(),
+            last_received_lsn: 0,
+            remote_consistent_lsn: 0,
+            disk_consistent_lsn: 0,
+            replytime: SystemTime::now(),
         }
     }
 
-    // Serialize ReplicationFeedback using custom format
+    // Serialize PageserverFeedback using custom format
     // to support protocol extensibility.
     //
     // Following layout is used:
@@ -974,24 +979,26 @@ impl ReplicationFeedback {
     // null-terminated string - key,
     // uint32 - value length in bytes
     // value itself
+    //
+    // TODO: change serialized fields names once all computes migrate to rename.
     pub fn serialize(&self, buf: &mut BytesMut) {
-        buf.put_u8(REPLICATION_FEEDBACK_FIELDS_NUMBER); // # of keys
+        buf.put_u8(PAGESERVER_FEEDBACK_FIELDS_NUMBER); // # of keys
         buf.put_slice(b"current_timeline_size\0");
         buf.put_i32(8);
         buf.put_u64(self.current_timeline_size);
 
         buf.put_slice(b"ps_writelsn\0");
         buf.put_i32(8);
-        buf.put_u64(self.ps_writelsn);
+        buf.put_u64(self.last_received_lsn);
         buf.put_slice(b"ps_flushlsn\0");
         buf.put_i32(8);
-        buf.put_u64(self.ps_flushlsn);
+        buf.put_u64(self.disk_consistent_lsn);
         buf.put_slice(b"ps_applylsn\0");
         buf.put_i32(8);
-        buf.put_u64(self.ps_applylsn);
+        buf.put_u64(self.remote_consistent_lsn);
 
         let timestamp = self
-            .ps_replytime
+            .replytime
             .duration_since(*PG_EPOCH)
             .expect("failed to serialize pg_replytime earlier than PG_EPOCH")
             .as_micros() as i64;
@@ -1001,9 +1008,10 @@ impl ReplicationFeedback {
         buf.put_i64(timestamp);
     }
 
-    // Deserialize ReplicationFeedback message
-    pub fn parse(mut buf: Bytes) -> ReplicationFeedback {
-        let mut rf = ReplicationFeedback::empty();
+    // Deserialize PageserverFeedback message
+    // TODO: change serialized fields names once all computes migrate to rename.
+    pub fn parse(mut buf: Bytes) -> PageserverFeedback {
+        let mut rf = PageserverFeedback::empty();
         let nfields = buf.get_u8();
         for _ in 0..nfields {
             let key = read_cstr(&mut buf).unwrap();
@@ -1016,39 +1024,39 @@ impl ReplicationFeedback {
                 b"ps_writelsn" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
-                    rf.ps_writelsn = buf.get_u64();
+                    rf.last_received_lsn = buf.get_u64();
                 }
                 b"ps_flushlsn" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
-                    rf.ps_flushlsn = buf.get_u64();
+                    rf.disk_consistent_lsn = buf.get_u64();
                 }
                 b"ps_applylsn" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
-                    rf.ps_applylsn = buf.get_u64();
+                    rf.remote_consistent_lsn = buf.get_u64();
                 }
                 b"ps_replytime" => {
                     let len = buf.get_i32();
                     assert_eq!(len, 8);
                     let raw_time = buf.get_i64();
                     if raw_time > 0 {
-                        rf.ps_replytime = *PG_EPOCH + Duration::from_micros(raw_time as u64);
+                        rf.replytime = *PG_EPOCH + Duration::from_micros(raw_time as u64);
                     } else {
-                        rf.ps_replytime = *PG_EPOCH - Duration::from_micros(-raw_time as u64);
+                        rf.replytime = *PG_EPOCH - Duration::from_micros(-raw_time as u64);
                     }
                 }
                 _ => {
                     let len = buf.get_i32();
                     warn!(
-                        "ReplicationFeedback parse. unknown key {} of len {len}. Skip it.",
+                        "PageserverFeedback parse. unknown key {} of len {len}. Skip it.",
                         String::from_utf8_lossy(key.as_ref())
                     );
                     buf.advance(len as usize);
                 }
             }
         }
-        trace!("ReplicationFeedback parsed is {:?}", rf);
+        trace!("PageserverFeedback parsed is {:?}", rf);
         rf
     }
 }
@@ -1059,33 +1067,33 @@ mod tests {
 
     #[test]
     fn test_replication_feedback_serialization() {
-        let mut rf = ReplicationFeedback::empty();
+        let mut rf = PageserverFeedback::empty();
         // Fill rf with some values
         rf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.
-        rf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        rf.replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
         let mut data = BytesMut::new();
         rf.serialize(&mut data);
 
-        let rf_parsed = ReplicationFeedback::parse(data.freeze());
+        let rf_parsed = PageserverFeedback::parse(data.freeze());
         assert_eq!(rf, rf_parsed);
     }
 
     #[test]
     fn test_replication_feedback_unknown_key() {
-        let mut rf = ReplicationFeedback::empty();
+        let mut rf = PageserverFeedback::empty();
         // Fill rf with some values
         rf.current_timeline_size = 12345678;
         // Set rounded time to be able to compare it with deserialized value,
         // because it is rounded up to microseconds during serialization.
-        rf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
+        rf.replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
         let mut data = BytesMut::new();
         rf.serialize(&mut data);
 
         // Add an extra field to the buffer and adjust number of keys
         if let Some(first) = data.first_mut() {
-            *first = REPLICATION_FEEDBACK_FIELDS_NUMBER + 1;
+            *first = PAGESERVER_FEEDBACK_FIELDS_NUMBER + 1;
         }
 
         data.put_slice(b"new_field_one\0");
@@ -1093,7 +1101,7 @@ mod tests {
         data.put_u64(42);
 
         // Parse serialized data and check that new field is not parsed
-        let rf_parsed = ReplicationFeedback::parse(data.freeze());
+        let rf_parsed = PageserverFeedback::parse(data.freeze());
         assert_eq!(rf, rf_parsed);
     }
 

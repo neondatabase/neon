@@ -255,7 +255,7 @@ pub struct TimelineCollector {
     epoch_start_lsn: GenericGaugeVec<AtomicU64>,
     peer_horizon_lsn: GenericGaugeVec<AtomicU64>,
     remote_consistent_lsn: GenericGaugeVec<AtomicU64>,
-    feedback_ps_write_lsn: GenericGaugeVec<AtomicU64>,
+    ps_last_received_lsn: GenericGaugeVec<AtomicU64>,
     feedback_last_time_seconds: GenericGaugeVec<AtomicU64>,
     timeline_active: GenericGaugeVec<AtomicU64>,
     wal_backup_active: GenericGaugeVec<AtomicU64>,
@@ -339,15 +339,15 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(remote_consistent_lsn.desc().into_iter().cloned());
 
-        let feedback_ps_write_lsn = GenericGaugeVec::new(
+        let ps_last_received_lsn = GenericGaugeVec::new(
             Opts::new(
-                "safekeeper_feedback_ps_write_lsn",
+                "safekeeper_ps_last_received_lsn",
                 "Last LSN received by the pageserver, acknowledged in the feedback",
             ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
-        descs.extend(feedback_ps_write_lsn.desc().into_iter().cloned());
+        descs.extend(ps_last_received_lsn.desc().into_iter().cloned());
 
         let feedback_last_time_seconds = GenericGaugeVec::new(
             Opts::new(
@@ -458,7 +458,7 @@ impl TimelineCollector {
             epoch_start_lsn,
             peer_horizon_lsn,
             remote_consistent_lsn,
-            feedback_ps_write_lsn,
+            ps_last_received_lsn,
             feedback_last_time_seconds,
             timeline_active,
             wal_backup_active,
@@ -489,7 +489,7 @@ impl Collector for TimelineCollector {
         self.epoch_start_lsn.reset();
         self.peer_horizon_lsn.reset();
         self.remote_consistent_lsn.reset();
-        self.feedback_ps_write_lsn.reset();
+        self.ps_last_received_lsn.reset();
         self.feedback_last_time_seconds.reset();
         self.timeline_active.reset();
         self.wal_backup_active.reset();
@@ -514,11 +514,11 @@ impl Collector for TimelineCollector {
             let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
 
-            let mut most_advanced: Option<pq_proto::ReplicationFeedback> = None;
+            let mut most_advanced: Option<pq_proto::PageserverFeedback> = None;
             for replica in tli.replicas.iter() {
                 if let Some(replica_feedback) = replica.pageserver_feedback {
                     if let Some(current) = most_advanced {
-                        if current.ps_writelsn < replica_feedback.ps_writelsn {
+                        if current.last_received_lsn < replica_feedback.last_received_lsn {
                             most_advanced = Some(replica_feedback);
                         }
                     } else {
@@ -568,11 +568,10 @@ impl Collector for TimelineCollector {
                 .set(tli.wal_storage.flush_wal_seconds);
 
             if let Some(feedback) = most_advanced {
-                self.feedback_ps_write_lsn
+                self.ps_last_received_lsn
                     .with_label_values(labels)
-                    .set(feedback.ps_writelsn);
-                if let Ok(unix_time) = feedback.ps_replytime.duration_since(SystemTime::UNIX_EPOCH)
-                {
+                    .set(feedback.last_received_lsn);
+                if let Ok(unix_time) = feedback.replytime.duration_since(SystemTime::UNIX_EPOCH) {
                     self.feedback_last_time_seconds
                         .with_label_values(labels)
                         .set(unix_time.as_secs());
@@ -599,7 +598,7 @@ impl Collector for TimelineCollector {
         mfs.extend(self.epoch_start_lsn.collect());
         mfs.extend(self.peer_horizon_lsn.collect());
         mfs.extend(self.remote_consistent_lsn.collect());
-        mfs.extend(self.feedback_ps_write_lsn.collect());
+        mfs.extend(self.ps_last_received_lsn.collect());
         mfs.extend(self.feedback_last_time_seconds.collect());
         mfs.extend(self.timeline_active.collect());
         mfs.extend(self.wal_backup_active.collect());
