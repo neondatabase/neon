@@ -8,10 +8,11 @@
 #include "miscadmin.h"
 #include "utils/acl.h"
 #include "fmgr.h"
+#include "utils/guc.h"
 #include <curl/curl.h>
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
-static CURL *CurlHandle = NULL;
+static char *ConsoleURL = NULL;
 
 typedef enum
 {
@@ -45,9 +46,213 @@ typedef struct DdlHashTable
 static DdlHashTable RootTable;
 static DdlHashTable *CurrentDdlTable = &RootTable;
 
+// Includes null terminator
+static size_t ComputeLengthOfDeltas()
+{
+    size_t length = sizeof('[');
+    {
+        HASH_SEQ_STATUS status;
+        DbEntry *entry;
+        hash_seq_init(&status, RootTable.db_table);
+        while((entry = hash_seq_search(&status)) != NULL)
+        {
+            length += sizeof('{');
+            length += strlen("\"op\":");
+            length += sizeof('"');
+            length += entry->type == Op_Set ? strlen("set") : strlen("del");
+            length += sizeof('"');
+            length += strlen(", \"name\":");
+            length += sizeof('"');
+            length += strlen(entry->name);
+            length += sizeof('"');
+            length += strlen(", \"type\":\"db\"");
+            if(entry->owner[0] != '\0')
+            {
+                length += strlen(", \"owner\":");
+                length += sizeof('"');
+                length += strlen(entry->owner);
+                length += sizeof('"');
+            }
+            if(entry->old_name[0] != '\0')
+            {
+                length += strlen(", \"old_name\":");
+                length += sizeof('"');
+                length += strlen(entry->old_name);
+                length += sizeof('"');
+            }
+            length += sizeof('}');
+            length += sizeof(',');
+        }
+    }
+
+    {
+        HASH_SEQ_STATUS status;
+        RoleEntry *entry;
+        hash_seq_init(&status, RootTable.role_table);
+        while((entry = hash_seq_search(&status)) != NULL)
+        {
+            length += sizeof('{');
+            length += strlen("\"op\":");
+            length += sizeof('"');
+            length += entry->type == Op_Set ? strlen("set") : strlen("del");
+            length += sizeof('"');
+            length += strlen(", \"name\":");
+            length += sizeof('"');
+            length += strlen(entry->name);
+            length += sizeof('"');
+            length += strlen(", \"type\":\"role\"");
+            if(entry->password)
+            {
+                length += strlen(", \"password\":");
+                length += sizeof('"');
+                length += strlen(entry->password);
+                length += sizeof('"');
+            }
+            if(entry->old_name[0] != '\0')
+            {
+                length += strlen(", \"old_name\":");
+                length += sizeof('"');
+                length += strlen(entry->old_name);
+                length += sizeof('"');
+            }
+            length += sizeof('}');
+            length += sizeof(',');
+        }
+    }
+    // We have added an extra byte due to the trailing comma. However,
+    // we also need room for null terminator, so we don't touch it.
+    length += sizeof(']');
+    return length;
+}
+
+void AppendChar(char **message, char c)
+{
+    **message = c;
+    (*message) += 1;
+}
+
+void AppendString(char **message, const char *str)
+{
+    size_t length = strlen(str);
+    memcpy(*message, str, length);
+    (*message) += length;
+}
+
+void ConstructDeltaMessage(char *message)
+{
+#define AppendChar(x) AppendChar(&message, x)
+#define AppendString(x) AppendString(&message, x)
+
+    AppendChar('[');
+    {
+        HASH_SEQ_STATUS status;
+        DbEntry *entry;
+        hash_seq_init(&status, RootTable.db_table);
+        while((entry = hash_seq_search(&status)) != NULL)
+        {
+            AppendChar('{');
+            AppendString("\"op\":");
+            AppendChar('"');
+            if(entry->type == Op_Set)
+                AppendString("set");
+            else
+                AppendString("del");
+            AppendChar('"');
+            AppendString(", \"name\":");
+            AppendChar('"');
+            AppendString(entry->name);
+            AppendChar('"');
+            AppendString(", \"type\":\"db\"");
+            if(entry->owner[0] != '\0')
+            {
+                AppendString(", \"owner\":");
+                AppendChar('"');
+                AppendString(entry->owner);
+                AppendChar('"');
+            }
+            if(entry->old_name[0] != '\0')
+            {
+                AppendString(", \"old_name\":");
+                AppendChar('"');
+                AppendString(entry->old_name);
+                AppendChar('"');
+            }
+            AppendChar('}');
+            AppendChar(',');
+        }
+    }
+
+    {
+        HASH_SEQ_STATUS status;
+        RoleEntry *entry;
+        hash_seq_init(&status, RootTable.role_table);
+        while((entry = hash_seq_search(&status)) != NULL)
+        {
+            AppendChar('{');
+            AppendString("\"op\":");
+            AppendChar('"');
+            if(entry->type == Op_Set)
+                AppendString("set");
+            else
+                AppendString("del");
+            AppendChar('"');
+            AppendString(", \"name\":");
+            AppendChar('"');
+            AppendString(entry->name);
+            AppendChar('"');
+            AppendString(", \"type\":\"role\"");
+            if(entry->password)
+            {
+                AppendString(", \"password\":");
+                AppendChar('"');
+                AppendString(entry->password);
+                AppendChar('"');
+            }
+            if(entry->old_name[0] != '\0')
+            {
+                AppendString(", \"old_name\":");
+                AppendChar('"');
+                AppendString(entry->old_name);
+                AppendChar('"');
+            }
+            AppendChar('}');
+            AppendChar(',');
+        }
+    }
+    *message++ = ']'; // Overwrite trailing comma
+    *message++ = '\0';
+#undef AppendChar
+#undef AppendString
+}
+
 static void SendDeltasToConsole()
 {
-    
+    if(!ConsoleURL)
+        return;
+    CURL *curl = curl_easy_init();
+    if(!curl)
+    {
+        errmsg("Failed to initialize curl object");
+        return;
+    }
+
+    size_t length_of_message = ComputeLengthOfDeltas(); // Includes null terminator
+    char *message = palloc(length_of_message);
+    ConstructDeltaMessage(message);
+
+    struct curl_slist *header = NULL;
+    header = curl_slist_append(header, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, message);
+    curl_easy_setopt(curl, CURLOPT_URL, ConsoleURL);
+    if(curl_easy_perform(curl) != 0)
+    {
+        errmsg("Failed to perform curl request");
+    }
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(header);
+    pfree(message);
 }
 
 static void PushTable()
@@ -456,8 +661,20 @@ void InitConsoleConnector()
     ProcessUtility_hook = NeonProcessUtility;
     RegisterXactCallback(NeonXactCallback, NULL);
     RegisterSubXactCallback(NeonSubXactCallback, NULL);
-    CurlHandle = curl_easy_init();
-    if(!CurlHandle)
+
+    DefineCustomStringVariable(
+        "neon.console_url",
+        "URL of the Neon Console, which will be forwarded changes to dbs and roles",
+        NULL,
+        &ConsoleURL,
+        "",
+        PGC_POSTMASTER,
+        0,
+        NULL,
+        NULL,
+        NULL);
+
+    if(curl_global_init(CURL_GLOBAL_DEFAULT))
     {
         errmsg("Failed to initialize curl");
     }
@@ -465,5 +682,5 @@ void InitConsoleConnector()
 
 void CleanupConsoleConnector()
 {
-    curl_easy_cleanup(CurlHandle);
+    curl_global_cleanup();
 }
