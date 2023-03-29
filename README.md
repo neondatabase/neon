@@ -40,6 +40,8 @@ pacman -S base-devel readline zlib libseccomp openssl clang \
 postgresql-libs cmake postgresql protobuf
 ```
 
+Building Neon requires 3.15+ version of `protoc` (protobuf-compiler). If your distribution provides an older version, you can install a newer version from [here](https://github.com/protocolbuffers/protobuf/releases).
+
 2. [Install Rust](https://www.rust-lang.org/tools/install)
 ```
 # recommended approach from https://www.rust-lang.org/tools/install
