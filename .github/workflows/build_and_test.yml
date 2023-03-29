@@ -265,8 +265,8 @@ jobs:
             jq -r '.packages[].targets[] | select(.kind | index("cdylib")) | .name'
           )
           for lib in $cdylibs; do
-            SRC=target/$BUILD_TYPE/$lib.so
-            DST=/tmp/neon/bin/$lib.so
+            SRC=target/$BUILD_TYPE/lib$lib.so
+            DST=/tmp/neon/bin/lib$lib.so
             cp "$SRC" "$DST"
           done
 
