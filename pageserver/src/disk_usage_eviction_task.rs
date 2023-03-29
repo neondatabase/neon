@@ -556,9 +556,9 @@ async fn collect_eviction_candidates(
         // A default override can be put in the default tenant conf in the pageserver.toml.
         let min_resident_size = if let Some(s) = tenant.get_min_resident_size_override() {
             debug!(
-                "using overridden min resident size {} for tenant {}",
-                s,
-                tenant.tenant_id()
+                tenant_id=%tenant.tenant_id(),
+                override=s,
+                "using overridden min resident size for tenant"
             );
             s
         } else {
