@@ -3,7 +3,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Tuple
+from typing import Any, Dict, Iterator, Tuple
 
 import pytest
 from fixtures.log_helper import log
@@ -93,6 +93,32 @@ class EvictionEnv:
         lsn = self.pgbench_init_lsns[tenant_id]
         with self.neon_env.postgres.create_start("main", tenant_id=tenant_id, lsn=lsn) as pg:
             self.pg_bin.run(["pgbench", "-S", pg.connstr()])
+
+    def pageserver_mock_statvfs(self, config_override: str, mock: Dict[str, Any]):
+        self.neon_env.pageserver.stop()
+
+        magic = str(uuid.uuid4())
+
+        preload_lib_path: Path = self.neon_env.neon_binpath / "libstatvfs_ldpreload.so"
+        assert preload_lib_path.is_file(), "libstatvfs_ldpreload.so must be built"
+
+        self.neon_env.pageserver.start(
+            overrides=("--pageserver-config-override=" + config_override,),
+            extra_env_vars={
+                "LD_PRELOAD": str(preload_lib_path.absolute()),
+                "NEON_STATVFS_LDPRELOAD_CONFIG": json.dumps(
+                    {
+                        "magic": magic,
+                        "mock": mock,
+                    }
+                ),
+            },
+        )
+
+        def statvfs_called():
+            assert self.neon_env.pageserver.log_contains(".*statvfs_ldpreload status:.*" + magic)
+
+        wait_until(10, 1, statvfs_called)
 
 
 @pytest.fixture
@@ -370,38 +396,15 @@ def poor_mans_du(
     return (total_on_disk, largest_layer, smallest_layer or 0)
 
 
-def test_disk_usage_eviction_loop_statvfs(eviction_env: EvictionEnv):
+def test_statvfs_error_handling(eviction_env: EvictionEnv):
     env = eviction_env
-
-    env.neon_env.pageserver.stop()
-
-    magic = str(uuid.uuid4())
-
-    preload_lib_path: Path = env.neon_env.neon_binpath / "libstatvfs_ldpreload.so"
-    assert preload_lib_path.is_file(), "libstatvfs_ldpreload.so must be built"
-
-    env.neon_env.pageserver.start(
-        overrides=(
-            '--pageserver-config-override=disk_usage_based_eviction={ period = "1s", max_usage_pct = 90, min_avail_bytes = 0 }',
-        ),
-        extra_env_vars={
-            "LD_PRELOAD": str(preload_lib_path.absolute()),
-            "NEON_STATVFS_LDPRELOAD_CONFIG": json.dumps(
-                {
-                    "magic": magic,
-                    "mock": {
-                        "type": "Failure",
-                        "mocked_error": "EIO",
-                    },
-                }
-            ),
+    env.pageserver_mock_statvfs(
+        'disk_usage_based_eviction={ period = "1s", max_usage_pct = 90, min_avail_bytes = 0 }',
+        {
+            "type": "Failure",
+            "mocked_error": "EIO",
         },
     )
-
-    def statvfs_called():
-        assert env.neon_env.pageserver.log_contains(".*statvfs_ldpreload status:.*" + magic)
-
-    wait_until(10, 1, statvfs_called)
 
     assert env.neon_env.pageserver.log_contains(".*statvfs failed.*EIO")
     env.neon_env.pageserver.allowed_errors.append(".*statvfs failed.*EIO")
