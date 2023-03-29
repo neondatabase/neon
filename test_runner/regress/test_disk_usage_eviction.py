@@ -1,14 +1,16 @@
 import json
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, Tuple
+from typing import Any, Dict, Tuple
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     LayerMapInfo,
+    LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
     PageserverHttpClient,
@@ -122,7 +124,7 @@ class EvictionEnv:
 
 
 @pytest.fixture
-def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Iterator[EvictionEnv]:
+def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> EvictionEnv:
     """
     Creates two tenants, one somewhat larger than the other.
     """
@@ -136,20 +138,15 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> It
 
     # allow because we are invoking this manually; we always warn on executing disk based eviction
     env.pageserver.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
-    env.pageserver.allowed_errors.append(
-        r".* Changing Active tenant to Broken state, reason: broken from test"
-    )
 
-    # break the difficult to use initial default tenant, later assert that it has not been evicted
-    broken_tenant_id, broken_timeline_id = (env.initial_tenant, env.initial_timeline)
-    assert broken_timeline_id is not None
-    pageserver_http.tenant_break(env.initial_tenant)
-    (broken_on_disk_before, _, _) = poor_mans_du(
-        env, timelines=[(broken_tenant_id, broken_timeline_id)]
-    )
-    env.pageserver.allowed_errors.append(
-        f".*extend_lru_candidates.*Tenant {broken_tenant_id} is not active. Current state: Broken"
-    )
+    # remove the initial tenant
+    pageserver_http.tenant_detach(env.initial_tenant)
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    tenant_remote_storage = env.remote_storage.root / "tenants" / str(env.initial_tenant)
+    assert tenant_remote_storage.is_dir()
+    shutil.rmtree(tenant_remote_storage)
+    env.initial_tenant = TenantId("0" * 32)
+    env.initial_timeline = None
 
     timelines = []
 
@@ -199,15 +196,36 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> It
         pgbench_init_lsns=pgbench_init_lsns,
     )
 
-    yield eviction_env
+    return eviction_env
 
-    (broken_on_disk_after, _, _) = poor_mans_du(
-        eviction_env.neon_env, [(broken_tenant_id, broken_timeline_id)]
+
+def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
+    env = eviction_env
+
+    env.neon_env.pageserver.allowed_errors.append(
+        r".* Changing Active tenant to Broken state, reason: broken from test"
     )
+    broken_tenant_id, broken_timeline_id, _ = env.timelines[0]
+    env.pageserver_http.tenant_break(broken_tenant_id)
 
-    assert (
-        broken_on_disk_before == broken_on_disk_after
-    ), "only touch active tenants with disk_usage_eviction"
+    healthy_tenant_id, healthy_timeline_id, _ = env.timelines[1]
+
+    broken_size_pre, _, _ = poor_mans_du(env.neon_env, [(broken_tenant_id, broken_timeline_id)])
+    healthy_size_pre, _, _ = poor_mans_du(env.neon_env, [(healthy_tenant_id, healthy_timeline_id)])
+
+    # try to evict everything, then validate that broken tenant wasn't touched
+    target = broken_size_pre + healthy_size_pre
+
+    response = env.pageserver_http.disk_usage_eviction_run({"evict_bytes": target})
+    log.info(f"{response}")
+
+    broken_size_post, _, _ = poor_mans_du(env.neon_env, [(broken_tenant_id, broken_timeline_id)])
+    healthy_size_post, _, _ = poor_mans_du(env.neon_env, [(healthy_tenant_id, healthy_timeline_id)])
+
+    assert broken_size_pre == broken_size_post, "broken tenant should not be touched"
+    assert healthy_size_post < healthy_size_pre
+    assert healthy_size_post == 0
+    env.neon_env.pageserver.allowed_errors.append(".*" + GLOBAL_LRU_LOG_LINE)
 
 
 def test_pageserver_evicts_until_pressure_is_relieved(eviction_env: EvictionEnv):
