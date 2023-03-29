@@ -8,6 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::compute::ComputeControlPlane;
+use control_plane::compute::Replication;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -473,7 +474,14 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             println!("Creating node for imported timeline ...");
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
-            cplane.new_node(tenant_id, name, timeline_id, None, None, pg_version)?;
+            cplane.new_node(
+                tenant_id,
+                name,
+                timeline_id,
+                None,
+                pg_version,
+                Replication::Primary,
+            )?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -559,19 +567,18 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .iter()
                 .filter(|((node_tenant_id, _), _)| node_tenant_id == &tenant_id)
             {
-                let lsn_str = match node.lsn {
-                    None => {
-                        // -> primary node
+                let lsn_str = match node.replication {
+                    Replication::Static(lsn) => {
+                        // -> read-only node
+                        // Use the node's LSN.
+                        lsn.to_string()
+                    }
+                    _ => {
                         // Use the LSN at the end of the timeline.
                         timeline_infos
                             .get(&node.timeline_id)
                             .map(|bi| bi.last_record_lsn.to_string())
                             .unwrap_or_else(|| "?".to_string())
-                    }
-                    Some(lsn) => {
-                        // -> read-only node
-                        // Use the node's LSN.
-                        lsn.to_string()
                     }
                 };
 
@@ -618,7 +625,26 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            cplane.new_node(tenant_id, &node_name, timeline_id, lsn, port, pg_version)?;
+            let hot_standby = sub_args
+                .get_one::<bool>("hot-standby")
+                .copied()
+                .unwrap_or(false);
+
+            let replication = match (lsn, hot_standby) {
+                (Some(lsn), false) => Replication::Static(lsn),
+                (None, true) => Replication::Replica,
+                (None, false) => Replication::Primary,
+                (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+            };
+
+            cplane.new_node(
+                tenant_id,
+                &node_name,
+                timeline_id,
+                port,
+                pg_version,
+                replication,
+            )?;
         }
         "start" => {
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
@@ -636,7 +662,21 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 None
             };
 
+            let hot_standby = sub_args
+                .get_one::<bool>("hot-standby")
+                .copied()
+                .unwrap_or(false);
+
             if let Some(node) = node {
+                match (&node.replication, hot_standby) {
+                    (Replication::Static(_), true) => {
+                        bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                    }
+                    (Replication::Primary, true) => {
+                        bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                    }
+                    _ => {}
+                }
                 println!("Starting existing postgres {node_name}...");
                 node.start(&auth_token)?;
             } else {
@@ -658,6 +698,14 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     .get_one::<u32>("pg-version")
                     .copied()
                     .context("Failed to `pg-version` from the argument string")?;
+
+                let replication = match (lsn, hot_standby) {
+                    (Some(lsn), false) => Replication::Static(lsn),
+                    (None, true) => Replication::Replica,
+                    (None, false) => Replication::Primary,
+                    (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+                };
+
                 // when used with custom port this results in non obvious behaviour
                 // port is remembered from first start command, i e
                 // start --port X
@@ -665,8 +713,14 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 // start <-- will also use port X even without explicit port argument
                 println!("Starting new postgres (v{pg_version}) {node_name} on timeline {timeline_id} ...");
 
-                let node =
-                    cplane.new_node(tenant_id, node_name, timeline_id, lsn, port, pg_version)?;
+                let node = cplane.new_node(
+                    tenant_id,
+                    node_name,
+                    timeline_id,
+                    port,
+                    pg_version,
+                    replication,
+                )?;
                 node.start(&auth_token)?;
             }
         }
@@ -919,6 +973,12 @@ fn cli() -> Command {
         .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
         .required(false);
 
+    let hot_standby_arg = Arg::new("hot-standby")
+        .value_parser(value_parser!(bool))
+        .long("hot-standby")
+        .help("If set, the node will be a hot replica on the specified timeline")
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1043,6 +1103,7 @@ fn cli() -> Command {
                             .long("config-only")
                             .required(false))
                     .arg(pg_version_arg.clone())
+                    .arg(hot_standby_arg.clone())
                 )
                 .subcommand(Command::new("start")
                     .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
@@ -1053,6 +1114,7 @@ fn cli() -> Command {
                     .arg(lsn_arg)
                     .arg(port_arg)
                     .arg(pg_version_arg)
+                    .arg(hot_standby_arg)
                 )
                 .subcommand(
                     Command::new("stop")
