@@ -27,6 +27,7 @@ use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
 use std::io;
 use std::net::TcpListener;
+use std::pin::pin;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -466,8 +467,7 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
 
-        let copyin_reader = StreamReader::new(copyin_stream(pgb));
-        tokio::pin!(copyin_reader);
+        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
         timeline
             .import_basebackup_from_tar(&mut copyin_reader, base_lsn, &ctx)
             .await?;
@@ -512,8 +512,7 @@ impl PageServerHandler {
         info!("importing wal");
         pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
         pgb.flush().await?;
-        let copyin_reader = StreamReader::new(copyin_stream(pgb));
-        tokio::pin!(copyin_reader);
+        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
         import_wal_from_tar(&timeline, &mut copyin_reader, start_lsn, end_lsn, &ctx).await?;
         info!("wal import complete");
 

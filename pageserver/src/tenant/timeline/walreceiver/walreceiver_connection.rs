@@ -2,6 +2,7 @@
 
 use std::{
     error::Error,
+    pin::pin,
     str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -17,7 +18,7 @@ use postgres_ffi::v14::xlog_utils::normalize_lsn;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
-use tokio::{pin, select, sync::watch, time};
+use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -187,8 +188,7 @@ pub async fn handle_walreceiver_connection(
     let query = format!("START_REPLICATION PHYSICAL {startpoint}");
 
     let copy_stream = replication_client.copy_both_simple(&query).await?;
-    let physical_stream = ReplicationStream::new(copy_stream);
-    pin!(physical_stream);
+    let mut physical_stream = pin!(ReplicationStream::new(copy_stream));
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 

@@ -399,7 +399,6 @@ impl Timeline {
         let mut throwaway_cache = HashMap::new();
         let gather =
             crate::tenant::size::gather_inputs(tenant, limit, None, &mut throwaway_cache, ctx);
-        tokio::pin!(gather);
 
         tokio::select! {
             _ = cancel.cancelled() => {}
