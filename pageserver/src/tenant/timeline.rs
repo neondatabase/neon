@@ -1055,8 +1055,8 @@ impl Timeline {
         use super::layer_map::Replacement;
 
         if local_layer.is_remote_layer() {
-            // TODO: consider returning an err here instead of false, which is the same out the
-            // match later
+            // TODO(issue #3851): consider returning an err here instead of false,
+            // which is the same out the match later
             return Ok(false);
         }
 
