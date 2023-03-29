@@ -96,9 +96,7 @@ class EvictionEnv:
         with self.neon_env.postgres.create_start("main", tenant_id=tenant_id, lsn=lsn) as pg:
             self.pg_bin.run(["pgbench", "-S", pg.connstr()])
 
-    def pageserver_mock_statvfs(self, config_override: str, mock: Dict[str, Any]):
-        self.neon_env.pageserver.stop()
-
+    def pageserver_start_with_mocked_statvfs(self, config_override: str, mock: Dict[str, Any]):
         magic = str(uuid.uuid4())
 
         preload_lib_path: Path = self.neon_env.neon_binpath / "libstatvfs_ldpreload.so"
@@ -416,7 +414,8 @@ def poor_mans_du(
 
 def test_statvfs_error_handling(eviction_env: EvictionEnv):
     env = eviction_env
-    env.pageserver_mock_statvfs(
+    env.neon_env.pageserver.stop()
+    env.pageserver_start_with_mocked_statvfs(
         'disk_usage_based_eviction={ period = "1s", max_usage_pct = 90, min_avail_bytes = 0 }',
         {
             "type": "Failure",
