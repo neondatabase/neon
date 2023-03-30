@@ -654,7 +654,18 @@ mod filesystem_level_usage {
         tenants_dir: &Path,
         config: &'a DiskUsageEvictionTaskConfig,
     ) -> anyhow::Result<Usage<'a>> {
-        let stat = Statvfs::get(tenants_dir, config.mock_statvfs.as_ref())
+        let mock_config = {
+            #[cfg(feature = "testing")]
+            {
+                config.mock_statvfs.as_ref()
+            }
+            #[cfg(not(feature = "testing"))]
+            {
+                None
+            }
+        };
+
+        let stat = Statvfs::get(tenants_dir, mock_config)
             .context("statvfs failed, presumably directory got unlinked")?;
 
         // https://unix.stackexchange.com/a/703650
