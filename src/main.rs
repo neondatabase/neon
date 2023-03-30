@@ -84,9 +84,11 @@ async fn main() -> anyhow::Result<()> {
 
     let deletion_stats = deleter_task_result.context("s3 deletion")?;
     info!(
-        "Deleted {} tenants and {} keys total. Dry run: {}",
-        deletion_stats.len(),
-        deletion_stats.values().sum::<usize>(),
+        "Deleted {} tenants ({} keys) abd {} timelines ({} keys) total. Dry run: {}",
+        deletion_stats.deleted_tenant_keys.len(),
+        deletion_stats.deleted_tenant_keys.values().sum::<usize>(),
+        deletion_stats.deleted_timeline_keys.len(),
+        deletion_stats.deleted_timeline_keys.values().sum::<usize>(),
         dry_run,
     );
     info!("Total stats: {deletion_stats:?}");

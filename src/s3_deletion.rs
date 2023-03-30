@@ -12,8 +12,9 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, Instrument};
 
+use crate::copied_definitions::id::TenantTimelineId;
 use crate::delete_batch_producer::DeleteBatch;
-use crate::{list_objects_with_retries, RootTarget, TenantId, MAX_RETRIES};
+use crate::{list_objects_with_retries, RootTarget, S3Target, TenantId, MAX_RETRIES};
 
 pub struct S3Deleter {
     dry_run: bool,
@@ -40,7 +41,7 @@ impl S3Deleter {
         }
     }
 
-    pub async fn remove_all(self) -> anyhow::Result<BTreeMap<TenantId, usize>> {
+    pub async fn remove_all(self) -> anyhow::Result<DeletionStats> {
         let mut deletion_tasks = JoinSet::new();
         for id in 0..self.concurrent_tasks_count.get() {
             let closure_client = Arc::clone(&self.s3_client);
@@ -53,7 +54,7 @@ impl S3Deleter {
                     (
                         id,
                         async move {
-                            let mut task_stats = BTreeMap::new();
+                            let mut task_stats = DeletionStats::default();
                             loop {
                                 let mut guard = closure_batch_receiver.lock().await;
                                 let receiver_result = guard.try_recv();
@@ -69,10 +70,11 @@ impl S3Deleter {
                                         .await
                                         .context("batch deletion")?;
                                         debug!(
-                                            "Batch processed, number of objects deleted per tenant in the batch is: {:?}",
-                                            stats.deleted_keys
+                                            "Batch processed, number of objects deleted per tenant in the batch is: {}, per timeline — {}",
+                                            stats.deleted_tenant_keys.len(),
+                                            stats.deleted_timeline_keys.len(),
                                         );
-                                        task_stats.extend(stats.deleted_keys);
+                                        task_stats.merge(stats);
                                     }
                                     Err(TryRecvError::Empty) => {
                                         debug!("No tasks yet, waiting");
@@ -93,12 +95,12 @@ impl S3Deleter {
             );
         }
 
-        let mut total_stats = BTreeMap::new();
+        let mut total_stats = DeletionStats::default();
         while let Some(task_result) = deletion_tasks.join_next().await {
             match task_result {
                 Ok((id, Ok(task_stats))) => {
                     info!("Task {id} completed");
-                    total_stats.extend(task_stats);
+                    total_stats.merge(task_stats);
                 }
                 Ok((id, Err(e))) => {
                     error!("Task {id} failed: {e:#}");
@@ -117,8 +119,18 @@ impl S3Deleter {
 /// actually delete nothing, so keep the number lower.
 const MAX_ITEMS_TO_DELETE: usize = 200;
 
-struct DeletionStats {
-    deleted_keys: BTreeMap<TenantId, usize>,
+#[derive(Debug, Default)]
+pub struct DeletionStats {
+    pub deleted_tenant_keys: BTreeMap<TenantId, usize>,
+    pub deleted_timeline_keys: BTreeMap<TenantTimelineId, usize>,
+}
+
+impl DeletionStats {
+    fn merge(&mut self, other: Self) {
+        self.deleted_tenant_keys.extend(other.deleted_tenant_keys);
+        self.deleted_timeline_keys
+            .extend(other.deleted_timeline_keys);
+    }
 }
 
 async fn delete_batch(
@@ -127,18 +139,81 @@ async fn delete_batch(
     batch: DeleteBatch,
     dry_run: bool,
 ) -> anyhow::Result<DeletionStats> {
-    if !batch.timelines.is_empty() {
-        todo!("TODO kb Timeline deletion is not supported yet");
+    let (deleted_tenant_keys, deleted_timeline_keys) = tokio::join!(
+        delete_tenants_batch(batch.tenants, s3_target, s3_client, dry_run),
+        delete_timelines_batch(batch.timelines, s3_target, s3_client, dry_run),
+    );
+
+    Ok(DeletionStats {
+        deleted_tenant_keys: deleted_tenant_keys.context("tenant batch deletion")?,
+        deleted_timeline_keys: deleted_timeline_keys.context("timeline batch deletion")?,
+    })
+}
+
+async fn delete_tenants_batch(
+    batched_tenants: Vec<TenantId>,
+    s3_target: &RootTarget,
+    s3_client: &Client,
+    dry_run: bool,
+) -> Result<BTreeMap<TenantId, usize>, anyhow::Error> {
+    info!("Deleting tenants batch of size {}", batched_tenants.len());
+    info!("Tenant ids to remove: {batched_tenants:?}");
+    let deleted_keys = delete_elements(
+        &batched_tenants,
+        s3_target,
+        s3_client,
+        dry_run,
+        |root_target, tenant_to_delete| root_target.tenant_root(tenant_to_delete),
+    )
+    .await?;
+
+    if !dry_run {
+        ensure_tenant_batch_deleted(s3_client, s3_target, batched_tenants).await?;
     }
-    let batch = batch.tenants;
-    info!("Deleting batch of size {}", batch.len());
-    info!("Tenant ids to remove: {batch:?}");
+    Ok(deleted_keys)
+}
+
+async fn delete_timelines_batch(
+    batched_timelines: Vec<TenantTimelineId>,
+    s3_target: &RootTarget,
+    s3_client: &Client,
+    dry_run: bool,
+) -> Result<BTreeMap<TenantTimelineId, usize>, anyhow::Error> {
+    info!(
+        "Deleting timelines batch of size {}",
+        batched_timelines.len()
+    );
+    info!("Tenant ids to remove: {batched_timelines:?}");
+    let deleted_keys = delete_elements(
+        &batched_timelines,
+        s3_target,
+        s3_client,
+        dry_run,
+        |root_target, timeline_to_delete| root_target.timeline_root(timeline_to_delete),
+    )
+    .await?;
+
+    if !dry_run {
+        ensure_timeline_batch_deleted(s3_client, s3_target, batched_timelines).await?;
+    }
+    Ok(deleted_keys)
+}
+
+async fn delete_elements<I>(
+    batched_ids: &Vec<I>,
+    s3_target: &RootTarget,
+    s3_client: &Client,
+    dry_run: bool,
+    target_producer: impl Fn(&RootTarget, I) -> S3Target,
+) -> Result<BTreeMap<I, usize>, anyhow::Error>
+where
+    I: Ord + PartialOrd + Copy,
+{
     let mut deleted_keys = BTreeMap::new();
     let mut object_ids_to_delete = Vec::with_capacity(MAX_ITEMS_TO_DELETE);
-
-    for &tenant_to_delete in &batch {
+    for &id_to_delete in batched_ids {
         let mut continuation_token = None;
-        let mut subtargets = vec![s3_target.tenants_root().clone()];
+        let mut subtargets = vec![target_producer(s3_target, id_to_delete)];
         while !subtargets.is_empty() {
             let current_target = subtargets.pop().expect("Subtargets is not empty");
             loop {
@@ -172,7 +247,7 @@ async fn delete_batch(
                     }
 
                     object_ids_to_delete.push(object_id);
-                    *deleted_keys.entry(tenant_to_delete).or_default() += 1;
+                    *deleted_keys.entry(id_to_delete).or_default() += 1;
                 }
 
                 subtargets.extend(
@@ -195,7 +270,6 @@ async fn delete_batch(
             }
         }
     }
-
     if !object_ids_to_delete.is_empty() {
         info!("Removing last objects of the batch");
         send_delete_request(
@@ -207,12 +281,7 @@ async fn delete_batch(
         .await
         .context("Last object ids deletion")?;
     }
-
-    if !dry_run {
-        ensure_batch_deleted(s3_client, s3_target, batch).await?;
-    }
-
-    Ok(DeletionStats { deleted_keys })
+    Ok(deleted_keys)
 }
 
 async fn send_delete_request(
@@ -265,7 +334,7 @@ async fn send_delete_request(
     }
 }
 
-async fn ensure_batch_deleted(
+async fn ensure_tenant_batch_deleted(
     s3_client: &Client,
     s3_target: &RootTarget,
     batch: Vec<TenantId>,
@@ -281,7 +350,7 @@ async fn ensure_batch_deleted(
             || fetch_response.common_prefixes().is_some()
         {
             error!(
-                "Tenant {tenant_id} should be deleted, but his list response is {fetch_response:?}"
+                "Tenant {tenant_id} should be deleted, but its list response is {fetch_response:?}"
             );
             not_deleted_tenants.push(tenant_id);
         }
@@ -290,6 +359,36 @@ async fn ensure_batch_deleted(
     anyhow::ensure!(
         not_deleted_tenants.is_empty(),
         "Failed to delete all tenants in a batch"
+    );
+    Ok(())
+}
+
+async fn ensure_timeline_batch_deleted(
+    s3_client: &Client,
+    s3_target: &RootTarget,
+    batch: Vec<TenantTimelineId>,
+) -> anyhow::Result<()> {
+    let mut not_deleted_timelines = Vec::with_capacity(batch.len());
+
+    for timeline_id in batch {
+        let fetch_response =
+            list_objects_with_retries(s3_client, &s3_target.timeline_root(timeline_id), None)
+                .await?;
+
+        if fetch_response.is_truncated()
+            || fetch_response.contents().is_some()
+            || fetch_response.common_prefixes().is_some()
+        {
+            error!(
+                "Timeline {timeline_id} should be deleted, but its list response is {fetch_response:?}"
+            );
+            not_deleted_timelines.push(timeline_id);
+        }
+    }
+
+    anyhow::ensure!(
+        not_deleted_timelines.is_empty(),
+        "Failed to delete all timelines in a batch"
     );
     Ok(())
 }
