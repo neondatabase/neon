@@ -171,6 +171,15 @@ async fn update_task(
 
 const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 
+pub fn init_remote_storage(conf: &SafeKeeperConf) {
+    REMOTE_STORAGE.get_or_init(|| {
+        conf
+            .remote_storage
+            .as_ref()
+            .map(|c| GenericRemoteStorage::from_config(c).expect("failed to create remote storage"))
+    });
+}
+
 /// Sits on wal_backup_launcher_rx and starts/stops per timeline wal backup
 /// tasks. Having this in separate task simplifies locking, allows to reap
 /// panics and separate elections from offloading itself.

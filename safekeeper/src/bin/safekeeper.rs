@@ -31,7 +31,7 @@ use safekeeper::defaults::{
 };
 use safekeeper::http;
 use safekeeper::remove_wal;
-use safekeeper::wal_backup;
+use safekeeper::wal_backup::{self, init_remote_storage};
 use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
@@ -299,6 +299,9 @@ fn start_safekeeper(conf: SafeKeeperConf, fix_old_timelines: Option<String>, dry
 }
 
 fn fix_timeline_start_lsn(conf: SafeKeeperConf, backup_dir: String, dry_run: bool) -> Result<()> {
+    // init remote storage
+    init_remote_storage(&conf);
+
     // create async runtime
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
