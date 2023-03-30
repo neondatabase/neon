@@ -10,7 +10,6 @@ from typing import Any, Dict, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    LayerMapInfo,
     LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
@@ -72,7 +71,7 @@ def test_min_resident_size_override_handling(
 
 @dataclass
 class EvictionEnv:
-    timelines: list[Tuple[TenantId, TimelineId, LayerMapInfo]]
+    timelines: list[Tuple[TenantId, TimelineId]]
     neon_env: NeonEnv
     pg_bin: PgBin
     pageserver_http: PageserverHttpClient
@@ -80,12 +79,12 @@ class EvictionEnv:
     pgbench_init_lsns: Dict[TenantId, Lsn]
 
     def timelines_du(self) -> Tuple[int, int, int]:
-        return poor_mans_du(self.neon_env, [(tid, tlid) for tid, tlid, _ in self.timelines])
+        return poor_mans_du(self.neon_env, [(tid, tlid) for tid, tlid in self.timelines])
 
     def du_by_timeline(self) -> Dict[Tuple[TenantId, TimelineId], int]:
         return {
             (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)])[0]
-            for tid, tlid, _ in self.timelines
+            for tid, tlid in self.timelines
         }
 
     def warm_up_tenant(self, tenant_id: TenantId):
@@ -187,7 +186,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
         log.info(f"{layers}")
         assert len(layers.historic_layers) >= 4
 
-        timelines.append((tenant_id, timeline_id, layers))
+        timelines.append((tenant_id, timeline_id))
 
     eviction_env = EvictionEnv(
         timelines=timelines,
@@ -207,10 +206,10 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
     env.neon_env.pageserver.allowed_errors.append(
         r".* Changing Active tenant to Broken state, reason: broken from test"
     )
-    broken_tenant_id, broken_timeline_id, _ = env.timelines[0]
+    broken_tenant_id, broken_timeline_id = env.timelines[0]
     env.pageserver_http.tenant_break(broken_tenant_id)
 
-    healthy_tenant_id, healthy_timeline_id, _ = env.timelines[1]
+    healthy_tenant_id, healthy_timeline_id = env.timelines[1]
 
     broken_size_pre, _, _ = poor_mans_du(env.neon_env, [(broken_tenant_id, broken_timeline_id)])
     healthy_size_pre, _, _ = poor_mans_du(env.neon_env, [(healthy_tenant_id, healthy_timeline_id)])
