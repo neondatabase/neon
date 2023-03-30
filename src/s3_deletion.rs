@@ -12,12 +12,13 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, Instrument};
 
+use crate::delete_batch_producer::DeleteBatch;
 use crate::{list_objects_with_retries, S3Target, TenantId, MAX_RETRIES};
 
 pub struct S3Deleter {
     dry_run: bool,
     concurrent_tasks_count: NonZeroUsize,
-    delete_batch_receiver: Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>>,
+    delete_batch_receiver: Arc<Mutex<UnboundedReceiver<DeleteBatch>>>,
     s3_client: Arc<Client>,
     s3_target: S3Target,
 }
@@ -27,7 +28,7 @@ impl S3Deleter {
         dry_run: bool,
         concurrent_tasks_count: NonZeroUsize,
         s3_client: Arc<Client>,
-        delete_batch_receiver: Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>>,
+        delete_batch_receiver: Arc<Mutex<UnboundedReceiver<DeleteBatch>>>,
         s3_target: S3Target,
     ) -> Self {
         Self {
@@ -125,9 +126,14 @@ struct DeletionStats {
 async fn delete_batch(
     s3_client: &Client,
     s3_target: &S3Target,
-    batch: Vec<TenantId>,
+    batch: DeleteBatch,
     dry_run: bool,
 ) -> anyhow::Result<DeletionStats> {
+    // TODO kb process timelines too
+    if !batch.timelines.is_empty() {
+        todo!("Timeline deletion is not supported yet");
+    }
+    let batch = batch.tenants;
     info!("Deleting batch of size {}", batch.len());
     info!("Tenant ids to remove: {batch:?}");
     let mut deleted_keys = BTreeMap::new();

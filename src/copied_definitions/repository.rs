@@ -20,30 +20,6 @@ pub struct Key {
 pub const KEY_SIZE: usize = 18;
 
 impl Key {
-    /// 'field2' is used to store tablespaceid for relations and small enum numbers for other relish.
-    /// As long as Neon does not support tablespace (because of lack of access to local file system),
-    /// we can assume that only some predefined namespace OIDs are used which can fit in u16
-    pub fn to_i128(&self) -> i128 {
-        assert!(self.field2 < 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
-        (((self.field1 & 0xf) as i128) << 120)
-            | (((self.field2 & 0xFFFF) as i128) << 104)
-            | ((self.field3 as i128) << 72)
-            | ((self.field4 as i128) << 40)
-            | ((self.field5 as i128) << 32)
-            | self.field6 as i128
-    }
-
-    pub fn from_i128(x: i128) -> Self {
-        Key {
-            field1: ((x >> 120) & 0xf) as u8,
-            field2: ((x >> 104) & 0xFFFF) as u32,
-            field3: (x >> 72) as u32,
-            field4: (x >> 40) as u32,
-            field5: (x >> 32) as u8,
-            field6: x as u32,
-        }
-    }
-
     pub fn next(&self) -> Key {
         self.add(1)
     }

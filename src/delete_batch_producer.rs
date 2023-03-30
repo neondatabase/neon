@@ -9,7 +9,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::cloud_admin_api::CloudAdminApiClient;
-use crate::{list_objects_with_retries, S3Target, TenantId, MAX_RETRIES};
+use crate::copied_definitions::id::TimelineId;
+use crate::{list_objects_with_retries, S3Target, TenantId, TraversingDepth, MAX_RETRIES};
 
 /// Typical tenant to remove contains 1 layer and 1 index_part.json blobs
 /// Also, there are some non-standard tenants to remove, having more layers.
@@ -21,8 +22,26 @@ use crate::{list_objects_with_retries, S3Target, TenantId, MAX_RETRIES};
 const BATCH_SIZE: usize = 100;
 
 pub struct DeleteBatchProducer {
-    batch_sender_task: JoinHandle<anyhow::Result<usize>>,
-    batch_receiver: Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>>,
+    batch_sender_task: JoinHandle<anyhow::Result<BatchProducerStats>>,
+    batch_receiver: Arc<Mutex<UnboundedReceiver<DeleteBatch>>>,
+}
+
+pub struct BatchProducerStats {
+    pub tenants_checked: usize,
+    pub timelines_checked: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct DeleteBatch {
+    pub tenants: Vec<TenantId>,
+    pub timelines: Vec<TimelineId>,
+}
+
+impl DeleteBatch {
+    pub fn merge(&mut self, other: Self) {
+        self.tenants.extend(other.tenants);
+        self.timelines.extend(other.timelines);
+    }
 }
 
 impl DeleteBatchProducer {
@@ -30,8 +49,13 @@ impl DeleteBatchProducer {
         admin_client: CloudAdminApiClient,
         s3_client: Arc<Client>,
         s3_target: S3Target,
-        tenant_limit: Option<usize>,
+        traversing_depth: TraversingDepth,
+        total_processed_items_limit: Option<usize>,
     ) -> Self {
+        if matches!(traversing_depth, TraversingDepth::Timeline) {
+            todo!("Timeline traversing is not supported yet");
+        }
+
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::unbounded_channel();
         let list_span = info_span!("bucket_list", name = %s3_target.bucket_name);
         let admin_client = Arc::new(admin_client);
@@ -47,7 +71,7 @@ impl DeleteBatchProducer {
                     .with_context(|| format!("bucket {} was not found", s3_target.bucket_name))?;
 
                 let mut continuation_token = None;
-                let mut next_batch = Vec::with_capacity(BATCH_SIZE);
+                let mut next_tenant_batch = Vec::with_capacity(BATCH_SIZE);
                 let mut total_tenants_listed = 0_usize;
 
                 loop {
@@ -68,7 +92,7 @@ impl DeleteBatchProducer {
                                 .strip_prefix(&s3_target.prefix_in_bucket)?
                                 .strip_suffix('/')
                         })
-                        .take(tenant_limit.unwrap_or(usize::MAX))
+                        .take(total_processed_items_limit.unwrap_or(usize::MAX))
                         .map(|tenant_id_str| {
                             let tenant_id = tenant_id_str.parse().with_context(|| {
                                 format!("Incorrect tenant id str: {tenant_id_str}")
@@ -85,15 +109,20 @@ impl DeleteBatchProducer {
                         .await
                         .context("filter active tenant ids")?
                     {
-                        if next_batch.len() >= BATCH_SIZE {
-                            let batch_to_send =
-                                std::mem::replace(&mut next_batch, Vec::with_capacity(BATCH_SIZE));
-                            info!("Produced new batch, size: {}", batch_to_send.len());
+                        if next_tenant_batch.len() >= BATCH_SIZE {
+                            let batched_tenants = std::mem::replace(
+                                &mut next_tenant_batch,
+                                Vec::with_capacity(BATCH_SIZE),
+                            );
+                            info!("Produced new batch, size: {}", batched_tenants.len());
                             batch_sender
-                                .send(batch_to_send)
+                                .send(DeleteBatch {
+                                    tenants: batched_tenants,
+                                    timelines: Vec::new(),
+                                })
                                 .expect("Receiver is not held in the same struct");
                         }
-                        next_batch.push(tenant_id_to_delete);
+                        next_tenant_batch.push(tenant_id_to_delete);
                     }
 
                     match fetch_response.next_continuation_token {
@@ -102,15 +131,21 @@ impl DeleteBatchProducer {
                     }
                 }
 
-                if !next_batch.is_empty() {
-                    info!("Produced final batch, size: {}", next_batch.len());
+                if !next_tenant_batch.is_empty() {
+                    info!("Produced final batch, size: {}", next_tenant_batch.len());
                     batch_sender
-                        .send(next_batch)
+                        .send(DeleteBatch {
+                            tenants: next_tenant_batch,
+                            timelines: Vec::new(),
+                        })
                         .expect("Receiver is not held in the same struct");
                 }
 
                 info!("Finished listing the bucket");
-                Ok(total_tenants_listed)
+                Ok(BatchProducerStats {
+                    tenants_checked: total_tenants_listed,
+                    timelines_checked: 0,
+                })
             }
             .instrument(list_span),
         );
@@ -121,11 +156,11 @@ impl DeleteBatchProducer {
         }
     }
 
-    pub fn subscribe(&self) -> Arc<Mutex<UnboundedReceiver<Vec<TenantId>>>> {
+    pub fn subscribe(&self) -> Arc<Mutex<UnboundedReceiver<DeleteBatch>>> {
         self.batch_receiver.clone()
     }
 
-    pub async fn join(self) -> anyhow::Result<usize> {
+    pub async fn join(self) -> anyhow::Result<BatchProducerStats> {
         match self.batch_sender_task.await {
             Ok(task_result) => task_result,
             Err(join_error) => anyhow::bail!("Failed to join the task: {join_error}"),

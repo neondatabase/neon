@@ -29,9 +29,10 @@ pub struct S3Target {
     pub delimiter: String,
 }
 
-pub enum DeleteMode {
-    Tenants,
-    Timelines,
+#[derive(Debug, Clone, Copy)]
+pub enum TraversingDepth {
+    Tenant,
+    Timeline,
 }
 
 impl S3Target {

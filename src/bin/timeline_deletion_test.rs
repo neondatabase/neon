@@ -1,14 +1,13 @@
 use std::env;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use anyhow::Context;
 use aws_sdk_s3::Region;
 use reqwest::Url;
 use s3_deleter::cloud_admin_api::CloudAdminApiClient;
-use s3_deleter::delete_batch_producer::DeleteBatchProducer;
+use s3_deleter::delete_batch_producer::{DeleteBatch, DeleteBatchProducer};
 use s3_deleter::{
-    get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, S3Deleter, S3Target,
+    get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, S3Target, TraversingDepth,
 };
 use tracing::{info, info_span, warn};
 
@@ -32,12 +31,12 @@ async fn main() -> anyhow::Result<()> {
         env::var("SSO_ACCOUNT_ID").context("'SSO_ACCOUNT_ID' param retrieval")?;
     let region_param = env::var("REGION").context("'REGION' param retrieval")?;
     let bucket_param = env::var("BUCKET").context("'BUCKET' param retrieval")?;
-    let total_processed_items_limit_param: Option<usize> = env::var("TOTAL_PROCESSED_ITEMS_LIMIT")
+    let batch_items_limit_param: Option<usize> = env::var("BATCH_ITEMS_LIMIT")
         .ok()
         .map(|limit_str| {
             limit_str
                 .parse()
-                .context("'TOTAL_PROCESSED_ITEMS_LIMIT' param parsing")
+                .context("'BATCH_ITEMS_LIMIT' param parsing")
         })
         .transpose()?;
     let cloud_admin_api_url_param: Url = env::var("CLOUD_ADMIN_API_URL")
@@ -55,7 +54,10 @@ async fn main() -> anyhow::Result<()> {
         unknown => anyhow::bail!("Unknown node type {unknown}"),
     };
 
-    info!("Starting extra tenant S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}'");
+    // TODO kb env arg + parsing
+    let traversing_depth = TraversingDepth::Timeline;
+
+    info!("Starting extra S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}', traversing depth: {traversing_depth:?}");
     let cloud_admin_api_client = CloudAdminApiClient::new(
         get_cloud_admin_api_token_or_exit(),
         cloud_admin_api_url_param,
@@ -72,37 +74,37 @@ async fn main() -> anyhow::Result<()> {
     let delete_batch_producer = DeleteBatchProducer::start(
         cloud_admin_api_client,
         Arc::clone(&s3_client),
-        s3_target.clone(),
-        s3_deleter::TraversingDepth::Tenant,
-        total_processed_items_limit_param,
-    );
-
-    let s3_deleter = S3Deleter::new(
-        dry_run,
-        NonZeroUsize::new(15).unwrap(),
-        s3_client,
-        delete_batch_producer.subscribe(),
         s3_target,
+        traversing_depth,
+        batch_items_limit_param,
     );
 
-    let (deleter_task_result, batch_producer_task_result) =
-        tokio::join!(s3_deleter.remove_all(), delete_batch_producer.join());
+    let delete_batch_receiver = delete_batch_producer.subscribe();
+    let batch_items_peeker = async move {
+        let mut all_items = DeleteBatch::default();
+        let mut batch_subscription = delete_batch_receiver.lock().await;
+        while let Some(new_batch) = batch_subscription.recv().await {
+            all_items.merge(new_batch);
+        }
+        all_items
+    };
 
-    let deletion_stats = deleter_task_result.context("s3 deletion")?;
+    let (all_items_to_delete, batch_producer_task_result) =
+        tokio::join!(batch_items_peeker, delete_batch_producer.join());
     info!(
-        "Deleted {} tenants and {} keys total. Dry run: {}",
-        deletion_stats.len(),
-        deletion_stats.values().sum::<usize>(),
-        dry_run,
+        "{} tenants and {} timelines should be deleted",
+        all_items_to_delete.tenants.len(),
+        all_items_to_delete.timelines.len()
     );
-    info!("Total stats: {deletion_stats:?}");
-
     let batch_producer_stats = batch_producer_task_result.context("delete batch producer join")?;
     info!(
         "Total bucket tenants listed: {}, timelines: {}",
         batch_producer_stats.tenants_checked, batch_producer_stats.timelines_checked
     );
-
+    assert!(
+        all_items_to_delete.tenants.len() + all_items_to_delete.timelines.len()
+            <= batch_producer_stats.tenants_checked + batch_producer_stats.timelines_checked
+    );
     info!("Finished S3 removal");
 
     Ok(())
