@@ -598,7 +598,6 @@ class NeonEnvBuilder:
         rust_log_override: Optional[str] = None,
         default_branch_name: str = DEFAULT_BRANCH_NAME,
         preserve_database_files: bool = False,
-        initial_tenant: Optional[TenantId] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -614,39 +613,32 @@ class NeonEnvBuilder:
         self.safekeepers_enable_fsync = safekeepers_enable_fsync
         self.auth_enabled = auth_enabled
         self.default_branch_name = default_branch_name
-        self.env: Optional[NeonEnv] = None
+        self.env: Optional[NeonEnvWithoutInitialTenant] = None
         self.remote_storage_prefix: Optional[str] = None
         self.keep_remote_storage_contents: bool = True
         self.neon_binpath = neon_binpath
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
         self.preserve_database_files = preserve_database_files
-        self.initial_tenant = initial_tenant or TenantId.generate()
 
-    def init_configs(self) -> NeonEnv:
+    def init_configs(self) -> NeonEnvWithoutInitialTenant:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
-        self.env = NeonEnv(self)
+        self.env = NeonEnvWithoutInitialTenant(self)
         return self.env
 
     def start(self):
         assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
-    def init_start(self) -> NeonEnv:
-        env = self.init_configs()
+    def init_start_no_initial_tenant(self) -> NeonEnvWithoutInitialTenant:
+        self.env = self.init_configs()
         self.start()
+        return self.env
 
-        # Prepare the default branch to start the postgres on later.
-        # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
-        log.info(
-            f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
-        )
-        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
-        env.initial_timeline = initial_timeline
-        log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
-
-        return env
+    def init_start(self) -> NeonEnv:
+        env_without_initial_tenant = self.init_start_no_initial_tenant()
+        return NeonEnv(env_without_initial_tenant)
 
     def enable_remote_storage(
         self,
@@ -854,7 +846,7 @@ class NeonEnvBuilder:
             self.env.pageserver.assert_no_errors()
 
 
-class NeonEnv:
+class NeonEnvWithoutInitialTenant:
     """
     An object representing the Neon runtime environment. It consists of
     the page server, 0-N safekeepers, and the compute nodes.
@@ -904,17 +896,11 @@ class NeonEnv:
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
-        self.initial_tenant = config.initial_tenant
-        self.initial_timeline: Optional[TimelineId] = None
+        # self.initial_tenant: TenantId = TenantId.generate()
+        # self.initial_timeline: Optional[TimelineId] = None
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
-            f"""
-            default_tenant_id = '{config.initial_tenant}'
-        """
-        )
-
-        toml += textwrap.dedent(
             f"""
             [broker]
             listen_addr = '{self.broker.listen_addr()}'
@@ -1013,6 +999,32 @@ class NeonEnv:
         pub = (Path(self.repo_dir) / "auth_public_key.pem").read_text()
         priv = (Path(self.repo_dir) / "auth_private_key.pem").read_text()
         return AuthKeys(pub=pub, priv=priv)
+
+
+class NeonEnv(NeonEnvWithoutInitialTenant):
+    """Wrapper class around NeonEnvWithoutInitialTenant that provides a default tenant & timeline"""
+
+    initial_tenant: TenantId
+    initial_timeline: TimelineId
+
+    def __init__(self, baseObject: NeonEnvWithoutInitialTenant):
+        # https://stackoverflow.com/a/1445289
+        self.__class__ = type(
+            baseObject.__class__.__name__, (self.__class__, baseObject.__class__), {}
+        )
+        self.__dict__ = baseObject.__dict__
+
+        # Prepare the default branch to start the postgres on later.
+        # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
+        initial_tenant = TenantId.generate()
+        log.info(f"Creating initial tenant {initial_tenant} and its initial timeline")
+        initial_tenant2, initial_timeline = self.neon_cli.create_tenant(
+            tenant_id=initial_tenant, set_default=True
+        )
+        assert initial_tenant == initial_tenant2
+        self.initial_tenant = initial_tenant
+        self.initial_timeline = initial_timeline
+        log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
 
 @pytest.fixture(scope=shareable_scope)
@@ -1637,7 +1649,7 @@ class AbstractNeonCli(abc.ABC):
     Do not use directly, use specific subclasses instead.
     """
 
-    def __init__(self, env: NeonEnv):
+    def __init__(self, env: NeonEnvWithoutInitialTenant):
         self.env = env
 
     COMMAND: str = cast(str, None)  # To be overwritten by the derived class.
@@ -1796,8 +1808,7 @@ class NeonCli(AbstractNeonCli):
             "create",
             "--branch-name",
             new_branch_name,
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
+            *(["--tenant-id", str(tenant_id)] if tenant_id is not None else []),
             "--pg-version",
             self.env.pg_version,
         ]
@@ -1825,8 +1836,7 @@ class NeonCli(AbstractNeonCli):
             "branch",
             "--branch-name",
             new_branch_name,
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
+            *(["--tenant-id", str(tenant_id)] if tenant_id is not None else []),
         ]
         if ancestor_branch_name is not None:
             cmd.extend(["--ancestor-branch-name", ancestor_branch_name])
@@ -1855,7 +1865,11 @@ class NeonCli(AbstractNeonCli):
         # main [b49f7954224a0ad25cc0013ea107b54b]
         # ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
         res = self.raw_cli(
-            ["timeline", "list", "--tenant-id", str(tenant_id or self.env.initial_tenant)]
+            [
+                "timeline",
+                "list",
+                *(["--tenant-id", str(tenant_id)] if tenant_id is not None else []),
+            ]
         )
         timelines_cli = sorted(
             map(
@@ -1946,8 +1960,7 @@ class NeonCli(AbstractNeonCli):
         args = [
             "pg",
             "create",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
+            *(["--tenant-id", str(tenant_id)] if tenant_id is not None else []),
             "--branch-name",
             branch_name,
             "--pg-version",
@@ -1974,8 +1987,7 @@ class NeonCli(AbstractNeonCli):
         args = [
             "pg",
             "start",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
+            *(["--tenant-id", str(tenant_id)] if tenant_id is not None else []),
             "--pg-version",
             self.env.pg_version,
         ]
@@ -2000,8 +2012,7 @@ class NeonCli(AbstractNeonCli):
         args = [
             "pg",
             "stop",
-            "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
+            *(["--tenant-id", str(tenant_id)] if tenant_id is not None else []),
         ]
         if destroy:
             args.append("--destroy")
@@ -2050,7 +2061,12 @@ class NeonPageserver(PgProtocol):
 
     TEMP_FILE_SUFFIX = "___temp"
 
-    def __init__(self, env: NeonEnv, port: PageserverPort, config_override: Optional[str] = None):
+    def __init__(
+        self,
+        env: NeonEnvWithoutInitialTenant,
+        port: PageserverPort,
+        config_override: Optional[str] = None,
+    ):
         super().__init__(host="localhost", port=port.pg, user="cloud_admin")
         self.env = env
         self.running = False
@@ -2662,13 +2678,17 @@ class Postgres(PgProtocol):
     """An object representing a running postgres daemon."""
 
     def __init__(
-        self, env: NeonEnv, tenant_id: TenantId, port: int, check_stop_result: bool = True
+        self,
+        env: NeonEnvWithoutInitialTenant,
+        tenant_id: Optional[TenantId],
+        port: int,
+        check_stop_result: bool = True,
     ):
         super().__init__(host="localhost", port=port, user="cloud_admin", dbname="postgres")
         self.env = env
         self.running = False
         self.node_name: Optional[str] = None  # dubious, see asserts below
-        self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
+        self.pgdata_dir: Optional[Path] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.port = port
         self.check_stop_result = check_stop_result
@@ -2690,11 +2710,12 @@ class Postgres(PgProtocol):
             config_lines = []
 
         self.node_name = node_name or f"{branch_name}_pg_node"
-        self.env.neon_cli.pg_create(
+        output = self.env.neon_cli.pg_create(
             branch_name, node_name=self.node_name, tenant_id=self.tenant_id, lsn=lsn, port=self.port
         )
-        path = Path("pgdatadirs") / "tenants" / str(self.tenant_id) / self.node_name
-        self.pgdata_dir = os.path.join(self.env.repo_dir, path)
+        self.pgdata_dir = Path(output.stdout.strip())
+        assert self.pgdata_dir.is_dir()
+        assert Path(self.config_file_path()).is_file()
 
         if config_lines is None:
             config_lines = []
@@ -2723,9 +2744,7 @@ class Postgres(PgProtocol):
 
     def pg_data_dir_path(self) -> str:
         """Path to data directory"""
-        assert self.node_name
-        path = Path("pgdatadirs") / "tenants" / str(self.tenant_id) / self.node_name
-        return os.path.join(self.env.repo_dir, path)
+        return str(self.pgdata_dir)
 
     def pg_xact_dir_path(self) -> str:
         """Path to pg_xact dir"""
@@ -2848,7 +2867,7 @@ class Postgres(PgProtocol):
 class PostgresFactory:
     """An object representing multiple running postgres daemons."""
 
-    def __init__(self, env: NeonEnv):
+    def __init__(self, env: NeonEnvWithoutInitialTenant):
         self.env = env
         self.num_instances: int = 0
         self.instances: List[Postgres] = []
@@ -2863,7 +2882,7 @@ class PostgresFactory:
     ) -> Postgres:
         pg = Postgres(
             self.env,
-            tenant_id=tenant_id or self.env.initial_tenant,
+            tenant_id=tenant_id,
             port=self.env.port_distributor.get_port(),
         )
         self.num_instances += 1
@@ -2886,7 +2905,7 @@ class PostgresFactory:
     ) -> Postgres:
         pg = Postgres(
             self.env,
-            tenant_id=tenant_id or self.env.initial_tenant,
+            tenant_id=tenant_id,
             port=self.env.port_distributor.get_port(),
         )
 
@@ -2917,7 +2936,7 @@ class SafekeeperPort:
 class Safekeeper:
     """An object representing a running safekeeper daemon."""
 
-    env: NeonEnv
+    env: NeonEnvWithoutInitialTenant
     port: SafekeeperPort
     id: int
     running: bool = False
@@ -3280,6 +3299,7 @@ def check_restored_datadir_content(
     pg: Postgres,
 ):
     # Get the timeline ID. We need it for the 'basebackup' command
+    tenant = TenantId(pg.safe_psql("SHOW neon.tenant_id")[0][0])
     timeline = TimelineId(pg.safe_psql("SHOW neon.timeline_id")[0][0])
 
     # stop postgres to ensure that files won't change
@@ -3296,7 +3316,7 @@ def check_restored_datadir_content(
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {pg.tenant_id} {timeline}'  \
+            -c 'basebackup {tenant} {timeline}'  \
          | tar -x -C {restored_dir_path}
     """
 
@@ -3490,7 +3510,7 @@ def wait_for_last_record_lsn(
 
 
 def wait_for_last_flush_lsn(
-    env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId
+    env: NeonEnvWithoutInitialTenant, pg: Postgres, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
     last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
@@ -3498,7 +3518,7 @@ def wait_for_last_flush_lsn(
 
 
 def wait_for_wal_insert_lsn(
-    env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId
+    env: NeonEnvWithoutInitialTenant, pg: Postgres, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
     last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
@@ -3506,7 +3526,7 @@ def wait_for_wal_insert_lsn(
 
 
 def fork_at_current_lsn(
-    env: NeonEnv,
+    env: NeonEnvWithoutInitialTenant,
     pg: Postgres,
     new_branch_name: str,
     ancestor_branch_name: str,
