@@ -295,8 +295,12 @@ def test_pageserver_respects_overridden_resident_size(eviction_env: EvictionEnv)
         [du > min_resident_size for du in du_by_timeline.values()]
     ), "ensure the larger tenant will get a haircut"
 
-    ps_http.set_tenant_config(small_tenant[0], {"min_resident_size_override": min_resident_size})
-    ps_http.set_tenant_config(large_tenant[0], {"min_resident_size_override": min_resident_size})
+    ps_http.patch_tenant_config_client_side(
+        small_tenant[0], {"min_resident_size_override": min_resident_size}
+    )
+    ps_http.patch_tenant_config_client_side(
+        large_tenant[0], {"min_resident_size_override": min_resident_size}
+    )
 
     # Make the large tenant more-recently used. An incorrect implemention would try to evict
     # from the smaller tenant first, since its layers would be the least-recently-used.
