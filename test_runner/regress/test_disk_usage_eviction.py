@@ -455,7 +455,7 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     total_blocks = (total_size + (blocksize - 1)) // blocksize
 
     env.pageserver_start_with_mocked_statvfs(
-        'disk_usage_based_eviction={ period = "1s", max_usage_pct = 50, min_avail_bytes = 0 }',
+        'disk_usage_based_eviction={ period = "1s", max_usage_pct = 33, min_avail_bytes = 0 }',
         {
             "type": "Success",
             "blocksize": blocksize,
@@ -476,7 +476,7 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
 
     post_eviction_total_size, _, _ = env.timelines_du()
 
-    assert post_eviction_total_size <= 0.5 * total_size, "we requested max 50% usage"
+    assert post_eviction_total_size <= 0.33 * total_size, "we requested max 33% usage"
 
 
 @pytest.mark.skipif(
@@ -496,7 +496,7 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
     blocksize = 512
     total_blocks = (total_size + (blocksize - 1)) // blocksize
 
-    min_avail_bytes = total_size // 2
+    min_avail_bytes = total_size // 3
 
     env.pageserver_start_with_mocked_statvfs(
         'disk_usage_based_eviction={ period = "1s", max_usage_pct = 100, min_avail_bytes = %s }'
