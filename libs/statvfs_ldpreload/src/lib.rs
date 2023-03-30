@@ -74,10 +74,14 @@ pub extern "C" fn fstatvfs(_fd: libc::c_int, buf: *mut libc::statvfs64) -> libc:
         config: &config,
         invocation_number,
     };
-    eprintln!(
+    let status_line = format!(
         "statvfs_ldpreload status: {}",
         serde_json::to_string(&status).unwrap()
     );
+    // Do a single write() system call to the stderr file descriptor.
+    // The kernel should serialize it with other writes to stderr,
+    // as long as the write doesn't cross page boundary.
+    eprintln!("{}", status_line);
 
     // mock the statvfs call
     match config.mock {
