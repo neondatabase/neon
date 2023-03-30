@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use aws_sdk_s3::Client;
+use either::Either;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -26,16 +27,19 @@ use crate::{
 const BATCH_SIZE: usize = 100;
 
 pub struct DeleteBatchProducer {
-    batch_sender_task: JoinHandle<anyhow::Result<BatchProducerStats>>,
-    batch_receiver: Arc<Mutex<UnboundedReceiver<DeleteBatch>>>,
+    delete_tenants_sender_task: JoinHandle<anyhow::Result<ProcessedS3List<TenantId, ProjectData>>>,
+    delete_timelines_sender_task:
+        JoinHandle<anyhow::Result<ProcessedS3List<TenantTimelineId, BranchData>>>,
+    delete_batch_creator_task: JoinHandle<()>,
+    delete_batch_receiver: Arc<Mutex<UnboundedReceiver<DeleteBatch>>>,
 }
 
-pub struct BatchProducerStats {
+pub struct DeleteProducerStats {
     pub tenant_stats: ProcessedS3List<TenantId, ProjectData>,
     pub timeline_stats: Option<ProcessedS3List<TenantTimelineId, BranchData>>,
 }
 
-impl BatchProducerStats {
+impl DeleteProducerStats {
     pub fn tenants_checked(&self) -> usize {
         self.tenant_stats.entries_total
     }
@@ -48,7 +52,7 @@ impl BatchProducerStats {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DeleteBatch {
     pub tenants: Vec<TenantId>,
     pub timelines: Vec<TenantTimelineId>,
@@ -59,6 +63,14 @@ impl DeleteBatch {
         self.tenants.extend(other.tenants);
         self.timelines.extend(other.timelines);
     }
+
+    pub fn len(&self) -> usize {
+        self.tenants.len() + self.timelines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl DeleteBatchProducer {
@@ -68,29 +80,36 @@ impl DeleteBatchProducer {
         s3_root_target: RootTarget,
         traversing_depth: TraversingDepth,
     ) -> Self {
-        let (batch_sender, batch_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let list_span = info_span!("bucket_list", name = %s3_root_target.bucket_name());
+        let (delete_elements_sender, mut delete_elements_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
+        let delete_elements_sender = Arc::new(delete_elements_sender);
         let admin_client = Arc::new(admin_client);
 
-        let batch_sender_task = tokio::spawn(
+        let (projects_to_check_sender, mut projects_to_check_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
+        let delete_tenants_root_target = s3_root_target.clone();
+        let delete_tenants_client = Arc::clone(&s3_client);
+        let delete_tenants_admin_client = Arc::clone(&admin_client);
+        let delete_sender = Arc::clone(&delete_elements_sender);
+        let delete_tenants_sender_task = tokio::spawn(
             async move {
                 info!(
                     "Starting to list the bucket from root {}",
-                    s3_root_target.bucket_name()
+                    delete_tenants_root_target.bucket_name()
                 );
-                s3_client
+                delete_tenants_client
                     .head_bucket()
-                    .bucket(s3_root_target.bucket_name())
+                    .bucket(delete_tenants_root_target.bucket_name())
                     .send()
                     .await
                     .with_context(|| {
-                        format!("bucket {} was not found", s3_root_target.bucket_name())
+                        format!("bucket {} was not found", delete_tenants_root_target.bucket_name())
                     })?;
-                let check_client = Arc::clone(&admin_client);
 
+                let check_client = Arc::clone(&delete_tenants_admin_client);
                 let tenant_stats = process_s3_target_recursively(
-                    &s3_client,
-                    s3_root_target.tenants_root(),
+                    &delete_tenants_client,
+                    delete_tenants_root_target.tenants_root(),
                     |s3_tenants| async {
                         let another_client = Arc::clone(&check_client);
                         split_to_active_and_deleted_entries(s3_tenants, |tenant_id| async move {
@@ -105,22 +124,14 @@ impl DeleteBatchProducer {
                 .await
                 .context("tenant batch processing")?;
 
-                for tenant_batch in tenant_stats.entries_to_delete.chunks(BATCH_SIZE) {
-                    batch_sender
-                        .send(DeleteBatch {
-                            tenants: tenant_batch.to_vec(),
-                            timelines: Vec::new(),
-                        })
-                        .ok();
+                for &tenant_id in &tenant_stats.entries_to_delete {
+                    delete_sender.send(Either::Left(tenant_id)).ok();
                 }
 
-                let batch_stats = match traversing_depth {
+                let tenant_stats = match traversing_depth {
                     TraversingDepth::Tenant => {
                         info!("Finished listing the bucket for tenants only");
-                        BatchProducerStats {
-                            tenant_stats,
-                            timeline_stats: None,
-                        }
+                        tenant_stats
                     }
                     TraversingDepth::Timeline => {
                         info!(
@@ -128,84 +139,146 @@ impl DeleteBatchProducer {
                             tenant_stats.active_entries.len()
                         );
 
-                        // TODO kb that should also be done in async fashion + batch on the receiver side
-                        let mut common_timeline_stats = ProcessedS3List::default();
-                        for active_project in &tenant_stats.active_entries {
-                            let check_client = Arc::clone(&admin_client);
-                            let tenant_timelines_stats = process_s3_target_recursively(
-                                &s3_client,
-                                &s3_root_target.timelines_root(active_project.tenant),
-                                |s3_timelines| async {
-                                    let another_client = check_client.clone();
-                                    split_to_active_and_deleted_entries(
-                                        s3_timelines,
-                                        |timeline_id| async move {
-                                            another_client
-                                                .find_timeline_branch(timeline_id)
-                                                .await
-                                                .with_context(|| {
-                                                    format!(
-                                                        "Timeline {timeline_id} branch admin check"
-                                                    )
-                                                })
-                                        },
-                                    )
-                                    .await
-                                },
-                            )
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "tenant {} timeline batch processing",
-                                    active_project.tenant
-                                )
-                            })?
-                            .change_ids(|timeline_id| {
-                                TenantTimelineId::new(active_project.tenant, timeline_id)
-                            });
-
-                            common_timeline_stats.merge(tenant_timelines_stats);
+                        for active_project in tenant_stats.active_entries.clone() {
+                            projects_to_check_sender.send(active_project).ok();
                         }
 
-                        for timeline_batch in
-                            common_timeline_stats.entries_to_delete.chunks(BATCH_SIZE)
-                        {
-                            batch_sender
-                                .send(DeleteBatch {
-                                    tenants: Vec::new(),
-                                    timelines: timeline_batch.to_vec(),
-                                })
-                                .ok();
-                        }
-
-                        info!("Finished listing the bucket for tenants and timelines");
-                        BatchProducerStats {
-                            tenant_stats,
-                            timeline_stats: Some(common_timeline_stats),
-                        }
+                        info!("Finished listing the bucket for tenants and sent {} active tenants to check for timelines", tenant_stats.active_entries.len());
+                        tenant_stats
                     }
                 };
 
-                Ok(batch_stats)
+                Ok(tenant_stats)
             }
-            .instrument(list_span),
+            .instrument(info_span!("delete_tenants_sender")),
         );
 
+        let delete_timelines_sender_task = tokio::spawn(
+            async move {
+                info!(
+                    "Starting to list the bucket from root {}",
+                    s3_root_target.bucket_name()
+                );
+                s3_client
+                    .head_bucket()
+                    .bucket(s3_root_target.bucket_name())
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!("bucket {} was not found", s3_root_target.bucket_name())
+                    })?;
+
+                let mut total_stats = ProcessedS3List::default();
+                while let Some(project_to_check) = projects_to_check_receiver.recv().await {
+                    let check_client = Arc::clone(&admin_client);
+                    let tenant_timelines_stats = process_s3_target_recursively(
+                        &s3_client,
+                        &s3_root_target.timelines_root(project_to_check.tenant),
+                        |s3_timelines| async {
+                            let another_client = check_client.clone();
+                            split_to_active_and_deleted_entries(
+                                s3_timelines,
+                                |timeline_id| async move {
+                                    another_client
+                                        .find_timeline_branch(timeline_id)
+                                        .await
+                                        .with_context(|| {
+                                            format!("Timeline {timeline_id} branch admin check")
+                                        })
+                                },
+                            )
+                            .await
+                        },
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "tenant {} timeline batch processing",
+                            project_to_check.tenant
+                        )
+                    })?
+                    .change_ids(|timeline_id| {
+                        TenantTimelineId::new(project_to_check.tenant, timeline_id)
+                    });
+
+                    total_stats.merge(tenant_timelines_stats);
+                }
+
+                for &id in &total_stats.entries_to_delete {
+                    delete_elements_sender.send(Either::Right(id)).ok();
+                }
+
+                Ok(total_stats)
+            }
+            .instrument(info_span!("delete_timelines_sender")),
+        );
+
+        let (delete_batch_sender, delete_batch_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let delete_batch_creator_task = tokio::spawn(async move {
+            'outer: loop {
+                let mut delete_batch = DeleteBatch::default();
+                while delete_batch.len() < BATCH_SIZE {
+                    match delete_elements_receiver.recv().await {
+                        Some(new_task) => match new_task {
+                            Either::Left(tenant_id) => delete_batch.tenants.push(tenant_id),
+                            Either::Right(timeline_id) => delete_batch.timelines.push(timeline_id),
+                        },
+                        None => {
+                            info!("Task finished: sender dropped");
+                            delete_batch_sender.send(delete_batch).ok();
+                            break 'outer;
+                        }
+                    }
+                }
+
+                delete_batch_sender.send(delete_batch).ok();
+            }
+        });
+
         Self {
-            batch_sender_task,
-            batch_receiver: Arc::new(Mutex::new(batch_receiver)),
+            delete_tenants_sender_task,
+            delete_timelines_sender_task,
+            delete_batch_creator_task,
+            delete_batch_receiver: Arc::new(Mutex::new(delete_batch_receiver)),
         }
     }
 
     pub fn subscribe(&self) -> Arc<Mutex<UnboundedReceiver<DeleteBatch>>> {
-        self.batch_receiver.clone()
+        self.delete_batch_receiver.clone()
     }
 
-    pub async fn join(self) -> anyhow::Result<BatchProducerStats> {
-        match self.batch_sender_task.await {
-            Ok(task_result) => task_result,
-            Err(join_error) => anyhow::bail!("Failed to join the task: {join_error}"),
-        }
+    pub async fn join(self) -> anyhow::Result<DeleteProducerStats> {
+        let (delete_tenants_task_result, delete_timelines_task_result, batch_task_result) = tokio::join!(
+            self.delete_tenants_sender_task,
+            self.delete_timelines_sender_task,
+            self.delete_batch_creator_task,
+        );
+
+        let tenant_stats = match delete_tenants_task_result {
+            Ok(Ok(stats)) => stats,
+            Ok(Err(tenant_deletion_error)) => return Err(tenant_deletion_error),
+            Err(join_error) => {
+                anyhow::bail!("Failed to join the delete tenant producing task: {join_error}")
+            }
+        };
+
+        let timeline_stats = match delete_timelines_task_result {
+            Ok(Ok(stats)) => Some(stats),
+            Ok(Err(timeline_deletion_error)) => return Err(timeline_deletion_error),
+            Err(join_error) => {
+                anyhow::bail!("Failed to join the delete timeline producing task: {join_error}")
+            }
+        };
+
+        match batch_task_result {
+            Ok(()) => (),
+            Err(join_error) => anyhow::bail!("Failed to join the batch forming task: {join_error}"),
+        };
+
+        Ok(DeleteProducerStats {
+            tenant_stats,
+            timeline_stats,
+        })
     }
 }
 

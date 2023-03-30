@@ -38,7 +38,7 @@ impl std::fmt::Display for Error {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(transparent)]
 pub struct ProjectId(pub String);
 
@@ -83,7 +83,7 @@ pub struct PageserverData {
     pub availability_zone_id: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct SafekeeperData {
     pub id: u64,
     pub created_at: DateTime<Utc>,
@@ -99,7 +99,7 @@ pub struct SafekeeperData {
 }
 
 #[serde_with::serde_as]
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProjectData {
     pub id: ProjectId,
     pub name: String,

@@ -41,10 +41,8 @@ impl S3Deleter {
     }
 
     pub async fn remove_all(self) -> anyhow::Result<BTreeMap<TenantId, usize>> {
-        let concurrent_tasks_count = self.concurrent_tasks_count.get();
-
         let mut deletion_tasks = JoinSet::new();
-        for id in 0..concurrent_tasks_count {
+        for id in 0..self.concurrent_tasks_count.get() {
             let closure_client = Arc::clone(&self.s3_client);
             let closure_s3_target = self.s3_target.clone();
             let closure_batch_receiver = Arc::clone(&self.delete_batch_receiver);
