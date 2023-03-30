@@ -843,7 +843,7 @@ mod tests {
 
             let expected_in_counts = (1, usize::from(expected_l0));
 
-            map.batch_update().insert_historic(remote.clone())?;
+            map.batch_update().insert_historic(remote.clone()).unwrap();
             assert_eq!(count_layer_in(&map, &remote), expected_in_counts);
 
             let replaced = map
