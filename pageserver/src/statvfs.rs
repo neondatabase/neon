@@ -16,6 +16,7 @@ impl Statvfs {
         }
     }
 
+    #[allow(clippy::useless_conversion)]
     pub fn blocks(&self) -> u64 {
         match self {
             Statvfs::Real(stat) => u64::try_from(stat.blocks()).unwrap(),
@@ -23,6 +24,7 @@ impl Statvfs {
         }
     }
 
+    #[allow(clippy::useless_conversion)]
     pub fn blocks_available(&self) -> u64 {
         match self {
             Statvfs::Real(stat) => u64::try_from(stat.blocks_available()).unwrap(),
@@ -30,6 +32,7 @@ impl Statvfs {
         }
     }
 
+    #[allow(clippy::useless_conversion)]
     pub fn fragment_size(&self) -> u64 {
         match self {
             Statvfs::Real(stat) => u64::try_from(stat.fragment_size()).unwrap(),
@@ -37,6 +40,7 @@ impl Statvfs {
         }
     }
 
+    #[allow(clippy::useless_conversion)]
     pub fn block_size(&self) -> u64 {
         match self {
             Statvfs::Real(stat) => u64::try_from(stat.block_size()).unwrap(),
