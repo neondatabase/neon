@@ -7,7 +7,7 @@ use anyhow::Context;
 use aws_sdk_s3::Client;
 use either::Either;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, info_span, Instrument};
 
@@ -128,6 +128,13 @@ impl DeleteBatchProducer {
                     delete_sender.send(Either::Left(tenant_id)).ok();
                 }
 
+                info!(
+                    "Among {} tenants, found {} tenants to delete and {} active ones",
+                    tenant_stats.entries_total,
+                    tenant_stats.entries_to_delete.len(),
+                    tenant_stats.active_entries.len(),
+                );
+
                 let tenant_stats = match traversing_depth {
                     TraversingDepth::Tenant => {
                         info!("Finished listing the bucket for tenants only");
@@ -153,25 +160,25 @@ impl DeleteBatchProducer {
             .instrument(info_span!("delete_tenants_sender")),
         );
 
-        let delete_timelines_sender_task = tokio::spawn(
-            async move {
-                info!(
-                    "Starting to list the bucket from root {}",
-                    s3_root_target.bucket_name()
-                );
-                s3_client
-                    .head_bucket()
-                    .bucket(s3_root_target.bucket_name())
-                    .send()
-                    .await
-                    .with_context(|| {
-                        format!("bucket {} was not found", s3_root_target.bucket_name())
-                    })?;
+        let delete_timelines_sender_task = tokio::spawn(async move {
+            info!(
+                "Starting to list the bucket from root {}",
+                s3_root_target.bucket_name()
+            );
+            s3_client
+                .head_bucket()
+                .bucket(s3_root_target.bucket_name())
+                .send()
+                .await
+                .with_context(|| {
+                    format!("bucket {} was not found", s3_root_target.bucket_name())
+                })?;
 
-                let mut total_stats = ProcessedS3List::default();
-                while let Some(project_to_check) = projects_to_check_receiver.recv().await {
+            let mut timeline_stats = ProcessedS3List::default();
+            while let Some(project_to_check) = projects_to_check_receiver.recv().await {
+                async {
                     let check_client = Arc::clone(&admin_client);
-                    let tenant_timelines_stats = process_s3_target_recursively(
+                    let stats = process_s3_target_recursively(
                         &s3_client,
                         &s3_root_target.timelines_root(project_to_check.tenant),
                         |s3_timelines| async {
@@ -182,8 +189,10 @@ impl DeleteBatchProducer {
                                     another_client
                                         .find_timeline_branch(timeline_id)
                                         .await
-                                        .with_context(|| {
-                                            format!("Timeline {timeline_id} branch admin check")
+                                        .map_err(|e| {
+                                            anyhow::anyhow!(
+                                                "Timeline {timeline_id} branch admin check: {e}"
+                                            )
                                         })
                                 },
                             )
@@ -201,17 +210,28 @@ impl DeleteBatchProducer {
                         TenantTimelineId::new(project_to_check.tenant, timeline_id)
                     });
 
-                    total_stats.merge(tenant_timelines_stats);
+                    timeline_stats.merge(stats);
+                    Ok::<_, anyhow::Error>(())
                 }
-
-                for &id in &total_stats.entries_to_delete {
-                    delete_elements_sender.send(Either::Right(id)).ok();
-                }
-
-                Ok(total_stats)
+                .instrument(
+                    info_span!("delete_timelines_sender", tenant = %project_to_check.tenant),
+                )
+                .await?
             }
-            .instrument(info_span!("delete_timelines_sender")),
-        );
+
+            for &id in &timeline_stats.entries_to_delete {
+                delete_elements_sender.send(Either::Right(id)).ok();
+            }
+
+            info!(
+                "Among {} timelines, found {} timelines to delete and {} active ones",
+                timeline_stats.entries_total,
+                timeline_stats.entries_to_delete.len(),
+                timeline_stats.active_entries.len(),
+            );
+
+            Ok(timeline_stats)
+        });
 
         let (delete_batch_sender, delete_batch_receiver) = tokio::sync::mpsc::unbounded_channel();
         let delete_batch_creator_task = tokio::spawn(async move {
@@ -300,9 +320,9 @@ impl<I, A> Default for ProcessedS3List<I, A> {
 
 impl<I, A> ProcessedS3List<I, A> {
     fn merge(&mut self, other: Self) {
-        self.entries_total = other.entries_total;
-        self.entries_to_delete = other.entries_to_delete;
-        self.active_entries = other.active_entries;
+        self.entries_total += other.entries_total;
+        self.entries_to_delete.extend(other.entries_to_delete);
+        self.active_entries.extend(other.active_entries);
     }
 
     fn change_ids<NewI>(self, transform: impl Fn(I) -> NewI) -> ProcessedS3List<NewI, A> {
@@ -362,13 +382,6 @@ where
         }
     }
 
-    info!(
-        "Among {}, found {} tenants to delete and {} active ones",
-        total_entries.entries_total,
-        total_entries.entries_to_delete.len(),
-        total_entries.active_entries.len(),
-    );
-
     Ok(total_entries)
 }
 
@@ -383,23 +396,17 @@ where
     Fut: Future<Output = anyhow::Result<Option<A>>> + Send,
 {
     let entries_total = new_entry_ids.len();
-    let api_request_limiter = Arc::new(Semaphore::new(200));
     let mut check_tasks = JoinSet::new();
     let mut active_entries = Vec::with_capacity(entries_total);
     let mut entries_to_delete = Vec::with_capacity(entries_total);
 
     for new_entry_id in new_entry_ids {
-        let check_limit = Arc::clone(&api_request_limiter);
         let check_closure = find_active_entry.clone();
         check_tasks.spawn(
             async move {
                 (
                     new_entry_id,
                     async {
-                        let _permit = check_limit
-                            .acquire()
-                            .await
-                            .expect("Semaphore is not closed");
                         for _ in 0..MAX_RETRIES {
                             let closure_clone = check_closure.clone();
                             match closure_clone(new_entry_id).await {
@@ -424,11 +431,11 @@ where
         let (entry_id, entry_data_fetch_result) = task_result.context("task join")?;
         match entry_data_fetch_result.context("entry data fetch")? {
             Some(active_entry) => {
-                info!("Found alive project for entry {entry_id}, cannot delete");
+                info!("Entry {entry_id} is alive, cannot delete");
                 active_entries.push(active_entry);
             }
             None => {
-                info!("Found deleted or no project for entry {entry_id} in admin data, can safely delete");
+                info!("Entry {entry_id} is either deleted or absent in the admin data, can safely delete");
                 entries_to_delete.push(entry_id);
             }
         }

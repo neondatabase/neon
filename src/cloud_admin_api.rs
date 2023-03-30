@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use reqwest::{header, Client, Url};
+use tokio::sync::Semaphore;
 
 use crate::copied_definitions::id::{TenantId, TimelineId};
 use crate::copied_definitions::lsn::Lsn;
@@ -56,6 +57,7 @@ pub enum ErrorKind {
 }
 
 pub struct CloudAdminApiClient {
+    request_limiter: Semaphore,
     token: String,
     base_url: Url,
     http_client: Client,
@@ -141,9 +143,9 @@ pub struct BranchData {
     pub parent_lsn: Option<Lsn>,
     pub default: bool,
     pub deleted: bool,
-    pub logical_size: u64,
-    pub physical_size: u64,
-    pub written_size: u64,
+    pub logical_size: Option<u64>,
+    pub physical_size: Option<u64>,
+    pub written_size: Option<u64>,
 }
 
 impl CloudAdminApiClient {
@@ -151,6 +153,7 @@ impl CloudAdminApiClient {
         Self {
             token,
             base_url,
+            request_limiter: Semaphore::new(200),
             http_client: Client::new(), // TODO timeout configs at least
         }
     }
@@ -159,6 +162,12 @@ impl CloudAdminApiClient {
         &self,
         tenant_id: TenantId,
     ) -> Result<Option<ProjectData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
         let response = self
             .http_client
             .get(self.append_url("/projects"))
@@ -203,6 +212,12 @@ impl CloudAdminApiClient {
         &self,
         timeline_id: TimelineId,
     ) -> Result<Option<BranchData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
         let response = self
             .http_client
             .get(self.append_url("/branches"))
@@ -244,6 +259,12 @@ impl CloudAdminApiClient {
     }
 
     pub async fn list_pageservers(&self) -> Result<Vec<PageserverData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
         let response = self
             .http_client
             .get(self.append_url("/pageservers"))
@@ -262,6 +283,12 @@ impl CloudAdminApiClient {
     }
 
     pub async fn list_safekeepers(&self) -> Result<Vec<SafekeeperData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
         let response = self
             .http_client
             .get(self.append_url("/safekeepers"))
@@ -284,6 +311,12 @@ impl CloudAdminApiClient {
         pageserver_id: u64,
         show_deleted: bool,
     ) -> Result<Vec<ProjectData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
         let response = self
             .http_client
             .get(self.append_url("/projects"))
@@ -310,6 +343,12 @@ impl CloudAdminApiClient {
         tenant_id: TenantId,
         show_deleted: bool,
     ) -> Result<Option<ProjectData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
         let response = self
             .http_client
             .get(self.append_url("/projects"))
@@ -343,6 +382,12 @@ impl CloudAdminApiClient {
         project_id: &ProjectId,
         show_deleted: bool,
     ) -> Result<Vec<BranchData>, Error> {
+        let _permit = self
+            .request_limiter
+            .acquire()
+            .await
+            .expect("Semaphore is not closed");
+
         let response = self
             .http_client
             .get(self.append_url("/branches"))
