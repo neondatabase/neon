@@ -144,6 +144,7 @@ void ConstructDeltaMessage(char *message)
 #define AppendString(x) AppendString(&message, x)
 
     AppendChar('[');
+    if(RootTable.db_table)
     {
         HASH_SEQ_STATUS status;
         DbEntry *entry;
@@ -182,6 +183,7 @@ void ConstructDeltaMessage(char *message)
         }
     }
 
+    if(RootTable.role_table)
     {
         HASH_SEQ_STATUS status;
         RoleEntry *entry;
@@ -227,6 +229,8 @@ void ConstructDeltaMessage(char *message)
 
 static void SendDeltasToConsole()
 {
+    if(!RootTable.db_table && !RootTable.role_table)
+        return;
     if(!ConsoleURL)
         return;
     CURL *curl = curl_easy_init();
@@ -255,31 +259,45 @@ static void SendDeltasToConsole()
     pfree(message);
 }
 
+static void InitDbTableIfNeeded()
+{
+    if(!CurrentDdlTable->db_table)
+    {
+        HASHCTL db_ctl = {};
+        db_ctl.keysize = NAMEDATALEN;
+        db_ctl.entrysize = sizeof(DbEntry);
+        db_ctl.hcxt = CurTransactionContext;
+        CurrentDdlTable->db_table = hash_create(
+            "Dbs Created",
+            4,
+            &db_ctl,
+            HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+    }
+}
+
+static void InitRoleTableIfNeeded()
+{
+    if(!CurrentDdlTable->role_table)
+    {
+        HASHCTL role_ctl = {};
+        role_ctl.keysize = NAMEDATALEN;
+        role_ctl.entrysize = sizeof(RoleEntry);
+        role_ctl.hcxt = CurTransactionContext;
+        CurrentDdlTable->role_table = hash_create(
+            "Roles Created",
+            4,
+            &role_ctl,
+            HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+    }
+}
+
 static void PushTable()
 {
     DdlHashTable *new_table = MemoryContextAlloc(CurTransactionContext, sizeof(DdlHashTable));
     new_table->prev_table = CurrentDdlTable;
+    new_table->role_table = NULL;
+    new_table->db_table = NULL;
     CurrentDdlTable = new_table;
-
-    HASHCTL db_ctl = {};
-    db_ctl.keysize = NAMEDATALEN;
-    db_ctl.entrysize = sizeof(DbEntry);
-    db_ctl.hcxt = CurTransactionContext;
-    new_table->db_table = hash_create(
-        "Dbs Created",
-        4,
-        &db_ctl,
-        HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-
-    HASHCTL role_ctl = {};
-    role_ctl.keysize = NAMEDATALEN;
-    role_ctl.entrysize = sizeof(RoleEntry);
-    role_ctl.hcxt = CurTransactionContext;
-    new_table->role_table = hash_create(
-        "Roles Created",
-        4,
-        &role_ctl,
-        HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 }
 
 static void MergeTable()
@@ -287,6 +305,7 @@ static void MergeTable()
     DdlHashTable *old_table = CurrentDdlTable;
     CurrentDdlTable = old_table->prev_table;
 
+    if(old_table->db_table)
     {
         DbEntry *entry;
         HASH_SEQ_STATUS status;
@@ -328,6 +347,7 @@ static void MergeTable()
         hash_destroy(old_table->db_table);
     }
 
+    if(old_table->role_table)
     {
         RoleEntry *entry;
         HASH_SEQ_STATUS status;
@@ -399,11 +419,14 @@ static void NeonXactCallback(XactEvent event, void *arg)
     if(event == XACT_EVENT_PRE_COMMIT || event == XACT_EVENT_PARALLEL_PRE_COMMIT)
     {
         SendDeltasToConsole();
+        RootTable.role_table = NULL;
+        RootTable.db_table = NULL;
     }
 }
 
 static void HandleCreateDb(CreatedbStmt *stmt)
 {
+    InitDbTableIfNeeded();
     DefElem *downer = NULL;
     ListCell *option;
     foreach(option, stmt->options)
@@ -428,6 +451,7 @@ static void HandleCreateDb(CreatedbStmt *stmt)
 
 static void HandleAlterOwner(AlterOwnerStmt *stmt)
 {
+    InitDbTableIfNeeded();
     if(stmt->objectType != OBJECT_DATABASE)
         return;
     const char *name = strVal(stmt->object);
@@ -444,6 +468,7 @@ static void HandleAlterOwner(AlterOwnerStmt *stmt)
 static void HandleDbRename(RenameStmt *stmt)
 {
     Assert(stmt->renameType == OBJECT_DATABASE);
+    InitDbTableIfNeeded();
     const char *name = strVal(stmt->object);
     bool found = false;
     DbEntry *entry = hash_search(
@@ -479,6 +504,7 @@ static void HandleDbRename(RenameStmt *stmt)
 
 static void HandleDropDb(DropdbStmt *stmt)
 {
+    InitDbTableIfNeeded();
     DbEntry *entry = hash_search(
         CurrentDdlTable->db_table,
         stmt->dbname,
@@ -489,6 +515,7 @@ static void HandleDropDb(DropdbStmt *stmt)
 
 static void HandleCreateRole(CreateRoleStmt *stmt)
 {
+    InitRoleTableIfNeeded();
     RoleEntry *entry = hash_search(
         CurrentDdlTable->role_table,
         stmt->role,
@@ -511,6 +538,7 @@ static void HandleCreateRole(CreateRoleStmt *stmt)
 
 static void HandleAlterRole(AlterRoleStmt *stmt)
 {
+    InitRoleTableIfNeeded();
     DefElem *dpass = NULL;
     ListCell *option;
     foreach(option, stmt->options)
@@ -533,6 +561,7 @@ static void HandleAlterRole(AlterRoleStmt *stmt)
 
 static void HandleRoleRename(RenameStmt *stmt)
 {
+    InitRoleTableIfNeeded();
     Assert(stmt->renameType == OBJECT_ROLE);
     const char *name = strVal(stmt->object);
     bool found = false;
@@ -570,6 +599,7 @@ static void HandleRoleRename(RenameStmt *stmt)
 
 static void HandleDropRole(DropRoleStmt *stmt)
 {
+    InitRoleTableIfNeeded();
     ListCell *item;
     foreach(item, stmt->roles)
     {
