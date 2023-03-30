@@ -493,6 +493,8 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
             "type": "Success",
             "blocksize": blocksize,
             "total_blocks": total_blocks,
+            # Only count layer files towards used bytes in the mock_statvfs.
+            # This avoids accounting for metadata files & tenant conf in the tests.
             "name_filter": ".*__.*",
         },
     )
@@ -531,6 +533,8 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
             "type": "Success",
             "blocksize": blocksize,
             "total_blocks": total_blocks,
+            # Only count layer files towards used bytes in the mock_statvfs.
+            # This avoids accounting for metadata files & tenant conf in the tests.
             "name_filter": ".*__.*",
         },
     )
