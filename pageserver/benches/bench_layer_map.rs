@@ -215,7 +215,7 @@ fn bench_sequential(c: &mut Criterion) {
             is_incremental: false,
             short_id: format!("Layer {}", i),
         };
-        updates.insert_historic(Arc::new(layer));
+        updates.insert_historic(Arc::new(layer)).unwrap();
     }
     updates.flush();
     println!("Finished layer map init in {:?}", now.elapsed());

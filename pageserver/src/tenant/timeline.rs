@@ -1446,7 +1446,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(Arc::new(layer));
+                updates.insert_historic(Arc::new(layer))?;
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1478,7 +1478,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(Arc::new(layer));
+                updates.insert_historic(Arc::new(layer))?;
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1615,7 +1615,7 @@ impl Timeline {
                     if let Some(local_layer) = &local_layer {
                         updates.replace_historic(local_layer, remote_layer)?;
                     } else {
-                        updates.insert_historic(remote_layer);
+                        updates.insert_historic(remote_layer)?;
                     }
                 }
                 LayerFileName::Delta(deltafilename) => {
@@ -1643,7 +1643,7 @@ impl Timeline {
                     if let Some(local_layer) = &local_layer {
                         updates.replace_historic(local_layer, remote_layer)?;
                     } else {
-                        updates.insert_historic(remote_layer);
+                        updates.insert_historic(remote_layer)?;
                     }
                 }
             }
@@ -2691,7 +2691,7 @@ impl Timeline {
             .write()
             .unwrap()
             .batch_update()
-            .insert_historic(Arc::new(new_delta));
+            .insert_historic(Arc::new(new_delta))?;
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
@@ -2896,7 +2896,7 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            updates.insert_historic(Arc::new(l));
+            updates.insert_historic(Arc::new(l))?;
         }
         updates.flush();
         drop(layers);
@@ -3329,7 +3329,7 @@ impl Timeline {
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            updates.insert_historic(x);
+            updates.insert_historic(x)?;
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
