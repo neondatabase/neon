@@ -1,6 +1,5 @@
 import shutil
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Tuple
@@ -98,16 +97,11 @@ class EvictionEnv:
     def pageserver_start_with_disk_usage_eviction(
         self, period, max_usage_pct, min_avail_bytes, mock_behavior
     ):
-        magic = str(uuid.uuid4())
-
         disk_usage_config = {
             "period": period,
             "max_usage_pct": max_usage_pct,
             "min_avail_bytes": min_avail_bytes,
-            "mock_statvfs": {
-                "behavior": mock_behavior,
-                "magic": magic,
-            },
+            "mock_statvfs": mock_behavior,
         }
 
         enc = toml.TomlEncoder()
@@ -120,7 +114,7 @@ class EvictionEnv:
         )
 
         def statvfs_called():
-            assert self.neon_env.pageserver.log_contains(".*running mocked statvfs.*" + magic)
+            assert self.neon_env.pageserver.log_contains(".*running mocked statvfs.*")
 
         wait_until(10, 1, statvfs_called)
 

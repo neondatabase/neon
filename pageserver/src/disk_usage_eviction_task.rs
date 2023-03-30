@@ -68,7 +68,7 @@ pub struct DiskUsageEvictionTaskConfig {
     #[serde(with = "humantime_serde")]
     pub period: Duration,
     #[cfg(feature = "testing")]
-    pub mock_statvfs: Option<crate::statvfs::mock::Config>,
+    pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
 }
 
 #[derive(Default)]

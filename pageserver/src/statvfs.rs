@@ -8,7 +8,7 @@ pub enum Statvfs {
 }
 
 impl Statvfs {
-    pub fn get(tenants_dir: &Path, mocked: Option<&mock::Config>) -> nix::Result<Self> {
+    pub fn get(tenants_dir: &Path, mocked: Option<&mock::Behavior>) -> nix::Result<Self> {
         if let Some(mocked) = mocked {
             Ok(Statvfs::Mock(mock::get(tenants_dir, mocked)?))
         } else {
@@ -52,12 +52,6 @@ pub mod mock {
     use tracing::log::info;
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct Config {
-        magic: String,
-        behavior: Behavior,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     #[serde(tag = "type")]
     pub enum Behavior {
         Success {
@@ -84,10 +78,10 @@ pub mod mock {
         }
     }
 
-    pub fn get(tenants_dir: &Path, config: &Config) -> nix::Result<Statvfs> {
-        info!("running mocked statvfs, magic: {}", config.magic);
+    pub fn get(tenants_dir: &Path, behavior: &Behavior) -> nix::Result<Statvfs> {
+        info!("running mocked statvfs");
 
-        match config.behavior {
+        match behavior {
             Behavior::Success {
                 blocksize,
                 total_blocks,
@@ -98,7 +92,7 @@ pub mod mock {
                 // round it up to the nearest block multiple
                 let used_blocks = (used_bytes + (blocksize - 1)) / blocksize;
 
-                if used_blocks > total_blocks {
+                if used_blocks > *total_blocks {
                     panic!(
                         "mocking error: used_blocks > total_blocks: {used_blocks} > {total_blocks}"
                     );
@@ -107,13 +101,13 @@ pub mod mock {
                 let avail_blocks = total_blocks - used_blocks;
 
                 Ok(Statvfs {
-                    blocks: total_blocks,
+                    blocks: *total_blocks,
                     blocks_available: avail_blocks,
-                    fragment_size: blocksize,
-                    block_size: blocksize,
+                    fragment_size: *blocksize,
+                    block_size: *blocksize,
                 })
             }
-            Behavior::Failure { mocked_error } => Err(mocked_error.into()),
+            Behavior::Failure { mocked_error } => Err((*mocked_error).into()),
         }
     }
 
