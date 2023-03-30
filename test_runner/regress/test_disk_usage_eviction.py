@@ -160,6 +160,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
     pgbench_init_lsns = {}
 
+    created = []
     for scale in pgbench_scales:
         tenant_id, timeline_id = env.neon_cli.create_tenant(
             conf={
@@ -175,6 +176,15 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
             pg_bin.run(["pgbench", "-i", f"-s{scale}", pg.connstr()])
             wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
+        created.append((tenant_id, timeline_id))
+
+    # stop the safekeepers to avoid on-demand downloads caused by
+    # initial logical size calculation triggered by walreceiver connection status
+    # when we restart the pageserver process in any of the tests
+    env.neon_cli.safekeeper_stop()
+
+    # after stopping the safekeepers, we know that no new WAL will be coming in
+    for tenant_id, timeline_id in created:
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload_queue_empty(env.pageserver, tenant_id, timeline_id)
         tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
@@ -184,7 +194,9 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
         layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
         log.info(f"{layers}")
-        assert len(layers.historic_layers) >= 4
+        assert (
+            len(layers.historic_layers) >= 10
+        ), "evictions happen at layer granularity, but we often assert at byte-granularity"
 
         timelines.append((tenant_id, timeline_id))
 
