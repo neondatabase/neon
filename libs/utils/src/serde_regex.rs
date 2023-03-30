@@ -1,4 +1,4 @@
-//! A `serde::Deserialize` type for regexes.
+//! A `serde::{Deserialize,Serialize}` type for regexes.
 
 use std::ops::Deref;
 
