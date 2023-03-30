@@ -203,13 +203,14 @@ fn main() -> Result<()> {
     if delay_exit {
         info!("giving control plane 30s to collect the error before shutdown");
         thread::sleep(Duration::from_secs(30));
-        info!("shutting down");
     }
 
+    info!("shutting down tracing");
     // Shutdown trace pipeline gracefully, so that it has a chance to send any
     // pending traces before we exit.
     tracing_utils::shutdown_tracing();
 
+    info!("shutting down");
     exit(exit_code.unwrap_or(1))
 }
 
