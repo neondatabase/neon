@@ -40,12 +40,6 @@ _PG_init(void)
         InitConsoleConnector();
 }
 
-void
-_PG_fini(void)
-{
-    CleanupConsoleConnector();
-}
-
 PG_FUNCTION_INFO_V1(pg_cluster_size);
 PG_FUNCTION_INFO_V1(backpressure_lsns);
 PG_FUNCTION_INFO_V1(backpressure_throttling_time);

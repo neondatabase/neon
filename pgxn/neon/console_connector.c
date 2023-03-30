@@ -709,8 +709,3 @@ void InitConsoleConnector()
         errmsg("Failed to initialize curl");
     }
 }
-
-void CleanupConsoleConnector()
-{
-    curl_global_cleanup();
-}
