@@ -33,7 +33,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
         min_lsn = min(min_lsn, lsn_range.start);
         max_lsn = max(max_lsn, Lsn(lsn_range.end.0 - 1));
 
-        updates.insert_historic(Arc::new(layer));
+        updates.insert_historic(Arc::new(layer)).unwrap90;
     }
 
     println!("min: {min_lsn}, max: {max_lsn}");
