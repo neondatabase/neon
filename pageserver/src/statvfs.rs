@@ -18,28 +18,28 @@ impl Statvfs {
 
     pub fn blocks(&self) -> u64 {
         match self {
-            Statvfs::Real(stat) => stat.blocks(),
+            Statvfs::Real(stat) => u64::try_from(stat.blocks()).unwrap(),
             Statvfs::Mock(stat) => stat.blocks,
         }
     }
 
     pub fn blocks_available(&self) -> u64 {
         match self {
-            Statvfs::Real(stat) => stat.blocks_available(),
+            Statvfs::Real(stat) => u64::try_from(stat.blocks_available()).unwrap(),
             Statvfs::Mock(stat) => stat.blocks_available,
         }
     }
 
     pub fn fragment_size(&self) -> u64 {
         match self {
-            Statvfs::Real(stat) => stat.fragment_size(),
+            Statvfs::Real(stat) => u64::try_from(stat.fragment_size()).unwrap(),
             Statvfs::Mock(stat) => stat.fragment_size,
         }
     }
 
     pub fn block_size(&self) -> u64 {
         match self {
-            Statvfs::Real(stat) => stat.block_size(),
+            Statvfs::Real(stat) => u64::try_from(stat.block_size()).unwrap(),
             Statvfs::Mock(stat) => stat.block_size,
         }
     }
