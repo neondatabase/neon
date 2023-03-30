@@ -12,7 +12,9 @@ use tracing::{error, info, info_span, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectData};
 use crate::copied_definitions::id::TenantTimelineId;
-use crate::{list_objects_with_retries, S3Target, TenantId, TraversingDepth, MAX_RETRIES};
+use crate::{
+    list_objects_with_retries, RootTarget, S3Target, TenantId, TraversingDepth, MAX_RETRIES,
+};
 
 /// Typical tenant to remove contains 1 layer and 1 index_part.json blobs
 /// Also, there are some non-standard tenants to remove, having more layers.
@@ -63,26 +65,33 @@ impl DeleteBatchProducer {
     pub fn start(
         admin_client: CloudAdminApiClient,
         s3_client: Arc<Client>,
-        s3_target: S3Target,
+        s3_root_target: RootTarget,
         traversing_depth: TraversingDepth,
     ) -> Self {
         let (batch_sender, batch_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let list_span = info_span!("bucket_list", name = %s3_target.bucket_name);
+        let list_span = info_span!("bucket_list", name = %s3_root_target.bucket_name());
         let admin_client = Arc::new(admin_client);
 
         let batch_sender_task = tokio::spawn(
             async move {
-                info!("Starting to list the bucket {}", s3_target.bucket_name);
+                info!(
+                    "Starting to list the bucket from root {}",
+                    s3_root_target.bucket_name()
+                );
                 s3_client
                     .head_bucket()
-                    .bucket(s3_target.bucket_name.clone())
+                    .bucket(s3_root_target.bucket_name())
                     .send()
                     .await
-                    .with_context(|| format!("bucket {} was not found", s3_target.bucket_name))?;
+                    .with_context(|| {
+                        format!("bucket {} was not found", s3_root_target.bucket_name())
+                    })?;
                 let check_client = Arc::clone(&admin_client);
 
-                let tenant_stats =
-                    process_s3_target_recursively(&s3_client, &s3_target, |s3_tenants| async {
+                let tenant_stats = process_s3_target_recursively(
+                    &s3_client,
+                    s3_root_target.tenants_root(),
+                    |s3_tenants| async {
                         let another_client = Arc::clone(&check_client);
                         split_to_active_and_deleted_entries(s3_tenants, |tenant_id| async move {
                             another_client
@@ -91,9 +100,10 @@ impl DeleteBatchProducer {
                                 .with_context(|| format!("Tenant {tenant_id} project admin check"))
                         })
                         .await
-                    })
-                    .await
-                    .context("tenant batch processing")?;
+                    },
+                )
+                .await
+                .context("tenant batch processing")?;
 
                 for tenant_batch in tenant_stats.entries_to_delete.chunks(BATCH_SIZE) {
                     batch_sender
@@ -120,14 +130,11 @@ impl DeleteBatchProducer {
 
                         // TODO kb that should also be done in async fashion + batch on the receiver side
                         let mut common_timeline_stats = ProcessedS3List::default();
-                        for active_tenant in &tenant_stats.active_entries {
-                            let tenant_timelines_target = s3_target
-                                .with_sub_segment(&active_tenant.tenant.to_string())
-                                .with_sub_segment("timelines");
+                        for active_project in &tenant_stats.active_entries {
                             let check_client = Arc::clone(&admin_client);
                             let tenant_timelines_stats = process_s3_target_recursively(
                                 &s3_client,
-                                &tenant_timelines_target,
+                                &s3_root_target.timelines_root(active_project.tenant),
                                 |s3_timelines| async {
                                     let another_client = check_client.clone();
                                     split_to_active_and_deleted_entries(
@@ -148,10 +155,13 @@ impl DeleteBatchProducer {
                             )
                             .await
                             .with_context(|| {
-                                format!("tenant {} timeline batch processing", active_tenant.tenant)
+                                format!(
+                                    "tenant {} timeline batch processing",
+                                    active_project.tenant
+                                )
                             })?
                             .change_ids(|timeline_id| {
-                                TenantTimelineId::new(active_tenant.tenant, timeline_id)
+                                TenantTimelineId::new(active_project.tenant, timeline_id)
                             });
 
                             common_timeline_stats.merge(tenant_timelines_stats);
@@ -225,11 +235,7 @@ impl<I, A> ProcessedS3List<I, A> {
     fn change_ids<NewI>(self, transform: impl Fn(I) -> NewI) -> ProcessedS3List<NewI, A> {
         ProcessedS3List {
             entries_total: self.entries_total,
-            entries_to_delete: self
-                .entries_to_delete
-                .into_iter()
-                .map(|entry| transform(entry))
-                .collect(),
+            entries_to_delete: self.entries_to_delete.into_iter().map(transform).collect(),
             active_entries: self.active_entries,
         }
     }

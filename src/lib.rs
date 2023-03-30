@@ -14,6 +14,7 @@ use aws_sdk_s3::Region;
 use aws_sdk_s3::{Client, Config};
 
 pub use copied_definitions::id::TenantId;
+use copied_definitions::id::TenantTimelineId;
 pub use s3_deletion::S3Deleter;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -42,6 +43,44 @@ impl S3Target {
         new_self.prefix_in_bucket =
             [&new_self.prefix_in_bucket, new_segment, ""].join(&new_self.delimiter);
         new_self
+    }
+}
+
+#[derive(Clone)]
+pub enum RootTarget {
+    Pageserver(S3Target),
+    Safekeeper(S3Target),
+}
+
+impl RootTarget {
+    pub fn tenants_root(&self) -> &S3Target {
+        match self {
+            Self::Pageserver(root) => root,
+            Self::Safekeeper(root) => root,
+        }
+    }
+
+    pub fn tenant_root(&self, tenant_id: TenantId) -> S3Target {
+        self.tenants_root().with_sub_segment(&tenant_id.to_string())
+    }
+
+    pub fn timelines_root(&self, tenant_id: TenantId) -> S3Target {
+        match self {
+            Self::Pageserver(_) => self.tenant_root(tenant_id).with_sub_segment("timelines"),
+            Self::Safekeeper(_) => self.tenant_root(tenant_id),
+        }
+    }
+
+    pub fn timeline_root(&self, id: TenantTimelineId) -> S3Target {
+        self.timelines_root(id.tenant_id)
+            .with_sub_segment(&id.timeline_id.to_string())
+    }
+
+    pub fn bucket_name(&self) -> &str {
+        match self {
+            Self::Pageserver(root) => &root.bucket_name,
+            Self::Safekeeper(root) => &root.bucket_name,
+        }
     }
 }
 

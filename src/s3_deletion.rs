@@ -13,14 +13,14 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, info_span, Instrument};
 
 use crate::delete_batch_producer::DeleteBatch;
-use crate::{list_objects_with_retries, S3Target, TenantId, MAX_RETRIES};
+use crate::{list_objects_with_retries, RootTarget, TenantId, MAX_RETRIES};
 
 pub struct S3Deleter {
     dry_run: bool,
     concurrent_tasks_count: NonZeroUsize,
     delete_batch_receiver: Arc<Mutex<UnboundedReceiver<DeleteBatch>>>,
     s3_client: Arc<Client>,
-    s3_target: S3Target,
+    s3_target: RootTarget,
 }
 
 impl S3Deleter {
@@ -29,7 +29,7 @@ impl S3Deleter {
         concurrent_tasks_count: NonZeroUsize,
         s3_client: Arc<Client>,
         delete_batch_receiver: Arc<Mutex<UnboundedReceiver<DeleteBatch>>>,
-        s3_target: S3Target,
+        s3_target: RootTarget,
     ) -> Self {
         Self {
             dry_run,
@@ -125,14 +125,12 @@ struct DeletionStats {
 
 async fn delete_batch(
     s3_client: &Client,
-    // TODO kb what target is this?
-    s3_target: &S3Target,
+    s3_target: &RootTarget,
     batch: DeleteBatch,
     dry_run: bool,
 ) -> anyhow::Result<DeletionStats> {
-    // TODO kb process timelines too
     if !batch.timelines.is_empty() {
-        todo!("Timeline deletion is not supported yet");
+        todo!("TODO kb Timeline deletion is not supported yet");
     }
     let batch = batch.tenants;
     info!("Deleting batch of size {}", batch.len());
@@ -141,10 +139,8 @@ async fn delete_batch(
     let mut object_ids_to_delete = Vec::with_capacity(MAX_ITEMS_TO_DELETE);
 
     for &tenant_to_delete in &batch {
-        let tenant_root_target = s3_target.with_sub_segment(&tenant_to_delete.to_string());
-
         let mut continuation_token = None;
-        let mut subtargets = vec![tenant_root_target];
+        let mut subtargets = vec![s3_target.tenants_root().clone()];
         while !subtargets.is_empty() {
             let current_target = subtargets.pop().expect("Subtargets is not empty");
             loop {
@@ -169,7 +165,7 @@ async fn delete_batch(
                         );
                         send_delete_request(
                             s3_client,
-                            &s3_target.bucket_name,
+                            s3_target.bucket_name(),
                             object_ids_for_request,
                             dry_run,
                         )
@@ -188,7 +184,7 @@ async fn delete_batch(
                         .iter()
                         .filter_map(|common_prefix| common_prefix.prefix())
                         .map(|prefix| {
-                            let mut new_target = s3_target.clone();
+                            let mut new_target = current_target.clone();
                             new_target.prefix_in_bucket = prefix.to_string();
                             new_target
                         }),
@@ -206,7 +202,7 @@ async fn delete_batch(
         info!("Removing last objects of the batch");
         send_delete_request(
             s3_client,
-            &s3_target.bucket_name,
+            s3_target.bucket_name(),
             object_ids_to_delete,
             dry_run,
         )
@@ -273,16 +269,14 @@ async fn send_delete_request(
 
 async fn ensure_batch_deleted(
     s3_client: &Client,
-    s3_target: &S3Target,
+    s3_target: &RootTarget,
     batch: Vec<TenantId>,
 ) -> anyhow::Result<()> {
     let mut not_deleted_tenants = Vec::with_capacity(batch.len());
 
     for tenant_id in batch {
-        let tenant_root_target = s3_target.with_sub_segment(&tenant_id.to_string());
-
         let fetch_response =
-            list_objects_with_retries(s3_client, &tenant_root_target, None).await?;
+            list_objects_with_retries(s3_client, &s3_target.tenant_root(tenant_id), None).await?;
 
         if fetch_response.is_truncated()
             || fetch_response.contents().is_some()

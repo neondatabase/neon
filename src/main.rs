@@ -8,7 +8,8 @@ use reqwest::Url;
 use s3_deleter::cloud_admin_api::CloudAdminApiClient;
 use s3_deleter::delete_batch_producer::DeleteBatchProducer;
 use s3_deleter::{
-    get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, S3Deleter, S3Target,
+    get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, RootTarget, S3Deleter,
+    S3Target,
 };
 use tracing::{info, info_span, warn};
 
@@ -40,13 +41,6 @@ async fn main() -> anyhow::Result<()> {
     let mut node_kind = env::var("NODE_KIND").context("'NODE_KIND' param retrieval")?;
     node_kind.make_ascii_lowercase();
 
-    let delimiter = "/".to_string();
-    let prefix_in_bucket = match node_kind.trim() {
-        "pageserver" => ["pageserver", "v1", "tenants", ""].join(&delimiter),
-        "safekeeper" => ["safekeeper", "v1", "wal", ""].join(&delimiter),
-        unknown => anyhow::bail!("Unknown node type {unknown}"),
-    };
-
     info!("Starting extra tenant S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}'");
     let cloud_admin_api_client = CloudAdminApiClient::new(
         get_cloud_admin_api_token_or_exit(),
@@ -54,11 +48,20 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let bucket_region = Region::new(region_param);
+    let delimiter = "/".to_string();
     let s3_client = Arc::new(init_s3_client(sso_account_id_param, bucket_region));
-    let s3_target = S3Target {
-        bucket_name: bucket_param,
-        prefix_in_bucket,
-        delimiter,
+    let s3_target = match node_kind.trim() {
+        "pageserver" => RootTarget::Pageserver(S3Target {
+            bucket_name: bucket_param,
+            prefix_in_bucket: ["pageserver", "v1", "tenants", ""].join(&delimiter),
+            delimiter,
+        }),
+        "safekeeper" => RootTarget::Safekeeper(S3Target {
+            bucket_name: bucket_param,
+            prefix_in_bucket: ["safekeeper", "v1", "wal", ""].join(&delimiter),
+            delimiter,
+        }),
+        unknown => anyhow::bail!("Unknown node type {unknown}"),
     };
 
     let delete_batch_producer = DeleteBatchProducer::start(
