@@ -4,7 +4,10 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use remote_storage::RemoteStorageConfig;
+use safekeeper::timeline::Timeline;
+use safekeeper::wal_storage::find_wal_beginning;
 use toml_edit::Document;
+use utils::lsn::Lsn;
 use utils::signals::ShutdownSignals;
 
 use std::fs::{self, File};
@@ -21,7 +24,7 @@ use utils::pid_file;
 
 use metrics::set_build_info_metric;
 use safekeeper::broker;
-use safekeeper::control_file;
+use safekeeper::control_file::{self, Storage, CONTROL_FILE_NAME};
 use safekeeper::defaults::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
     DEFAULT_PG_LISTEN_ADDR,
@@ -118,6 +121,12 @@ struct Args {
     /// Format for logging, either 'plain' or 'json'.
     #[arg(long, default_value = "plain")]
     log_format: String,
+    /// Fix old timelines with incorrent timeline_start_lsn.
+    /// Accepts path to backup old control files before fixes.
+    #[arg(long)]
+    fix_old_timelines: Option<String>,
+    #[arg(long)]
+    wet_run: bool, // anti dry-run
 }
 
 fn main() -> anyhow::Result<()> {
@@ -187,10 +196,10 @@ fn main() -> anyhow::Result<()> {
         Some(GIT_VERSION.into()),
         &[("node_id", &conf.my_id.to_string())],
     );
-    start_safekeeper(conf)
+    start_safekeeper(conf, args.fix_old_timelines, !args.wet_run)
 }
 
-fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
+fn start_safekeeper(conf: SafeKeeperConf, fix_old_timelines: Option<String>, dry_run: bool) -> Result<()> {
     // Prevent running multiple safekeepers on the same directory
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
     let lock_file =
@@ -200,6 +209,11 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     // ensure that the lock file is held even if the main thread of the process is panics
     // we need to release the lock file only when the current process is gone
     std::mem::forget(lock_file);
+
+    if fix_old_timelines.is_some() {
+        info!("Running code to fix old timelines (timeline_start_lsn fix)");
+        return fix_timeline_start_lsn(conf, fix_old_timelines.unwrap(), dry_run);
+    }
 
     let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
@@ -282,6 +296,83 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         info!("received {}, terminating", signal.name());
         std::process::exit(0);
     })
+}
+
+fn fix_timeline_start_lsn(conf: SafeKeeperConf, backup_dir: String, dry_run: bool) -> Result<()> {
+    // create async runtime
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        let backup_dir = PathBuf::from(backup_dir);
+        // create a dir for control file backups
+        fs::create_dir_all(&backup_dir).context("failed to create backup dir")?;
+
+        let (wal_backup_launcher_tx, _wal_backup_launcher_rx) = mpsc::channel(100000);
+
+        // Load all timelines from disk to memory.
+        GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
+
+        let timelines = GlobalTimelines::get_all();
+        let mut fixed_timelines = 0;
+        for tli in timelines {
+            if fix_one_timeline(&conf, tli, &backup_dir, dry_run).await? {
+                fixed_timelines += 1;
+            }
+        }
+
+        info!("Finished fixing timelines, fixed in total: {}", fixed_timelines);
+        Ok(())
+    })
+}
+
+async fn fix_one_timeline(conf: &SafeKeeperConf, tli: Arc<Timeline>, backup_root: &PathBuf, dry_run: bool) -> Result<bool> {
+    let (_mem_state, disk_state) = tli.get_state();
+    let need_fix = disk_state.backup_lsn == Lsn(1) || disk_state.timeline_start_lsn == Lsn(1) || disk_state.local_start_lsn == Lsn(1);
+    if !need_fix {
+        return Ok(false);
+    }
+
+    info!("Fixing timeline {}, backup_lsn={}, timeline_start_lsn={}, local_start_lsn={}", tli.ttid, disk_state.backup_lsn, disk_state.timeline_start_lsn, disk_state.local_start_lsn);
+
+    let start_lsn = find_wal_beginning(
+        conf.workdir.clone(),
+        conf.timeline_dir(&tli.ttid),
+        &disk_state,
+        conf.wal_backup_enabled,
+    ).await?;
+    
+    info!("Found WAL beginning at {}", start_lsn);
+
+    let mut new_state = disk_state.clone();
+    if new_state.backup_lsn < start_lsn {
+        new_state.backup_lsn = start_lsn;
+    }
+    if new_state.timeline_start_lsn < start_lsn {
+        new_state.timeline_start_lsn = start_lsn;
+    }
+    if new_state.local_start_lsn < start_lsn {
+        new_state.local_start_lsn = start_lsn;
+    }
+
+    info!("New state JSON: {}", serde_json::to_string(&new_state)?);
+
+    // copy old control file to backup dir
+    let ttid_path = format!("{}_{}.bak", tli.ttid.tenant_id, tli.ttid.timeline_id);
+    let backup_file = backup_root.join(ttid_path);
+    let original_file = conf.timeline_dir(&tli.ttid).join(CONTROL_FILE_NAME);
+
+    fs::copy(original_file, &backup_file).context("failed to copy control file")?;
+
+    if dry_run {
+        // don't modify anything if this is a dry run
+        return Ok(true);
+    }
+
+    tli.write_shared_state().sk.state.persist(&new_state)?;
+    Ok(true)
 }
 
 /// Determine safekeeper id.

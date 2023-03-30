@@ -606,6 +606,88 @@ impl WalReader {
     }
 }
 
+pub async fn find_wal_beginning(
+    workdir: PathBuf,
+    timeline_dir: PathBuf,
+    state: &SafeKeeperState,
+    enable_remote_read: bool,
+) -> Result<Lsn> {
+    let wal_seg_size = state.server.wal_seg_size as usize;
+    let mut reader = WalReader{
+        enable_remote_read,
+        local_start_lsn: Lsn(0),
+        workdir: workdir.clone(),
+        timeline_dir: timeline_dir.clone(),
+        wal_seg_size,
+        pos: Lsn(0),
+        wal_segment: None,
+    };
+    let commit_lsn = state.commit_lsn;
+
+    // Iterating through WAL segments, until commit_lsn is reached.
+    let mut seg_start = Lsn(0);
+    let first_lsn = loop {
+        seg_start = Lsn(seg_start.0 + wal_seg_size as u64);
+        if seg_start > commit_lsn {
+            bail!("all bytes until commit_lsn({}) are zero", commit_lsn);
+        }
+        reader.pos = seg_start;
+        let res = reader.open_segment().await;
+        if let Err(e) = &res {
+            if e.to_string().contains("Failed to open WAL segment download stream for remote path") {
+                // S3 error, probably the file is not found. This is possible if timeline was branched not from the first segment.
+                info!("skipping segment {} because it is not found in remote storage", seg_start.segment_number(wal_seg_size));
+                continue;
+            }
+        }
+        let mut reader = res?;
+        info!("reading segment {} to find LSN with first non-zero byte", seg_start.segment_number(wal_seg_size));
+
+        let mut buf = [0u8; 1024];
+        let mut lsn = seg_start;
+        let mut found_zero = false;
+        while !found_zero {
+            let read = reader.read(&mut buf).await?;
+            if read == 0 {
+                break;
+            }
+            for i in 0..read {
+                if buf[i] != 0 {
+                    info!("found non-zero byte at LSN {}", lsn);
+                    found_zero = true;
+                    break;
+                }
+                lsn += 1;
+            }
+        }
+        if !found_zero {
+            bail!("segment is empty, all values from {} to {} are zeroes", seg_start, lsn);
+        }
+        break lsn;
+    };
+
+    // restarting WAL reader to test that we can read at least one WAL record
+    let mut reader = WalReader::new(workdir, timeline_dir, state, first_lsn, enable_remote_read)?;
+    let mut decoder = WalStreamDecoder::new(first_lsn, state.server.pg_version / 10000);
+    
+    let mut buf = [0u8; 1024];
+    let first_record = loop {
+        let res = decoder.poll_decode()?;
+        if res.is_some() {
+            break res.unwrap();
+        }
+        let read = reader.read(&mut buf).await?;
+        if read == 0 {
+            bail!("failed to read first WAL record, reached EOF");
+        }
+
+        decoder.feed_bytes(&buf[0..read]);
+    };
+
+    info!("first WAL record is {:?}", first_record);
+    Ok(first_lsn)
+}
+
 /// Zero block for filling created WAL segments.
 const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 

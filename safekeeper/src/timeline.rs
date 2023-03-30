@@ -118,7 +118,7 @@ impl ReplicaState {
 /// Shared state associated with database instance
 pub struct SharedState {
     /// Safekeeper object
-    sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
+    pub sk: SafeKeeper<control_file::FileStorage, wal_storage::PhysicalStorage>,
     /// In memory list containing state of peers sent in latest messages from them.
     peers_info: PeersInfo,
     /// State of replicas

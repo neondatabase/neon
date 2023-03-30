@@ -18,7 +18,7 @@ use crate::SafeKeeperConf;
 use std::convert::TryInto;
 
 // contains persistent metadata for safekeeper
-const CONTROL_FILE_NAME: &str = "safekeeper.control";
+pub const CONTROL_FILE_NAME: &str = "safekeeper.control";
 // needed to atomically update the state using `rename`
 const CONTROL_FILE_NAME_PARTIAL: &str = "safekeeper.control.partial";
 pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
