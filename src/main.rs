@@ -32,14 +32,6 @@ async fn main() -> anyhow::Result<()> {
         env::var("SSO_ACCOUNT_ID").context("'SSO_ACCOUNT_ID' param retrieval")?;
     let region_param = env::var("REGION").context("'REGION' param retrieval")?;
     let bucket_param = env::var("BUCKET").context("'BUCKET' param retrieval")?;
-    let total_processed_items_limit_param: Option<usize> = env::var("TOTAL_PROCESSED_ITEMS_LIMIT")
-        .ok()
-        .map(|limit_str| {
-            limit_str
-                .parse()
-                .context("'TOTAL_PROCESSED_ITEMS_LIMIT' param parsing")
-        })
-        .transpose()?;
     let cloud_admin_api_url_param: Url = env::var("CLOUD_ADMIN_API_URL")
         .context("'CLOUD_ADMIN_API_URL' param retrieval")?
         .parse()
@@ -74,7 +66,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&s3_client),
         s3_target.clone(),
         s3_deleter::TraversingDepth::Tenant,
-        total_processed_items_limit_param,
     );
 
     let s3_deleter = S3Deleter::new(
@@ -100,7 +91,8 @@ async fn main() -> anyhow::Result<()> {
     let batch_producer_stats = batch_producer_task_result.context("delete batch producer join")?;
     info!(
         "Total bucket tenants listed: {}, timelines: {}",
-        batch_producer_stats.tenants_checked, batch_producer_stats.timelines_checked
+        batch_producer_stats.tenants_checked(),
+        batch_producer_stats.timelines_checked(),
     );
 
     info!("Finished S3 removal");

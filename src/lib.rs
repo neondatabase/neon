@@ -36,9 +36,12 @@ pub enum TraversingDepth {
 }
 
 impl S3Target {
-    pub fn add_segment_to_prefix(&mut self, new_segment: &str) {
-        let _ = self.prefix_in_bucket.pop();
-        self.prefix_in_bucket = [&self.prefix_in_bucket, new_segment, ""].join(&self.delimiter);
+    pub fn with_sub_segment(&self, new_segment: &str) -> Self {
+        let mut new_self = self.clone();
+        let _ = new_self.prefix_in_bucket.pop();
+        new_self.prefix_in_bucket =
+            [&new_self.prefix_in_bucket, new_segment, ""].join(&new_self.delimiter);
+        new_self
     }
 }
 

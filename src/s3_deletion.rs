@@ -125,6 +125,7 @@ struct DeletionStats {
 
 async fn delete_batch(
     s3_client: &Client,
+    // TODO kb what target is this?
     s3_target: &S3Target,
     batch: DeleteBatch,
     dry_run: bool,
@@ -140,8 +141,7 @@ async fn delete_batch(
     let mut object_ids_to_delete = Vec::with_capacity(MAX_ITEMS_TO_DELETE);
 
     for &tenant_to_delete in &batch {
-        let mut tenant_root_target = s3_target.clone();
-        tenant_root_target.add_segment_to_prefix(&tenant_to_delete.to_string());
+        let tenant_root_target = s3_target.with_sub_segment(&tenant_to_delete.to_string());
 
         let mut continuation_token = None;
         let mut subtargets = vec![tenant_root_target];
@@ -279,8 +279,7 @@ async fn ensure_batch_deleted(
     let mut not_deleted_tenants = Vec::with_capacity(batch.len());
 
     for tenant_id in batch {
-        let mut tenant_root_target = s3_target.clone();
-        tenant_root_target.add_segment_to_prefix(&tenant_id.to_string());
+        let tenant_root_target = s3_target.with_sub_segment(&tenant_id.to_string());
 
         let fetch_response =
             list_objects_with_retries(s3_client, &tenant_root_target, None).await?;

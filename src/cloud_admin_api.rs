@@ -151,7 +151,7 @@ impl CloudAdminApiClient {
         Self {
             token,
             base_url,
-            http_client: Client::new(), // TODO kb timeout configs at least
+            http_client: Client::new(), // TODO timeout configs at least
         }
     }
 
@@ -194,6 +194,50 @@ impl CloudAdminApiClient {
             )),
             too_many => Err(Error::new(
                 format!("Find project for tenant returned {too_many} projects instead of 0 or 1"),
+                ErrorKind::UnexpectedState,
+            )),
+        }
+    }
+
+    pub async fn find_timeline_branch(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Result<Option<BranchData>, Error> {
+        let response = self
+            .http_client
+            .get(self.append_url("/branches"))
+            .query(&[
+                ("timeline_id", timeline_id.to_string()),
+                ("show_deleted", "true".to_string()),
+            ])
+            .header(header::ACCEPT, "application/json")
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| {
+                Error::new(
+                    "Find branch for timeline".to_string(),
+                    ErrorKind::RequestSend(e),
+                )
+            })?;
+
+        let response: AdminApiResponse<Vec<BranchData>> = response.json().await.map_err(|e| {
+            Error::new(
+                "Find branch for timeline".to_string(),
+                ErrorKind::BodyRead(e),
+            )
+        })?;
+        match response.data.len() {
+            0 => Ok(None),
+            1 => Ok(Some(
+                response
+                    .data
+                    .into_iter()
+                    .next()
+                    .expect("Should have exactly one element"),
+            )),
+            too_many => Err(Error::new(
+                format!("Find branch for timeline returned {too_many} branches instead of 0 or 1"),
                 ErrorKind::UnexpectedState,
             )),
         }
