@@ -27,6 +27,11 @@ RETURNS SETOF RECORD
 AS 'MODULE_PATHNAME', 'local_cache_pages'
 LANGUAGE C PARALLEL SAFE;
 
+CREATE FUNCTION approximate_working_set_size(reset bool)
+RETURNS integer
+AS 'MODULE_PATHNAME', 'approximate_working_set_size'
+LANGUAGE C PARALLEL SAFE;
+
 -- Create a view for convenient access.
 CREATE VIEW local_cache AS
 	SELECT P.* FROM local_cache_pages() AS P
