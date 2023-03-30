@@ -1,13 +1,12 @@
-import json
 import shutil
-import sys
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Dict, Tuple
 
 import pytest
+import toml
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     LocalFsStorage,
@@ -96,27 +95,32 @@ class EvictionEnv:
         with self.neon_env.postgres.create_start("main", tenant_id=tenant_id, lsn=lsn) as pg:
             self.pg_bin.run(["pgbench", "-S", pg.connstr()])
 
-    def pageserver_start_with_mocked_statvfs(self, config_override: str, mock: Dict[str, Any]):
+    def pageserver_start_with_disk_usage_eviction(
+        self, period, max_usage_pct, min_avail_bytes, mock_behavior
+    ):
         magic = str(uuid.uuid4())
 
-        preload_lib_path: Path = self.neon_env.neon_binpath / "libstatvfs_ldpreload.so"
-        assert preload_lib_path.is_file(), "libstatvfs_ldpreload.so must be built"
+        disk_usage_config = {
+            "period": period,
+            "max_usage_pct": max_usage_pct,
+            "min_avail_bytes": min_avail_bytes,
+            "mock_statvfs": {
+                "behavior": mock_behavior,
+                "magic": magic,
+            },
+        }
+
+        enc = toml.TomlEncoder()
 
         self.neon_env.pageserver.start(
-            overrides=("--pageserver-config-override=" + config_override,),
-            extra_env_vars={
-                "LD_PRELOAD": str(preload_lib_path.absolute()),
-                "NEON_STATVFS_LDPRELOAD_CONFIG": json.dumps(
-                    {
-                        "magic": magic,
-                        "mock": mock,
-                    }
-                ),
-            },
+            overrides=(
+                "--pageserver-config-override=disk_usage_based_eviction="
+                + enc.dump_inline_table(disk_usage_config).replace("\n", " "),
+            ),
         )
 
         def statvfs_called():
-            assert self.neon_env.pageserver.log_contains(".*statvfs_ldpreload status:.*" + magic)
+            assert self.neon_env.pageserver.log_contains(".*running mocked statvfs.*" + magic)
 
         wait_until(10, 1, statvfs_called)
 
@@ -431,18 +435,17 @@ def poor_mans_du(
     return (total_on_disk, largest_layer, smallest_layer or 0)
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"), reason="LD_PRELOAD hack currently only supported on Linux"
-)
 def test_statvfs_error_handling(eviction_env: EvictionEnv):
     """
     We should log an error that statvfs fails.
     """
     env = eviction_env
     env.neon_env.pageserver.stop()
-    env.pageserver_start_with_mocked_statvfs(
-        'disk_usage_based_eviction={ period = "1s", max_usage_pct = 90, min_avail_bytes = 0 }',
-        {
+    env.pageserver_start_with_disk_usage_eviction(
+        period="1s",
+        max_usage_pct=90,
+        min_avail_bytes=0,
+        mock_behavior={
             "type": "Failure",
             "mocked_error": "EIO",
         },
@@ -452,9 +455,6 @@ def test_statvfs_error_handling(eviction_env: EvictionEnv):
     env.neon_env.pageserver.allowed_errors.append(".*statvfs failed.*EIO")
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"), reason="LD_PRELOAD hack currently only supported on Linux"
-)
 def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     """
     If statvfs data shows 100% usage, the eviction task will drive it down to
@@ -469,18 +469,15 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     blocksize = 512
     total_blocks = (total_size + (blocksize - 1)) // blocksize
 
-    env.pageserver_start_with_mocked_statvfs(
-        'disk_usage_based_eviction={ period = "1s", max_usage_pct = 33, min_avail_bytes = 0 }',
-        {
+    env.pageserver_start_with_disk_usage_eviction(
+        period="1s",
+        max_usage_pct=33,
+        min_avail_bytes=0,
+        mock_behavior={
             "type": "Success",
             "blocksize": blocksize,
             "total_blocks": total_blocks,
-            "used": {
-                "type": "WalkDir",
-                "path": str((env.neon_env.repo_dir / "tenants").absolute()),
-                # timelines_du() only reports layer files, do the same here
-                "name_filter": ".*__.*",
-            },
+            "name_filter": ".*__.*",
         },
     )
 
@@ -494,9 +491,6 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
     assert post_eviction_total_size <= 0.33 * total_size, "we requested max 33% usage"
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"), reason="LD_PRELOAD hack currently only supported on Linux"
-)
 def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
     """
     If statvfs data shows 100% usage, the eviction task will drive it down to
@@ -513,19 +507,15 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
 
     min_avail_bytes = total_size // 3
 
-    env.pageserver_start_with_mocked_statvfs(
-        'disk_usage_based_eviction={ period = "1s", max_usage_pct = 100, min_avail_bytes = %s }'
-        % (min_avail_bytes),
-        {
+    env.pageserver_start_with_disk_usage_eviction(
+        period="1s",
+        max_usage_pct=100,
+        min_avail_bytes=min_avail_bytes,
+        mock_behavior={
             "type": "Success",
             "blocksize": blocksize,
             "total_blocks": total_blocks,
-            "used": {
-                "type": "WalkDir",
-                "path": str((env.neon_env.repo_dir / "tenants").absolute()),
-                # timelines_du() only reports layer files, do the same here
-                "name_filter": ".*__.*",
-            },
+            "name_filter": ".*__.*",
         },
     )
 

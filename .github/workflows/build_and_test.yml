@@ -240,7 +240,7 @@ jobs:
 
       - name: Run cargo build
         run: |
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
 
       - name: Run cargo test
         run: |
@@ -257,16 +257,6 @@ jobs:
           for bin in $binaries; do
             SRC=target/$BUILD_TYPE/$bin
             DST=/tmp/neon/bin/$bin
-            cp "$SRC" "$DST"
-          done
-
-          cdylibs=$(
-            ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
-            jq -r '.packages[].targets[] | select(.kind | index("cdylib")) | .name'
-          )
-          for lib in $cdylibs; do
-            SRC=target/$BUILD_TYPE/lib$lib.so
-            DST=/tmp/neon/bin/lib$lib.so
             cp "$SRC" "$DST"
           done
 
