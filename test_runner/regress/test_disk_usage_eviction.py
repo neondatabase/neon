@@ -153,8 +153,6 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
     env.initial_tenant = TenantId("0" * 32)
     env.initial_timeline = None
 
-    timelines = []
-
     # Choose small layer_size so that we can use low pgbench_scales and still get a large count of layers.
     # Large count of layers and small layer size is good for testing because it makes evictions predictable.
     # Predictable in the sense that many layer evictions will be required to reach the eviction target, because
@@ -164,7 +162,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
     pgbench_init_lsns = {}
 
-    created = []
+    timelines = []
     for scale in pgbench_scales:
         tenant_id, timeline_id = env.neon_cli.create_tenant(
             conf={
@@ -180,7 +178,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
             pg_bin.run(["pgbench", "-i", f"-s{scale}", pg.connstr()])
             wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
 
-        created.append((tenant_id, timeline_id))
+        timelines.append((tenant_id, timeline_id))
 
     # stop the safekeepers to avoid on-demand downloads caused by
     # initial logical size calculation triggered by walreceiver connection status
@@ -188,7 +186,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
     env.neon_cli.safekeeper_stop()
 
     # after stopping the safekeepers, we know that no new WAL will be coming in
-    for tenant_id, timeline_id in created:
+    for tenant_id, timeline_id in timelines:
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         wait_for_upload_queue_empty(env.pageserver, tenant_id, timeline_id)
         tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
@@ -201,8 +199,6 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
         assert (
             len(layers.historic_layers) >= 10
         ), "evictions happen at layer granularity, but we often assert at byte-granularity"
-
-        timelines.append((tenant_id, timeline_id))
 
     eviction_env = EvictionEnv(
         timelines=timelines,
