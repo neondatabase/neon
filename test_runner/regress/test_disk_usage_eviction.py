@@ -365,6 +365,12 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv):
 
 
 def test_partial_evict_tenant(eviction_env: EvictionEnv):
+    """
+    Warm up a tenant, then build up pressure to cause in evictions in both.
+    We expect
+    * the default min resident size to be respect (largest layer file size)
+    * the warmed-up tenants layers above min resident size to be evicted after the cold tenant's.
+    """
     env = eviction_env
     ps_http = env.pageserver_http
 
@@ -374,12 +380,16 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
     # pick any tenant
     [our_tenant, other_tenant] = list(du_by_timeline.keys())
     (tenant_id, timeline_id) = our_tenant
-    tenant_usage = du_by_timeline[our_tenant]
 
     # make our tenant more recently used than the other one
     env.warm_up_tenant(tenant_id)
 
-    target = total_on_disk - (tenant_usage // 2)
+    # Build up enough pressure to require evictions from both tenants,
+    # but not enough to fall into global LRU.
+    # So, set target to all occipied space, except 2*env.layer_size per tenant
+    target = (
+        du_by_timeline[other_tenant] + (du_by_timeline[our_tenant] // 2) - 2 * 2 * env.layer_size
+    )
     response = ps_http.disk_usage_eviction_run({"evict_bytes": target})
     log.info(f"{response}")
 
@@ -395,11 +405,17 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv):
         ), "all tenants should have lost some layers"
 
     assert (
-        later_du_by_timeline[our_tenant] > 0.4 * tenant_usage
-    ), "our warmed up tenant should be at about half capacity"
+        later_du_by_timeline[our_tenant] > 0.5 * du_by_timeline[our_tenant]
+    ), "our warmed up tenant should be at about half capacity, part 1"
+    assert (
+        # We don't know exactly whether the cold tenant needs 2 or just 1 env.layer_size wiggle room.
+        # So, check for up to 3 here.
+        later_du_by_timeline[our_tenant]
+        < 0.5 * du_by_timeline[our_tenant] + 3 * env.layer_size
+    ), "our warmed up tenant should be at about half capacity, part 2"
     assert (
         later_du_by_timeline[other_tenant] < 2 * env.layer_size
-    ), "the other tenant should be completely evicted"
+    ), "the other tenant should be evicted to is min_resident_size, i.e., max layer file size"
 
 
 def poor_mans_du(
