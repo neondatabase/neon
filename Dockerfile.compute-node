@@ -316,7 +316,7 @@ RUN apt-get update && \
     apt-get install -y cmake && \
     wget https://github.com/timescale/timescaledb/archive/refs/tags/2.10.1.tar.gz -O timescaledb.tar.gz && \
     mkdir timescaledb-src && cd timescaledb-src && tar xvzf ../timescaledb.tar.gz --strip-components=1 -C . && \
-    ./bootstrap -DSEND_TELEMETRY_DEFAULT:BOOL=OFF -DUSE_TELEMETRY:BOLL=OFF -DAPACHE_ONLY:BOOL=ON && \
+    ./bootstrap -DSEND_TELEMETRY_DEFAULT:BOOL=OFF -DUSE_TELEMETRY:BOOL=OFF -DAPACHE_ONLY:BOOL=ON && \
     cd build && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make install -j $(getconf _NPROCESSORS_ONLN) && \
