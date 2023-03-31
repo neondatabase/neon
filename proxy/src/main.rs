@@ -133,12 +133,13 @@ fn build_tls_config(args: &clap::ArgMatches) -> anyhow::Result<Option<TlsConfig>
 
     let tls_config = args.get_one::<PathBuf>("tls-config");
     let main = tls_config.map(TlsServers::from_config_file).transpose()?;
+    tracing::info!(?main, "config");
 
     let tls_cert = args.get_one::<PathBuf>("tls-cert");
     let tls_key = args.get_one::<PathBuf>("tls-key");
 
     let aux = match (tls_cert, tls_key) {
-        (Some(key_path), Some(cert_path)) => todo!("implement legacy TLS setup"),
+        (Some(_key), Some(_cert)) => todo!("implement legacy TLS setup"),
         (None, None) => None::<()>,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
@@ -264,19 +265,22 @@ fn cli() -> clap::Command {
                 .short('k')
                 .long("tls-key")
                 .alias("ssl-key") // backwards compatibility
-                .help("path to TLS key for client postgres connections"),
+                .help("path to TLS key for client postgres connections")
+                .value_parser(clap::builder::PathBufValueParser::new()),
         )
         .arg(
             Arg::new("tls-cert")
                 .short('c')
                 .long("tls-cert")
                 .alias("ssl-cert") // backwards compatibility
-                .help("path to TLS cert for client postgres connections"),
+                .help("path to TLS cert for client postgres connections")
+                .value_parser(clap::builder::PathBufValueParser::new()),
         )
         .arg(
             Arg::new("tls-config")
                 .long("tls-config")
-                .help("path to the TLS config file"),
+                .help("path to the TLS config file")
+                .value_parser(clap::builder::PathBufValueParser::new()),
         )
         .arg(
             Arg::new("metric-collection-endpoint")
