@@ -898,6 +898,16 @@ jobs:
     needs: [ push-docker-hub, tag, regress-tests ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
+      - name: Fix git ownership
+        run: |
+          # Workaround for `fatal: detected dubious ownership in repository at ...`
+          #
+          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+          #   Ref https://github.com/actions/checkout/issues/785
+          #
+          git config --global --add safe.directory ${{ github.workspace }}
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
       - name: Checkout
         uses: actions/checkout@v3
         with:
