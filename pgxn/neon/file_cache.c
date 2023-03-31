@@ -25,6 +25,7 @@
 #include "pgstat.h"
 #include "pagestore_client.h"
 #include "access/parallel.h"
+#include "common/hashfn.h"
 #include "postmaster/bgworker.h"
 #include "storage/relfilenode.h"
 #include "storage/buf_internals.h"
@@ -69,68 +70,8 @@
 
 /* Hyper log-log implementation for counting size of working set */
 
-#define ROTL32(x, r) ((x) << (r)) | ((x) >> (32 - (r)))
 #define HASH_BITS 25
 #define N_HASHES (1 << (32 - HASH_BITS))
-#define MURMUR_SEED 0x5C1DB
-
-static uint32
-murmur_hash3_32(const void* key, const int len, const uint32 seed)
-{
-    const uint8 * data = (const uint8*)key;
-    const int nblocks = len / 4;
-
-    uint32 h1 = seed;
-
-    uint32 c1 = 0xcc9e2d51;
-    uint32 c2 = 0x1b873593;
-    int i;
-    uint32 k1;
-    const uint8* tail;
-    const uint32* blocks = (const uint32 *)(data + nblocks*4);
-
-    for(i = -nblocks; i; i++)
-    {
-        k1 = blocks[i];
-
-        k1 *= c1;
-        k1 = ROTL32(k1,15);
-        k1 *= c2;
-
-        h1 ^= k1;
-        h1 = ROTL32(h1,13);
-        h1 = h1*5+0xe6546b64;
-    }
-
-    tail = (const uint8*)(data + nblocks*4);
-
-    k1 = 0;
-
-    switch(len & 3)
-    {
-      case 3:
-        k1 ^= tail[2] << 16;
-        /* no break */
-      case 2:
-        k1 ^= tail[1] << 8;
-        /* no break */
-      case 1:
-        k1 ^= tail[0];
-        k1 *= c1;
-        k1 = ROTL32(k1,15);
-        k1 *= c2;
-        h1 ^= k1;
-    }
-
-    h1 ^= len;
-    h1 ^= h1 >> 16;
-    h1 *= 0x85ebca6b;
-    h1 ^= h1 >> 13;
-    h1 *= 0xc2b2ae35;
-    h1 ^= h1 >> 16;
-
-    return h1;
-}
 
 static void
 calculate_zero_bits(uint32 h, uint8* max_zero_bits)
@@ -149,7 +90,7 @@ calculate_zero_bits(uint32 h, uint8* max_zero_bits)
 static void
 calculate_hash_functions(void const* val, int size, uint8* max_zero_bits)
 {
-    uint32 h = murmur_hash3_32(val, size, MURMUR_SEED);
+    uint32 h = hash_bytes((char const*)val, size);
     calculate_zero_bits(h, max_zero_bits);
 }
 
