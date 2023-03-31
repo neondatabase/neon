@@ -7,6 +7,10 @@ pub enum Statvfs {
     Mock(mock::Statvfs),
 }
 
+// NB: on macOS, the block count type of struct statvfs is u32.
+// The workaround seems to be to use the non-standard statfs64 call.
+// Sincce it should only be a problem on > 2TiB disks, let's ignore
+// the problem for now and upcast to u64.
 impl Statvfs {
     pub fn get(tenants_dir: &Path, mocked: Option<&mock::Behavior>) -> nix::Result<Self> {
         if let Some(mocked) = mocked {
@@ -16,6 +20,7 @@ impl Statvfs {
         }
     }
 
+    // NB: allow() because the block count type is u32 on macOS.
     #[allow(clippy::useless_conversion)]
     pub fn blocks(&self) -> u64 {
         match self {
@@ -24,6 +29,7 @@ impl Statvfs {
         }
     }
 
+    // NB: allow() because the block count type is u32 on macOS.
     #[allow(clippy::useless_conversion)]
     pub fn blocks_available(&self) -> u64 {
         match self {
@@ -32,18 +38,16 @@ impl Statvfs {
         }
     }
 
-    #[allow(clippy::useless_conversion)]
     pub fn fragment_size(&self) -> u64 {
         match self {
-            Statvfs::Real(stat) => u64::try_from(stat.fragment_size()).unwrap(),
+            Statvfs::Real(stat) => stat.fragment_size(),
             Statvfs::Mock(stat) => stat.fragment_size,
         }
     }
 
-    #[allow(clippy::useless_conversion)]
     pub fn block_size(&self) -> u64 {
         match self {
-            Statvfs::Real(stat) => u64::try_from(stat.block_size()).unwrap(),
+            Statvfs::Real(stat) => stat.block_size(),
             Statvfs::Mock(stat) => stat.block_size,
         }
     }
