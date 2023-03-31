@@ -257,7 +257,7 @@ impl EvictionsWithLowResidenceDuration {
     }
 
     pub fn observe(&self, observed_value: Duration) {
-        if self.threshold < observed_value {
+        if observed_value < self.threshold {
             self.counter
                 .as_ref()
                 .expect("nobody calls this function after `remove_from_vec`")
