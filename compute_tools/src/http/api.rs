@@ -155,7 +155,7 @@ async fn handle_configure_request(
         // ```
         {
             let mut state = compute.state.lock().unwrap();
-            if state.status != ComputeStatus::Empty {
+            if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
                 let msg = format!(
                     "invalid compute status for configuration request: {:?}",
                     state.status.clone()

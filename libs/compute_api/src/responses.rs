@@ -1,7 +1,9 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
+
+use crate::spec::ComputeSpec;
 
 #[derive(Serialize, Debug)]
 pub struct GenericAPIError {
@@ -43,6 +45,8 @@ pub enum ComputeStatus {
     Init,
     // Compute is configured and running.
     Running,
+    // New spec is being applied.
+    Configuration,
     // Either startup or configuration failed,
     // compute will exit soon or is waiting for
     // control-plane to terminate it.
@@ -63,4 +67,12 @@ pub struct ComputeMetrics {
     pub basebackup_ms: u64,
     pub config_ms: u64,
     pub total_startup_ms: u64,
+}
+
+/// Response of the `/computes/{compute_id}/spec` control-plane API.
+/// This is not actually a compute API response, so consider moving
+/// to a different place.
+#[derive(Deserialize, Debug)]
+pub struct ControlPlaneSpecResponse {
+    pub spec: Option<ComputeSpec>,
 }

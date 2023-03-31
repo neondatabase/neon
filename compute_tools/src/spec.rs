@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use postgres::config::Config;
 use postgres::{Client, NoTls};
 use tracing::{info, info_span, instrument, span_enabled, warn, Level};
@@ -10,6 +10,7 @@ use crate::config;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
+use compute_api::responses::ControlPlaneSpecResponse;
 use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
 
 /// Request spec from the control-plane by compute_id. If `NEON_CONSOLE_JWT`
@@ -26,13 +27,19 @@ pub fn get_spec_from_control_plane(base_uri: &str, compute_id: &str) -> Result<C
     // - network error, then retry
     // - no spec for compute yet, then wait
     // - compute id is unknown or any other error, then bail out
-    let spec = reqwest::blocking::Client::new()
+    let resp: ControlPlaneSpecResponse = reqwest::blocking::Client::new()
         .get(cp_uri)
         .header("Authorization", jwt)
-        .send()?
-        .json()?;
+        .send()
+        .map_err(|e| anyhow!("could not send spec request to control plane: {}", e))?
+        .json()
+        .map_err(|e| anyhow!("could not get compute spec from control plane: {}", e))?;
 
-    Ok(spec)
+    if let Some(spec) = resp.spec {
+        Ok(spec)
+    } else {
+        bail!("could not get compute spec from control plane")
+    }
 }
 
 /// It takes cluster specification and does the following:
