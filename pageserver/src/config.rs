@@ -27,6 +27,7 @@ use utils::{
     logging::LogFormat,
 };
 
+use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
@@ -92,6 +93,8 @@ pub mod defaults {
 
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 
+#disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
+
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
@@ -103,6 +106,8 @@ pub mod defaults {
 #gc_horizon = {DEFAULT_GC_HORIZON}
 #image_creation_threshold = {DEFAULT_IMAGE_CREATION_THRESHOLD}
 #pitr_interval = '{DEFAULT_PITR_INTERVAL}'
+
+#min_resident_size_override = .. # in bytes
 
 # [remote_storage]
 
@@ -180,6 +185,8 @@ pub struct PageServerConf {
     // See the corresponding metric's help string.
     pub evictions_low_residence_duration_metric_threshold: Duration,
 
+    pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
+
     pub test_remote_failures: u64,
 
     pub ondemand_download_behavior_treat_error_as_warn: bool,
@@ -252,6 +259,8 @@ struct PageServerConfigBuilder {
 
     evictions_low_residence_duration_metric_threshold: BuilderValue<Duration>,
 
+    disk_usage_based_eviction: BuilderValue<Option<DiskUsageEvictionTaskConfig>>,
+
     test_remote_failures: BuilderValue<u64>,
 
     ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
@@ -311,6 +320,8 @@ impl Default for PageServerConfigBuilder {
                 DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
             )
             .expect("cannot parse DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD")),
+
+            disk_usage_based_eviction: Set(None),
 
             test_remote_failures: Set(0),
 
@@ -431,6 +442,10 @@ impl PageServerConfigBuilder {
         self.evictions_low_residence_duration_metric_threshold = BuilderValue::Set(value);
     }
 
+    pub fn disk_usage_based_eviction(&mut self, value: Option<DiskUsageEvictionTaskConfig>) {
+        self.disk_usage_based_eviction = BuilderValue::Set(value);
+    }
+
     pub fn ondemand_download_behavior_treat_error_as_warn(
         &mut self,
         ondemand_download_behavior_treat_error_as_warn: bool,
@@ -515,6 +530,9 @@ impl PageServerConfigBuilder {
                 .ok_or(anyhow!(
                     "missing evictions_low_residence_duration_metric_threshold"
                 ))?,
+            disk_usage_based_eviction: self
+                .disk_usage_based_eviction
+                .ok_or(anyhow!("missing disk_usage_based_eviction"))?,
             test_remote_failures: self
                 .test_remote_failures
                 .ok_or(anyhow!("missing test_remote_failuers"))?,
@@ -704,6 +722,12 @@ impl PageServerConf {
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
                 "evictions_low_residence_duration_metric_threshold" => builder.evictions_low_residence_duration_metric_threshold(parse_toml_duration(key, item)?),
+                "disk_usage_based_eviction" => {
+                    tracing::info!("disk_usage_based_eviction: {:#?}", &item);
+                    builder.disk_usage_based_eviction(
+                    toml_edit::de::from_item(item.clone())
+                    .context("parse disk_usage_based_eviction")?)
+                },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
@@ -808,6 +832,13 @@ impl PageServerConf {
             );
         }
 
+        if let Some(item) = item.get("min_resident_size_override") {
+            t_conf.min_resident_size_override = Some(
+                toml_edit::de::from_item(item.clone())
+                    .context("parse min_resident_size_override")?,
+            );
+        }
+
         Ok(t_conf)
     }
 
@@ -850,6 +881,7 @@ impl PageServerConf {
                 defaults::DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
             )
             .unwrap(),
+            disk_usage_based_eviction: None,
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
         }
@@ -1058,6 +1090,7 @@ log_format = 'json'
                 evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
                     defaults::DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD
                 )?,
+                disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
             },
@@ -1112,6 +1145,7 @@ log_format = 'json'
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 synthetic_size_calculation_interval: Duration::from_secs(333),
                 evictions_low_residence_duration_metric_threshold: Duration::from_secs(444),
+                disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
             },

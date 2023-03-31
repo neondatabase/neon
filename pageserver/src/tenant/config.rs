@@ -92,6 +92,7 @@ pub struct TenantConf {
     pub max_lsn_wal_lag: NonZeroU64,
     pub trace_read_requests: bool,
     pub eviction_policy: EvictionPolicy,
+    pub min_resident_size_override: Option<u64>,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -159,6 +160,10 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub eviction_policy: Option<EvictionPolicy>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub min_resident_size_override: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +225,9 @@ impl TenantConfOpt {
                 .trace_read_requests
                 .unwrap_or(global_conf.trace_read_requests),
             eviction_policy: self.eviction_policy.unwrap_or(global_conf.eviction_policy),
+            min_resident_size_override: self
+                .min_resident_size_override
+                .or(global_conf.min_resident_size_override),
         }
     }
 }
@@ -251,6 +259,7 @@ impl Default for TenantConf {
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
             trace_read_requests: false,
             eviction_policy: EvictionPolicy::NoEviction,
+            min_resident_size_override: None,
         }
     }
 }
