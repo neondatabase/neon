@@ -340,12 +340,20 @@ async fn fix_one_timeline(conf: &SafeKeeperConf, tli: Arc<Timeline>, backup_root
 
     info!("Fixing timeline {}, backup_lsn={}, timeline_start_lsn={}, local_start_lsn={}", tli.ttid, disk_state.backup_lsn, disk_state.timeline_start_lsn, disk_state.local_start_lsn);
 
-    let start_lsn = find_wal_beginning(
+    let res = find_wal_beginning(
         conf.workdir.clone(),
         conf.timeline_dir(&tli.ttid),
         &disk_state,
         conf.wal_backup_enabled,
-    ).await?;
+    ).await;
+
+    if let Err(e) = &res {
+        error!("Failed to find WAL beginning for timeline {}: {}", tli.ttid, e);
+        warn!("Skipping timeline {}...", tli.ttid);
+        return Ok(false);
+    }
+
+    let start_lsn = res?;
     
     info!("Found WAL beginning at {}", start_lsn);
 
