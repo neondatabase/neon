@@ -39,22 +39,17 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         "test_ancestor_branch_delete_branch1", "test_ancestor_branch_delete_parent"
     )
 
+    timeline_path = (
+        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(parent_timeline_id)
+    )
+
     ps_http = env.pageserver.http_client()
     with pytest.raises(
         PageserverApiException, match="Cannot delete timeline which has child timelines"
     ) as exc:
-        timeline_path = (
-            env.repo_dir
-            / "tenants"
-            / str(env.initial_tenant)
-            / "timelines"
-            / str(parent_timeline_id)
-        )
         assert timeline_path.exists()
 
         ps_http.timeline_delete(env.initial_tenant, parent_timeline_id)
-
-        assert not timeline_path.exists()
 
     assert exc.value.status_code == 400
 
@@ -87,3 +82,14 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         )
 
     assert exc.value.status_code == 404
+
+    # Check that we didnt pick up the timeline again after restart.
+    # See https://github.com/neondatabase/neon/issues/3560
+    env.pageserver.stop(immediate=True)
+    env.pageserver.start()
+
+    with pytest.raises(
+        PageserverApiException,
+        match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
+    ) as exc:
+        ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)

@@ -712,8 +712,7 @@ impl Tenant {
             );
         }
         // Wait for all the download tasks to complete & collect results.
-        let mut remote_clients = HashMap::new();
-        let mut index_parts = HashMap::new();
+        let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
         while let Some(result) = part_downloads.join_next().await {
             // NB: we already added timeline_id as context to the error
@@ -721,8 +720,7 @@ impl Tenant {
             let (timeline_id, client, index_part, remote_metadata) = result?;
             debug!("successfully downloaded index part for timeline {timeline_id}");
             timeline_ancestors.insert(timeline_id, remote_metadata);
-            index_parts.insert(timeline_id, index_part);
-            remote_clients.insert(timeline_id, client);
+            remote_index_and_client.insert(timeline_id, (index_part, client));
         }
 
         // For every timeline, download the metadata file, scan the local directory,
@@ -730,12 +728,21 @@ impl Tenant {
         // layer file.
         let sorted_timelines = tree_sort_timelines(timeline_ancestors)?;
         for (timeline_id, remote_metadata) in sorted_timelines {
+            let (index_part, remote_client) = remote_index_and_client
+                .remove(&timeline_id)
+                .expect("just put it in above");
+
+            if index_part.is_deleted {
+                info!("timeline {} is deleted, skipping", timeline_id);
+                continue;
+            }
+
             // TODO again handle early failure
             self.load_remote_timeline(
                 timeline_id,
-                index_parts.remove(&timeline_id).unwrap(),
+                index_part,
                 remote_metadata,
-                remote_clients.remove(&timeline_id).unwrap(),
+                remote_client,
                 &ctx,
             )
             .await
@@ -1048,14 +1055,6 @@ impl Tenant {
         local_metadata: TimelineMetadata,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
-            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
-            .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
-            Some(ancestor_timeline)
-        } else {
-            None
-        };
-
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
             RemoteTimelineClient::new(
                 remote_storage.clone(),
@@ -1068,6 +1067,11 @@ impl Tenant {
         let remote_startup_data = match &remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
                 Ok(index_part) => {
+                    if index_part.is_deleted {
+                        info!("is_deleted is set on remote, skipping");
+                        return Ok(());
+                    }
+
                     let remote_metadata = index_part.parse_metadata().context("parse_metadata")?;
                     Some(RemoteStartupData {
                         index_part,
@@ -1081,6 +1085,14 @@ impl Tenant {
                 Err(e) => return Err(anyhow::anyhow!(e)),
             },
             None => None,
+        };
+
+        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
+            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
+            .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
+            Some(ancestor_timeline)
+        } else {
+            None
         };
 
         self.timeline_init_and_sync(
@@ -1372,6 +1384,13 @@ impl Tenant {
 
         info!("waiting for timeline tasks to shutdown");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
+
+        // Make sure we marked timeline as deleted on the remote
+        // so we wont pick it up next time during attach or pageserver restart
+        // See comment in persist_index_part_with_deleted_flag.
+        if let Some(remote_client) = timeline.remote_client.as_ref() {
+            remote_client.persist_index_part_with_deleted_flag().await?;
+        }
 
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.

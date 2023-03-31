@@ -12,6 +12,7 @@ use std::io::Write;
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 use tracing::info_span;
+use utils::bin_ser::SerializeError;
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
@@ -182,7 +183,7 @@ impl TimelineMetadata {
         }
     }
 
-    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SerializeError> {
         let body_bytes = self.body.ser()?;
         let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
         let hdr = TimelineMetadataHeader {

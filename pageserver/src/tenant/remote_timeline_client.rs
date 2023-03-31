@@ -204,6 +204,7 @@ mod download;
 pub mod index;
 mod upload;
 
+use anyhow::Context;
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
 
@@ -213,7 +214,7 @@ use std::sync::{Arc, Mutex};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use std::ops::DerefMut;
 use tokio::runtime::Runtime;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
@@ -615,6 +616,39 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    // NOTE: if there were no tasks to call stop we need to call stop by ourselves first
+    pub(crate) async fn persist_index_part_with_deleted_flag(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<()> {
+        self.stop().context("stop")?;
+
+        let index_part = {
+            let mut locked = self.upload_queue.lock().unwrap();
+
+            // We must be in stopped state because otherwise
+            // we can have inprogress index part upload that can overwrite the file
+            // with missing is_deleted flag that we going to set below
+            let stopped = match &mut *locked {
+                UploadQueue::Uninitialized => anyhow::bail!("is not Stopped but Uninitialized"),
+                UploadQueue::Initialized(_) => anyhow::bail!("is not Stopped but Initialized"),
+                UploadQueue::Stopped(stopped) => stopped,
+            };
+
+            stopped.index_part.is_deleted = true;
+
+            stopped.index_part.clone()
+        };
+
+        upload::upload_index_part(
+            self.conf,
+            &self.storage_impl,
+            self.tenant_id,
+            self.timeline_id,
+            &index_part,
+        )
+        .await
+    }
+
     ///
     /// Pick next tasks from the queue, and start as many of them as possible without violating
     /// the ordering constraints.
@@ -732,8 +766,10 @@ impl RemoteTimelineClient {
             // upload finishes or times out soon enough.
             if task_mgr::is_shutdown_requested() {
                 info!("upload task cancelled by shutdown request");
+                if let Err(e) = self.stop() {
+                    error!("got an error when trying to stop remote client: {e}")
+                }
                 self.calls_unfinished_metric_end(&task.op);
-                self.stop();
                 return;
             }
 
@@ -916,21 +952,31 @@ impl RemoteTimelineClient {
         self.metrics.call_end(&file_kind, &op_kind);
     }
 
-    fn stop(&self) {
+    fn stop(&self) -> anyhow::Result<()> {
         // Whichever *task* for this RemoteTimelineClient grabs the mutex first will transition the queue
         // into stopped state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
         // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
         let mut guard = self.upload_queue.lock().unwrap();
         match &*guard {
-            UploadQueue::Uninitialized => panic!(
+            UploadQueue::Uninitialized => anyhow::bail!(
                 "callers are responsible for ensuring this is only called on initialized queue"
             ),
             UploadQueue::Stopped(_) => {
                 // nothing to do
                 info!("another concurrent task already shut down the queue");
+                Ok(())
             }
             UploadQueue::Initialized(qi) => {
                 info!("shutting down upload queue");
+
+                // Prepare index part to put into stopped state
+                let index_part = IndexPart::new(
+                    qi.latest_files.clone(),
+                    qi.last_uploaded_consistent_lsn,
+                    qi.latest_metadata
+                        .to_bytes()
+                        .context("should be able to serialize metadata")?,
+                );
 
                 // Replace the queue with the Stopped state, taking ownership of the old
                 // Initialized queue. We will do some checks on it, and then drop it.
@@ -940,6 +986,7 @@ impl RemoteTimelineClient {
                         &mut *guard,
                         UploadQueue::Stopped(UploadQueueStopped {
                             last_uploaded_consistent_lsn,
+                            index_part,
                         }),
                     );
                     if let UploadQueue::Initialized(qi) = upload_queue {
@@ -972,6 +1019,7 @@ impl RemoteTimelineClient {
 
                 // We're done.
                 drop(guard);
+                Ok(())
             }
         }
     }
