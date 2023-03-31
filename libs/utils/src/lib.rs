@@ -52,6 +52,7 @@ pub mod history_buffer;
 pub mod measured_stream;
 
 pub mod serde_percent;
+pub mod serde_regex;
 
 /// use with fail::cfg("$name", "return(2000)")
 #[macro_export]

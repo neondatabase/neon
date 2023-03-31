@@ -4535,6 +4535,7 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "rand",
+ "regex",
  "routerify",
  "sentry",
  "serde",

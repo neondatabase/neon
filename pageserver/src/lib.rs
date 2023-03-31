@@ -13,6 +13,7 @@ pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod repository;
+pub(crate) mod statvfs;
 pub mod task_mgr;
 pub mod tenant;
 pub mod trace;

@@ -42,15 +42,14 @@
 
 use std::{
     collections::HashMap,
+    path::Path,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use anyhow::Context;
-use nix::dir::Dir;
 use remote_storage::GenericRemoteStorage;
 use serde::{Deserialize, Serialize};
-use sync_wrapper::SyncWrapper;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
@@ -68,6 +67,8 @@ pub struct DiskUsageEvictionTaskConfig {
     pub min_avail_bytes: u64,
     #[serde(with = "humantime_serde")]
     pub period: Duration,
+    #[cfg(feature = "testing")]
+    pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
 }
 
 #[derive(Default)]
@@ -86,16 +87,6 @@ pub fn launch_disk_usage_global_eviction_task(
         return Ok(());
     };
 
-    let tenants_dir_fd = {
-        let tenants_path = conf.tenants_path();
-        nix::dir::Dir::open(
-            &tenants_path,
-            nix::fcntl::OFlag::O_DIRECTORY,
-            nix::sys::stat::Mode::empty(),
-        )
-        .with_context(|| format!("open tenants_path {tenants_path:?}"))?
-    };
-
     info!("launching disk usage based eviction task");
 
     task_mgr::spawn(
@@ -110,7 +101,7 @@ pub fn launch_disk_usage_global_eviction_task(
                 &state,
                 task_config,
                 storage,
-                tenants_dir_fd,
+                &conf.tenants_path(),
                 task_mgr::shutdown_token(),
             )
             .await;
@@ -127,17 +118,9 @@ async fn disk_usage_eviction_task(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: GenericRemoteStorage,
-    tenants_dir_fd: Dir,
+    tenants_dir: &Path,
     cancel: CancellationToken,
 ) {
-    // nix::dir::Dir is Send but not Sync.
-    // One would think that that is sufficient, but rustc complains that the &tenants_dir_fd
-    // that we pass to disk_usage_eviction_iteration below will outlive the .await;
-    // The reason is that the &tenants_dir_fd is not sync because of stdlib-enforced axiom
-    //  T: Sync <=> &T: Send
-    // The solution is to use SyncWrapper, which, by owning the tenants_dir_fd, can impl Sync.
-    let mut tenants_dir_fd = SyncWrapper::new(tenants_dir_fd);
-
     use crate::tenant::tasks::random_init_delay;
     {
         if random_init_delay(task_config.period, &cancel)
@@ -159,7 +142,7 @@ async fn disk_usage_eviction_task(
                 state,
                 task_config,
                 &storage,
-                &mut tenants_dir_fd,
+                tenants_dir,
                 &cancel,
             )
             .await;
@@ -195,10 +178,10 @@ async fn disk_usage_eviction_task_iteration(
     state: &State,
     task_config: &DiskUsageEvictionTaskConfig,
     storage: &GenericRemoteStorage,
-    tenants_dir_fd: &mut SyncWrapper<Dir>,
+    tenants_dir: &Path,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    let usage_pre = filesystem_level_usage::get(tenants_dir_fd, task_config)
+    let usage_pre = filesystem_level_usage::get(tenants_dir, task_config)
         .context("get filesystem-level disk usage before evictions")?;
     let res = disk_usage_eviction_task_iteration_impl(state, storage, usage_pre, cancel).await;
     match res {
@@ -210,7 +193,7 @@ async fn disk_usage_eviction_task_iteration(
                 }
                 IterationOutcome::Finished(outcome) => {
                     // Verify with statvfs whether we made any real progress
-                    let after = filesystem_level_usage::get(tenants_dir_fd, task_config)
+                    let after = filesystem_level_usage::get(tenants_dir, task_config)
                         // It's quite unlikely to hit the error here. Keep the code simple and bail out.
                         .context("get filesystem-level disk usage after evictions")?;
 
@@ -624,12 +607,11 @@ impl std::ops::Deref for TimelineKey {
 }
 
 mod filesystem_level_usage {
+    use std::path::Path;
+
     use anyhow::Context;
-    use nix::{
-        dir::Dir,
-        sys::statvfs::{self, Statvfs},
-    };
-    use sync_wrapper::SyncWrapper;
+
+    use crate::statvfs::Statvfs;
 
     use super::DiskUsageEvictionTaskConfig;
 
@@ -669,10 +651,21 @@ mod filesystem_level_usage {
     }
 
     pub fn get<'a>(
-        tenants_dir_fd: &mut SyncWrapper<Dir>,
+        tenants_dir: &Path,
         config: &'a DiskUsageEvictionTaskConfig,
     ) -> anyhow::Result<Usage<'a>> {
-        let stat: Statvfs = statvfs::fstatvfs(tenants_dir_fd.get_mut())
+        let mock_config = {
+            #[cfg(feature = "testing")]
+            {
+                config.mock_statvfs.as_ref()
+            }
+            #[cfg(not(feature = "testing"))]
+            {
+                None
+            }
+        };
+
+        let stat = Statvfs::get(tenants_dir, mock_config)
             .context("statvfs failed, presumably directory got unlinked")?;
 
         // https://unix.stackexchange.com/a/703650

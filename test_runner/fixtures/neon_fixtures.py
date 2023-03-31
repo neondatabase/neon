@@ -1228,6 +1228,20 @@ class PageserverHttpClient(requests.Session):
         )
         self.verbose_error(res)
 
+    def patch_tenant_config_client_side(
+        self,
+        tenant_id: TenantId,
+        inserts: Optional[Dict[str, Any]] = None,
+        removes: Optional[List[str]] = None,
+    ):
+        current = self.tenant_config(tenant_id).tenant_specific_overrides
+        if inserts is not None:
+            current.update(inserts)
+        if removes is not None:
+            for key in removes:
+                del current[key]
+        self.set_tenant_config(tenant_id, current)
+
     def tenant_size(self, tenant_id: TenantId) -> int:
         return self.tenant_size_and_modelinputs(tenant_id)[0]
 
