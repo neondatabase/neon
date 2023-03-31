@@ -3,12 +3,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
-use crate::compute::ComputeNode;
+use crate::compute::{ComputeNode, ComputeStatus};
+use crate::http::requests::ConfigurationRequest;
+use crate::http::responses::{ComputeStatusResponse, GenericAPIError};
+
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use num_cpus;
 use serde_json;
+use tokio::task;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
@@ -23,8 +27,10 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         // Serialized compute state.
         (&Method::GET, "/status") => {
             info!("serving /status GET request");
-            let state = compute.state.read().unwrap();
-            Response::new(Body::from(serde_json::to_string(&*state).unwrap()))
+            let state = compute.state.lock().unwrap();
+            let status_response = ComputeStatusResponse::from(state.clone());
+
+            Response::new(Body::from(serde_json::to_string(&status_response).unwrap()))
         }
 
         // Startup metrics in JSON format. Keep /metrics reserved for a possible
@@ -37,12 +43,29 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         // Collect Postgres current usage insights
         (&Method::GET, "/insights") => {
             info!("serving /insights GET request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!("compute is not running, current status: {:?}", status);
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
             let insights = compute.collect_insights().await;
             Response::new(Body::from(insights))
         }
 
         (&Method::POST, "/check_writability") => {
             info!("serving /check_writability POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for check_writability request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
             let res = crate::checker::check_writability(compute).await;
             match res {
                 Ok(_) => Response::new(Body::from("true")),
@@ -61,6 +84,23 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             ))
         }
 
+        // Accept spec in JSON format and request compute configuration. If
+        // anything goes wrong after we set the compute status to `ConfigurationPending`
+        // and update compute state with new spec, we basically leave compute
+        // in the potentially wrong state. That said, it's control-plane's
+        // responsibility to watch compute state after reconfiguration request
+        // and to clean restart in case of errors.
+        (&Method::POST, "/configure") => {
+            info!("serving /configure POST request");
+            match handle_configure_request(req, compute).await {
+                Ok(msg) => Response::new(Body::from(msg)),
+                Err((msg, code)) => {
+                    error!("error handling /configure request: {msg}");
+                    render_json_error(&msg, code)
+                }
+            }
+        }
+
         // Return the `404 Not Found` for any other routes.
         _ => {
             let mut not_found = Response::new(Body::from("404 Not Found"));
@@ -68,6 +108,88 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             not_found
         }
     }
+}
+
+async fn handle_configure_request(
+    req: Request<Body>,
+    compute: &Arc<ComputeNode>,
+) -> Result<String, (String, StatusCode)> {
+    if !compute.live_config_allowed {
+        return Err((
+            "live configuration is not allowed for this compute node".to_string(),
+            StatusCode::PRECONDITION_FAILED,
+        ));
+    }
+
+    let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
+    let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
+    if let Ok(request) = serde_json::from_str::<ConfigurationRequest>(&spec_raw) {
+        let spec = request.spec;
+        // XXX: wrap state update under lock in code blocks. Otherwise,
+        // we will try to `Send` `mut state` into the spawned thread
+        // bellow, which will cause error:
+        // ```
+        // error: future cannot be sent between threads safely
+        // ```
+        {
+            let mut state = compute.state.lock().unwrap();
+            if state.status != ComputeStatus::Empty {
+                let msg = format!(
+                    "invalid compute status for configuration request: {:?}",
+                    state.status.clone()
+                );
+                return Err((msg, StatusCode::PRECONDITION_FAILED));
+            }
+            state.spec = spec;
+            state.status = ComputeStatus::ConfigurationPending;
+            compute.state_changed.notify_all();
+            drop(state);
+            info!("set new spec and notified waiters");
+        }
+
+        // Spawn a blocking thread to wait for compute to become Running.
+        // This is needed to do not block the main pool of workers and
+        // be able to serve other requests while some particular request
+        // is waiting for compute to finish configuration.
+        let c = compute.clone();
+        task::spawn_blocking(move || {
+            let mut state = c.state.lock().unwrap();
+            while state.status != ComputeStatus::Running {
+                state = c.state_changed.wait(state).unwrap();
+                info!(
+                    "waiting for compute to become Running, current status: {:?}",
+                    state.status
+                );
+
+                if state.status == ComputeStatus::Failed {
+                    let err = state.error.clone().unwrap_or("unknown error".to_string());
+                    let msg = format!("compute configuration failed: {:?}", err);
+                    return Err((msg, StatusCode::INTERNAL_SERVER_ERROR));
+                }
+            }
+
+            Ok(())
+        })
+        .await
+        .unwrap()?;
+
+        // Return current compute state if everything went well.
+        let state = compute.state.lock().unwrap().clone();
+        let status_response = ComputeStatusResponse::from(state);
+        Ok(serde_json::to_string(&status_response).unwrap())
+    } else {
+        Err(("invalid spec".to_string(), StatusCode::BAD_REQUEST))
+    }
+}
+
+fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
+    let error = GenericAPIError {
+        error: e.to_string(),
+    };
+    Response::builder()
+        .status(status)
+        .body(Body::from(serde_json::to_string(&error).unwrap()))
+        .unwrap()
 }
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
