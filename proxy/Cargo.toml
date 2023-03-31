@@ -44,6 +44,7 @@ rustls-pemfile.workspace = true
 rustls.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
+serde_dhall.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 socket2.workspace = true

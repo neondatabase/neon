@@ -7,6 +7,7 @@
 mod auth;
 mod cache;
 mod cancellation;
+mod certs;
 mod compute;
 mod config;
 mod console;
@@ -23,10 +24,11 @@ mod url;
 mod waiters;
 
 use anyhow::{bail, Context};
+use auth::BackendType;
 use clap::{self, Arg};
-use config::ProxyConfig;
+use config::{MetricCollectionConfig, ProxyConfig, TlsConfig};
 use futures::FutureExt;
-use std::{borrow::Cow, future::Future, net::SocketAddr};
+use std::{borrow::Cow, future::Future, net::SocketAddr, path::PathBuf};
 use tokio::{net::TcpListener, task::JoinError};
 use tracing::{info, warn};
 use utils::{project_git_version, sentry_init::init_sentry};
@@ -126,23 +128,31 @@ async fn handle_signals() -> anyhow::Result<()> {
     }
 }
 
-/// ProxyConfig is created at proxy startup, and lives forever.
-fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig> {
-    let tls_config = match (
-        args.get_one::<String>("tls-key"),
-        args.get_one::<String>("tls-cert"),
-    ) {
-        (Some(key_path), Some(cert_path)) => Some(config::configure_tls(key_path, cert_path)?),
-        (None, None) => None,
+fn build_tls_config(args: &clap::ArgMatches) -> anyhow::Result<Option<TlsConfig>> {
+    use certs::config::TlsServers;
+
+    let tls_config = args.get_one::<PathBuf>("tls-config");
+    let main = tls_config.map(TlsServers::from_config_file).transpose()?;
+
+    let tls_cert = args.get_one::<PathBuf>("tls-cert");
+    let tls_key = args.get_one::<PathBuf>("tls-key");
+
+    let aux = match (tls_cert, tls_key) {
+        (Some(key_path), Some(cert_path)) => todo!("implement legacy TLS setup"),
+        (None, None) => None::<()>,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    let metric_collection = match (
-        args.get_one::<String>("metric-collection-endpoint"),
-        args.get_one::<String>("metric-collection-interval"),
-    ) {
+    todo!()
+}
+
+fn build_metrics_config(args: &clap::ArgMatches) -> anyhow::Result<Option<MetricCollectionConfig>> {
+    let endpoint = args.get_one::<String>("metric-collection-endpoint");
+    let interval = args.get_one::<String>("metric-collection-interval");
+
+    let config = match (endpoint, interval) {
         (Some(endpoint), Some(interval)) => Some(config::MetricCollectionConfig {
-            endpoint: endpoint.parse()?,
+            endpoint: endpoint.parse().context("bad metrics endpoint")?,
             interval: humantime::parse_duration(interval)?,
         }),
         (None, None) => None,
@@ -152,7 +162,11 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         ),
     };
 
-    let auth_backend = match args.get_one::<String>("auth-backend").unwrap().as_str() {
+    Ok(config)
+}
+
+fn build_auth_config(args: &clap::ArgMatches) -> anyhow::Result<BackendType<'static, ()>> {
+    let config = match args.get_one::<String>("auth-backend").unwrap().as_str() {
         "console" => {
             let config::CacheOptions { size, ttl } = args
                 .get_one::<String>("wake-compute-cache")
@@ -182,10 +196,15 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         other => bail!("unsupported auth backend: {other}"),
     };
 
+    Ok(config)
+}
+
+/// ProxyConfig is created at proxy startup, and lives forever.
+fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig> {
     let config = Box::leak(Box::new(ProxyConfig {
-        tls_config,
-        auth_backend,
-        metric_collection,
+        tls_config: build_tls_config(args)?,
+        auth_backend: build_auth_config(args)?,
+        metric_collection: build_metrics_config(args)?,
     }));
 
     Ok(config)
@@ -253,6 +272,11 @@ fn cli() -> clap::Command {
                 .long("tls-cert")
                 .alias("ssl-cert") // backwards compatibility
                 .help("path to TLS cert for client postgres connections"),
+        )
+        .arg(
+            Arg::new("tls-config")
+                .long("tls-config")
+                .help("path to the TLS config file"),
         )
         .arg(
             Arg::new("metric-collection-endpoint")
