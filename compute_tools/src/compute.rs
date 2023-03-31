@@ -41,12 +41,15 @@ pub struct ComputeNode {
     pub connstr: url::Url,
     pub pgdata: String,
     pub pgbin: String,
-    pub spec: ComputeSpec,
-    pub tenant: String,
-    pub timeline: String,
-    pub pageserver_connstr: String,
-    pub storage_auth_token: Option<String>,
     pub metrics: ComputeMetrics,
+    // We only allow live re- / configuration of the compute node if
+    // it uses 'pull model', i.e. it can go to control-plane and fetch
+    // the latest configuration. Otherwise, there could be a case:
+    // - we start compute with some spec provided as argument
+    // - we push new spec and it does reconfiguration
+    // - but then something happens and compute pod / VM is destroyed,
+    //   so k8s controller starts it again with the **old** spec
+    pub live_config_allowed: bool,
     /// Volatile part of the `ComputeNode` so should be used under `RwLock`
     /// to allow HTTP API server to serve status requests, while configuration
     /// is in progress.
@@ -60,7 +63,7 @@ where
     x.to_rfc3339().serialize(s)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeState {
     pub status: ComputeStatus,
@@ -68,14 +71,27 @@ pub struct ComputeState {
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: DateTime<Utc>,
     pub error: Option<String>,
+    #[serde(skip_serializing)]
+    pub spec: ComputeSpec,
+    pub tenant: String,
+    pub timeline: String,
+    #[serde(skip_serializing)]
+    pub pageserver_connstr: String,
+    #[serde(skip_serializing)]
+    pub storage_auth_token: Option<String>,
 }
 
 impl ComputeState {
     pub fn new() -> Self {
         Self {
-            status: ComputeStatus::Init,
+            status: ComputeStatus::WaitingSpec,
             last_active: Utc::now(),
             error: None,
+            spec: ComputeSpec::default(),
+            tenant: String::new(),
+            timeline: String::new(),
+            pageserver_connstr: String::new(),
+            storage_auth_token: None,
         }
     }
 }
@@ -136,15 +152,15 @@ impl ComputeNode {
 
     // Get basebackup from the libpq connection to pageserver using `connstr` and
     // unarchive it to `pgdata` directory overriding all its previous content.
-    #[instrument(skip(self))]
-    fn get_basebackup(&self, lsn: &str) -> Result<()> {
+    #[instrument(skip(self, compute_state))]
+    fn get_basebackup(&self, compute_state: &ComputeState, lsn: &str) -> Result<()> {
         let start_time = Utc::now();
 
-        let mut config = postgres::Config::from_str(&self.pageserver_connstr)?;
+        let mut config = postgres::Config::from_str(&compute_state.pageserver_connstr)?;
 
         // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.
-        if let Some(storage_auth_token) = &self.storage_auth_token {
+        if let Some(storage_auth_token) = &compute_state.storage_auth_token {
             info!("Got storage auth token from spec file");
             config.password(storage_auth_token);
         } else {
@@ -153,8 +169,14 @@ impl ComputeNode {
 
         let mut client = config.connect(NoTls)?;
         let basebackup_cmd = match lsn {
-            "0/0" => format!("basebackup {} {}", &self.tenant, &self.timeline), // First start of the compute
-            _ => format!("basebackup {} {} {}", &self.tenant, &self.timeline, lsn),
+            "0/0" => format!(
+                "basebackup {} {}",
+                &compute_state.tenant, &compute_state.timeline
+            ), // First start of the compute
+            _ => format!(
+                "basebackup {} {} {}",
+                &compute_state.tenant, &compute_state.timeline, lsn
+            ),
         };
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;
 
@@ -181,14 +203,14 @@ impl ComputeNode {
 
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
-    #[instrument(skip(self))]
-    fn sync_safekeepers(&self) -> Result<String> {
+    #[instrument(skip(self, storage_auth_token))]
+    fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<String> {
         let start_time = Utc::now();
 
         let sync_handle = Command::new(&self.pgbin)
             .args(["--sync-safekeepers"])
             .env("PGDATA", &self.pgdata) // we cannot use -D in this mode
-            .envs(if let Some(storage_auth_token) = &self.storage_auth_token {
+            .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
             } else {
                 vec![]
@@ -229,9 +251,9 @@ impl ComputeNode {
 
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
-    #[instrument(skip(self))]
-    pub fn prepare_pgdata(&self) -> Result<()> {
-        let spec = &self.spec;
+    #[instrument(skip(self, compute_state))]
+    pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
+        let spec = &compute_state.spec;
         let pgdata_path = Path::new(&self.pgdata);
 
         // Remove/create an empty pgdata directory and put configuration there.
@@ -240,18 +262,18 @@ impl ComputeNode {
 
         info!("starting safekeepers syncing");
         let lsn = self
-            .sync_safekeepers()
+            .sync_safekeepers(compute_state.storage_auth_token.clone())
             .with_context(|| "failed to sync safekeepers")?;
         info!("safekeepers synced at LSN {}", lsn);
 
         info!(
             "getting basebackup@{} from pageserver {}",
-            lsn, &self.pageserver_connstr
+            lsn, &compute_state.pageserver_connstr
         );
-        self.get_basebackup(&lsn).with_context(|| {
+        self.get_basebackup(compute_state, &lsn).with_context(|| {
             format!(
                 "failed to get basebackup@{} from pageserver {}",
-                lsn, &self.pageserver_connstr
+                lsn, &compute_state.pageserver_connstr
             )
         })?;
 
@@ -264,13 +286,16 @@ impl ComputeNode {
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
     #[instrument(skip(self))]
-    pub fn start_postgres(&self) -> Result<std::process::Child> {
+    pub fn start_postgres(
+        &self,
+        storage_auth_token: Option<String>,
+    ) -> Result<std::process::Child> {
         let pgdata_path = Path::new(&self.pgdata);
 
         // Run postgres as a child process.
         let mut pg = Command::new(&self.pgbin)
             .args(["-D", &self.pgdata])
-            .envs(if let Some(storage_auth_token) = &self.storage_auth_token {
+            .envs(if let Some(storage_auth_token) = &storage_auth_token {
                 vec![("NEON_AUTH_TOKEN", storage_auth_token)]
             } else {
                 vec![]
@@ -284,8 +309,8 @@ impl ComputeNode {
     }
 
     /// Do initial configuration of the already started Postgres.
-    #[instrument(skip(self))]
-    pub fn apply_config(&self) -> Result<()> {
+    #[instrument(skip(self, compute_state))]
+    pub fn apply_config(&self, compute_state: &ComputeState) -> Result<()> {
         // If connection fails,
         // it may be the old node with `zenith_admin` superuser.
         //
@@ -316,19 +341,19 @@ impl ComputeNode {
         };
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
-        handle_roles(&self.spec, &mut client)?;
-        handle_databases(&self.spec, &mut client)?;
-        handle_role_deletions(&self.spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(&self.spec, self.connstr.as_str(), &mut client)?;
+        handle_roles(&compute_state.spec, &mut client)?;
+        handle_databases(&compute_state.spec, &mut client)?;
+        handle_role_deletions(&compute_state.spec, self.connstr.as_str(), &mut client)?;
+        handle_grants(&compute_state.spec, self.connstr.as_str(), &mut client)?;
         create_writability_check_data(&mut client)?;
-        handle_extensions(&self.spec, &mut client)?;
+        handle_extensions(&compute_state.spec, &mut client)?;
 
         // 'Close' connection
         drop(client);
 
         info!(
             "finished configuration of compute for project {}",
-            self.spec.cluster.cluster_id
+            compute_state.spec.cluster.cluster_id
         );
 
         Ok(())
@@ -376,21 +401,22 @@ impl ComputeNode {
 
     #[instrument(skip(self))]
     pub fn start_compute(&self) -> Result<std::process::Child> {
+        let compute_state = self.state.read().unwrap().clone();
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            self.spec.cluster.cluster_id,
-            self.spec.operation_uuid.as_ref().unwrap(),
-            self.tenant,
-            self.timeline,
+            compute_state.spec.cluster.cluster_id,
+            compute_state.spec.operation_uuid.as_ref().unwrap(),
+            compute_state.tenant,
+            compute_state.timeline,
         );
 
-        self.prepare_pgdata()?;
+        self.prepare_pgdata(&compute_state)?;
 
         let start_time = Utc::now();
 
-        let pg = self.start_postgres()?;
+        let pg = self.start_postgres(compute_state.storage_auth_token.clone())?;
 
-        self.apply_config()?;
+        self.apply_config(&compute_state)?;
 
         let startup_end_time = Utc::now();
         self.metrics.config_ms.store(

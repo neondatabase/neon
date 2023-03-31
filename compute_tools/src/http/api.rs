@@ -44,12 +44,29 @@ async fn routes(
         // Collect Postgres current usage insights
         (&Method::GET, "/insights") => {
             info!("serving /insights GET request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!("compute is not running, current status: {:?}", status);
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
             let insights = compute.collect_insights().await;
             Response::new(Body::from(insights))
         }
 
         (&Method::POST, "/check_writability") => {
             info!("serving /check_writability POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for check_writability request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
             let res = crate::checker::check_writability(compute).await;
             match res {
                 Ok(_) => Response::new(Body::from("true")),
@@ -76,9 +93,15 @@ async fn routes(
         // watch compute state after reconfiguration request and to clean
         // restart in case of errors.
         //
-        // TODO: Errors should be in JSON format
+        // TODO: Errors should be in JSON format with proper status codes.
         (&Method::POST, "/spec") => {
             info!("serving /spec POST request");
+            if !compute.live_config_allowed {
+                let msg = "live reconfiguration is not allowed for this compute node";
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
             let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
             if let Ok(spec) = serde_json::from_str::<ComputeSpec>(&spec_raw) {

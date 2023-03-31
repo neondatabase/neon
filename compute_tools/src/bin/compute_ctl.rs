@@ -64,7 +64,7 @@ fn main() -> Result<()> {
     let connstr = matches
         .get_one::<String>("connstr")
         .expect("Postgres connection string is required");
-    let spec = matches.get_one::<String>("spec");
+    let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
 
     let compute_id = matches.get_one::<String>("compute-id");
@@ -73,39 +73,80 @@ fn main() -> Result<()> {
     // Try to use just 'postgres' if no path is provided
     let pgbin = matches.get_one::<String>("pgbin").unwrap();
 
-    let spec: ComputeSpec = match spec {
+    let mut spec = Default::default();
+    let mut spec_set = false;
+    let mut live_config_allowed = false;
+    match spec_json {
         // First, try to get cluster spec from the cli argument
-        Some(json) => serde_json::from_str(json)?,
+        Some(json) => {
+            spec = serde_json::from_str(json)?;
+            spec_set = true;
+        }
         None => {
             // Second, try to read it from the file if path is provided
             if let Some(sp) = spec_path {
                 let path = Path::new(sp);
                 let file = File::open(path)?;
-                serde_json::from_reader(file)?
+                spec = serde_json::from_reader(file)?;
+                spec_set = true;
             } else if let Some(id) = compute_id {
                 if let Some(cp_base) = control_plane_uri {
-                    let cp_uri = format!("{cp_base}/management/api/v1/{id}/spec");
-                    let jwt: String = match std::env::var("NEON_CONSOLE_JWT") {
-                        Ok(v) => v,
-                        Err(_) => "".to_string(),
-                    };
-
-                    reqwest::blocking::Client::new()
-                        .get(cp_uri)
-                        .header("Authorization", jwt)
-                        .send()?
-                        .json()?
+                    live_config_allowed = true;
+                    if let Ok(s) = get_spec_from_control_plane(cp_base, id) {
+                        spec = s;
+                        spec_set = true;
+                    }
                 } else {
-                    panic!(
-                        "must specify --control-plane-uri \"{:#?}\" and --compute-id \"{:#?}\"",
-                        control_plane_uri, compute_id
-                    );
+                    panic!("must specify both --control-plane-uri and --compute-id or none");
                 }
             } else {
-                panic!("compute spec should be provided via --spec or --spec-path argument");
+                panic!(
+                    "compute spec should be provided by one of the following ways: \
+                    --spec OR --spec-path OR --control-plane-uri and --compute-id"
+                );
             }
         }
     };
+
+    // We have one configurator thread and async http server, so generally we
+    // have single consumer - multiple producers pattern here. That's why we use
+    // `mpsc` channel, not `tokio::sync::watch`. Actually, concurrency of
+    // producers is limited to one due to code logic, but we still need to
+    // pass `Sender` to several threads.
+    //
+    // Next, we use async `hyper` + `tokio` http server, but all the other code
+    // is completely synchronous. So we need to send data from async to sync,
+    // that's why we use `mpsc::unbounded_channel` here, not `mpsc::channel`.
+    // It doesn't make much sense to rewrite all code to async now, but we can
+    // consider doing this in the future. Unbound should not sound scary here,
+    // as again, only one unprocessed spec could be sent to channel at any
+    // given moment.
+    let (spec_tx, mut spec_rx) = mpsc::unbounded_channel::<ComputeSpec>();
+
+    let compute_state = ComputeNode {
+        start_time: Utc::now(),
+        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
+        pgdata: pgdata.to_string(),
+        pgbin: pgbin.to_string(),
+        live_config_allowed,
+        metrics: ComputeMetrics::default(),
+        state: RwLock::new(ComputeState::new()),
+    };
+    let compute = Arc::new(compute_state);
+
+    // Launch http service first, so we were able to serve control-plane
+    // requests, while configuration is still in progress.
+    let _http_handle =
+        launch_http_server(&compute, spec_tx).expect("cannot launch http endpoint thread");
+
+    if !spec_set {
+        info!("no compute spec provided, waiting");
+        if let Some(s) = spec_rx.blocking_recv() {
+            spec = s;
+        } else {
+            panic!("no compute spec received");
+        }
+    }
 
     // Extract OpenTelemetry context for the startup actions from the spec, and
     // attach it to the current tracing context.
@@ -147,38 +188,17 @@ fn main() -> Result<()> {
         .find("neon.timeline_id")
         .expect("tenant id should be provided");
 
-    let compute_state = ComputeNode {
-        start_time: Utc::now(),
-        connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
-        pgdata: pgdata.to_string(),
-        pgbin: pgbin.to_string(),
-        spec,
-        tenant,
-        timeline,
-        pageserver_connstr,
-        storage_auth_token,
-        metrics: ComputeMetrics::default(),
-        state: RwLock::new(ComputeState::new()),
-    };
-    let compute = Arc::new(compute_state);
+    // We got all we need, fill in the state.
+    let mut state = compute.state.write().unwrap();
+    state.spec = spec;
+    state.pageserver_connstr = pageserver_connstr;
+    state.storage_auth_token = storage_auth_token;
+    state.tenant = tenant;
+    state.timeline = timeline;
+    state.status = ComputeStatus::Init;
+    drop(state);
 
-    // We have one configurator thread and async http server, so generally we
-    // single consumer - multiple producers pattern here. That's why we use
-    // `mpsc` channel, not `tokio::sync::watch`. Actually, concurrency of
-    // producers is limited to one due to code logic, but we still need to
-    // pass `Sender` to several threads.
-    //
-    // Next, we use async `hyper` + `tokio` http server, but all the other code
-    // is completely synchronous. So we need to send data from async to sync,
-    // that's why we use `mpsc::unbounded_channel` here, not `mpsc::channel`.
-    // It doesn't make much sense to rewrite all code to async now, but we can
-    // consider doing this in the future.
-    let (spec_tx, spec_rx) = mpsc::unbounded_channel::<ComputeSpec>();
-
-    // Launch service threads first, so we were able to serve availability
-    // requests, while configuration is still in progress.
-    let _http_handle =
-        launch_http_server(&compute, spec_tx).expect("cannot launch http endpoint thread");
+    // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
     let _configurator_handle =
         launch_configurator(&compute, spec_rx).expect("cannot launch configurator thread");
@@ -280,7 +300,7 @@ fn cli() -> clap::Command {
             Arg::new("control-plane-uri")
                 .short('p')
                 .long("control-plane-uri")
-                .value_name("CONTROL_PLANE"),
+                .value_name("CONTROL_PLANE_API_BASE_URI"),
         )
 }
 

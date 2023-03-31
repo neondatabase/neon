@@ -14,7 +14,7 @@ use crate::pg_helpers::*;
 
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct ComputeSpec {
     pub format_version: f32,
     pub timestamp: String,
@@ -30,7 +30,7 @@ pub struct ComputeSpec {
 
 /// Cluster state seen from the perspective of the external tools
 /// like Rails web console.
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct Cluster {
     pub cluster_id: String,
     pub name: String,
@@ -51,6 +51,29 @@ pub struct DeltaOp {
     pub action: String,
     pub name: PgIdent,
     pub new_name: Option<PgIdent>,
+}
+
+/// Request spec from the control-plane by compute_id. If `NEON_CONSOLE_JWT`
+/// env variable is set, it will be used for authorization.
+pub fn get_spec_from_control_plane(base_uri: &str, compute_id: &str) -> Result<ComputeSpec> {
+    let cp_uri = format!("{base_uri}/management/api/v2/computes/{compute_id}/spec");
+    let jwt: String = match std::env::var("NEON_CONSOLE_JWT") {
+        Ok(v) => v,
+        Err(_) => "".to_string(),
+    };
+    info!("getting spec from control plane: {}", cp_uri);
+
+    // TODO: check the response. We should distinguish cases when it's
+    // - network error, then retry
+    // - no spec for compute yet, then wait
+    // - compute id is unknown or any other error, then bail out
+    let spec = reqwest::blocking::Client::new()
+        .get(cp_uri)
+        .header("Authorization", jwt)
+        .send()?
+        .json()?;
+
+    Ok(spec)
 }
 
 /// It takes cluster specification and does the following:
