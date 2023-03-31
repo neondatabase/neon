@@ -44,10 +44,10 @@ async fn main() -> anyhow::Result<()> {
     let traversing_depth = TraversingDepth::Timeline;
 
     info!("Starting extra S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}', traversing depth: {traversing_depth:?}");
-    let cloud_admin_api_client = CloudAdminApiClient::new(
+    let cloud_admin_api_client = Arc::new(CloudAdminApiClient::new(
         get_cloud_admin_api_token_or_exit(),
         cloud_admin_api_url_param,
-    );
+    ));
 
     let bucket_region = Region::new(region_param);
     let s3_client = Arc::new(init_s3_client(sso_account_id_param, bucket_region));

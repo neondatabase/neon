@@ -78,7 +78,7 @@ impl DeleteBatch {
 
 impl DeleteBatchProducer {
     pub fn start(
-        admin_client: CloudAdminApiClient,
+        admin_client: Arc<CloudAdminApiClient>,
         s3_client: Arc<Client>,
         s3_root_target: RootTarget,
         traversing_depth: TraversingDepth,
@@ -138,7 +138,9 @@ impl DeleteBatchProducer {
                     }
                 }
 
-                delete_batch_sender.send(delete_batch).ok();
+                if !delete_batch.is_empty() {
+                    delete_batch_sender.send(delete_batch).ok();
+                }
             }
         });
 

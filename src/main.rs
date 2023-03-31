@@ -8,7 +8,7 @@ use reqwest::Url;
 use s3_deleter::cloud_admin_api::CloudAdminApiClient;
 use s3_deleter::delete_batch_producer::DeleteBatchProducer;
 use s3_deleter::{
-    get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, RootTarget, S3Deleter,
+    checks, get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, RootTarget, S3Deleter,
     S3Target,
 };
 use tracing::{info, info_span, warn};
@@ -42,15 +42,15 @@ async fn main() -> anyhow::Result<()> {
     node_kind.make_ascii_lowercase();
 
     info!("Starting extra tenant S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}'");
-    let cloud_admin_api_client = CloudAdminApiClient::new(
+    let cloud_admin_api_client = Arc::new(CloudAdminApiClient::new(
         get_cloud_admin_api_token_or_exit(),
         cloud_admin_api_url_param,
-    );
+    ));
 
     let bucket_region = Region::new(region_param);
     let delimiter = "/".to_string();
     let s3_client = Arc::new(init_s3_client(sso_account_id_param, bucket_region));
-    let s3_target = match node_kind.trim() {
+    let s3_root = match node_kind.trim() {
         "pageserver" => RootTarget::Pageserver(S3Target {
             bucket_name: bucket_param,
             prefix_in_bucket: ["pageserver", "v1", "tenants", ""].join(&delimiter),
@@ -65,18 +65,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let delete_batch_producer = DeleteBatchProducer::start(
-        cloud_admin_api_client,
+        Arc::clone(&cloud_admin_api_client),
         Arc::clone(&s3_client),
-        s3_target.clone(),
+        s3_root.clone(),
         s3_deleter::TraversingDepth::Tenant,
     );
 
     let s3_deleter = S3Deleter::new(
         dry_run,
         NonZeroUsize::new(15).unwrap(),
-        s3_client,
+        Arc::clone(&s3_client),
         delete_batch_producer.subscribe(),
-        s3_target,
+        s3_root.clone(),
     );
 
     let (deleter_task_result, batch_producer_task_result) =
@@ -101,6 +101,21 @@ async fn main() -> anyhow::Result<()> {
     );
 
     info!("Finished S3 removal");
+
+    if "pageserver" == node_kind.trim() {
+        info!("validating active tenants and timelines for pageserver S3 data");
+
+        // TODO kb real stats for validation + better stats for every place: add and print `min`, `max`, `mean` values at least
+        let validation_stats = checks::validate_pageserver_active_tenant_and_timelines(
+            s3_client,
+            s3_root,
+            cloud_admin_api_client,
+            batch_producer_stats,
+        )
+        .await
+        .context("active tenant and timeline validation")?;
+        info!("Finished active tenant and timeline validation: {validation_stats:?}");
+    }
 
     Ok(())
 }

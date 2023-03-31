@@ -39,11 +39,11 @@ impl std::fmt::Display for Error {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, Hash, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct ProjectId(pub String);
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, Hash, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct BranchId(pub String);
 
