@@ -22,7 +22,8 @@
 //! If the actual usage is higher, the threshold is exceeded.
 //! `min_avail_bytes` is the absolute available space in bytes.
 //! If the actual usage is lower, the threshold is exceeded.
-//!
+//! If either of these thresholds is exceeded, the system is considered to have "disk pressure", and eviction
+//! is performed on the next iteration, to release disk space and bring the usage below the thresholds again. 
 //! The iteration evicts layers in LRU fashion, but, with a weak reservation per tenant.
 //! The reservation is to keep the most recently accessed X bytes per tenant resident.
 //! If we cannot relieve pressure by evicting layers outside of the reservation, we
@@ -34,7 +35,7 @@
 //! The idea is to allow at least one layer to be resident per tenant, to ensure it can make forward progress
 //! during page reconstruction.
 //! An alternative default for all tenants can be specified in the `tenant_config` section of the config.
-//! Lastly, each tenant can have an override in their respectice tenant config (`min_resident_size_override`).
+//! Lastly, each tenant can have an override in their respective tenant config (`min_resident_size_override`).
 
 // Implementation notes:
 // - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
