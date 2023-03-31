@@ -407,13 +407,22 @@ jobs:
           )
         with:
           script: |
+            const reports = [{
+              buildType: "debug",
+              reportUrl: "${{ steps.create-allure-report-debug.outputs.report-url }}",
+              jsonUrl:   "${{ steps.create-allure-report-debug.outputs.report-json-url }}",
+            }, {
+              buildType: "release",
+              reportUrl: "${{ steps.create-allure-report-release.outputs.report-url }}",
+              jsonUrl:   "${{ steps.create-allure-report-release.outputs.report-json-url }}",
+            }]
+
             const script = require("./scripts/pr-comment-test-report.js")
             await script({
-                github,
-                context,
-                fetch,
-                reportUrlDebug: "${{ steps.create-allure-report-debug.outputs.report-url }}",
-                reportUrlRelease: "${{ steps.create-allure-report-release.outputs.report-url }}",
+              github,
+              context,
+              fetch,
+              reports,
             })
 
       - name: Store Allure test stat in the DB
@@ -424,24 +433,24 @@ jobs:
           )
         env:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_URL_DEBUG: ${{ steps.create-allure-report-debug.outputs.report-url }}
-          REPORT_URL_RELEASE: ${{ steps.create-allure-report-release.outputs.report-url }}
+          REPORT_JSON_URL_DEBUG: ${{ steps.create-allure-report-debug.outputs.report-json-url }}
+          REPORT_JSON_URL_RELEASE: ${{ steps.create-allure-report-release.outputs.report-json-url }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
         run: |
           ./scripts/pysync
 
-          for report_url in $REPORT_URL_DEBUG $REPORT_URL_RELEASE; do
+          for report_url in $REPORT_JSON_URL_DEBUG $REPORT_JSON_URL_RELEASE; do
             if [ -z "$report_url" ]; then
               continue
             fi
 
-            if [[ "$report_url" == "$REPORT_URL_DEBUG" ]]; then
+            if [[ "$report_url" == "$REPORT_JSON_URL_DEBUG" ]]; then
               BUILD_TYPE=debug
             else
               BUILD_TYPE=release
             fi
 
-            curl --fail --output suites.json ${report_url%/index.html}/data/suites.json
+            curl --fail --output suites.json "${report_url}"
             DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
           done
 

@@ -1,5 +1,10 @@
-// The script is designed to be used in actions/github-script from GitHub Workflows::
 //
+// The script parses Allure reports and posts a comment with a summary of the test results to the PR.
+// It accepts an array of items and creates a comment with a summary for each one (for "release" and "debug", together or separately if any of them failed to be generated).
+//
+// The comment is updated on each run with the latest results.
+//
+// It is designed to be used with actions/github-script from GitHub Workflows:
 // - uses: actions/github-script@v6
 //   with:
 //     script: |
@@ -8,11 +13,11 @@
 //         github,
 //         context,
 //         fetch,
-//         reportUrlDebug: "...",
-//         reportUrlRelease: "...",
+//         reports: [{...}, ...], // each report is expected to have "buildType", "reportUrl", and "jsonUrl" properties
 //       })
+//
 
-module.exports = async ({ github, context, fetch, reportUrlDebug, reportUrlRelease }) => {
+module.exports = async ({ github, context, fetch, reports }) => {
     // Marker to find the comment in the subsequent runs
     const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
     // GitHub bot id taken from (https://api.github.com/users/github-actions[bot])
@@ -28,15 +33,15 @@ module.exports = async ({ github, context, fetch, reportUrlDebug, reportUrlRelea
         repo: context.repo.repo,
     }
 
-    for (const reportUrl of [reportUrlDebug, reportUrlRelease]) {
-        if (!reportUrl) {
+    for (const report of reports) {
+        const {buildType, reportUrl, jsonUrl} = report
+
+        if (!reportUrl || !jsonUrl) {
+            console.warn(`"reportUrl" or "jsonUrl" aren't set for ${buildType} build`)
             continue
         }
 
-        const buildType = (reportUrl === reportUrlDebug) ? "Debug" : "Release"
-
-        const suitesJsonUrl = reportUrl.replace("/index.html", "/data/suites.json")
-        const suites = await (await fetch(suitesJsonUrl)).json()
+        const suites = await (await fetch(jsonUrl)).json()
 
         // Allure distinguishes "failed" (with an assertion error) and "broken" (with any other error) tests.
         // For this report it's ok to treat them in the same way (as failed).
@@ -72,7 +77,7 @@ module.exports = async ({ github, context, fetch, reportUrlDebug, reportUrlRelea
             }
         }
 
-        totalTestsCount = failedTests.length + passedTests.length + skippedTests.length
+        const totalTestsCount = failedTests.length + passedTests.length + skippedTests.length
         commentBody += `#### ${buildType} build: ${totalTestsCount} tests run: ${passedTests.length} passed, ${failedTests.length} failed, ${skippedTests.length} ([full report](${reportUrl}))\n`
         if (failedTests.length > 0) {
             commentBody += `Failed tests:\n`

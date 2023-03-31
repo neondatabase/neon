@@ -15,8 +15,16 @@ outputs:
   report-url:
     description: 'Allure report URL'
     value: ${{ steps.generate-report.outputs.report-url }}
+  report-json-url:
+    description: 'Allure report JSON URL'
+    value: ${{ steps.generate-report.outputs.report-json-url }}
 
 runs:
+  env:
+    BUILD_TYPE: ${{ inputs.build_type }}
+    BUCKET: neon-github-public-dev
+    TEST_OUTPUT: /tmp/test_output
+
   using: "composite"
   steps:
     - name: Validate input parameters
@@ -82,10 +90,8 @@ runs:
     - name: Upload Allure results
       if: ${{ inputs.action == 'store' }}
       env:
-        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
-        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
-        TEST_OUTPUT: /tmp/test_output
-        BUCKET: neon-github-public-dev
+        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ env.BUILD_TYPE }}
+        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ env.BUILD_TYPE }}
         TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       shell: bash -euxo pipefail {0}
       run: |
@@ -104,7 +110,7 @@ runs:
         EOF
         cat <<EOF > $TEST_OUTPUT/allure/results/environment.properties
           TEST_SELECTION=${{ inputs.test_selection }}
-          BUILD_TYPE=${{ inputs.build_type }}
+          BUILD_TYPE=${BUILD_TYPE}
         EOF
 
         ARCHIVE="${GITHUB_RUN_ID}-${TEST_SELECTION}-${GITHUB_RUN_ATTEMPT}-$(date +%s).tar.zst"
@@ -119,7 +125,6 @@ runs:
       shell: bash -euxo pipefail {0}
       env:
         LOCK_FILE: reports/${{ steps.calculate-vars.outputs.KEY }}/lock.txt
-        BUCKET: neon-github-public-dev
         TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       run: |
         LOCK_TIMEOUT=300 # seconds
@@ -147,10 +152,8 @@ runs:
       if: ${{ inputs.action == 'generate' }}
       id: generate-report
       env:
-        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
-        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
-        TEST_OUTPUT: /tmp/test_output
-        BUCKET: neon-github-public-dev
+        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ env.build_type }}
+        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ env.build_type }}
       shell: bash -euxo pipefail {0}
       run: |
         # Get previously uploaded data for this run
@@ -197,13 +200,13 @@ runs:
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
         echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
+        echo "report-json-url=${REPORT_URL%/index.html}/data/suites.json" >> $GITHUB_OUTPUT
 
     - name: Release Allure lock
       if: ${{ inputs.action == 'generate' && always() }}
       shell: bash -euxo pipefail {0}
       env:
         LOCK_FILE: reports/${{ steps.calculate-vars.outputs.KEY }}/lock.txt
-        BUCKET: neon-github-public-dev
         TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       run: |
         aws s3 cp --only-show-errors "s3://${BUCKET}/${LOCK_FILE}" ./lock.txt || exit 0
@@ -214,8 +217,6 @@ runs:
 
     - name: Cleanup
       if: always()
-      env:
-        TEST_OUTPUT: /tmp/test_output
       shell: bash -euxo pipefail {0}
       run: |
         rm -rf ${TEST_OUTPUT}/allure
@@ -224,7 +225,6 @@ runs:
       if: ${{ inputs.action == 'generate' && always() }}
       env:
         REPORT_URL: ${{ steps.generate-report.outputs.report-url }}
-        BUILD_TYPE: ${{ inputs.build_type }}
         SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       with:
         script: |
