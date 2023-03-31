@@ -12,7 +12,7 @@ pub type PgIdent = String;
 
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ComputeSpec {
     pub format_version: f32,
     pub timestamp: String,
@@ -26,7 +26,7 @@ pub struct ComputeSpec {
     pub startup_tracing_context: Option<HashMap<String, String>>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Cluster {
     pub cluster_id: String,
     pub name: String,
@@ -42,7 +42,7 @@ pub struct Cluster {
 /// - DROP ROLE
 /// - ALTER ROLE name RENAME TO new_name
 /// - ALTER DATABASE name RENAME TO new_name
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct DeltaOp {
     pub action: String,
     pub name: PgIdent,
@@ -51,7 +51,7 @@ pub struct DeltaOp {
 
 /// Rust representation of Postgres role info with only those fields
 /// that matter for us.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Role {
     pub name: PgIdent,
     pub encrypted_password: Option<String>,
@@ -60,7 +60,7 @@ pub struct Role {
 
 /// Rust representation of Postgres database info with only those fields
 /// that matter for us.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Database {
     pub name: PgIdent,
     pub owner: PgIdent,
@@ -70,7 +70,7 @@ pub struct Database {
 /// Common type representing both SQL statement params with or without value,
 /// like `LOGIN` or `OWNER username` in the `CREATE/ALTER ROLE`, and config
 /// options like `wal_level = logical`.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct GenericOption {
     pub name: String,
     pub value: Option<String>,

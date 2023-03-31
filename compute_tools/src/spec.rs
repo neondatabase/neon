@@ -6,7 +6,6 @@ use postgres::config::Config;
 use postgres::{Client, NoTls};
 use tracing::{info, info_span, instrument, span_enabled, warn, Level};
 
-use crate::compute::ComputeNode;
 use crate::config;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
@@ -185,8 +184,8 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
 /// Reassign all dependent objects and delete requested roles.
 #[instrument(skip_all)]
-pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<()> {
-    if let Some(ops) = &node.spec.delta_operations {
+pub fn handle_role_deletions(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> Result<()> {
+    if let Some(ops) = &spec.delta_operations {
         // First, reassign all dependent objects to db owners.
         info!("reassigning dependent objects of to-be-deleted roles");
 
@@ -203,7 +202,7 @@ pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<
             // Check that role is still present in Postgres, as this could be a
             // restart with the same spec after role deletion.
             if op.action == "delete_role" && existing_roles.iter().any(|r| r.name == op.name) {
-                reassign_owned_objects(node, &op.name)?;
+                reassign_owned_objects(spec, connstr, &op.name)?;
             }
         }
 
@@ -227,10 +226,10 @@ pub fn handle_role_deletions(node: &ComputeNode, client: &mut Client) -> Result<
 }
 
 // Reassign all owned objects in all databases to the owner of the database.
-fn reassign_owned_objects(node: &ComputeNode, role_name: &PgIdent) -> Result<()> {
-    for db in &node.spec.cluster.databases {
+fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent) -> Result<()> {
+    for db in &spec.cluster.databases {
         if db.owner != *role_name {
-            let mut conf = Config::from_str(node.connstr.as_str())?;
+            let mut conf = Config::from_str(connstr)?;
             conf.dbname(&db.name);
 
             let mut client = conf.connect(NoTls)?;
@@ -375,9 +374,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 /// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
 /// to allow users creating trusted extensions and re-creating `public` schema, for example.
 #[instrument(skip_all)]
-pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
-    let spec = &node.spec;
-
+pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> Result<()> {
     info!("cluster spec grants:");
 
     // We now have a separate `web_access` role to connect to the database
@@ -409,8 +406,8 @@ pub fn handle_grants(node: &ComputeNode, client: &mut Client) -> Result<()> {
     // Do some per-database access adjustments. We'd better do this at db creation time,
     // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants
     // atomically.
-    for db in &node.spec.cluster.databases {
-        let mut conf = Config::from_str(node.connstr.as_str())?;
+    for db in &spec.cluster.databases {
+        let mut conf = Config::from_str(connstr)?;
         conf.dbname(&db.name);
 
         let mut db_client = conf.connect(NoTls)?;

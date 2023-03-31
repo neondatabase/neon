@@ -40,6 +40,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use tokio::sync::mpsc;
 use tracing::{error, info};
 use url::Url;
 
@@ -47,6 +48,7 @@ use compute_api::models::{ComputeMetrics, ComputeState, ComputeStatus};
 use compute_api::spec::ComputeSpec;
 
 use compute_tools::compute::ComputeNode;
+use compute_tools::configurator::launch_configurator;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -168,10 +170,26 @@ fn main() -> Result<()> {
     };
     let compute = Arc::new(compute_state);
 
+    // We have one configurator thread and async http server, so generally we
+    // single consumer - multiple producers pattern here. That's why we use
+    // `mpsc` channel, not `tokio::sync::watch`. Actually, concurrency of
+    // producers is limited to one due to code logic, but we still need to
+    // pass `Sender` to several threads.
+    //
+    // Next, we use async `hyper` + `tokio` http server, but all the other code
+    // is completely synchronous. So we need to send data from async to sync,
+    // that's why we use `mpsc::unbounded_channel` here, not `mpsc::channel`.
+    // It doesn't make much sense to rewrite all code to async now, but we can
+    // consider doing this in the future.
+    let (spec_tx, spec_rx) = mpsc::unbounded_channel::<ComputeSpec>();
+
     // Launch service threads first, so we were able to serve availability
     // requests, while configuration is still in progress.
-    let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
+    let _http_handle =
+        launch_http_server(&compute, spec_tx).expect("cannot launch http endpoint thread");
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
+    let _configurator_handle =
+        launch_configurator(&compute, spec_rx).expect("cannot launch configurator thread");
 
     // Start Postgres
     let mut delay_exit = false;
