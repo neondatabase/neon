@@ -86,12 +86,24 @@ impl Default for ComputeState {
     }
 }
 
-#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeStatus {
+    // Spec wasn't provided as start, waiting for it to be
+    // provided by control-plane.
+    WaitingSpec,
+    // Compute node has initial spec and is starting up.
     Init,
+    // Compute is configured and running.
     Running,
+    // Either startup or configuration failed,
+    // compute will exit soon or is waiting for
+    // control-plane to terminate it.
     Failed,
+    // Control-plane requested reconfiguration.
+    ConfigurationPending,
+    // New spec is being applied.
+    Reconfiguration,
 }
 
 #[derive(Default, Serialize)]
@@ -271,6 +283,7 @@ impl ComputeNode {
         Ok(pg)
     }
 
+    /// Do initial configuration of the already started Postgres.
     #[instrument(skip(self))]
     pub fn apply_config(&self) -> Result<()> {
         // If connection fails,
@@ -305,8 +318,8 @@ impl ComputeNode {
         // Proceed with post-startup configuration. Note, that order of operations is important.
         handle_roles(&self.spec, &mut client)?;
         handle_databases(&self.spec, &mut client)?;
-        handle_role_deletions(self, &mut client)?;
-        handle_grants(self, &mut client)?;
+        handle_role_deletions(&self.spec, self.connstr.as_str(), &mut client)?;
+        handle_grants(&self.spec, self.connstr.as_str(), &mut client)?;
         create_writability_check_data(&mut client)?;
         handle_extensions(&self.spec, &mut client)?;
 
@@ -316,6 +329,46 @@ impl ComputeNode {
         info!(
             "finished configuration of compute for project {}",
             self.spec.cluster.cluster_id
+        );
+
+        Ok(())
+    }
+
+    // We could've wrapped this around `pg_ctl reload`, but right now we don't use
+    // `pg_ctl` for start / stop, so this just seems much easier to do as we already
+    // have opened connection to Postgres and superuser access.
+    #[instrument(skip(self, client))]
+    fn pg_reload_conf(&self, client: &mut Client) -> Result<()> {
+        client.simple_query("SELECT pg_reload_conf()")?;
+        Ok(())
+    }
+
+    /// Similar to `apply_config()`, but does a bit different sequence of operations,
+    /// as it's used to reconfigure a previously started and configured Postgres node.
+    #[instrument(skip(self, spec))]
+    pub fn reconfigure(&self, spec: ComputeSpec) -> Result<()> {
+        // Write new config
+        let pgdata_path = Path::new(&self.pgdata);
+        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec)?;
+
+        let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
+        self.pg_reload_conf(&mut client)?;
+
+        // Proceed with post-startup configuration. Note, that order of operations is important.
+        handle_roles(&spec, &mut client)?;
+        handle_databases(&spec, &mut client)?;
+        handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
+        handle_grants(&spec, self.connstr.as_str(), &mut client)?;
+        handle_extensions(&spec, &mut client)?;
+
+        // 'Close' connection
+        drop(client);
+
+        let unknown_op = "unknown".to_string();
+        let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
+        info!(
+            "finished reconfiguration of compute node for operation {}",
+            op_id
         );
 
         Ok(())

@@ -17,7 +17,7 @@ const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // mil
 
 /// Rust representation of Postgres role info with only those fields
 /// that matter for us.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct Role {
     pub name: PgIdent,
     pub encrypted_password: Option<String>,
@@ -26,7 +26,7 @@ pub struct Role {
 
 /// Rust representation of Postgres database info with only those fields
 /// that matter for us.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct Database {
     pub name: PgIdent,
     pub owner: PgIdent,
@@ -36,7 +36,7 @@ pub struct Database {
 /// Common type representing both SQL statement params with or without value,
 /// like `LOGIN` or `OWNER username` in the `CREATE/ALTER ROLE`, and config
 /// options like `wal_level = logical`.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct GenericOption {
     pub name: String,
     pub value: Option<String>,
