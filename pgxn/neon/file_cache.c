@@ -99,7 +99,7 @@ approximate_distinct_count(uint8* max_zero_bits)
 {
     const int m = N_HASHES;
     const double alpha_m = 0.7213 / (1 + 1.079 / (double)m);
-    const double pow_2_32 = 0xffffffff;
+    const double pow_2_32 = 4294967296.0;
     double E, c = 0;
     int i;
     for (i = 0; i < m; i++)
