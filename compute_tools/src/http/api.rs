@@ -31,27 +31,44 @@ async fn routes(
         // Serialized compute state.
         (&Method::GET, "/status") => {
             info!("serving /status GET request");
-            let state = compute.state.read().unwrap();
-            Response::new(Body::from(serde_json::to_string(&*state).unwrap()))
+            let state = compute.get_state();
+            Response::new(Body::from(serde_json::to_string(&state).unwrap()))
         }
 
         // Startup metrics in JSON format. Keep /metrics reserved for a possible
         // future use for Prometheus metrics format.
         (&Method::GET, "/metrics.json") => {
             info!("serving /metrics.json GET request");
-            let metrics = compute.metrics.read().unwrap();
-            Response::new(Body::from(serde_json::to_string(&*metrics).unwrap()))
+            let metrics = compute.get_metrics();
+            Response::new(Body::from(serde_json::to_string(&metrics).unwrap()))
         }
 
         // Collect Postgres current usage insights
         (&Method::GET, "/insights") => {
             info!("serving /insights GET request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!("compute is not running, current status: {:?}", status);
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
             let insights = compute.collect_insights().await;
             Response::new(Body::from(insights))
         }
 
         (&Method::POST, "/check_writability") => {
             info!("serving /check_writability POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for check_writability request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
             let res = crate::checker::check_writability(compute).await;
             match res {
                 Ok(_) => Response::new(Body::from("true")),
@@ -78,25 +95,31 @@ async fn routes(
         // watch compute state after reconfiguration request and to clean
         // restart in case of errors.
         //
-        // TODO: Errors should be in JSON format
+        // TODO: Errors should be in JSON format with proper status codes.
         (&Method::POST, "/spec") => {
             info!("serving /spec POST request");
+            if !compute.live_config_allowed {
+                let msg = "live reconfiguration is not allowed for this compute node";
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
             let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
             if let Ok(spec) = serde_json::from_str::<ComputeSpec>(&spec_raw) {
-                let mut state = compute.state.write().unwrap();
-                if !(state.status == ComputeStatus::WaitingSpec
-                    || state.status == ComputeStatus::Running)
+                let mut inner = compute.inner.write().unwrap();
+                if !(inner.state.status == ComputeStatus::WaitingSpec
+                    || inner.state.status == ComputeStatus::Running)
                 {
                     let msg = format!(
                         "invalid compute status for reconfiguration request: {}",
-                        serde_json::to_string(&*state).unwrap()
+                        serde_json::to_string(&inner.state).unwrap()
                     );
                     error!(msg);
                     return Response::new(Body::from(msg));
                 }
-                state.status = ComputeStatus::ConfigurationPending;
-                drop(state);
+                inner.state.status = ComputeStatus::ConfigurationPending;
+                drop(inner);
 
                 if let Err(e) = tx.send(spec) {
                     error!("failed to send spec request to configurator thread: {}", e);

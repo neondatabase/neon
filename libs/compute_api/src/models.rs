@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer};
 
 /// Response of the /status API
 ///
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeState {
     pub status: ComputeStatus,

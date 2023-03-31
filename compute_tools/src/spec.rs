@@ -12,6 +12,29 @@ use crate::pg_helpers::*;
 
 use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
 
+/// Request spec from the control-plane by compute_id. If `NEON_CONSOLE_JWT`
+/// env variable is set, it will be used for authorization.
+pub fn get_spec_from_control_plane(base_uri: &str, compute_id: &str) -> Result<ComputeSpec> {
+    let cp_uri = format!("{base_uri}/management/api/v2/computes/{compute_id}/spec");
+    let jwt: String = match std::env::var("NEON_CONSOLE_JWT") {
+        Ok(v) => v,
+        Err(_) => "".to_string(),
+    };
+    info!("getting spec from control plane: {}", cp_uri);
+
+    // TODO: check the response. We should distinguish cases when it's
+    // - network error, then retry
+    // - no spec for compute yet, then wait
+    // - compute id is unknown or any other error, then bail out
+    let spec = reqwest::blocking::Client::new()
+        .get(cp_uri)
+        .header("Authorization", jwt)
+        .send()?
+        .json()?;
+
+    Ok(spec)
+}
+
 /// It takes cluster specification and does the following:
 /// - Serialize cluster config and put it into `postgresql.conf` completely rewriting the file.
 /// - Update `pg_hba.conf` to allow external connections.
