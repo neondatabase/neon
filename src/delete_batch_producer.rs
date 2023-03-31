@@ -1,3 +1,6 @@
+mod tenant_batch;
+mod timeline_batch;
+
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -93,144 +96,28 @@ impl DeleteBatchProducer {
         let delete_sender = Arc::clone(&delete_elements_sender);
         let delete_tenants_sender_task = tokio::spawn(
             async move {
-                info!(
-                    "Starting to list the bucket from root {}",
-                    delete_tenants_root_target.bucket_name()
-                );
-                delete_tenants_client
-                    .head_bucket()
-                    .bucket(delete_tenants_root_target.bucket_name())
-                    .send()
-                    .await
-                    .with_context(|| {
-                        format!("bucket {} was not found", delete_tenants_root_target.bucket_name())
-                    })?;
-
-                let check_client = Arc::clone(&delete_tenants_admin_client);
-                let tenant_stats = process_s3_target_recursively(
+                tenant_batch::schedule_cleanup_deleted_tenants(
+                    &delete_tenants_root_target,
                     &delete_tenants_client,
-                    delete_tenants_root_target.tenants_root(),
-                    |s3_tenants| async {
-                        let another_client = Arc::clone(&check_client);
-                        split_to_active_and_deleted_entries(s3_tenants, |tenant_id| async move {
-                            another_client
-                                .find_tenant_project(tenant_id)
-                                .await
-                                .with_context(|| format!("Tenant {tenant_id} project admin check"))
-                        })
-                        .await
-                    },
+                    &delete_tenants_admin_client,
+                    projects_to_check_sender,
+                    delete_sender,
+                    traversing_depth,
                 )
                 .await
-                .context("tenant batch processing")?;
-
-                for &tenant_id in &tenant_stats.entries_to_delete {
-                    delete_sender.send(Either::Left(tenant_id)).ok();
-                }
-
-                info!(
-                    "Among {} tenants, found {} tenants to delete and {} active ones",
-                    tenant_stats.entries_total,
-                    tenant_stats.entries_to_delete.len(),
-                    tenant_stats.active_entries.len(),
-                );
-
-                let tenant_stats = match traversing_depth {
-                    TraversingDepth::Tenant => {
-                        info!("Finished listing the bucket for tenants only");
-                        tenant_stats
-                    }
-                    TraversingDepth::Timeline => {
-                        info!(
-                            "Processing timelines for {} active tenants",
-                            tenant_stats.active_entries.len()
-                        );
-
-                        for active_project in tenant_stats.active_entries.clone() {
-                            projects_to_check_sender.send(active_project).ok();
-                        }
-
-                        info!("Finished listing the bucket for tenants and sent {} active tenants to check for timelines", tenant_stats.active_entries.len());
-                        tenant_stats
-                    }
-                };
-
-                Ok(tenant_stats)
             }
             .instrument(info_span!("delete_tenants_sender")),
         );
 
         let delete_timelines_sender_task = tokio::spawn(async move {
-            info!(
-                "Starting to list the bucket from root {}",
-                s3_root_target.bucket_name()
-            );
-            s3_client
-                .head_bucket()
-                .bucket(s3_root_target.bucket_name())
-                .send()
-                .await
-                .with_context(|| {
-                    format!("bucket {} was not found", s3_root_target.bucket_name())
-                })?;
-
-            let mut timeline_stats = ProcessedS3List::default();
-            while let Some(project_to_check) = projects_to_check_receiver.recv().await {
-                async {
-                    let check_client = Arc::clone(&admin_client);
-                    let stats = process_s3_target_recursively(
-                        &s3_client,
-                        &s3_root_target.timelines_root(project_to_check.tenant),
-                        |s3_timelines| async {
-                            let another_client = check_client.clone();
-                            split_to_active_and_deleted_entries(
-                                s3_timelines,
-                                |timeline_id| async move {
-                                    another_client
-                                        .find_timeline_branch(timeline_id)
-                                        .await
-                                        .map_err(|e| {
-                                            anyhow::anyhow!(
-                                                "Timeline {timeline_id} branch admin check: {e}"
-                                            )
-                                        })
-                                },
-                            )
-                            .await
-                        },
-                    )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "tenant {} timeline batch processing",
-                            project_to_check.tenant
-                        )
-                    })?
-                    .change_ids(|timeline_id| {
-                        TenantTimelineId::new(project_to_check.tenant, timeline_id)
-                    });
-
-                    timeline_stats.merge(stats);
-                    Ok::<_, anyhow::Error>(())
-                }
-                .instrument(
-                    info_span!("delete_timelines_sender", tenant = %project_to_check.tenant),
-                )
-                .await?
-            }
-
-            for &id in &timeline_stats.entries_to_delete {
-                delete_elements_sender.send(Either::Right(id)).ok();
-            }
-
-            info!(
-                "Among {} timelines, found {} timelines to delete and {} active ones",
-                timeline_stats.entries_total,
-                timeline_stats.entries_to_delete.len(),
-                timeline_stats.active_entries.len(),
-            );
-
-            Ok(timeline_stats)
+            timeline_batch::schedule_cleanup_deleted_timelines(
+                &s3_root_target,
+                &s3_client,
+                &admin_client,
+                &mut projects_to_check_receiver,
+                delete_elements_sender,
+            )
+            .await
         });
 
         let (delete_batch_sender, delete_batch_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -337,12 +224,12 @@ impl<I, A> ProcessedS3List<I, A> {
 async fn process_s3_target_recursively<F, Fut, I, E, A>(
     s3_client: &Client,
     target: &S3Target,
-    mut find_active_and_deleted_entries: F,
+    find_active_and_deleted_entries: F,
 ) -> anyhow::Result<ProcessedS3List<I, A>>
 where
     I: FromStr<Err = E> + Send + Sync,
     E: Send + Sync + std::error::Error + 'static,
-    F: FnMut(Vec<I>) -> Fut,
+    F: FnOnce(Vec<I>) -> Fut + Clone,
     Fut: Future<Output = anyhow::Result<ProcessedS3List<I, A>>>,
 {
     let mut continuation_token = None;
@@ -371,7 +258,7 @@ where
             .context("list and parse bucket's entry ids")?;
 
         total_entries.merge(
-            find_active_and_deleted_entries(new_entry_ids)
+            (find_active_and_deleted_entries.clone())(new_entry_ids)
                 .await
                 .context("filter active and deleted entry ids")?,
         );

@@ -30,7 +30,7 @@ pub struct S3Target {
     pub delimiter: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraversingDepth {
     Tenant,
     Timeline,
