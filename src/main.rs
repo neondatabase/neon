@@ -114,7 +114,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .await
         .context("active tenant and timeline validation")?;
-        info!("Finished active tenant and timeline validation: {validation_stats:?}");
+        info!("Finished active tenant and timeline validation, correct timelines: {}, timeline validation errors: {:?}",
+            validation_stats.normal_timelines.len(), validation_stats.timelines_with_errors);
     }
 
     Ok(())

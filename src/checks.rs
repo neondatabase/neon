@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,12 +6,13 @@ use anyhow::Context;
 use aws_sdk_s3::Client;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{error, info, info_span, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectId};
 use crate::copied_definitions::filename::LayerFileName;
 use crate::copied_definitions::id::TenantTimelineId;
 use crate::copied_definitions::index::IndexPart;
+use crate::copied_definitions::metadata::TimelineMetadata;
 use crate::delete_batch_producer::DeleteProducerStats;
 use crate::{list_objects_with_retries, RootTarget, MAX_RETRIES};
 
@@ -23,7 +24,7 @@ pub async fn validate_pageserver_active_tenant_and_timelines(
 ) -> anyhow::Result<BranchCheckStats> {
     let Some(timeline_stats) = batch_producer_stats.timeline_stats else {
         info!("No tenant-only checks, exiting");
-        return Ok(BranchCheckStats);
+        return Ok(BranchCheckStats::default());
     };
 
     let s3_active_projects = batch_producer_stats
@@ -84,20 +85,25 @@ pub async fn validate_pageserver_active_tenant_and_timelines(
             let id = TenantTimelineId::new(tenant_id, timeline_id);
             let s3_data = s3_blob_data.remove(&id);
             branch_checks.spawn(
-                async move { check_branch(&s3_active_branch, console_branch, s3_data).await }
-                    .instrument(info_span!("check_branch", id = %id)),
+                async move {
+                    (
+                        id,
+                        get_branch_check_errors(&s3_active_branch, console_branch, s3_data).await,
+                    )
+                }
+                .instrument(info_span!("check_branch", id = %id)),
             );
         }
     }
 
-    let mut total_stats = BranchCheckStats;
-    while let Some(branch_check_stats) = branch_checks
+    let mut total_stats = BranchCheckStats::default();
+    while let Some((id, branch_check_errors)) = branch_checks
         .join_next()
         .await
         .transpose()
         .context("branch check task join")?
     {
-        total_stats.merge(branch_check_stats);
+        total_stats.add(id, branch_check_errors);
     }
     Ok(total_stats)
 }
@@ -120,46 +126,114 @@ async fn branches_for_project_with_retries(
 }
 
 // TODO kb naming, has to cover tenant -> active project transition?
-#[derive(Debug)]
-pub struct BranchCheckStats;
+#[derive(Debug, Default)]
+pub struct BranchCheckStats {
+    pub timelines_with_errors: HashMap<TenantTimelineId, Vec<String>>,
+    pub normal_timelines: HashSet<TenantTimelineId>,
+}
 
 impl BranchCheckStats {
-    pub fn merge(&mut self, other: Self) {
-        // TODO kb
+    pub fn add(&mut self, id: TenantTimelineId, check_errors: Vec<String>) {
+        if check_errors.is_empty() {
+            if !self.normal_timelines.insert(id) {
+                panic!("Checking branch with timeline {id} more than once")
+            }
+        } else {
+            match self.timelines_with_errors.entry(id) {
+                hash_map::Entry::Occupied(_) => {
+                    panic!("Checking branch with timeline {id} more than once")
+                }
+                hash_map::Entry::Vacant(v) => {
+                    v.insert(check_errors);
+                }
+            }
+        }
     }
 }
 
-async fn check_branch(
+async fn get_branch_check_errors(
     s3_active_branch: &BranchData,
     console_branch: Option<BranchData>,
     s3_data: Option<S3TimelineBlobData>,
-) -> BranchCheckStats {
+) -> Vec<String> {
+    let mut branch_check_errors = Vec::new();
+
     match console_branch {
         Some(console_active_branch) => {
             if console_active_branch.deleted {
-                warn!("Timeline has deleted branch data in the console, recheck whether if it got removed during the check")
+                branch_check_errors.push(format!("Timeline has deleted branch data in the console (id = {:?}, project_id = {:?}), recheck whether if it got removed during the check",
+                    s3_active_branch.id, s3_active_branch.project_id))
             }
         },
-        None => warn!("Timeline has no branch data in the console, recheck whether if it got removed during the check"),
+        None => branch_check_errors.push(format!("Timeline has no branch data in the console (id = {:?}, project_id = {:?}), recheck whether if it got removed during the check",
+            s3_active_branch.id, s3_active_branch.project_id))
     }
 
     match s3_data {
-        Some(S3TimelineBlobData::Parsed { index_part, layers }) => {
-            // TODO kb check layers — need match the really listed, not to be empty
+        Some(S3TimelineBlobData::Parsed {
+            mut index_part,
+            mut s3_layers,
+        }) => {
+            if index_part.version != 1 {
+                branch_check_errors.push(format!("index_part.json version: {}", index_part.version))
+            }
+
+            match TimelineMetadata::from_bytes(&index_part.metadata_bytes) {
+                Ok(index_metadata) => {
+                    if index_metadata.disk_consistent_lsn() != index_part.disk_consistent_lsn {
+                        branch_check_errors.push(format!(
+                            "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
+                            index_metadata.disk_consistent_lsn(),
+                            index_part.disk_consistent_lsn,
+
+                        ))
+                    }
+                }
+                Err(e) => branch_check_errors.push(format!(
+                    "Could not parse index_part.json metadata_bytes: {e}"
+                )),
+            }
+
+            for index_layer in index_part.timeline_layers {
+                match index_part.layer_metadata.remove(&index_layer) {
+                    Some(index_layer_metadata) => {
+                        if index_layer_metadata.file_size == 0 {
+                            branch_check_errors.push(format!(
+                                "index_part.json contains a layer {index_layer:?} that has 0 size in its layer metadata"
+                            ))
+                        }
+                    },
+                    None => branch_check_errors.push(format!(
+                        "index_part.json contains a layer {index_layer:?} that has no layer metadata"
+                    )),
+                }
+
+                if !s3_layers.remove(&index_layer) {
+                    branch_check_errors.push(format!(
+                        "index_part.json contains a layer {index_layer:?} that is not present in S3"
+                    ))
+                }
+            }
+
+            if !s3_layers.is_empty() {
+                branch_check_errors.push(format!(
+                    "index_part.json does not contain layers from S3: {s3_layers:?}"
+                ))
+            }
         }
         Some(S3TimelineBlobData::Incorrect(e)) => {
-            error!("Timeline has incorrect S3 data: {e}");
+            branch_check_errors.push(format!("Timeline has incorrect S3 data: {e}"))
         }
-        None => error!("Timeline has no data on S3 at all"),
+        None => branch_check_errors.push("Timeline has no data on S3 at all".to_string()),
     }
 
-    BranchCheckStats
+    branch_check_errors
 }
 
 enum S3TimelineBlobData {
     Parsed {
         index_part: IndexPart,
-        layers: Vec<LayerFileName>,
+        s3_layers: HashSet<LayerFileName>,
     },
     Incorrect(anyhow::Error),
 }
@@ -169,7 +243,7 @@ async fn list_timeline_blobs(
     id: TenantTimelineId,
     s3_root: &RootTarget,
 ) -> anyhow::Result<S3TimelineBlobData> {
-    let mut layers = Vec::new();
+    let mut s3_layers = HashSet::new();
     let mut index_part_object = None;
 
     let timeline_dir_target = s3_root.timeline_root(id);
@@ -199,7 +273,9 @@ async fn list_timeline_blobs(
             match blob_name {
                 Some("index_part.json") => index_part_object = Some(object.clone()),
                 Some(maybe_layer_name) => match maybe_layer_name.parse::<LayerFileName>() {
-                    Ok(new_layer) => layers.push(new_layer),
+                    Ok(new_layer) => {
+                        s3_layers.insert(new_layer);
+                    },
                     Err(e) => errors.entry(id).or_default().push(
                         format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
                     ),
@@ -239,7 +315,10 @@ async fn list_timeline_blobs(
     let index_part =
         serde_json::from_slice(&index_part_bytes).context("index_part.json body parsing")?;
 
-    Ok(S3TimelineBlobData::Parsed { index_part, layers })
+    Ok(S3TimelineBlobData::Parsed {
+        index_part,
+        s3_layers,
+    })
 }
 
 async fn download_object_with_retries(

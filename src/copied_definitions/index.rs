@@ -54,7 +54,7 @@ impl LayerFileMetadata {
 pub struct IndexPart {
     /// Debugging aid describing the version of this type.
     #[serde(default)]
-    version: usize,
+    pub version: usize,
 
     /// Layer names, which are stored on the remote storage.
     ///
@@ -113,7 +113,7 @@ impl IndexPart {
 /// Serialized form of [`LayerFileMetadata`].
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct IndexLayerMetadata {
-    pub(super) file_size: u64,
+    pub file_size: u64,
 }
 
 impl From<&'_ LayerFileMetadata> for IndexLayerMetadata {
