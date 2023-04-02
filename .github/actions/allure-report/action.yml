@@ -20,13 +20,27 @@ outputs:
     value: ${{ steps.generate-report.outputs.report-json-url }}
 
 runs:
-  env:
-    BUILD_TYPE: ${{ inputs.build_type }}
-    BUCKET: neon-github-public-dev
-    TEST_OUTPUT: /tmp/test_output
-
   using: "composite"
+
   steps:
+    # We're using some of env variables quite offen, so let's set them once.
+    #
+    # It would be nice to have them set in common runs.env[0] section, but it doesn't work[1]
+    #
+    # - [0] https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions#runsenv
+    # - [1] https://github.com/neondatabase/neon/pull/3907#discussion_r1154703456
+    #
+    - name: Set common environment variables
+      shell: bash -euxo pipefail {0}
+      run: |
+        echo "BUILD_TYPE=${BUILD_TYPE}"   >> $GITHUB_ENV
+        echo "BUCKET=${BUCKET}"           >> $GITHUB_ENV
+        echo "TEST_OUTPUT=${TEST_OUTPUT}" >> $GITHUB_ENV
+      env:
+        BUILD_TYPE: ${{ inputs.build_type }}
+        BUCKET: neon-github-public-dev
+        TEST_OUTPUT: /tmp/test_output
+
     - name: Validate input parameters
       shell: bash -euxo pipefail {0}
       run: |
@@ -90,8 +104,8 @@ runs:
     - name: Upload Allure results
       if: ${{ inputs.action == 'store' }}
       env:
-        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ env.BUILD_TYPE }}
-        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ env.BUILD_TYPE }}
+        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
+        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
         TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       shell: bash -euxo pipefail {0}
       run: |
@@ -152,8 +166,8 @@ runs:
       if: ${{ inputs.action == 'generate' }}
       id: generate-report
       env:
-        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ env.build_type }}
-        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ env.build_type }}
+        REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
+        RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
       shell: bash -euxo pipefail {0}
       run: |
         # Get previously uploaded data for this run
