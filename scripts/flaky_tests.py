@@ -4,22 +4,22 @@ import argparse
 import json
 import logging
 from collections import defaultdict
-from typing import DefaultDict
+from typing import DefaultDict, Dict
 
 import psycopg2
 import psycopg2.extras
 
-# We call the test "flaky" if it changed its status on the same revision in the last N=10 days on main branch.
+# We call the test "flaky" if it failed at least once on the main branch in the last N=10 days.
 FLAKY_TESTS_QUERY = """
     SELECT
-        DISTINCT ON (parent_suite, suite, name) parent_suite, suite, name
+        DISTINCT parent_suite, suite, test
     FROM
         (
             SELECT
                 revision,
                 jsonb_array_elements(data -> 'children') -> 'name' as parent_suite,
                 jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'name' as suite,
-                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'name' as name,
+                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'name' as test,
                 jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'status' as status,
                 to_timestamp((jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'time' -> 'start')::bigint / 1000)::date as timestamp
             FROM
@@ -29,10 +29,7 @@ FLAKY_TESTS_QUERY = """
         ) data
     WHERE
         timestamp > CURRENT_DATE - INTERVAL '%s' day
-    GROUP BY
-        revision, parent_suite, suite, name
-    HAVING
-        COUNT(DISTINCT status) > 1
+        AND status::text IN ('"failed"', '"broken"')
     ;
 """
 
@@ -42,8 +39,8 @@ def main(args: argparse.Namespace):
     interval_days = args.days
     output = args.output
 
-    res: DefaultDict[str, DefaultDict[str, DefaultDict[str, bool]]]
-    res = defaultdict(lambda: defaultdict(lambda: defaultdict(bool)))
+    res: DefaultDict[str, DefaultDict[str, Dict[str, bool]]]
+    res = defaultdict(lambda: defaultdict(dict))
 
     logging.info("connecting to the database...")
     with psycopg2.connect(connstr, connect_timeout=10) as conn:
@@ -53,8 +50,8 @@ def main(args: argparse.Namespace):
             rows = cur.fetchall()
 
     for row in rows:
-        logging.info(f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{row['name']}")
-        res[row["parent_suite"]][row["suite"]][row["name"]] = True
+        logging.info(f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{row['test']}")
+        res[row["parent_suite"]][row["suite"]][row["test"]] = True
 
     logging.info(f"saving results to {output.name}")
     json.dump(res, output, indent=2)
