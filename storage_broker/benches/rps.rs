@@ -133,6 +133,7 @@ async fn publish(client: Option<BrokerClientChannel>, n_keys: u64) {
                 peer_horizon_lsn: 5,
                 safekeeper_connstr: "zenith-1-sk-1.local:7676".to_owned(),
                 local_start_lsn: 0,
+                availability_zone: None,
             };
             counter += 1;
             yield info;
