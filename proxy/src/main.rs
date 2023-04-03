@@ -133,7 +133,7 @@ fn build_tls_config(args: &clap::ArgMatches) -> anyhow::Result<Option<TlsConfig>
 
     let tls_config = args.get_one::<PathBuf>("tls-config");
     let main = tls_config.map(TlsServers::from_config_file).transpose()?;
-    tracing::info!(?main, "config");
+    certs::CertResolver::new(main.unwrap());
 
     let tls_cert = args.get_one::<PathBuf>("tls-cert");
     let tls_key = args.get_one::<PathBuf>("tls-key");
@@ -144,7 +144,7 @@ fn build_tls_config(args: &clap::ArgMatches) -> anyhow::Result<Option<TlsConfig>
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    todo!()
+    todo!("TlsConfig")
 }
 
 fn build_metrics_config(args: &clap::ArgMatches) -> anyhow::Result<Option<MetricCollectionConfig>> {

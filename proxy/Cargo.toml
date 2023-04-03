@@ -16,6 +16,7 @@ clap.workspace = true
 consumption_metrics.workspace = true
 futures.workspace = true
 git-version.workspace = true
+globset.workspace = true
 hashbrown.workspace = true
 hashlink.workspace = true
 hex.workspace = true
