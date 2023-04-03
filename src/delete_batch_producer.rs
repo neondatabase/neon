@@ -47,6 +47,10 @@ impl DeleteProducerStats {
         self.tenant_stats.entries_total
     }
 
+    pub fn active_tenants(&self) -> usize {
+        self.tenant_stats.active_entries.len()
+    }
+
     pub fn timelines_checked(&self) -> usize {
         self.timeline_stats
             .as_ref()

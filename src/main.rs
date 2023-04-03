@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use s3_deleter::cloud_admin_api::CloudAdminApiClient;
 use s3_deleter::delete_batch_producer::DeleteBatchProducer;
 use s3_deleter::{
     checks, get_cloud_admin_api_token_or_exit, init_logging, init_s3_client, RootTarget, S3Deleter,
-    S3Target,
+    S3Target, TraversingDepth,
 };
 use tracing::{info, info_span, warn};
 
@@ -41,6 +42,19 @@ async fn main() -> anyhow::Result<()> {
     let mut node_kind = env::var("NODE_KIND").context("'NODE_KIND' param retrieval")?;
     node_kind.make_ascii_lowercase();
 
+    let traversing_depth = match env::var("TRAVERSING_DEPTH").ok() {
+        Some(traversing_depth) => match traversing_depth.as_str() {
+            "tenant" => TraversingDepth::Tenant,
+            "timeline" => TraversingDepth::Timeline,
+            unknown => anyhow::bail!("Unknown traversing depth {unknown}"),
+        },
+        None => {
+            info!("No traversing depth found, using the smallest");
+            TraversingDepth::Tenant
+        }
+    };
+    info!("Starting extra S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}', traversing depth: {traversing_depth:?}");
+
     info!("Starting extra tenant S3 removal in bucket {bucket_param}, region {region_param} for node kind '{node_kind}'");
     let cloud_admin_api_client = Arc::new(CloudAdminApiClient::new(
         get_cloud_admin_api_token_or_exit(),
@@ -68,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&cloud_admin_api_client),
         Arc::clone(&s3_client),
         s3_root.clone(),
-        s3_deleter::TraversingDepth::Tenant,
+        traversing_depth,
     );
 
     let s3_deleter = S3Deleter::new(
@@ -95,11 +109,11 @@ async fn main() -> anyhow::Result<()> {
 
     let batch_producer_stats = batch_producer_task_result.context("delete batch producer join")?;
     info!(
-        "Total bucket tenants listed: {}, timelines: {}",
+        "Total bucket tenants listed: {}; for {} active tenants, timelines checked: {}",
         batch_producer_stats.tenants_checked(),
-        batch_producer_stats.timelines_checked(),
+        batch_producer_stats.active_tenants(),
+        batch_producer_stats.timelines_checked()
     );
-
     info!("Finished S3 removal");
 
     if "pageserver" == node_kind.trim() {
@@ -114,8 +128,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .await
         .context("active tenant and timeline validation")?;
-        info!("Finished active tenant and timeline validation, correct timelines: {}, timeline validation errors: {:?}",
-            validation_stats.normal_timelines.len(), validation_stats.timelines_with_errors);
+        info!("Finished active tenant and timeline validation, correct timelines: {}, timeline validation errors: {}",
+            validation_stats.normal_timelines.len(), validation_stats.timelines_with_errors.len());
+        if !validation_stats.timelines_with_errors.is_empty() {
+            warn!(
+                "Validation errors: {:?}",
+                validation_stats
+                    .timelines_with_errors
+                    .into_iter()
+                    .map(|(id, errors)| (id.to_string(), format!("{:?}", errors)))
+                    .collect::<HashMap<_, _>>()
+            );
+        }
     }
 
     Ok(())
