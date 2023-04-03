@@ -8,6 +8,7 @@ storage:
       pg_distrib_dir: /usr/local
       metric_collection_endpoint: http://neon-internal-api.aws.neon.build/billing/api/v1/usage_events
       metric_collection_interval: 10min
+      evictions_low_residence_duration_metric_threshold: "20m"
       disk_usage_based_eviction:
         max_usage_pct: 80
         # TODO: learn typical resident-size growth rate [GiB/minute] and configure
