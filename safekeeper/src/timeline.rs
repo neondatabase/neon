@@ -4,7 +4,7 @@
 use anyhow::{anyhow, bail, Result};
 use parking_lot::{Mutex, MutexGuard};
 use postgres_ffi::XLogSegNo;
-use pq_proto::ReplicationFeedback;
+use pq_proto::PageserverFeedback;
 use serde::Serialize;
 use std::cmp::{max, min};
 use std::path::PathBuf;
@@ -91,7 +91,7 @@ pub struct ReplicaState {
     /// combined hot standby feedback from all replicas
     pub hs_feedback: HotStandbyFeedback,
     /// Replication specific feedback received from pageserver, if any
-    pub pageserver_feedback: Option<ReplicationFeedback>,
+    pub pageserver_feedback: Option<PageserverFeedback>,
 }
 
 impl Default for ReplicaState {
@@ -276,7 +276,7 @@ impl SharedState {
             //
             if let Some(pageserver_feedback) = state.pageserver_feedback {
                 if let Some(acc_feedback) = acc.pageserver_feedback {
-                    if acc_feedback.ps_writelsn < pageserver_feedback.ps_writelsn {
+                    if acc_feedback.last_received_lsn < pageserver_feedback.last_received_lsn {
                         warn!("More than one pageserver is streaming WAL for the timeline. Feedback resolving is not fully supported yet.");
                         acc.pageserver_feedback = Some(pageserver_feedback);
                     }
@@ -287,12 +287,12 @@ impl SharedState {
                 // last lsn received by pageserver
                 // FIXME if multiple pageservers are streaming WAL, last_received_lsn must be tracked per pageserver.
                 // See https://github.com/neondatabase/neon/issues/1171
-                acc.last_received_lsn = Lsn::from(pageserver_feedback.ps_writelsn);
+                acc.last_received_lsn = Lsn::from(pageserver_feedback.last_received_lsn);
 
                 // When at least one pageserver has preserved data up to remote_consistent_lsn,
                 // safekeeper is free to delete it, so choose max of all pageservers.
                 acc.remote_consistent_lsn = max(
-                    Lsn::from(pageserver_feedback.ps_applylsn),
+                    Lsn::from(pageserver_feedback.remote_consistent_lsn),
                     acc.remote_consistent_lsn,
                 );
             }
@@ -337,6 +337,7 @@ impl SharedState {
             safekeeper_connstr: conf.listen_pg_addr.clone(),
             backup_lsn: self.sk.inmem.backup_lsn.0,
             local_start_lsn: self.sk.state.local_start_lsn.0,
+            availability_zone: conf.availability_zone.clone(),
         }
     }
 }
@@ -584,7 +585,7 @@ impl Timeline {
             let replica_state = shared_state.replicas[replica_id].unwrap();
             let reported_remote_consistent_lsn = replica_state
                 .pageserver_feedback
-                .map(|f| Lsn(f.ps_applylsn))
+                .map(|f| Lsn(f.remote_consistent_lsn))
                 .unwrap_or(Lsn::INVALID);
             let stop = shared_state.sk.inmem.commit_lsn == Lsn(0) || // no data at all yet
             (reported_remote_consistent_lsn!= Lsn::MAX && // Lsn::MAX means that we don't know the latest LSN yet.

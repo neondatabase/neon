@@ -13,10 +13,9 @@ settings:
 
 # -- Additional labels for zenith-proxy pods
 podLabels:
-  zenith_service: proxy
-  zenith_env: production
-  zenith_region: us-east-2
-  zenith_region_slug: us-east-2
+  neon_service: proxy
+  neon_env: production
+  neon_region: us-east-2
 
 service:
   type: LoadBalancer

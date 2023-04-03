@@ -2,6 +2,7 @@
 
 use std::{
     error::Error,
+    pin::pin,
     str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -17,7 +18,7 @@ use postgres_ffi::v14::xlog_utils::normalize_lsn;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use postgres_protocol::message::backend::ReplicationMessage;
 use postgres_types::PgLsn;
-use tokio::{pin, select, sync::watch, time};
+use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -36,7 +37,7 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use pq_proto::ReplicationFeedback;
+use pq_proto::PageserverFeedback;
 use utils::lsn::Lsn;
 
 /// Status of the connection.
@@ -187,8 +188,7 @@ pub async fn handle_walreceiver_connection(
     let query = format!("START_REPLICATION PHYSICAL {startpoint}");
 
     let copy_stream = replication_client.copy_both_simple(&query).await?;
-    let physical_stream = ReplicationStream::new(copy_stream);
-    pin!(physical_stream);
+    let mut physical_stream = pin!(ReplicationStream::new(copy_stream));
 
     let mut waldecoder = WalStreamDecoder::new(startpoint, timeline.pg_version);
 
@@ -319,12 +319,12 @@ pub async fn handle_walreceiver_connection(
                 timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
-            let write_lsn = u64::from(last_lsn);
+            let last_received_lsn = u64::from(last_lsn);
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let flush_lsn = u64::from(timeline.get_disk_consistent_lsn());
+            let disk_consistent_lsn = u64::from(timeline.get_disk_consistent_lsn());
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
-            let apply_lsn = u64::from(timeline_remote_consistent_lsn);
+            let remote_consistent_lsn = u64::from(timeline_remote_consistent_lsn);
             let ts = SystemTime::now();
 
             // Update the status about what we just received. This is shown in the mgmt API.
@@ -343,12 +343,12 @@ pub async fn handle_walreceiver_connection(
             let (timeline_logical_size, _) = timeline
                 .get_current_logical_size(&ctx)
                 .context("Status update creation failed to get current logical size")?;
-            let status_update = ReplicationFeedback {
+            let status_update = PageserverFeedback {
                 current_timeline_size: timeline_logical_size,
-                ps_writelsn: write_lsn,
-                ps_flushlsn: flush_lsn,
-                ps_applylsn: apply_lsn,
-                ps_replytime: ts,
+                last_received_lsn,
+                disk_consistent_lsn,
+                remote_consistent_lsn,
+                replytime: ts,
             };
 
             debug!("neon_status_update {status_update:?}");

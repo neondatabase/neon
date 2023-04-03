@@ -102,6 +102,7 @@ pub struct S3Bucket {
     client: Client,
     bucket_name: String,
     prefix_in_bucket: Option<String>,
+    max_keys_per_list_response: Option<i32>,
     // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
     // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
     // The helps to ensure we don't exceed the thresholds.
@@ -164,6 +165,7 @@ impl S3Bucket {
         Ok(Self {
             client,
             bucket_name: aws_config.bucket_name.clone(),
+            max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
             concurrency_limiter: Arc::new(Semaphore::new(aws_config.concurrency_limit.get())),
         })
@@ -291,7 +293,9 @@ impl RemoteStorage for S3Bucket {
                 .list_objects_v2()
                 .bucket(self.bucket_name.clone())
                 .set_prefix(self.prefix_in_bucket.clone())
+                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
                 .set_continuation_token(continuation_token)
+                .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
                 .map_err(|e| {
@@ -306,7 +310,7 @@ impl RemoteStorage for S3Bucket {
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.key()?))),
             );
 
-            match fetch_response.continuation_token {
+            match fetch_response.next_continuation_token {
                 Some(new_token) => continuation_token = Some(new_token),
                 None => break,
             }
@@ -354,6 +358,7 @@ impl RemoteStorage for S3Bucket {
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
                 .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
+                .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
                 .map_err(|e| {
@@ -371,7 +376,7 @@ impl RemoteStorage for S3Bucket {
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
             );
 
-            match fetch_response.continuation_token {
+            match fetch_response.next_continuation_token {
                 Some(new_token) => continuation_token = Some(new_token),
                 None => break,
             }

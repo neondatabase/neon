@@ -30,10 +30,9 @@ settings:
 
 # -- Additional labels for neon-proxy pods
 podLabels:
-  zenith_service: proxy-scram
-  zenith_env: dev
-  zenith_region: eu-west-1
-  zenith_region_slug: eu-west-1
+  neon_service: proxy-scram
+  neon_env: dev
+  neon_region: eu-west-1
 
 exposedService:
   annotations:

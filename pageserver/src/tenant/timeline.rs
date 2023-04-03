@@ -13,6 +13,7 @@ use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
     DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceStatus, TimelineState,
 };
+use remote_storage::GenericRemoteStorage;
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -24,6 +25,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -677,8 +679,7 @@ impl Timeline {
 
             let mut failed = 0;
 
-            let cancelled = task_mgr::shutdown_watcher();
-            tokio::pin!(cancelled);
+            let mut cancelled = pin!(task_mgr::shutdown_watcher());
 
             loop {
                 tokio::select! {
@@ -957,6 +958,25 @@ impl Timeline {
         }
     }
 
+    /// Evict a batch of layers.
+    ///
+    /// GenericRemoteStorage reference is required as a witness[^witness_article] for "remote storage is configured."
+    ///
+    /// [^witness_article]: https://willcrichton.net/rust-api-type-patterns/witnesses.html
+    pub async fn evict_layers(
+        &self,
+        _: &GenericRemoteStorage,
+        layers_to_evict: &[Arc<dyn PersistentLayer>],
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Vec<Option<anyhow::Result<bool>>>> {
+        let remote_client = self.remote_client.clone().expect(
+            "GenericRemoteStorage is configured, so timeline must have RemoteTimelineClient",
+        );
+
+        self.evict_layer_batch(&remote_client, layers_to_evict, cancel)
+            .await
+    }
+
     /// Evict multiple layers at once, continuing through errors.
     ///
     /// Try to evict the given `layers_to_evict` by
@@ -994,6 +1014,15 @@ impl Timeline {
         // now lock out layer removal (compaction, gc, timeline deletion)
         let layer_removal_guard = self.layer_removal_cs.lock().await;
 
+        {
+            // to avoid racing with detach and delete_timeline
+            let state = self.current_state();
+            anyhow::ensure!(
+                state == TimelineState::Active,
+                "timeline is not active but {state:?}"
+            );
+        }
+
         // start the batch update
         let mut layer_map = self.layers.write().unwrap();
         let mut batch_updates = layer_map.batch_update();
@@ -1027,6 +1056,8 @@ impl Timeline {
         use super::layer_map::Replacement;
 
         if local_layer.is_remote_layer() {
+            // TODO(issue #3851): consider returning an err here instead of false,
+            // which is the same out the match later
             return Ok(false);
         }
 
@@ -1096,6 +1127,9 @@ impl Timeline {
                     self.metrics
                         .evictions_with_low_residence_duration
                         .observe(delta);
+                    info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
+                } else {
+                    info!(layer=%local_layer.short_id(), "evicted layer after unknown residence period");
                 }
 
                 true
@@ -1837,13 +1871,13 @@ impl Timeline {
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
 
-        let calculation = async {
+        let mut calculation = pin!(async {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
                 .calculate_logical_size(lsn, cancel, &ctx)
                 .await
-        };
+        });
         let timeline_state_cancellation = async {
             loop {
                 match timeline_state_updates.changed().await {
@@ -1872,7 +1906,6 @@ impl Timeline {
             "aborted because task_mgr shutdown requested".to_string()
         };
 
-        tokio::pin!(calculation);
         loop {
             tokio::select! {
                 res = &mut calculation => { return res }
@@ -4010,6 +4043,67 @@ impl Timeline {
             .read()
             .unwrap()
             .clone()
+    }
+}
+
+pub struct DiskUsageEvictionInfo {
+    /// Timeline's largest layer (remote or resident)
+    pub max_layer_size: Option<u64>,
+    /// Timeline's resident layers
+    pub resident_layers: Vec<LocalLayerInfoForDiskUsageEviction>,
+}
+
+pub struct LocalLayerInfoForDiskUsageEviction {
+    pub layer: Arc<dyn PersistentLayer>,
+    pub last_activity_ts: SystemTime,
+}
+
+impl std::fmt::Debug for LocalLayerInfoForDiskUsageEviction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // format the tv_sec, tv_nsec into rfc3339 in case someone is looking at it
+        // having to allocate a string to this is bad, but it will rarely be formatted
+        let ts = chrono::DateTime::<chrono::Utc>::from(self.last_activity_ts);
+        let ts = ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        f.debug_struct("LocalLayerInfoForDiskUsageEviction")
+            .field("layer", &self.layer)
+            .field("last_activity", &ts)
+            .finish()
+    }
+}
+
+impl LocalLayerInfoForDiskUsageEviction {
+    pub fn file_size(&self) -> u64 {
+        self.layer.file_size()
+    }
+}
+
+impl Timeline {
+    pub(crate) fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
+        let layers = self.layers.read().unwrap();
+
+        let mut max_layer_size: Option<u64> = None;
+        let mut resident_layers = Vec::new();
+
+        for l in layers.iter_historic_layers() {
+            let file_size = l.file_size();
+            max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
+
+            if l.is_remote_layer() {
+                continue;
+            }
+
+            let last_activity_ts = l.access_stats().latest_activity();
+
+            resident_layers.push(LocalLayerInfoForDiskUsageEviction {
+                layer: l,
+                last_activity_ts,
+            });
+        }
+
+        DiskUsageEvictionInfo {
+            max_layer_size,
+            resident_layers,
+        }
     }
 }
 

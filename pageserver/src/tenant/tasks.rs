@@ -244,14 +244,12 @@ pub(crate) async fn random_init_delay(
 ) -> Result<(), Cancelled> {
     use rand::Rng;
 
+    if period == Duration::ZERO {
+        return Ok(());
+    }
+
     let d = {
         let mut rng = rand::thread_rng();
-
-        // gen_range asserts that the range cannot be empty, which it could be because period can
-        // be set to zero to disable gc or compaction, so lets set it to be at least 10s.
-        let period = std::cmp::max(period, Duration::from_secs(10));
-
-        // semi-ok default as the source of jitter
         rng.gen_range(Duration::ZERO..=period)
     };
 

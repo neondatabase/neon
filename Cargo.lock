@@ -2474,6 +2474,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "svg_fmt",
+ "sync_wrapper",
  "tempfile",
  "tenant_size_model",
  "thiserror",
@@ -3085,6 +3086,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "test-context",
  "tokio",
  "tokio-util",
  "toml_edit",
@@ -3889,6 +3891,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-context"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "055831a02a4f5aa28fede67f2902014273eb8c21b958ac5ebbd59b71ef30dbc3"
+dependencies = [
+ "async-trait",
+ "futures",
+ "test-context-macros",
+]
+
+[[package]]
+name = "test-context-macros"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8901a55b0a7a06ebc4a674dcca925170da8e613fa3b163a1df804ed10afb154d"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "textwrap"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4534,6 +4557,7 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "rand",
+ "regex",
  "routerify",
  "sentry",
  "serde",

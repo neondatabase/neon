@@ -33,6 +33,7 @@ use tonic::transport::server::Connected;
 use tonic::Code;
 use tonic::{Request, Response, Status};
 use tracing::*;
+use utils::signals::ShutdownSignals;
 
 use metrics::{Encoder, TextEncoder};
 use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
@@ -437,6 +438,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("version: {GIT_VERSION}");
     ::metrics::set_build_info_metric(GIT_VERSION);
 
+    // On any shutdown signal, log receival and exit.
+    std::thread::spawn(move || {
+        ShutdownSignals::handle(|signal| {
+            info!("received {}, terminating", signal.name());
+            std::process::exit(0);
+        })
+    });
+
     let registry = Registry {
         shared_state: Arc::new(RwLock::new(SharedState::new(args.all_keys_chan_size))),
         timeline_chan_size: args.timeline_chan_size,
@@ -516,6 +525,7 @@ mod tests {
             peer_horizon_lsn: 5,
             safekeeper_connstr: "neon-1-sk-1.local:7676".to_owned(),
             local_start_lsn: 0,
+            availability_zone: None,
         }
     }
 
