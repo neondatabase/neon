@@ -98,7 +98,7 @@ pub async fn task_main(
 }
 
 // TODO(tech debt): unite this with its twin below.
-#[tracing::instrument(fields(session_id), skip_all)]
+#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
 pub async fn handle_ws_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
@@ -140,7 +140,7 @@ pub async fn handle_ws_client(
         .await
 }
 
-#[tracing::instrument(fields(session_id), skip_all)]
+#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
 async fn handle_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
