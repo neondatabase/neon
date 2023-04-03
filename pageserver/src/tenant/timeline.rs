@@ -1127,6 +1127,9 @@ impl Timeline {
                     self.metrics
                         .evictions_with_low_residence_duration
                         .observe(delta);
+                    info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
+                } else {
+                    info!(layer=%local_layer.short_id(), "evicted layer after unknown residence period");
                 }
 
                 true
