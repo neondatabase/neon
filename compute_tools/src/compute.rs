@@ -19,7 +19,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::RwLock;
+use std::sync::{Condvar, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -50,10 +50,15 @@ pub struct ComputeNode {
     // - but then something happens and compute pod / VM is destroyed,
     //   so k8s controller starts it again with the **old** spec
     pub live_config_allowed: bool,
-    /// Volatile part of the `ComputeNode` so should be used under `RwLock`
-    /// to allow HTTP API server to serve status requests, while configuration
-    /// is in progress.
-    pub inner: RwLock<ComputeNodeInner>,
+
+    /// Volatile part of the `ComputeNode`, which should be used under `Mutex`.
+    /// Coupled with `Condvar` to allow notifying HTTP API and configurator
+    /// thread about state changes. To allow HTTP API server to serving status
+    /// requests, while configuration is in progress, lock should be held only
+    /// for short periods of time to do read/write, not the whole configuration
+    /// process.
+    pub inner: Mutex<ComputeNodeInner>,
+    pub state_changed: Condvar,
 }
 
 pub struct ComputeNodeInner {
@@ -75,21 +80,54 @@ pub struct ParsedSpec {
     pub storage_auth_token: Option<String>,
 }
 
+impl TryFrom<ComputeSpec> for ParsedSpec {
+    type Error = String;
+
+    fn try_from(spec: ComputeSpec) -> Result<Self, String> {
+        let pageserver_connstr = spec
+            .cluster
+            .settings
+            .find("neon.pageserver_connstring")
+            .ok_or("pageserver connstr should be provided")?;
+        let storage_auth_token = spec.storage_auth_token.clone();
+        let tenant = spec
+            .cluster
+            .settings
+            .find("neon.tenant_id")
+            .ok_or("tenant id should be provided")?;
+        let timeline = spec
+            .cluster
+            .settings
+            .find("neon.timeline_id")
+            .ok_or("tenant id should be provided")?;
+
+        Ok(ParsedSpec {
+            spec,
+            pageserver_connstr,
+            storage_auth_token,
+            tenant,
+            timeline,
+        })
+    }
+}
+
 impl ComputeNode {
     pub fn set_status(&self, status: ComputeStatus) {
-        self.inner.write().unwrap().state.status = status;
+        let mut inner = self.inner.lock().unwrap();
+        inner.state.status = status;
+        self.state_changed.notify_all();
     }
 
     pub fn get_status(&self) -> ComputeStatus {
-        self.inner.read().unwrap().state.status
+        self.inner.lock().unwrap().state.status
     }
 
     pub fn get_state(&self) -> ComputeState {
-        self.inner.read().unwrap().state.clone()
+        self.inner.lock().unwrap().state.clone()
     }
 
     pub fn get_metrics(&self) -> ComputeMetrics {
-        self.inner.read().unwrap().metrics.clone()
+        self.inner.lock().unwrap().metrics.clone()
     }
 
     // Remove `pgdata` directory and create it again with right permissions.
@@ -136,7 +174,7 @@ impl ComputeNode {
         ar.set_ignore_zeros(true);
         ar.unpack(&self.pgdata)?;
 
-        self.inner.write().unwrap().metrics.basebackup_ms = Utc::now()
+        self.inner.lock().unwrap().metrics.basebackup_ms = Utc::now()
             .signed_duration_since(start_time)
             .to_std()
             .unwrap()
@@ -178,7 +216,7 @@ impl ComputeNode {
             );
         }
 
-        self.inner.write().unwrap().metrics.sync_safekeepers_ms = Utc::now()
+        self.inner.lock().unwrap().metrics.sync_safekeepers_ms = Utc::now()
             .signed_duration_since(start_time)
             .to_std()
             .unwrap()
@@ -309,8 +347,13 @@ impl ComputeNode {
 
     /// Similar to `apply_config()`, but does a bit different sequence of operations,
     /// as it's used to reconfigure a previously started and configured Postgres node.
-    #[instrument(skip(self, spec))]
-    pub fn reconfigure(&self, spec: ComputeSpec) -> Result<()> {
+    #[instrument(skip(self))]
+    pub fn reconfigure(&self) -> Result<()> {
+        let spec = {
+            let inner = self.inner.lock().unwrap();
+            inner.spec.as_ref().expect("cannot start_compute without spec").spec.clone()
+        };
+
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
         config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec)?;
@@ -342,7 +385,7 @@ impl ComputeNode {
     pub fn start_compute(&self) -> Result<std::process::Child> {
         let spec = self
             .inner
-            .read()
+            .lock()
             .unwrap()
             .spec
             .as_ref()
@@ -366,7 +409,7 @@ impl ComputeNode {
 
         let startup_end_time = Utc::now();
         {
-            let mut inner = self.inner.write().unwrap();
+            let mut inner = self.inner.lock().unwrap();
             inner.metrics.config_ms = startup_end_time
                 .signed_duration_since(start_time)
                 .to_std()

@@ -46,7 +46,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
                             AND usename != 'cloud_admin';", // XXX: find a better way to filter other monitors?
                         &[],
                     );
-                let mut last_active = compute.inner.read().unwrap().state.last_active;
+                let mut last_active = compute.inner.lock().unwrap().state.last_active;
 
                 if let Ok(backs) = backends {
                     let mut idle_backs: Vec<DateTime<Utc>> = vec![];
@@ -87,7 +87,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
                 }
 
                 // Update the last activity in the shared state if we got a more recent one.
-                let mut inner = compute.inner.write().unwrap();
+                let mut inner = compute.inner.lock().unwrap();
                 if last_active > inner.state.last_active {
                     inner.state.last_active = last_active;
                     debug!("set the last compute activity time to: {}", last_active);
