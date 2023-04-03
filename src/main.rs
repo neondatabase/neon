@@ -98,14 +98,29 @@ async fn main() -> anyhow::Result<()> {
 
     let deletion_stats = deleter_task_result.context("s3 deletion")?;
     info!(
-        "Deleted {} tenants ({} keys) abd {} timelines ({} keys) total. Dry run: {}",
+        "Deleted {} tenants ({} keys) and {} timelines ({} keys) total. Dry run: {}",
         deletion_stats.deleted_tenant_keys.len(),
         deletion_stats.deleted_tenant_keys.values().sum::<usize>(),
         deletion_stats.deleted_timeline_keys.len(),
         deletion_stats.deleted_timeline_keys.values().sum::<usize>(),
         dry_run,
     );
-    info!("Total stats: {deletion_stats:?}");
+    info!(
+        "Total tenant deletion stats: {:?}",
+        deletion_stats
+            .deleted_tenant_keys
+            .into_iter()
+            .map(|(id, key)| (id.to_string(), key))
+            .collect::<HashMap<_, _>>()
+    );
+    info!(
+        "Total timeline deletion stats: {:?}",
+        deletion_stats
+            .deleted_timeline_keys
+            .into_iter()
+            .map(|(id, key)| (id.to_string(), key))
+            .collect::<HashMap<_, _>>()
+    );
 
     let batch_producer_stats = batch_producer_task_result.context("delete batch producer join")?;
     info!(
@@ -132,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
             validation_stats.normal_timelines.len(), validation_stats.timelines_with_errors.len());
         if !validation_stats.timelines_with_errors.is_empty() {
             warn!(
-                "Validation errors: {:?}",
+                "Validation errors: {:#?}",
                 validation_stats
                     .timelines_with_errors
                     .into_iter()

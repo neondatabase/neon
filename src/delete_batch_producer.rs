@@ -12,7 +12,7 @@ use either::Either;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, Instrument, Span};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectData};
 use crate::copied_definitions::id::TenantTimelineId;
@@ -113,6 +113,7 @@ impl DeleteBatchProducer {
             .instrument(info_span!("delete_tenants_sender")),
         );
 
+        let current_span = Span::current();
         let delete_timelines_sender_task = tokio::spawn(async move {
             timeline_batch::schedule_cleanup_deleted_timelines(
                 &s3_root_target,
@@ -121,6 +122,7 @@ impl DeleteBatchProducer {
                 &mut projects_to_check_receiver,
                 delete_elements_sender,
             )
+            .instrument(current_span)
             .await
         });
 

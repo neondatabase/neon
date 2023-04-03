@@ -183,7 +183,13 @@ async fn delete_timelines_batch(
         "Deleting timelines batch of size {}",
         batched_timelines.len()
     );
-    info!("Tenant ids to remove: {batched_timelines:?}");
+    info!(
+        "Timeline ids to remove: {:?}",
+        batched_timelines
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+    );
     let deleted_keys = delete_elements(
         &batched_timelines,
         s3_target,
