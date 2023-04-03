@@ -10,10 +10,12 @@ from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
 def test_twophase(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_twophase", "empty")
-    pg = env.postgres.create_start("test_twophase", config_lines=["max_prepared_transactions=5"])
+    endpoint = env.endpoints.create_start(
+        "test_twophase", config_lines=["max_prepared_transactions=5"]
+    )
     log.info("postgres is running on 'test_twophase' branch")
 
-    conn = pg.connect()
+    conn = endpoint.connect()
     cur = conn.cursor()
 
     cur.execute("CREATE TABLE foo (t text)")
@@ -42,7 +44,7 @@ def test_twophase(neon_simple_env: NeonEnv):
     # pg_twophase directory and fsynced
     cur.execute("CHECKPOINT")
 
-    twophase_files = os.listdir(pg.pg_twophase_dir_path())
+    twophase_files = os.listdir(endpoint.pg_twophase_dir_path())
     log.info(twophase_files)
     assert len(twophase_files) == 4
 
@@ -50,25 +52,25 @@ def test_twophase(neon_simple_env: NeonEnv):
     cur.execute("ROLLBACK PREPARED 'insert_four'")
     cur.execute("CHECKPOINT")
 
-    twophase_files = os.listdir(pg.pg_twophase_dir_path())
+    twophase_files = os.listdir(endpoint.pg_twophase_dir_path())
     log.info(twophase_files)
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
-    fork_at_current_lsn(env, pg, "test_twophase_prepared", "test_twophase")
+    fork_at_current_lsn(env, endpoint, "test_twophase_prepared", "test_twophase")
 
     # Start compute on the new branch
-    pg2 = env.postgres.create_start(
+    endpoint2 = env.endpoints.create_start(
         "test_twophase_prepared",
         config_lines=["max_prepared_transactions=5"],
     )
 
     # Check that we restored only needed twophase files
-    twophase_files2 = os.listdir(pg2.pg_twophase_dir_path())
+    twophase_files2 = os.listdir(endpoint2.pg_twophase_dir_path())
     log.info(twophase_files2)
     assert twophase_files2.sort() == twophase_files.sort()
 
-    conn2 = pg2.connect()
+    conn2 = endpoint2.connect()
     cur2 = conn2.cursor()
 
     # On the new branch, commit one of the prepared transactions,

@@ -63,9 +63,9 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
 
     branch = "test_compute_auth_to_pageserver"
     env.neon_cli.create_branch(branch)
-    pg = env.postgres.create_start(branch)
+    endpoint = env.endpoints.create_start(branch)
 
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             # we rely upon autocommit after each statement
             # as waiting for acceptors happens there
@@ -82,7 +82,7 @@ def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     branch = f"test_auth_failures_auth_enabled_{auth_enabled}"
     timeline_id = env.neon_cli.create_branch(branch)
-    env.postgres.create_start(branch)
+    env.endpoints.create_start(branch)
 
     tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant)
     invalid_tenant_token = env.auth_keys.generate_tenant_token(TenantId.generate())

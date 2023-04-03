@@ -91,8 +91,8 @@ class EvictionEnv:
         This assumes that the tenant is still at the state after pbench -i.
         """
         lsn = self.pgbench_init_lsns[tenant_id]
-        with self.neon_env.postgres.create_start("main", tenant_id=tenant_id, lsn=lsn) as pg:
-            self.pg_bin.run(["pgbench", "-S", pg.connstr()])
+        with self.neon_env.endpoints.create_start("main", tenant_id=tenant_id, lsn=lsn) as endpoint:
+            self.pg_bin.run(["pgbench", "-S", endpoint.connstr()])
 
     def pageserver_start_with_disk_usage_eviction(
         self, period, max_usage_pct, min_avail_bytes, mock_behavior
@@ -168,9 +168,9 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
             }
         )
 
-        with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
-            pg_bin.run(["pgbench", "-i", f"-s{scale}", pg.connstr()])
-            wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+            pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
+            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
         timelines.append((tenant_id, timeline_id))
 

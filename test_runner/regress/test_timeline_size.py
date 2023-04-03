@@ -12,13 +12,13 @@ import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     NeonEnvBuilder,
     PageserverApiException,
     PageserverHttpClient,
     PgBin,
     PortDistributor,
-    Postgres,
     RemoteStorageKind,
     VanillaPostgres,
     assert_tenant_status,
@@ -37,10 +37,10 @@ def test_timeline_size(neon_simple_env: NeonEnv):
     client = env.pageserver.http_client()
     wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
 
-    pgmain = env.postgres.create_start("test_timeline_size")
+    endpoint_main = env.endpoints.create_start("test_timeline_size")
     log.info("postgres is running on 'test_timeline_size' branch")
 
-    with closing(pgmain.connect()) as conn:
+    with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE TABLE foo (t text)")
             cur.execute(
@@ -73,10 +73,10 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
         env.initial_tenant, new_timeline_id, include_non_incremental_logical_size=True
     )
 
-    pgmain = env.postgres.create_start("test_timeline_size_createdropdb")
+    endpoint_main = env.endpoints.create_start("test_timeline_size_createdropdb")
     log.info("postgres is running on 'test_timeline_size_createdropdb' branch")
 
-    with closing(pgmain.connect()) as conn:
+    with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
             res = client.timeline_detail(
                 env.initial_tenant, new_timeline_id, include_non_incremental_logical_size=True
@@ -88,7 +88,7 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
             ), "no writes should not change the incremental logical size"
 
             cur.execute("CREATE DATABASE foodb")
-            with closing(pgmain.connect(dbname="foodb")) as conn:
+            with closing(endpoint_main.connect(dbname="foodb")) as conn:
                 with conn.cursor() as cur2:
                     cur2.execute("CREATE TABLE foo (t text)")
                     cur2.execute(
@@ -117,7 +117,7 @@ def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
 
 
 # wait until received_lsn_lag is 0
-def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60):
+def wait_for_pageserver_catchup(endpoint_main: Endpoint, polling_interval=1, timeout=60):
     started_at = time.time()
 
     received_lsn_lag = 1
@@ -128,7 +128,7 @@ def wait_for_pageserver_catchup(pgmain: Postgres, polling_interval=1, timeout=60
                 "timed out waiting for pageserver to reach pg_current_wal_flush_lsn()"
             )
 
-        res = pgmain.safe_psql(
+        res = endpoint_main.safe_psql(
             """
             SELECT
                 pg_size_pretty(pg_cluster_size()),
@@ -149,20 +149,20 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
 
     wait_for_timeline_size_init(client, tenant=env.initial_tenant, timeline=new_timeline_id)
 
-    pgmain = env.postgres.create_start(
+    endpoint_main = env.endpoints.create_start(
         "test_timeline_size_quota",
         # Set small limit for the test
         config_lines=["neon.max_cluster_size=30MB"],
     )
     log.info("postgres is running on 'test_timeline_size_quota' branch")
 
-    with closing(pgmain.connect()) as conn:
+    with closing(endpoint_main.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION neon")  # TODO move it to neon_fixtures?
 
             cur.execute("CREATE TABLE foo (t text)")
 
-            wait_for_pageserver_catchup(pgmain)
+            wait_for_pageserver_catchup(endpoint_main)
 
             # Insert many rows. This query must fail because of space limit
             try:
@@ -174,7 +174,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
                 """
                 )
 
-                wait_for_pageserver_catchup(pgmain)
+                wait_for_pageserver_catchup(endpoint_main)
 
                 cur.execute(
                     """
@@ -194,7 +194,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
             # drop table to free space
             cur.execute("DROP TABLE foo")
 
-            wait_for_pageserver_catchup(pgmain)
+            wait_for_pageserver_catchup(endpoint_main)
 
             # create it again and insert some rows. This query must succeed
             cur.execute("CREATE TABLE foo (t text)")
@@ -206,7 +206,7 @@ def test_timeline_size_quota(neon_env_builder: NeonEnvBuilder):
             """
             )
 
-            wait_for_pageserver_catchup(pgmain)
+            wait_for_pageserver_catchup(endpoint_main)
 
             cur.execute("SELECT * from pg_size_pretty(pg_cluster_size())")
             pg_cluster_size = cur.fetchone()
@@ -230,15 +230,15 @@ def test_timeline_initial_logical_size_calculation_cancellation(
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
     # load in some data
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    pg.safe_psql_many(
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (x INTEGER)",
             "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
         ]
     )
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
-    pg.stop()
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    endpoint.stop()
 
     # restart with failpoint inside initial size calculation task
     env.pageserver.stop()
@@ -315,9 +315,9 @@ def test_timeline_physical_size_init(
     env = neon_env_builder.init_start()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_init")
-    pg = env.postgres.create_start("test_timeline_physical_size_init")
+    endpoint = env.endpoints.create_start("test_timeline_physical_size_init")
 
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (t text)",
             """INSERT INTO foo
@@ -326,7 +326,7 @@ def test_timeline_physical_size_init(
         ]
     )
 
-    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
 
     # restart the pageserer to force calculating timeline's initial physical size
     env.pageserver.stop()
@@ -359,9 +359,9 @@ def test_timeline_physical_size_post_checkpoint(
 
     pageserver_http = env.pageserver.http_client()
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_checkpoint")
-    pg = env.postgres.create_start("test_timeline_physical_size_post_checkpoint")
+    endpoint = env.endpoints.create_start("test_timeline_physical_size_post_checkpoint")
 
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (t text)",
             """INSERT INTO foo
@@ -370,7 +370,7 @@ def test_timeline_physical_size_post_checkpoint(
         ]
     )
 
-    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
     assert_physical_size_invariants(
@@ -398,7 +398,7 @@ def test_timeline_physical_size_post_compaction(
     pageserver_http = env.pageserver.http_client()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_compaction")
-    pg = env.postgres.create_start("test_timeline_physical_size_post_compaction")
+    endpoint = env.endpoints.create_start("test_timeline_physical_size_post_compaction")
 
     # We don't want autovacuum to run on the table, while we are calculating the
     # physical size, because that could cause a new layer to be created and a
@@ -406,7 +406,7 @@ def test_timeline_physical_size_post_compaction(
     # happens, because of some other background activity or autovacuum on other
     # tables, we could simply retry the size calculations. It's unlikely that
     # that would happen more than once.)
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)",
             """INSERT INTO foo
@@ -415,7 +415,7 @@ def test_timeline_physical_size_post_compaction(
         ]
     )
 
-    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
 
     # shutdown safekeepers to prevent new data from coming in
     for sk in env.safekeepers:
@@ -450,10 +450,10 @@ def test_timeline_physical_size_post_gc(
     pageserver_http = env.pageserver.http_client()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_physical_size_post_gc")
-    pg = env.postgres.create_start("test_timeline_physical_size_post_gc")
+    endpoint = env.endpoints.create_start("test_timeline_physical_size_post_gc")
 
     # Like in test_timeline_physical_size_post_compaction, disable autovacuum
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)",
             """INSERT INTO foo
@@ -462,10 +462,10 @@ def test_timeline_physical_size_post_gc(
         ]
     )
 
-    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
-    pg.safe_psql(
+    endpoint.safe_psql(
         """
         INSERT INTO foo
             SELECT 'long string to consume some space' || g
@@ -473,7 +473,7 @@ def test_timeline_physical_size_post_gc(
     """
     )
 
-    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_gc(env.initial_tenant, new_timeline_id, gc_horizon=None)
 
@@ -499,9 +499,9 @@ def test_timeline_size_metrics(
     pageserver_http = env.pageserver.http_client()
 
     new_timeline_id = env.neon_cli.create_branch("test_timeline_size_metrics")
-    pg = env.postgres.create_start("test_timeline_size_metrics")
+    endpoint = env.endpoints.create_start("test_timeline_size_metrics")
 
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (t text)",
             """INSERT INTO foo
@@ -510,7 +510,7 @@ def test_timeline_size_metrics(
         ]
     )
 
-    wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_timeline_id)
     pageserver_http.timeline_checkpoint(env.initial_tenant, new_timeline_id)
 
     # get the metrics and parse the metric for the current timeline's physical size
@@ -562,7 +562,7 @@ def test_timeline_size_metrics(
     # The sum of the sizes of all databases, as seen by pg_database_size(), should also
     # be close. Again allow some slack, the logical size metric includes some things like
     # the SLRUs that are not included in pg_database_size().
-    dbsize_sum = pg.safe_psql("select sum(pg_database_size(oid)) from pg_database")[0][0]
+    dbsize_sum = endpoint.safe_psql("select sum(pg_database_size(oid)) from pg_database")[0][0]
     assert math.isclose(dbsize_sum, tl_logical_size_metric, abs_tol=2 * 1024 * 1024)
 
 
@@ -596,16 +596,16 @@ def test_tenant_physical_size(
         n_rows = random.randint(100, 1000)
 
         timeline = env.neon_cli.create_branch(f"test_tenant_physical_size_{i}", tenant_id=tenant)
-        pg = env.postgres.create_start(f"test_tenant_physical_size_{i}", tenant_id=tenant)
+        endpoint = env.endpoints.create_start(f"test_tenant_physical_size_{i}", tenant_id=tenant)
 
-        pg.safe_psql_many(
+        endpoint.safe_psql_many(
             [
                 "CREATE TABLE foo (t text)",
                 f"INSERT INTO foo SELECT 'long string to consume some space' || g FROM generate_series(1, {n_rows}) g",
             ]
         )
 
-        wait_for_last_flush_lsn(env, pg, tenant, timeline)
+        wait_for_last_flush_lsn(env, endpoint, tenant, timeline)
         pageserver_http.timeline_checkpoint(tenant, timeline)
 
         if remote_storage_kind is not None:
@@ -613,7 +613,7 @@ def test_tenant_physical_size(
 
         timeline_total_resident_physical_size += get_timeline_resident_physical_size(timeline)
 
-        pg.stop()
+        endpoint.stop()
 
     # ensure that tenant_status current_physical size reports sum of timeline current_physical_size
     tenant_current_physical_size = int(

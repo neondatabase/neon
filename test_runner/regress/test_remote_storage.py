@@ -85,17 +85,17 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     checkpoint_numbers = range(1, 3)
 
     for checkpoint_number in checkpoint_numbers:
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute(
                 f"""
                 CREATE TABLE t{checkpoint_number}(id int primary key, data text);
@@ -124,7 +124,7 @@ def test_remote_storage_backup_and_restore(
     )
 
     ##### Stop the first pageserver instance, erase all its data
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     env.pageserver.stop()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
@@ -190,8 +190,8 @@ def test_remote_storage_backup_and_restore(
     ), "current db Lsn should should not be less than the one stored on remote storage"
 
     log.info("select some data, this will cause layers to be downloaded")
-    pg = env.postgres.create_start("main")
-    with pg.cursor() as cur:
+    endpoint = env.endpoints.create_start("main")
+    with endpoint.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
             assert (
                 query_scalar(cur, f"SELECT data FROM t{checkpoint_number} WHERE id = {data_id};")
@@ -241,9 +241,9 @@ def test_remote_storage_upload_queue_retries(
 
     client = env.pageserver.http_client()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
-    pg.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+    endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
 
     def configure_storage_sync_failpoints(action):
         client.configure_failpoints(
@@ -256,7 +256,7 @@ def test_remote_storage_upload_queue_retries(
 
     def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
         # create initial set of layers & upload them with failpoints configured
-        pg.safe_psql_many(
+        endpoint.safe_psql_many(
             [
                 f"""
                INSERT INTO foo (id, val)
@@ -269,7 +269,7 @@ def test_remote_storage_upload_queue_retries(
                 "VACUUM foo",
             ]
         )
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
         val = client.get_remote_timeline_client_metric(
@@ -346,7 +346,7 @@ def test_remote_storage_upload_queue_retries(
     #      but how do we validate the result after restore?
 
     env.pageserver.stop(immediate=True)
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
     shutil.rmtree(dir_to_clear)
@@ -365,8 +365,8 @@ def test_remote_storage_upload_queue_retries(
     wait_until(30, 1, tenant_active)
 
     log.info("restarting postgres to validate")
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    with pg.cursor() as cur:
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    with endpoint.cursor() as cur:
         assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
 
 
@@ -402,13 +402,13 @@ def test_remote_timeline_client_calls_started_metric(
 
     client = env.pageserver.http_client()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
-    pg.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+    endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
 
     def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
         # create initial set of layers & upload them with failpoints configured
-        pg.safe_psql_many(
+        endpoint.safe_psql_many(
             [
                 f"""
                INSERT INTO foo (id, val)
@@ -421,7 +421,7 @@ def test_remote_timeline_client_calls_started_metric(
                 "VACUUM foo",
             ]
         )
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     calls_started: Dict[Tuple[str, str], List[int]] = {
         ("layer", "upload"): [0],
@@ -486,7 +486,7 @@ def test_remote_timeline_client_calls_started_metric(
     )
 
     env.pageserver.stop(immediate=True)
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
     shutil.rmtree(dir_to_clear)
@@ -505,8 +505,8 @@ def test_remote_timeline_client_calls_started_metric(
     wait_until(30, 1, tenant_active)
 
     log.info("restarting postgres to validate")
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    with pg.cursor() as cur:
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    with endpoint.cursor() as cur:
         assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
 
     # ensure that we updated the calls_started download metric
@@ -556,17 +556,17 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         )
         return int(val) if val is not None else val
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
     client.configure_failpoints(("before-upload-layer", "return"))
 
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (x INTEGER)",
             "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
         ]
     )
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     # Kick off a checkpoint operation.
     # It will get stuck in remote_client.wait_completion(), since the select query will have
@@ -640,8 +640,8 @@ def test_empty_branch_remote_storage_upload(
     new_branch_name = "new_branch"
     new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
 
-    with env.postgres.create_start(new_branch_name, tenant_id=env.initial_tenant) as pg:
-        wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_branch_timeline_id)
+    with env.endpoints.create_start(new_branch_name, tenant_id=env.initial_tenant) as endpoint:
+        wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_branch_timeline_id)
     wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
 
     timelines_before_detach = set(
@@ -689,8 +689,8 @@ def test_empty_branch_remote_storage_upload_on_restart(
     new_branch_name = "new_branch"
     new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
 
-    with env.postgres.create_start(new_branch_name, tenant_id=env.initial_tenant) as pg:
-        wait_for_last_flush_lsn(env, pg, env.initial_tenant, new_branch_timeline_id)
+    with env.endpoints.create_start(new_branch_name, tenant_id=env.initial_tenant) as endpoint:
+        wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_branch_timeline_id)
     wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
 
     env.pageserver.stop()

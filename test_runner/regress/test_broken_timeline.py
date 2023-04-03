@@ -4,7 +4,7 @@ from typing import List, Tuple
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, Postgres
+from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder
 from fixtures.types import TenantId, TimelineId
 
 
@@ -24,17 +24,17 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
         ]
     )
 
-    tenant_timelines: List[Tuple[TenantId, TimelineId, Postgres]] = []
+    tenant_timelines: List[Tuple[TenantId, TimelineId, Endpoint]] = []
 
     for n in range(4):
         tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-        pg = env.postgres.create_start("main", tenant_id=tenant_id)
-        with pg.cursor() as cur:
+        endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+        with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t(key int primary key, value text)")
             cur.execute("INSERT INTO t SELECT generate_series(1,100), 'payload'")
-        pg.stop()
-        tenant_timelines.append((tenant_id, timeline_id, pg))
+        endpoint.stop()
+        tenant_timelines.append((tenant_id, timeline_id, endpoint))
 
     # Stop the pageserver
     env.pageserver.stop()

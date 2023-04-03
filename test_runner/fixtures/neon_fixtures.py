@@ -829,7 +829,7 @@ class NeonEnvBuilder:
         # Stop all the nodes.
         if self.env:
             log.info("Cleaning up all storage and compute nodes")
-            self.env.postgres.stop_all()
+            self.env.endpoints.stop_all()
             for sk in self.env.safekeepers:
                 sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
@@ -893,7 +893,7 @@ class NeonEnv:
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.mock_s3_server
         self.neon_cli = NeonCli(env=self)
-        self.postgres = PostgresFactory(self)
+        self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.broker = config.broker
         self.remote_storage = config.remote_storage
@@ -901,6 +901,7 @@ class NeonEnv:
         self.pg_version = config.pg_version
         self.neon_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
+        self.endpoint_counter = 0
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
@@ -1014,6 +1015,13 @@ class NeonEnv:
         priv = (Path(self.repo_dir) / "auth_private_key.pem").read_text()
         return AuthKeys(pub=pub, priv=priv)
 
+    def generate_endpoint_id(self) -> str:
+        """
+        Generate a unique endpoint ID
+        """
+        self.endpoint_counter += 1
+        return "ep-" + str(self.endpoint_counter)
+
 
 @pytest.fixture(scope=shareable_scope)
 def _shared_simple_env(
@@ -1072,7 +1080,7 @@ def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
     """
     yield _shared_simple_env
 
-    _shared_simple_env.postgres.stop_all()
+    _shared_simple_env.endpoints.stop_all()
 
 
 @pytest.fixture(scope="function")
@@ -1096,7 +1104,7 @@ def neon_env_builder(
     neon_env_builder.init_start().
 
     After the initialization, you can launch compute nodes by calling
-    the functions in the 'env.postgres' factory object, stop/start the
+    the functions in the 'env.endpoints' factory object, stop/start the
     nodes, etc.
     """
 
@@ -1969,16 +1977,16 @@ class NeonCli(AbstractNeonCli):
             args.extend(["-m", "immediate"])
         return self.raw_cli(args)
 
-    def pg_create(
+    def endpoint_create(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
         port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
-            "pg",
+            "endpoint",
             "create",
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
@@ -1991,22 +1999,22 @@ class NeonCli(AbstractNeonCli):
             args.extend(["--lsn", str(lsn)])
         if port is not None:
             args.extend(["--port", str(port)])
-        if node_name is not None:
-            args.append(node_name)
+        if endpoint_id is not None:
+            args.append(endpoint_id)
 
         res = self.raw_cli(args)
         res.check_returncode()
         return res
 
-    def pg_start(
+    def endpoint_start(
         self,
-        node_name: str,
+        endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
         port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
-            "pg",
+            "endpoint",
             "start",
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
@@ -2017,30 +2025,30 @@ class NeonCli(AbstractNeonCli):
             args.append(f"--lsn={lsn}")
         if port is not None:
             args.append(f"--port={port}")
-        if node_name is not None:
-            args.append(node_name)
+        if endpoint_id is not None:
+            args.append(endpoint_id)
 
         res = self.raw_cli(args)
         res.check_returncode()
         return res
 
-    def pg_stop(
+    def endpoint_stop(
         self,
-        node_name: str,
+        endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
         destroy=False,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
-            "pg",
+            "endpoint",
             "stop",
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
         ]
         if destroy:
             args.append("--destroy")
-        if node_name is not None:
-            args.append(node_name)
+        if endpoint_id is not None:
+            args.append(endpoint_id)
 
         return self.raw_cli(args, check_return_code=check_return_code)
 
@@ -2692,8 +2700,8 @@ def static_proxy(
         yield proxy
 
 
-class Postgres(PgProtocol):
-    """An object representing a running postgres daemon."""
+class Endpoint(PgProtocol):
+    """An object representing a Postgres compute endpoint managed by the control plane."""
 
     def __init__(
         self, env: NeonEnv, tenant_id: TenantId, port: int, check_stop_result: bool = True
@@ -2701,33 +2709,40 @@ class Postgres(PgProtocol):
         super().__init__(host="localhost", port=port, user="cloud_admin", dbname="postgres")
         self.env = env
         self.running = False
-        self.node_name: Optional[str] = None  # dubious, see asserts below
+        self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.port = port
         self.check_stop_result = check_stop_result
-        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
+        # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
     def create(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
-    ) -> "Postgres":
+    ) -> "Endpoint":
         """
-        Create the pg data directory.
+        Create a new Postgres endpoint.
         Returns self.
         """
 
         if not config_lines:
             config_lines = []
 
-        self.node_name = node_name or f"{branch_name}_pg_node"
-        self.env.neon_cli.pg_create(
-            branch_name, node_name=self.node_name, tenant_id=self.tenant_id, lsn=lsn, port=self.port
+        if endpoint_id is None:
+            endpoint_id = self.env.generate_endpoint_id()
+        self.endpoint_id = endpoint_id
+
+        self.env.neon_cli.endpoint_create(
+            branch_name,
+            endpoint_id=self.endpoint_id,
+            tenant_id=self.tenant_id,
+            lsn=lsn,
+            port=self.port,
         )
-        path = Path("pgdatadirs") / "tenants" / str(self.tenant_id) / self.node_name
+        path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
         if config_lines is None:
@@ -2740,25 +2755,25 @@ class Postgres(PgProtocol):
 
         return self
 
-    def start(self) -> "Postgres":
+    def start(self) -> "Endpoint":
         """
         Start the Postgres instance.
         Returns self.
         """
 
-        assert self.node_name is not None
+        assert self.endpoint_id is not None
 
-        log.info(f"Starting postgres node {self.node_name}")
+        log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
-        self.env.neon_cli.pg_start(self.node_name, tenant_id=self.tenant_id, port=self.port)
+        self.env.neon_cli.endpoint_start(self.endpoint_id, tenant_id=self.tenant_id, port=self.port)
         self.running = True
 
         return self
 
     def pg_data_dir_path(self) -> str:
         """Path to data directory"""
-        assert self.node_name
-        path = Path("pgdatadirs") / "tenants" / str(self.tenant_id) / self.node_name
+        assert self.endpoint_id
+        path = Path("endpoints") / self.endpoint_id / "pgdata"
         return os.path.join(self.env.repo_dir, path)
 
     def pg_xact_dir_path(self) -> str:
@@ -2773,7 +2788,7 @@ class Postgres(PgProtocol):
         """Path to postgresql.conf"""
         return os.path.join(self.pg_data_dir_path(), "postgresql.conf")
 
-    def adjust_for_safekeepers(self, safekeepers: str) -> "Postgres":
+    def adjust_for_safekeepers(self, safekeepers: str) -> "Endpoint":
         """
         Adjust instance config for working with wal acceptors instead of
         pageserver (pre-configured by CLI) directly.
@@ -2797,7 +2812,7 @@ class Postgres(PgProtocol):
             f.write("neon.safekeepers = '{}'\n".format(safekeepers))
         return self
 
-    def config(self, lines: List[str]) -> "Postgres":
+    def config(self, lines: List[str]) -> "Endpoint":
         """
         Add lines to postgresql.conf.
         Lines should be an array of valid postgresql.conf rows.
@@ -2811,32 +2826,32 @@ class Postgres(PgProtocol):
 
         return self
 
-    def stop(self) -> "Postgres":
+    def stop(self) -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
         Returns self.
         """
 
         if self.running:
-            assert self.node_name is not None
-            self.env.neon_cli.pg_stop(
-                self.node_name, self.tenant_id, check_return_code=self.check_stop_result
+            assert self.endpoint_id is not None
+            self.env.neon_cli.endpoint_stop(
+                self.endpoint_id, self.tenant_id, check_return_code=self.check_stop_result
             )
             self.running = False
 
         return self
 
-    def stop_and_destroy(self) -> "Postgres":
+    def stop_and_destroy(self) -> "Endpoint":
         """
-        Stop the Postgres instance, then destroy it.
+        Stop the Postgres instance, then destroy the endpoint.
         Returns self.
         """
 
-        assert self.node_name is not None
-        self.env.neon_cli.pg_stop(
-            self.node_name, self.tenant_id, True, check_return_code=self.check_stop_result
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_stop(
+            self.endpoint_id, self.tenant_id, True, check_return_code=self.check_stop_result
         )
-        self.node_name = None
+        self.endpoint_id = None
         self.running = False
 
         return self
@@ -2844,13 +2859,12 @@ class Postgres(PgProtocol):
     def create_start(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
-    ) -> "Postgres":
+    ) -> "Endpoint":
         """
-        Create a Postgres instance, apply config
-        and then start it.
+        Create an endpoint, apply config, and start Postgres.
         Returns self.
         """
 
@@ -2858,7 +2872,7 @@ class Postgres(PgProtocol):
 
         self.create(
             branch_name=branch_name,
-            node_name=node_name,
+            endpoint_id=endpoint_id,
             config_lines=config_lines,
             lsn=lsn,
         ).start()
@@ -2867,7 +2881,7 @@ class Postgres(PgProtocol):
 
         return self
 
-    def __enter__(self) -> "Postgres":
+    def __enter__(self) -> "Endpoint":
         return self
 
     def __exit__(
@@ -2879,33 +2893,33 @@ class Postgres(PgProtocol):
         self.stop()
 
 
-class PostgresFactory:
-    """An object representing multiple running postgres daemons."""
+class EndpointFactory:
+    """An object representing multiple compute endpoints."""
 
     def __init__(self, env: NeonEnv):
         self.env = env
         self.num_instances: int = 0
-        self.instances: List[Postgres] = []
+        self.endpoints: List[Endpoint] = []
 
     def create_start(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
-    ) -> Postgres:
-        pg = Postgres(
+    ) -> Endpoint:
+        ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             port=self.env.port_distributor.get_port(),
         )
         self.num_instances += 1
-        self.instances.append(pg)
+        self.endpoints.append(ep)
 
-        return pg.create_start(
+        return ep.create_start(
             branch_name=branch_name,
-            node_name=node_name,
+            endpoint_id=endpoint_id,
             config_lines=config_lines,
             lsn=lsn,
         )
@@ -2913,30 +2927,33 @@ class PostgresFactory:
     def create(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
-    ) -> Postgres:
-        pg = Postgres(
+    ) -> Endpoint:
+        ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             port=self.env.port_distributor.get_port(),
         )
 
-        self.num_instances += 1
-        self.instances.append(pg)
+        if endpoint_id is None:
+            endpoint_id = self.env.generate_endpoint_id()
 
-        return pg.create(
+        self.num_instances += 1
+        self.endpoints.append(ep)
+
+        return ep.create(
             branch_name=branch_name,
-            node_name=node_name,
+            endpoint_id=endpoint_id,
             lsn=lsn,
             config_lines=config_lines,
         )
 
-    def stop_all(self) -> "PostgresFactory":
-        for pg in self.instances:
-            pg.stop()
+    def stop_all(self) -> "EndpointFactory":
+        for ep in self.endpoints:
+            ep.stop()
 
         return self
 
@@ -3311,16 +3328,16 @@ def list_files_to_compare(pgdata_dir: Path) -> List[str]:
 def check_restored_datadir_content(
     test_output_dir: Path,
     env: NeonEnv,
-    pg: Postgres,
+    endpoint: Endpoint,
 ):
     # Get the timeline ID. We need it for the 'basebackup' command
-    timeline = TimelineId(pg.safe_psql("SHOW neon.timeline_id")[0][0])
+    timeline = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
     # stop postgres to ensure that files won't change
-    pg.stop()
+    endpoint.stop()
 
     # Take a basebackup from pageserver
-    restored_dir_path = env.repo_dir / f"{pg.node_name}_restored_datadir"
+    restored_dir_path = env.repo_dir / f"{endpoint.endpoint_id}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
 
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
@@ -3330,7 +3347,7 @@ def check_restored_datadir_content(
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {pg.tenant_id} {timeline}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline}'  \
          | tar -x -C {restored_dir_path}
     """
 
@@ -3347,8 +3364,8 @@ def check_restored_datadir_content(
     assert result.returncode == 0
 
     # list files we're going to compare
-    assert pg.pgdata_dir
-    pgdata_files = list_files_to_compare(Path(pg.pgdata_dir))
+    assert endpoint.pgdata_dir
+    pgdata_files = list_files_to_compare(Path(endpoint.pgdata_dir))
     restored_files = list_files_to_compare(restored_dir_path)
 
     # check that file sets are equal
@@ -3359,12 +3376,12 @@ def check_restored_datadir_content(
     # We've already filtered all mismatching files in list_files_to_compare(),
     # so here expect that the content is identical
     (match, mismatch, error) = filecmp.cmpfiles(
-        pg.pgdata_dir, restored_dir_path, pgdata_files, shallow=False
+        endpoint.pgdata_dir, restored_dir_path, pgdata_files, shallow=False
     )
     log.info(f"filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}")
 
     for f in mismatch:
-        f1 = os.path.join(pg.pgdata_dir, f)
+        f1 = os.path.join(endpoint.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
         stdout_filename = "{}.filediff".format(f2)
 
@@ -3524,24 +3541,24 @@ def wait_for_last_record_lsn(
 
 
 def wait_for_last_flush_lsn(
-    env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId
+    env: NeonEnv, endpoint: Endpoint, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
-    last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
 
 
 def wait_for_wal_insert_lsn(
-    env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId
+    env: NeonEnv, endpoint: Endpoint, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
-    last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
+    last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
     return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
 
 
 def fork_at_current_lsn(
     env: NeonEnv,
-    pg: Postgres,
+    endpoint: Endpoint,
     new_branch_name: str,
     ancestor_branch_name: str,
     tenant_id: Optional[TenantId] = None,
@@ -3551,7 +3568,7 @@ def fork_at_current_lsn(
     The "last LSN" is taken from the given Postgres instance. The pageserver will wait for all the
     the WAL up to that LSN to arrive in the pageserver before creating the branch.
     """
-    current_lsn = pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
+    current_lsn = endpoint.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
 
 

@@ -67,9 +67,9 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
     )
 
     timeline_main = env.neon_cli.create_timeline("test_main", tenant_id=tenant)
-    pg_main = env.postgres.create_start("test_main", tenant_id=tenant)
+    endpoint_main = env.endpoints.create_start("test_main", tenant_id=tenant)
 
-    main_cur = pg_main.connect().cursor()
+    main_cur = endpoint_main.connect().cursor()
 
     main_cur.execute(
         "CREATE TABLE foo(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')"
@@ -90,9 +90,9 @@ def test_branch_and_gc(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch(
         "test_branch", "test_main", tenant_id=tenant, ancestor_start_lsn=lsn1
     )
-    pg_branch = env.postgres.create_start("test_branch", tenant_id=tenant)
+    endpoint_branch = env.endpoints.create_start("test_branch", tenant_id=tenant)
 
-    branch_cur = pg_branch.connect().cursor()
+    branch_cur = endpoint_branch.connect().cursor()
     branch_cur.execute("INSERT INTO foo SELECT FROM generate_series(1, 100000)")
 
     assert query_scalar(branch_cur, "SELECT count(*) FROM foo") == 200000
@@ -142,8 +142,8 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     )
 
     b0 = env.neon_cli.create_branch("b0", tenant_id=tenant)
-    pg0 = env.postgres.create_start("b0", tenant_id=tenant)
-    res = pg0.safe_psql_many(
+    endpoint0 = env.endpoints.create_start("b0", tenant_id=tenant)
+    res = endpoint0.safe_psql_many(
         queries=[
             "CREATE TABLE t(key serial primary key)",
             "INSERT INTO t SELECT FROM generate_series(1, 100000)",

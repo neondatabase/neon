@@ -20,7 +20,7 @@ def test_image_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
         }
     )
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    pg = env.endpoints.create_start("main", tenant_id=tenant_id)
     pg.safe_psql_many(
         [
             "CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)",
@@ -64,8 +64,8 @@ def test_delta_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
         }
     )
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    pg.safe_psql_many(
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (t text) WITH (autovacuum_enabled = off)",
             """INSERT INTO foo

@@ -150,7 +150,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
         tenant_id, timeline_id = env.neon_cli.create_tenant()
-        pg = env.postgres.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
+        endpoint = env.endpoints.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
         # Wait to make sure that we get a latest WAL receiver data.
         # We need to wait here because it's possible that we don't have access to
@@ -163,7 +163,7 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         )
 
         # Make a DB modification then expect getting a new WAL receiver's data.
-        pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
+        endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
         wait_until(
             number_of_iterations=5,
             interval=1,

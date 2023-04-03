@@ -50,29 +50,31 @@ def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_o
     neon_env_builder.preserve_database_files = True
 
     env = neon_env_builder.init_start()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     # FIXME: Is this expected?
     env.pageserver.allowed_errors.append(
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
 
-    pg_bin.run(["pgbench", "--initialize", "--scale=10", pg.connstr()])
-    pg_bin.run(["pgbench", "--time=60", "--progress=2", pg.connstr()])
-    pg_bin.run(["pg_dumpall", f"--dbname={pg.connstr()}", f"--file={test_output_dir / 'dump.sql'}"])
+    pg_bin.run(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
+    pg_bin.run(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
+    pg_bin.run(
+        ["pg_dumpall", f"--dbname={endpoint.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
+    )
 
     snapshot_config = toml.load(test_output_dir / "repo" / "config")
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
 
     pageserver_http = env.pageserver.http_client()
-    lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
     pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(pageserver_http, tenant_id, timeline_id, lsn)
 
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
@@ -216,8 +218,8 @@ def prepare_snapshot(
     for logfile in repo_dir.glob("**/*.log"):
         logfile.unlink()
 
-    # Remove tenants data for compute
-    for tenant in (repo_dir / "pgdatadirs" / "tenants").glob("*"):
+    # Remove old computes
+    for tenant in (repo_dir / "endpoints").glob("*"):
         shutil.rmtree(tenant)
 
     # Remove wal-redo temp directory if it exists. Newer pageserver versions don't create
@@ -349,8 +351,8 @@ def check_neon_works(
     request.addfinalizer(lambda: cli.raw_cli(["stop"]))
 
     pg_port = port_distributor.get_port()
-    cli.pg_start("main", port=pg_port)
-    request.addfinalizer(lambda: cli.pg_stop("main"))
+    cli.endpoint_start("main", port=pg_port)
+    request.addfinalizer(lambda: cli.endpoint_stop("main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
     pg_bin.run(["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"])

@@ -22,8 +22,8 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
 
     pageserver_http.configure_failpoints(("flush-frozen-before-sync", "sleep(10000)"))
 
-    pg_branch0 = env.postgres.create_start("main", tenant_id=tenant)
-    branch0_cur = pg_branch0.connect().cursor()
+    endpoint_branch0 = env.endpoints.create_start("main", tenant_id=tenant)
+    branch0_cur = endpoint_branch0.connect().cursor()
     branch0_timeline = TimelineId(query_scalar(branch0_cur, "SHOW neon.timeline_id"))
     log.info(f"b0 timeline {branch0_timeline}")
 
@@ -44,10 +44,10 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
 
     # Create branch1.
     env.neon_cli.create_branch("branch1", "main", tenant_id=tenant, ancestor_start_lsn=lsn_100)
-    pg_branch1 = env.postgres.create_start("branch1", tenant_id=tenant)
+    endpoint_branch1 = env.endpoints.create_start("branch1", tenant_id=tenant)
     log.info("postgres is running on 'branch1' branch")
 
-    branch1_cur = pg_branch1.connect().cursor()
+    branch1_cur = endpoint_branch1.connect().cursor()
     branch1_timeline = TimelineId(query_scalar(branch1_cur, "SHOW neon.timeline_id"))
     log.info(f"b1 timeline {branch1_timeline}")
 
@@ -67,9 +67,9 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
 
     # Create branch2.
     env.neon_cli.create_branch("branch2", "branch1", tenant_id=tenant, ancestor_start_lsn=lsn_200)
-    pg_branch2 = env.postgres.create_start("branch2", tenant_id=tenant)
+    endpoint_branch2 = env.endpoints.create_start("branch2", tenant_id=tenant)
     log.info("postgres is running on 'branch2' branch")
-    branch2_cur = pg_branch2.connect().cursor()
+    branch2_cur = endpoint_branch2.connect().cursor()
 
     branch2_timeline = TimelineId(query_scalar(branch2_cur, "SHOW neon.timeline_id"))
     log.info(f"b2 timeline {branch2_timeline}")

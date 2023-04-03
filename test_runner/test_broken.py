@@ -24,7 +24,7 @@ def test_broken(neon_simple_env: NeonEnv, pg_bin):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_broken", "empty")
-    env.postgres.create_start("test_broken")
+    env.endpoints.create_start("test_broken")
     log.info("postgres is running")
 
     log.info("THIS NEXT COMMAND WILL FAIL:")

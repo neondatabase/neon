@@ -18,8 +18,8 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
 
     timeline_id = env.neon_cli.create_branch("test_bulk_update")
     tenant_id = env.initial_tenant
-    pg = env.postgres.create_start("test_bulk_update")
-    cur = pg.connect().cursor()
+    endpoint = env.endpoints.create_start("test_bulk_update")
+    cur = endpoint.connect().cursor()
     cur.execute("set statement_timeout=0")
 
     cur.execute(f"create table t(x integer) WITH (fillfactor={fillfactor})")
@@ -28,13 +28,13 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
         cur.execute(f"insert into t values (generate_series(1,{n_records}))")
 
     cur.execute("vacuum t")
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     with zenbenchmark.record_duration("update-no-prefetch"):
         cur.execute("update t set x=x+1")
 
     cur.execute("vacuum t")
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     with zenbenchmark.record_duration("delete-no-prefetch"):
         cur.execute("delete from t")
@@ -50,13 +50,13 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
         cur.execute(f"insert into t2 values (generate_series(1,{n_records}))")
 
     cur.execute("vacuum t2")
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     with zenbenchmark.record_duration("update-with-prefetch"):
         cur.execute("update t2 set x=x+1")
 
     cur.execute("vacuum t2")
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     with zenbenchmark.record_duration("delete-with-prefetch"):
         cur.execute("delete from t2")
