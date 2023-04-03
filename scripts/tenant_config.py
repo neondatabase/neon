@@ -31,18 +31,19 @@ class Client:
 class AppException(RuntimeError):
     pass
 
-def do_one(tenant, endpoint, merge_existing_with):
+def do_one(tenant, endpoint, merge_existing_with, check_tenant_exists=True):
     global verbose
     client = Client(endpoint)
 
-    tenants = client.get(f"/v1/tenant")
-    matching_tenant = [ t for t in tenants if t['id'] == tenant ]
-    if len(matching_tenant) == 0:
-        raise AppException(f"no tenant {tenant} on pageserver {endpoint}")
-    elif len(matching_tenant) > 1:
-        raise AppException(f"multiple ({len(matching_tenant)}) tenants with id {tenant} on pageserver {endpoint}")
-    else:
-        pass
+    if check_tenant_exists:
+        tenants = client.get(f"/v1/tenant")
+        matching_tenant = [ t for t in tenants if t['id'] == tenant ]
+        if len(matching_tenant) == 0:
+            raise AppException(f"no tenant {tenant} on pageserver {endpoint}")
+        elif len(matching_tenant) > 1:
+            raise AppException(f"multiple ({len(matching_tenant)}) tenants with id {tenant} on pageserver {endpoint}")
+        else:
+            pass
 
     config = client.get(f"/v1/tenant/{tenant}/config")
 
@@ -79,7 +80,7 @@ def do_csv(csv_file, merge_existing_with):
         tenant_id = line[0]
         pageserver = line[1]
         try:
-            do_one(tenant_id, f"http://{pageserver}:9898", merge_existing_with)
+            do_one(tenant_id, f"http://{pageserver}:9898", merge_existing_with, check_tenant_exists=False)
             logging.info(f"succeeded to configure tenant {tenant_id}")
             succeeded += [tenant_id]
         except Exception as e:
