@@ -11,16 +11,11 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use num_cpus;
 use serde_json;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
 // Service function to handle all available routes.
-async fn routes(
-    req: Request<Body>,
-    compute: &Arc<ComputeNode>,
-    tx: &UnboundedSender<ComputeSpec>,
-) -> Response<Body> {
+async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
     //
     // NOTE: The URI path is currently included in traces. That's OK because
     // it doesn't contain any variable parts or sensitive information. But
@@ -30,7 +25,9 @@ async fn routes(
         // Serialized compute state.
         (&Method::GET, "/status") => {
             info!("serving /status GET request");
-            let state = compute.state.read().unwrap();
+            // let state = compute.state.read().unwrap();
+            let (state, _) = &compute.state;
+            let state = state.lock().unwrap();
             Response::new(Body::from(serde_json::to_string(&*state).unwrap()))
         }
 
@@ -105,7 +102,8 @@ async fn routes(
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
             let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
             if let Ok(spec) = serde_json::from_str::<ComputeSpec>(&spec_raw) {
-                let mut state = compute.state.write().unwrap();
+                let (state, state_changed) = &compute.state;
+                let mut state = state.lock().unwrap();
                 if !(state.status == ComputeStatus::WaitingSpec
                     || state.status == ComputeStatus::Running)
                 {
@@ -116,19 +114,22 @@ async fn routes(
                     error!(msg);
                     return Response::new(Body::from(msg));
                 }
+                state.spec = spec;
                 state.status = ComputeStatus::ConfigurationPending;
+                state_changed.notify_all();
                 drop(state);
+                info!("set new spec and notified configurator");
 
-                if let Err(e) = tx.send(spec) {
-                    error!("failed to send spec request to configurator thread: {}", e);
-                    Response::new(Body::from(format!(
-                        "could not request reconfiguration: {}",
-                        e
-                    )))
-                } else {
-                    info!("sent spec request to configurator");
-                    Response::new(Body::from("ok"))
+                let (state, state_changed) = &compute.state;
+                let mut state = state.lock().unwrap();
+                while state.status != ComputeStatus::Running {
+                    state = state_changed.wait(state).unwrap();
+                    info!(
+                        "waiting for compute to become Running, current status: {:?}",
+                        state.status
+                    );
                 }
+                Response::new(Body::from("ok"))
             } else {
                 let msg = "invalid spec";
                 error!(msg);
@@ -147,16 +148,14 @@ async fn routes(
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
 #[tokio::main]
-async fn serve(state: Arc<ComputeNode>, tx: UnboundedSender<ComputeSpec>) {
+async fn serve(state: Arc<ComputeNode>) {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3080));
 
     let make_service = make_service_fn(move |_conn| {
         let state = state.clone();
-        let tx = tx.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
                 let state = state.clone();
-                let tx = tx.clone();
                 async move {
                     Ok::<_, Infallible>(
                         // NOTE: We include the URI path in the string. It
@@ -164,7 +163,7 @@ async fn serve(state: Arc<ComputeNode>, tx: UnboundedSender<ComputeSpec>) {
                         // information in this API.
                         tracing_utils::http::tracing_handler(
                             req,
-                            |req| routes(req, &state, &tx),
+                            |req| routes(req, &state),
                             OtelName::UriPath,
                         )
                         .await,
@@ -185,12 +184,9 @@ async fn serve(state: Arc<ComputeNode>, tx: UnboundedSender<ComputeSpec>) {
 }
 
 /// Launch a separate Hyper HTTP API server thread and return its `JoinHandle`.
-pub fn launch_http_server(
-    state: &Arc<ComputeNode>,
-    tx: UnboundedSender<ComputeSpec>,
-) -> Result<thread::JoinHandle<()>> {
+pub fn launch_http_server(state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let state = Arc::clone(state);
     Ok(thread::Builder::new()
         .name("http-endpoint".into())
-        .spawn(move || serve(state, tx))?)
+        .spawn(move || serve(state))?)
 }

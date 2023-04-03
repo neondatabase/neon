@@ -34,13 +34,12 @@ use std::fs::File;
 use std::panic;
 use std::path::Path;
 use std::process::exit;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use tokio::sync::mpsc;
 use tracing::{error, info};
 use url::Url;
 
@@ -108,45 +107,74 @@ fn main() -> Result<()> {
         }
     };
 
-    // We have one configurator thread and async http server, so generally we
-    // have single consumer - multiple producers pattern here. That's why we use
-    // `mpsc` channel, not `tokio::sync::watch`. Actually, concurrency of
-    // producers is limited to one due to code logic, but we still need to
-    // pass `Sender` to several threads.
-    //
-    // Next, we use async `hyper` + `tokio` http server, but all the other code
-    // is completely synchronous. So we need to send data from async to sync,
-    // that's why we use `mpsc::unbounded_channel` here, not `mpsc::channel`.
-    // It doesn't make much sense to rewrite all code to async now, but we can
-    // consider doing this in the future. Unbound should not sound scary here,
-    // as again, only one unprocessed spec could be sent to channel at any
-    // given moment.
-    let (spec_tx, mut spec_rx) = mpsc::unbounded_channel::<ComputeSpec>();
-
-    let compute_state = ComputeNode {
+    let mut new_state = ComputeState::new();
+    if spec_set {
+        new_state.spec = spec;
+    }
+    // Volatile compute state under mutex and condition variable to notify everyone
+    // who is interested in the state changes.
+    let compute_state = (Mutex::new(new_state), Condvar::new());
+    let compute_node = ComputeNode {
         start_time: Utc::now(),
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
         live_config_allowed,
         metrics: ComputeMetrics::default(),
-        state: RwLock::new(ComputeState::new()),
+        state: compute_state,
     };
-    let compute = Arc::new(compute_state);
+    let compute = Arc::new(compute_node);
 
     // Launch http service first, so we were able to serve control-plane
     // requests, while configuration is still in progress.
-    let _http_handle =
-        launch_http_server(&compute, spec_tx).expect("cannot launch http endpoint thread");
+    let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
 
     if !spec_set {
+        // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
-        if let Some(s) = spec_rx.blocking_recv() {
-            spec = s;
-        } else {
-            panic!("no compute spec received");
+        let (state, state_changed) = &compute.state;
+        let mut state = state.lock().unwrap();
+        while state.status != ComputeStatus::ConfigurationPending {
+            state = state_changed.wait(state).unwrap();
+
+            if state.status == ComputeStatus::ConfigurationPending {
+                info!("got spec, continue configuration");
+                // Spec is already set by the http server handler.
+                break;
+            }
         }
     }
+
+    // We got all we need, fill in the state.
+    let (state, _) = &compute.state;
+    let mut state = state.lock().unwrap();
+    let pageserver_connstr = state
+        .spec
+        .cluster
+        .settings
+        .find("neon.pageserver_connstring")
+        .expect("pageserver connstr should be provided");
+    let storage_auth_token = state.spec.storage_auth_token.clone();
+    let tenant = state
+        .spec
+        .cluster
+        .settings
+        .find("neon.tenant_id")
+        .expect("tenant id should be provided");
+    let timeline = state
+        .spec
+        .cluster
+        .settings
+        .find("neon.timeline_id")
+        .expect("tenant id should be provided");
+    let startup_tracing_context = state.spec.startup_tracing_context.clone();
+
+    state.pageserver_connstr = pageserver_connstr;
+    state.storage_auth_token = storage_auth_token;
+    state.tenant = tenant;
+    state.timeline = timeline;
+    state.status = ComputeStatus::Init;
+    drop(state);
 
     // Extract OpenTelemetry context for the startup actions from the spec, and
     // attach it to the current tracing context.
@@ -163,7 +191,7 @@ fn main() -> Result<()> {
     // postgres is configured and up-and-running, we exit this span. Any other
     // actions that are performed on incoming HTTP requests, for example, are
     // performed in separate spans.
-    let startup_context_guard = if let Some(ref carrier) = spec.startup_tracing_context {
+    let startup_context_guard = if let Some(ref carrier) = startup_tracing_context {
         use opentelemetry::propagation::TextMapPropagator;
         use opentelemetry::sdk::propagation::TraceContextPropagator;
         Some(TraceContextPropagator::new().extract(carrier).attach())
@@ -171,37 +199,10 @@ fn main() -> Result<()> {
         None
     };
 
-    let pageserver_connstr = spec
-        .cluster
-        .settings
-        .find("neon.pageserver_connstring")
-        .expect("pageserver connstr should be provided");
-    let storage_auth_token = spec.storage_auth_token.clone();
-    let tenant = spec
-        .cluster
-        .settings
-        .find("neon.tenant_id")
-        .expect("tenant id should be provided");
-    let timeline = spec
-        .cluster
-        .settings
-        .find("neon.timeline_id")
-        .expect("tenant id should be provided");
-
-    // We got all we need, fill in the state.
-    let mut state = compute.state.write().unwrap();
-    state.spec = spec;
-    state.pageserver_connstr = pageserver_connstr;
-    state.storage_auth_token = storage_auth_token;
-    state.tenant = tenant;
-    state.timeline = timeline;
-    state.status = ComputeStatus::Init;
-    drop(state);
-
     // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
     let _configurator_handle =
-        launch_configurator(&compute, spec_rx).expect("cannot launch configurator thread");
+        launch_configurator(&compute).expect("cannot launch configurator thread");
 
     // Start Postgres
     let mut delay_exit = false;
@@ -210,7 +211,8 @@ fn main() -> Result<()> {
         Ok(pg) => Some(pg),
         Err(err) => {
             error!("could not start the compute node: {:?}", err);
-            let mut state = compute.state.write().unwrap();
+            let (state, _) = &compute.state;
+            let mut state = state.lock().unwrap();
             state.error = Some(format!("{:?}", err));
             state.status = ComputeStatus::Failed;
             drop(state);

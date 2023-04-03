@@ -20,7 +20,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+// use std::sync::RwLock;
+use std::sync::{Condvar, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -50,10 +51,13 @@ pub struct ComputeNode {
     // - but then something happens and compute pod / VM is destroyed,
     //   so k8s controller starts it again with the **old** spec
     pub live_config_allowed: bool,
-    /// Volatile part of the `ComputeNode` so should be used under `RwLock`
-    /// to allow HTTP API server to serve status requests, while configuration
-    /// is in progress.
-    pub state: RwLock<ComputeState>,
+    /// Volatile part of the `ComputeNode`, which should be used under `Mutex`.
+    /// Coupled with `Condvar` to allow notifying HTTP API and configurator
+    /// thread about state changes. To allow HTTP API server to serving status
+    /// requests, while configuration is in progress, lock should be held only
+    /// for short periods of time to do read/write, not the whole configuration
+    /// process.
+    pub state: (Mutex<ComputeState>, Condvar),
 }
 
 fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
@@ -132,11 +136,16 @@ pub struct ComputeMetrics {
 
 impl ComputeNode {
     pub fn set_status(&self, status: ComputeStatus) {
-        self.state.write().unwrap().status = status;
+        let (state, state_changed) = &self.state;
+        let mut state = state.lock().unwrap();
+        state.status = status;
+        state_changed.notify_all();
     }
 
     pub fn get_status(&self) -> ComputeStatus {
-        self.state.read().unwrap().status
+        // self.state.read().unwrap().status
+        let (state, _) = &self.state;
+        state.lock().unwrap().status
     }
 
     // Remove `pgdata` directory and create it again with right permissions.
@@ -370,8 +379,11 @@ impl ComputeNode {
 
     /// Similar to `apply_config()`, but does a bit different sequence of operations,
     /// as it's used to reconfigure a previously started and configured Postgres node.
-    #[instrument(skip(self, spec))]
-    pub fn reconfigure(&self, spec: ComputeSpec) -> Result<()> {
+    #[instrument(skip(self))]
+    pub fn reconfigure(&self) -> Result<()> {
+        let (state, _) = &self.state;
+        let spec = state.lock().unwrap().spec.clone();
+
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
         config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec)?;
@@ -401,7 +413,9 @@ impl ComputeNode {
 
     #[instrument(skip(self))]
     pub fn start_compute(&self) -> Result<std::process::Child> {
-        let compute_state = self.state.read().unwrap().clone();
+        // let compute_state = self.state.read().unwrap().clone();
+        let (state, _) = &self.state;
+        let compute_state = state.lock().unwrap().clone();
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
             compute_state.spec.cluster.cluster_id,

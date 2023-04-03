@@ -2,54 +2,53 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::Result;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, info, instrument};
 
 use crate::compute::{ComputeNode, ComputeStatus};
-use crate::spec::ComputeSpec;
 
-#[instrument(skip(compute, rx))]
-fn configurator_main_loop(compute: &Arc<ComputeNode>, mut rx: UnboundedReceiver<ComputeSpec>) {
+#[instrument(skip(compute))]
+fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     info!("waiting for reconfiguration requests");
-    while let Some(spec) = rx.blocking_recv() {
-        info!("got spec = {:?}", &spec);
+    let (state, state_changed) = &compute.state;
+    loop {
+        let state = state.lock().unwrap();
+        let mut state = state_changed.wait(state).unwrap();
 
-        let status = compute.get_status();
-        // Sanity check, should never happen.
-        if status != ComputeStatus::ConfigurationPending {
-            error!(
-                "unexpected compute status: {:?}, expected {:?}",
-                status,
-                ComputeStatus::ConfigurationPending
-            );
-            compute.set_status(ComputeStatus::Failed);
-            continue;
+        if state.status == ComputeStatus::ConfigurationPending {
+            info!("got reconfiguration request");
+            state.status = ComputeStatus::Reconfiguration;
+            state_changed.notify_all();
+            drop(state);
+
+            let mut new_status = ComputeStatus::Failed;
+            if let Err(e) = compute.reconfigure() {
+                error!("could not reconfigure compute node: {}", e);
+            } else {
+                new_status = ComputeStatus::Running;
+                info!("compute node reconfigured");
+            }
+
+            // XXX: used to test that API is blocking
+            // TODO: remove before merge
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+
+            compute.set_status(new_status);
+        } else if state.status == ComputeStatus::Failed {
+            info!("compute node is now in Failed state, exiting");
+            break;
         } else {
-            compute.set_status(ComputeStatus::Reconfiguration);
+            info!("woken up for compute status: {:?}, sleeping", state.status);
         }
-
-        let mut new_status = ComputeStatus::Failed;
-        if let Err(e) = compute.reconfigure(spec) {
-            error!("could not reconfigure compute node: {}", e);
-        } else {
-            new_status = ComputeStatus::Running;
-            info!("compute node reconfigured");
-        }
-
-        compute.set_status(new_status);
     }
-    info!("configurator thread is exiting");
 }
 
-pub fn launch_configurator(
-    compute: &Arc<ComputeNode>,
-    rx: UnboundedReceiver<ComputeSpec>,
-) -> Result<thread::JoinHandle<()>> {
+pub fn launch_configurator(compute: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let compute = Arc::clone(compute);
 
     Ok(thread::Builder::new()
         .name("compute-configurator".into())
         .spawn(move || {
-            configurator_main_loop(&compute, rx);
+            configurator_main_loop(&compute);
+            info!("configurator thread is exited");
         })?)
 }
