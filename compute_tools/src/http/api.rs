@@ -3,9 +3,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
-use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
+use crate::compute::{ComputeNode, ComputeState};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
+use compute_api::spec::ComputeSpecV2;
 
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
@@ -18,14 +19,8 @@ use tracing_utils::http::OtelName;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
-        tenant: state
-            .pspec
-            .as_ref()
-            .map(|pspec| pspec.tenant_id.to_string()),
-        timeline: state
-            .pspec
-            .as_ref()
-            .map(|pspec| pspec.timeline_id.to_string()),
+        tenant: state.spec.as_ref().map(|spec| spec.tenant_id.to_string()),
+        timeline: state.spec.as_ref().map(|spec| spec.timeline_id.to_string()),
         status: state.status,
         last_active: state.last_active,
         error: state.error.clone(),
@@ -140,11 +135,9 @@ async fn handle_configure_request(
     let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
     let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
     if let Ok(request) = serde_json::from_str::<ConfigurationRequest>(&spec_raw) {
-        let spec = request.spec;
-
-        let parsed_spec = match ParsedSpec::try_from(spec) {
+        let specv2 = match ComputeSpecV2::try_from(request.spec) {
             Ok(ps) => ps,
-            Err(msg) => return Err((msg, StatusCode::PRECONDITION_FAILED)),
+            Err(err) => return Err((err.to_string(), StatusCode::PRECONDITION_FAILED)),
         };
 
         // XXX: wrap state update under lock in code blocks. Otherwise,
@@ -162,7 +155,7 @@ async fn handle_configure_request(
                 );
                 return Err((msg, StatusCode::PRECONDITION_FAILED));
             }
-            state.pspec = Some(parsed_spec);
+            state.spec = Some(specv2);
             state.status = ComputeStatus::ConfigurationPending;
             compute.state_changed.notify_all();
             drop(state);

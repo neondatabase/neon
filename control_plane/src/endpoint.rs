@@ -55,7 +55,7 @@ use crate::pageserver::PageServerNode;
 use crate::postgresql_conf::PostgresConf;
 
 use compute_api::responses::{ComputeState, ComputeStatus};
-use compute_api::spec::{Cluster, ComputeSpec};
+use compute_api::spec::ComputeSpecV2;
 
 // contents of a endpoint.json file
 #[serde_as]
@@ -402,26 +402,29 @@ impl Endpoint {
         }
 
         // Create spec file
-        let spec = ComputeSpec {
-            format_version: 1.0,
+        let spec = ComputeSpecV2 {
+            format_version: 2,
+
+            project_id: None,
+            endpoint_id: Some(self.endpoint_id.clone()),
             operation_uuid: None,
-            cluster: Cluster {
-                cluster_id: "FIXME".to_string(),
-                name: "FIXME".to_string(),
-                state: None,
-                roles: vec![],
-                databases: vec![],
-                settings: None,
-                postgresql_conf: Some(postgresql_conf),
-            },
-            delta_operations: None,
-            tenant_id: Some(self.tenant_id),
-            timeline_id: Some(self.timeline_id),
+
+            startup_tracing_context: None,
+
+            tenant_id: self.tenant_id,
+            timeline_id: self.timeline_id,
             lsn: self.lsn,
-            pageserver_connstring: Some(pageserver_connstring),
+            pageserver_connstring,
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
-            startup_tracing_context: None,
+
+            postgresql_conf: Some(postgresql_conf),
+            settings: None,
+
+            roles: vec![],
+            databases: vec![],
+            extensions: vec![],
+            delta_operations: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

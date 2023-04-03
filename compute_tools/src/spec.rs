@@ -1,3 +1,4 @@
+//! Functions to reconciliate Postgres cluster with the spec file
 use std::path::Path;
 use std::str::FromStr;
 
@@ -10,11 +11,14 @@ use crate::config;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
-use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
+use compute_api::spec::{ComputeSpecAnyVersion, ComputeSpecV2, Database, PgIdent, Role};
 
 /// Request spec from the control-plane by compute_id. If `NEON_CONSOLE_JWT`
 /// env variable is set, it will be used for authorization.
-pub fn get_spec_from_control_plane(base_uri: &str, compute_id: &str) -> Result<ComputeSpec> {
+pub fn get_spec_from_control_plane(
+    base_uri: &str,
+    compute_id: &str,
+) -> Result<ComputeSpecAnyVersion> {
     let cp_uri = format!("{base_uri}/management/api/v2/computes/{compute_id}/spec");
     let jwt: String = match std::env::var("NEON_CONSOLE_JWT") {
         Ok(v) => v,
@@ -26,19 +30,18 @@ pub fn get_spec_from_control_plane(base_uri: &str, compute_id: &str) -> Result<C
     // - network error, then retry
     // - no spec for compute yet, then wait
     // - compute id is unknown or any other error, then bail out
-    let spec = reqwest::blocking::Client::new()
+    let json = reqwest::blocking::Client::new()
         .get(cp_uri)
         .header("Authorization", jwt)
         .send()?
         .json()?;
-
-    Ok(spec)
+    Ok(ComputeSpecAnyVersion(json))
 }
 
 /// It takes cluster specification and does the following:
 /// - Serialize cluster config and put it into `postgresql.conf` completely rewriting the file.
 /// - Update `pg_hba.conf` to allow external connections.
-pub fn handle_configuration(spec: &ComputeSpec, pgdata_path: &Path) -> Result<()> {
+pub fn handle_configuration(spec: &ComputeSpecV2, pgdata_path: &Path) -> Result<()> {
     // File `postgresql.conf` is no longer included into `basebackup`, so just
     // always write all config into it creating new file.
     config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec)?;
@@ -66,7 +69,7 @@ pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
 /// Given a cluster spec json and open transaction it handles roles creation,
 /// deletion and update.
 #[instrument(skip_all)]
-pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+pub fn handle_roles(spec: &ComputeSpecV2, client: &mut Client) -> Result<()> {
     let mut xact = client.transaction()?;
     let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
 
@@ -122,7 +125,7 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
 
     info!("cluster spec roles:");
-    for role in &spec.cluster.roles {
+    for role in &spec.roles {
         let name = &role.name;
         // XXX: with a limited number of roles it is fine, but consider making it a HashMap
         let pg_role = existing_roles.iter().find(|r| r.name == *name);
@@ -207,7 +210,11 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 
 /// Reassign all dependent objects and delete requested roles.
 #[instrument(skip_all)]
-pub fn handle_role_deletions(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> Result<()> {
+pub fn handle_role_deletions(
+    spec: &ComputeSpecV2,
+    connstr: &str,
+    client: &mut Client,
+) -> Result<()> {
     if let Some(ops) = &spec.delta_operations {
         // First, reassign all dependent objects to db owners.
         info!("reassigning dependent objects of to-be-deleted roles");
@@ -249,8 +256,8 @@ pub fn handle_role_deletions(spec: &ComputeSpec, connstr: &str, client: &mut Cli
 }
 
 // Reassign all owned objects in all databases to the owner of the database.
-fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent) -> Result<()> {
-    for db in &spec.cluster.databases {
+fn reassign_owned_objects(spec: &ComputeSpecV2, connstr: &str, role_name: &PgIdent) -> Result<()> {
+    for db in &spec.databases {
         if db.owner != *role_name {
             let mut conf = Config::from_str(connstr)?;
             conf.dbname(&db.name);
@@ -284,7 +291,7 @@ fn reassign_owned_objects(spec: &ComputeSpec, connstr: &str, role_name: &PgIdent
 /// atomicity should be enough here due to the order of operations and various checks,
 /// which together provide us idempotency.
 #[instrument(skip_all)]
-pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+pub fn handle_databases(spec: &ComputeSpecV2, client: &mut Client) -> Result<()> {
     let existing_dbs: Vec<Database> = get_existing_dbs(client)?;
 
     // Print a list of existing Postgres databases (only in debug mode)
@@ -332,7 +339,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let existing_dbs: Vec<Database> = get_existing_dbs(client)?;
 
     info!("cluster spec databases:");
-    for db in &spec.cluster.databases {
+    for db in &spec.databases {
         let name = &db.name;
 
         // XXX: with a limited number of databases it is fine, but consider making it a HashMap
@@ -397,7 +404,7 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 /// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
 /// to allow users creating trusted extensions and re-creating `public` schema, for example.
 #[instrument(skip_all)]
-pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> Result<()> {
+pub fn handle_grants(spec: &ComputeSpecV2, connstr: &str, client: &mut Client) -> Result<()> {
     info!("cluster spec grants:");
 
     // We now have a separate `web_access` role to connect to the database
@@ -407,13 +414,12 @@ pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> 
     // XXX: later we should stop messing with Postgres ACL in such horrible
     // ways.
     let roles = spec
-        .cluster
         .roles
         .iter()
         .map(|r| r.name.pg_quote())
         .collect::<Vec<_>>();
 
-    for db in &spec.cluster.databases {
+    for db in &spec.databases {
         let dbname = &db.name;
 
         let query: String = format!(
@@ -429,7 +435,7 @@ pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> 
     // Do some per-database access adjustments. We'd better do this at db creation time,
     // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants
     // atomically.
-    for db in &spec.cluster.databases {
+    for db in &spec.databases {
         let mut conf = Config::from_str(connstr)?;
         conf.dbname(&db.name);
 
@@ -499,14 +505,11 @@ pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> 
 
 /// Create required system extensions
 #[instrument(skip_all)]
-pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
-    if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
-        if libs.contains("pg_stat_statements") {
-            // Create extension only if this compute really needs it
-            let query = "CREATE EXTENSION IF NOT EXISTS pg_stat_statements";
-            info!("creating system extensions with query: {}", query);
-            client.simple_query(query)?;
-        }
+pub fn handle_extensions(spec: &ComputeSpecV2, client: &mut Client) -> Result<()> {
+    for extension in &spec.extensions {
+        let query = format!("CREATE EXTENSION IF NOT EXISTS {}", extension.pg_quote());
+        info!("creating system extensions with query: {}", query);
+        client.simple_query(&query)?;
     }
 
     Ok(())
