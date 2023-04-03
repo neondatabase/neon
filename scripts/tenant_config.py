@@ -74,7 +74,7 @@ def do_csv(csv_file, merge_existing_with):
             # skip header row
             continue
         if len(line) != 2:
-            logging.warning(f"skipping line {n+1}: {line}")
+            logging.warn(f"skipping line {n+1}: {line}")
             continue
         tenant_id = line[0]
         pageserver = line[1]
