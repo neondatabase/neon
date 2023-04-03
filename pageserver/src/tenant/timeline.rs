@@ -1129,6 +1129,8 @@ impl Timeline {
                         .observe(delta);
                 }
 
+                info!(resident_for=?local_layer_residence_duration, layer=?local_layer, "evicted");
+
                 true
             }
             Replacement::NotFound => {
