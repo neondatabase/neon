@@ -275,50 +275,6 @@ impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
 
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
-    async fn list(&self) -> anyhow::Result<Vec<RemotePath>> {
-        let mut document_keys = Vec::new();
-
-        let mut continuation_token = None;
-        loop {
-            let _guard = self
-                .concurrency_limiter
-                .acquire()
-                .await
-                .context("Concurrency limiter semaphore got closed during S3 list")?;
-
-            metrics::inc_list_objects();
-
-            let fetch_response = self
-                .client
-                .list_objects_v2()
-                .bucket(self.bucket_name.clone())
-                .set_prefix(self.prefix_in_bucket.clone())
-                .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
-                .set_continuation_token(continuation_token)
-                .set_max_keys(self.max_keys_per_list_response)
-                .send()
-                .await
-                .map_err(|e| {
-                    metrics::inc_list_objects_fail();
-                    e
-                })?;
-            document_keys.extend(
-                fetch_response
-                    .contents
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|o| Some(self.s3_object_to_relative_path(o.key()?))),
-            );
-
-            match fetch_response.next_continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
-                None => break,
-            }
-        }
-
-        Ok(document_keys)
-    }
-
     /// See the doc for `RemoteStorage::list_prefixes`
     /// Note: it wont include empty "directories"
     async fn list_prefixes(

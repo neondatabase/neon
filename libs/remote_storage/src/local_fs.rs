@@ -73,10 +73,8 @@ impl LocalFs {
             Ok(None)
         }
     }
-}
 
-#[async_trait::async_trait]
-impl RemoteStorage for LocalFs {
+    #[cfg(test)]
     async fn list(&self) -> anyhow::Result<Vec<RemotePath>> {
         Ok(get_all_files(&self.storage_root, true)
             .await?
@@ -91,7 +89,10 @@ impl RemoteStorage for LocalFs {
             })
             .collect())
     }
+}
 
+#[async_trait::async_trait]
+impl RemoteStorage for LocalFs {
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
