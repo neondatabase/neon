@@ -140,7 +140,7 @@ async fn auth_quirks(
 
 impl BackendType<'_, ClientCredentials<'_>> {
     /// Authenticate the client via the requested backend, possibly using credentials.
-    #[tracing::instrument(fields(allow_cleartext), skip_all)]
+    #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub async fn authenticate(
         &mut self,
         extra: &ConsoleReqExtra<'_>,
