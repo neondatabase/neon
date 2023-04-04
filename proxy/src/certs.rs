@@ -206,9 +206,9 @@ impl<V> GlobMap<V> {
     }
 }
 
-struct CertResolverEntry {
-    raw: Arc<rustls::sign::CertifiedKey>,
-    names: Vec<String>,
+pub struct CertResolverEntry {
+    pub raw: Arc<rustls::sign::CertifiedKey>,
+    pub names: Vec<String>,
 }
 
 pub struct CertResolver {
@@ -242,16 +242,17 @@ impl CertResolver {
             storage: builder.build()?,
         })
     }
+
+    pub fn resolve_raw(&self, name: &str) -> Option<&CertResolverEntry> {
+        let entries = self.storage.query(name);
+        entries.first().copied()
+    }
 }
 
 impl ResolvesServerCert for CertResolver {
     fn resolve(&self, message: ClientHello) -> Option<Arc<CertifiedKey>> {
         let name = message.server_name()?;
-        let certs = self.storage.query(name);
-        let first = certs.first()?;
-
-        // TODO: warn if there's more than one match!
-        Some(first.raw.clone())
+        self.resolve_raw(name).map(|entry| entry.raw.clone())
     }
 }
 

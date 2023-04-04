@@ -1,4 +1,4 @@
-use crate::auth;
+use crate::{auth, certs};
 use anyhow::{bail, Context};
 use std::{str::FromStr, sync::Arc, time::Duration};
 
@@ -22,6 +22,27 @@ pub struct TlsConfig {
 impl TlsConfig {
     pub fn to_server_config(&self) -> Arc<rustls::ServerConfig> {
         self.config.clone()
+    }
+}
+
+impl TlsConfig {
+    pub fn new(resolver: certs::CertResolver) -> anyhow::Result<Self> {
+        let resolver = Arc::new(resolver);
+
+        let rustls_config = rustls::ServerConfig::builder()
+            .with_safe_default_cipher_suites()
+            .with_safe_default_kx_groups()
+            // allow TLS 1.2 to be compatible with older client libraries
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+            .with_no_client_auth()
+            .with_cert_resolver(resolver.clone());
+
+        let config = TlsConfig {
+            config: Arc::new(rustls_config),
+            common_name: None,
+        };
+
+        Ok(config)
     }
 }
 

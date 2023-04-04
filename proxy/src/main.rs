@@ -25,6 +25,7 @@ mod waiters;
 
 use anyhow::{bail, Context};
 use auth::BackendType;
+use certs::config::TlsServers;
 use clap::{self, Arg};
 use config::{MetricCollectionConfig, ProxyConfig, TlsConfig};
 use futures::FutureExt;
@@ -129,22 +130,24 @@ async fn handle_signals() -> anyhow::Result<()> {
 }
 
 fn build_tls_config(args: &clap::ArgMatches) -> anyhow::Result<Option<TlsConfig>> {
-    use certs::config::TlsServers;
-
     let tls_config = args.get_one::<PathBuf>("tls-config");
     let main = tls_config.map(TlsServers::from_config_file).transpose()?;
-    certs::CertResolver::new(main.unwrap());
 
     let tls_cert = args.get_one::<PathBuf>("tls-cert");
     let tls_key = args.get_one::<PathBuf>("tls-key");
 
-    let aux = match (tls_cert, tls_key) {
+    let _aux = match (tls_cert, tls_key) {
         (Some(_key), Some(_cert)) => todo!("implement legacy TLS setup"),
         (None, None) => None::<()>,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
-    todo!("TlsConfig")
+    // TODO: first merge `main` and `_aux` into one.
+    main.map(|servers| {
+        let resolver = certs::CertResolver::new(servers)?;
+        TlsConfig::new(resolver)
+    })
+    .transpose()
 }
 
 fn build_metrics_config(args: &clap::ArgMatches) -> anyhow::Result<Option<MetricCollectionConfig>> {
@@ -279,7 +282,7 @@ fn cli() -> clap::Command {
         .arg(
             Arg::new("tls-config")
                 .long("tls-config")
-                .help("path to the TLS config file")
+                .help("path to the TLS config file (example: config/servers.dhall)")
                 .value_parser(clap::builder::PathBufValueParser::new()),
         )
         .arg(
