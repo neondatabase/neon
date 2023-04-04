@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use aws_sdk_s3::model::ObjectIdentifier;
 use aws_sdk_s3::Client;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
@@ -14,9 +15,11 @@ use crate::copied_definitions::id::TenantTimelineId;
 use crate::copied_definitions::index::IndexPart;
 use crate::copied_definitions::metadata::TimelineMetadata;
 use crate::delete_batch_producer::DeleteProducerStats;
+use crate::s3_deletion::send_delete_request;
 use crate::{list_objects_with_retries, RootTarget, MAX_RETRIES};
 
 pub async fn validate_pageserver_active_tenant_and_timelines(
+    dry_run: bool,
     s3_client: Arc<Client>,
     s3_root: RootTarget,
     admin_client: Arc<CloudAdminApiClient>,
@@ -55,10 +58,9 @@ pub async fn validate_pageserver_active_tenant_and_timelines(
         let id = TenantTimelineId::new(active_project.tenant, active_timeline_id);
         s3_blob_data.insert(
             id,
-            match list_timeline_blobs(&s3_client, id, &s3_root).await {
-                Ok(data) => data,
-                Err(e) => S3TimelineBlobData::Incorrect(e),
-            },
+            list_timeline_blobs(&s3_client, id, &s3_root)
+                .await
+                .with_context(|| format!("List timeline {id} blobs"))?,
         );
     }
 
@@ -90,10 +92,20 @@ pub async fn validate_pageserver_active_tenant_and_timelines(
             let timeline_id = s3_active_branch.timeline_id;
             let id = TenantTimelineId::new(tenant_id, timeline_id);
             let s3_data = s3_blob_data.remove(&id);
+            let s3_root = s3_root.clone();
+            let timeline_cleanup_client = Arc::clone(&s3_client);
             branch_checks.spawn(
                 async move {
-                    let check_errors =
-                        get_branch_check_errors(&s3_active_branch, console_branch, s3_data).await;
+                    let check_errors = branch_cleanup_and_check_errors(
+                        dry_run,
+                        id,
+                        &timeline_cleanup_client,
+                        &s3_root,
+                        &s3_active_branch,
+                        console_branch,
+                        s3_data,
+                    )
+                    .await;
                     (id, check_errors)
                 }
                 .instrument(info_span!("check_timeline", id = %id)),
@@ -155,7 +167,11 @@ impl BranchCheckStats {
     }
 }
 
-async fn get_branch_check_errors(
+async fn branch_cleanup_and_check_errors(
+    dry_run: bool,
+    id: TenantTimelineId,
+    s3_client: &Client,
+    s3_root: &RootTarget,
     s3_active_branch: &BranchData,
     console_branch: Option<BranchData>,
     s3_data: Option<S3TimelineBlobData>,
@@ -177,71 +193,90 @@ async fn get_branch_check_errors(
             s3_active_branch.id, s3_active_branch.project_id))
     }
 
+    let mut keys_to_remove = Vec::new();
+
     match s3_data {
-        Some(S3TimelineBlobData::Parsed {
-            mut index_part,
-            mut s3_layers,
-        }) => {
-            if index_part.version != 1 {
-                branch_check_errors.push(format!("index_part.json version: {}", index_part.version))
-            }
+        Some(s3_data) => {
+            keys_to_remove.extend(s3_data.keys_to_remove);
 
-            match TimelineMetadata::from_bytes(&index_part.metadata_bytes) {
-                Ok(index_metadata) => {
-                    if index_metadata.disk_consistent_lsn() != index_part.disk_consistent_lsn {
-                        branch_check_errors.push(format!(
-                            "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
-                            index_metadata.disk_consistent_lsn(),
-                            index_part.disk_consistent_lsn,
-
-                        ))
+            match s3_data.blob_data {
+                BlobDataParseResult::Parsed {
+                    mut index_part,
+                    mut s3_layers,
+                } => {
+                    if index_part.version != 1 {
+                        branch_check_errors
+                            .push(format!("index_part.json version: {}", index_part.version))
                     }
-                }
-                Err(e) => branch_check_errors.push(format!(
-                    "Could not parse index_part.json metadata_bytes: {e}"
-                )),
-            }
 
-            if index_part.timeline_layers.is_empty() {
-                // not an error, can happen for branches with zero writes, but notice that
-                info!("index_part.json has no layers");
-            } else {
-                for index_layer in index_part.timeline_layers {
-                    match index_part.layer_metadata.remove(&index_layer) {
-                        Some(index_layer_metadata) => {
-                            if index_layer_metadata.file_size == 0 {
+                    match TimelineMetadata::from_bytes(&index_part.metadata_bytes) {
+                        Ok(index_metadata) => {
+                            if index_metadata.disk_consistent_lsn()
+                                != index_part.disk_consistent_lsn
+                            {
                                 branch_check_errors.push(format!(
-                                    "index_part.json contains a layer {} that has 0 size in its layer metadata", index_layer.file_name(),
+                                    "Mismatching disk_consistent_lsn in TimelineMetadata ({}) and in the index_part ({})",
+                                    index_metadata.disk_consistent_lsn(),
+                                    index_part.disk_consistent_lsn,
+
                                 ))
                             }
                         }
-                        None => branch_check_errors.push(format!(
-                            "index_part.json contains a layer {} that has no layer metadata",
-                            index_layer.file_name(),
+                        Err(e) => branch_check_errors.push(format!(
+                            "Could not parse index_part.json metadata_bytes: {e}"
                         )),
                     }
 
-                    if !s3_layers.remove(&index_layer) {
+                    if index_part.timeline_layers.is_empty() {
+                        // not an error, can happen for branches with zero writes, but notice that
+                        info!("index_part.json has no layers");
+                    } else {
+                        for index_layer in index_part.timeline_layers {
+                            match index_part.layer_metadata.remove(&index_layer) {
+                                Some(index_layer_metadata) => {
+                                    if index_layer_metadata.file_size == 0 {
+                                        branch_check_errors.push(format!(
+                                            "index_part.json contains a layer {} that has 0 size in its layer metadata", index_layer.file_name(),
+                                        ))
+                                    }
+                                }
+                                None => branch_check_errors.push(format!(
+                                    "index_part.json contains a layer {} that has no layer metadata",
+                                    index_layer.file_name(),
+                                )),
+                            }
+
+                            if !s3_layers.remove(&index_layer) {
+                                branch_check_errors.push(format!(
+                                    "index_part.json contains a layer {} that is not present in S3",
+                                    index_layer.file_name(),
+                                ))
+                            }
+                        }
+                    }
+
+                    if !s3_layers.is_empty() {
                         branch_check_errors.push(format!(
-                            "index_part.json contains a layer {} that is not present in S3",
-                            index_layer.file_name(),
-                        ))
+                            "index_part.json does not contain layers from S3: {:?}",
+                            s3_layers
+                                .iter()
+                                .map(|layer_name| layer_name.file_name())
+                                .collect::<Vec<_>>(),
+                        ));
+                        keys_to_remove.extend(s3_layers.iter().map(|layer_name| {
+                            s3_root
+                                .timeline_root(id)
+                                .with_sub_segment(&layer_name.file_name())
+                                .prefix_in_bucket
+                        }));
                     }
                 }
-            }
-
-            if !s3_layers.is_empty() {
-                branch_check_errors.push(format!(
-                    "index_part.json does not contain layers from S3: {:?}",
-                    s3_layers
+                BlobDataParseResult::Incorrect(parse_errors) => branch_check_errors.extend(
+                    parse_errors
                         .into_iter()
-                        .map(|layer_name| layer_name.file_name())
-                        .collect::<Vec<_>>(),
-                ))
+                        .map(|error| format!("parse error: {error}")),
+                ),
             }
-        }
-        Some(S3TimelineBlobData::Incorrect(e)) => {
-            branch_check_errors.push(format!("Timeline has incorrect S3 data: {e}"))
         }
         None => branch_check_errors.push("Timeline has no data on S3 at all".to_string()),
     }
@@ -252,16 +287,54 @@ async fn get_branch_check_errors(
         warn!("Found check errors: {branch_check_errors:?}");
     }
 
+    if let Err(e) = remove_keys(s3_client, s3_root.bucket_name(), dry_run, keys_to_remove).await {
+        error!("Failed to clean up keys: {e:?}")
+    };
+
     branch_check_errors
 }
 
+async fn remove_keys(
+    s3_client: &Client,
+    bucket_name: &str,
+    dry_run: bool,
+    keys_to_remove: Vec<String>,
+) -> anyhow::Result<()> {
+    info!(
+        "Cleaning up {} keys in batches: {:?}",
+        keys_to_remove.len(),
+        keys_to_remove
+    );
+
+    for keys_batch in keys_to_remove.chunks(900) {
+        send_delete_request(
+            s3_client,
+            bucket_name,
+            keys_batch
+                .iter()
+                .map(|key| ObjectIdentifier::builder().key(key).build())
+                .collect(),
+            dry_run,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
 #[derive(Debug)]
-enum S3TimelineBlobData {
+struct S3TimelineBlobData {
+    blob_data: BlobDataParseResult,
+    keys_to_remove: Vec<String>,
+}
+
+#[derive(Debug)]
+enum BlobDataParseResult {
     Parsed {
         index_part: IndexPart,
         s3_layers: HashSet<LayerFileName>,
     },
-    Incorrect(anyhow::Error),
+    Incorrect(Vec<String>),
 }
 
 async fn list_timeline_blobs(
@@ -274,7 +347,10 @@ async fn list_timeline_blobs(
 
     let timeline_dir_target = s3_root.timeline_root(id);
     let mut continuation_token = None;
-    let mut errors = HashMap::new();
+
+    let mut errors = Vec::new();
+    let mut keys_to_remove = Vec::new();
+
     loop {
         let fetch_response =
             list_objects_with_retries(s3_client, &timeline_dir_target, continuation_token.clone())
@@ -282,7 +358,7 @@ async fn list_timeline_blobs(
 
         let subdirectories = fetch_response.common_prefixes().unwrap_or_default();
         if !subdirectories.is_empty() {
-            errors.entry(id).or_insert_with(Vec::new).push(format!(
+            errors.push(format!(
                 "S3 list response should not contain any subdirectories, but got {subdirectories:?}"
             ));
         }
@@ -299,15 +375,18 @@ async fn list_timeline_blobs(
                 Some(maybe_layer_name) => match maybe_layer_name.parse::<LayerFileName>() {
                     Ok(new_layer) => {
                         s3_layers.insert(new_layer);
-                    },
-                    Err(e) => errors.entry(id).or_default().push(
-                        format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
-                    ),
+                    }
+                    Err(e) => {
+                        errors.push(
+                            format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
+                        );
+                        keys_to_remove.push(key.to_string());
+                    }
                 },
-                None => errors
-                    .entry(id)
-                    .or_default()
-                    .push(format!("S3 list response got an object with odd key {key}")),
+                None => {
+                    errors.push(format!("S3 list response got an object with odd key {key}"));
+                    keys_to_remove.push(key.to_string());
+                }
             }
         }
 
@@ -318,30 +397,48 @@ async fn list_timeline_blobs(
     }
 
     if index_part_object.is_none() {
-        errors
-            .entry(id)
-            .or_default()
-            .push("S3 list response got no index_part.json file".to_string());
+        errors.push("S3 list response got no index_part.json file".to_string());
     }
-    anyhow::ensure!(
-        errors.is_empty(),
-        "Failed to list timeline S3 without errors: {errors:?}"
-    );
-    let Some(index_part_object_key) = index_part_object.as_ref().and_then(|object| object.key()) else { anyhow::bail!("Index part object {index_part_object:?} has no key") };
 
-    let index_part_bytes = download_object_with_retries(
-        s3_client,
-        &timeline_dir_target.bucket_name,
-        index_part_object_key,
-    )
-    .await
-    .context("index_part.json download")?;
-    let index_part =
-        serde_json::from_slice(&index_part_bytes).context("index_part.json body parsing")?;
+    if let Some(index_part_object_key) = index_part_object.as_ref().and_then(|object| object.key())
+    {
+        let index_part_bytes = download_object_with_retries(
+            s3_client,
+            &timeline_dir_target.bucket_name,
+            index_part_object_key,
+        )
+        .await
+        .context("index_part.json download")?;
 
-    Ok(S3TimelineBlobData::Parsed {
-        index_part,
-        s3_layers,
+        match serde_json::from_slice(&index_part_bytes) {
+            Ok(index_part) => {
+                return Ok(S3TimelineBlobData {
+                    blob_data: BlobDataParseResult::Parsed {
+                        index_part,
+                        s3_layers,
+                    },
+                    keys_to_remove,
+                })
+            }
+            Err(index_parse_error) => errors.push(format!(
+                "index_part.json body parsing error: {index_parse_error}"
+            )),
+        }
+    } else {
+        errors.push(format!(
+            "Index part object {index_part_object:?} has no key"
+        ));
+    }
+
+    if errors.is_empty() {
+        errors.push(
+            "Unexpected: no errors did not lead to a successfully parsed blob return".to_string(),
+        );
+    }
+
+    Ok(S3TimelineBlobData {
+        blob_data: BlobDataParseResult::Incorrect(errors),
+        keys_to_remove,
     })
 }
 

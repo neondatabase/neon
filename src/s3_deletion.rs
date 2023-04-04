@@ -88,6 +88,7 @@ impl S3Deleter {
                                 }
                             }
                         }
+                        .in_current_span()
                         .await,
                     )
                 }
@@ -290,7 +291,7 @@ where
     Ok(deleted_keys)
 }
 
-async fn send_delete_request(
+pub async fn send_delete_request(
     s3_client: &Client,
     bucket_name: &str,
     ids: Vec<ObjectIdentifier>,

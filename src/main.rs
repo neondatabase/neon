@@ -129,13 +129,13 @@ async fn main() -> anyhow::Result<()> {
         batch_producer_stats.active_tenants(),
         batch_producer_stats.timelines_checked()
     );
-    info!("Finished S3 removal");
 
     if "pageserver" == node_kind.trim() {
         info!("validating active tenants and timelines for pageserver S3 data");
 
         // TODO kb real stats for validation + better stats for every place: add and print `min`, `max`, `mean` values at least
         let validation_stats = checks::validate_pageserver_active_tenant_and_timelines(
+            dry_run,
             s3_client,
             s3_root,
             cloud_admin_api_client,
@@ -151,11 +151,13 @@ async fn main() -> anyhow::Result<()> {
                 validation_stats
                     .timelines_with_errors
                     .into_iter()
-                    .map(|(id, errors)| (id.to_string(), format!("{:?}", errors)))
+                    .map(|(id, errors)| (id.to_string(), format!("{errors:?}")))
                     .collect::<HashMap<_, _>>()
             );
         }
     }
+
+    info!("Finished S3 removal");
 
     Ok(())
 }

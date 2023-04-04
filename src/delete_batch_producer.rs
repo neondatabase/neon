@@ -12,7 +12,7 @@ use either::Either;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
-use tracing::{error, info, info_span, Instrument, Span};
+use tracing::{error, info, info_span, Instrument};
 
 use crate::cloud_admin_api::{BranchData, CloudAdminApiClient, ProjectData};
 use crate::copied_definitions::id::TenantTimelineId;
@@ -112,8 +112,6 @@ impl DeleteBatchProducer {
             }
             .instrument(info_span!("delete_tenants_sender")),
         );
-
-        let current_span = Span::current();
         let delete_timelines_sender_task = tokio::spawn(async move {
             timeline_batch::schedule_cleanup_deleted_timelines(
                 &s3_root_target,
@@ -122,33 +120,38 @@ impl DeleteBatchProducer {
                 &mut projects_to_check_receiver,
                 delete_elements_sender,
             )
-            .instrument(current_span)
+            .in_current_span()
             .await
         });
 
         let (delete_batch_sender, delete_batch_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let delete_batch_creator_task = tokio::spawn(async move {
-            'outer: loop {
-                let mut delete_batch = DeleteBatch::default();
-                while delete_batch.len() < BATCH_SIZE {
-                    match delete_elements_receiver.recv().await {
-                        Some(new_task) => match new_task {
-                            Either::Left(tenant_id) => delete_batch.tenants.push(tenant_id),
-                            Either::Right(timeline_id) => delete_batch.timelines.push(timeline_id),
-                        },
-                        None => {
-                            info!("Task finished: sender dropped");
-                            delete_batch_sender.send(delete_batch).ok();
-                            break 'outer;
+        let delete_batch_creator_task = tokio::spawn(
+            async move {
+                'outer: loop {
+                    let mut delete_batch = DeleteBatch::default();
+                    while delete_batch.len() < BATCH_SIZE {
+                        match delete_elements_receiver.recv().await {
+                            Some(new_task) => match new_task {
+                                Either::Left(tenant_id) => delete_batch.tenants.push(tenant_id),
+                                Either::Right(timeline_id) => {
+                                    delete_batch.timelines.push(timeline_id)
+                                }
+                            },
+                            None => {
+                                info!("Task finished: sender dropped");
+                                delete_batch_sender.send(delete_batch).ok();
+                                break 'outer;
+                            }
                         }
                     }
-                }
 
-                if !delete_batch.is_empty() {
-                    delete_batch_sender.send(delete_batch).ok();
+                    if !delete_batch.is_empty() {
+                        delete_batch_sender.send(delete_batch).ok();
+                    }
                 }
             }
-        });
+            .instrument(info_span!("delete batch creator")),
+        );
 
         Self {
             delete_tenants_sender_task,
