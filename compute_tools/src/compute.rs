@@ -261,10 +261,7 @@ impl ComputeNode {
 
         let hot_replica = if let Some(option) = spec.cluster.settings.find_ref("hot_standby") {
             if let Some(value) = &option.value {
-                match value.as_str() {
-                    "on" | "yes" | "true" => true,
-                    _ => false,
-                }
+                matches!(value.as_str(), "on" | "yes" | "true")
             } else {
                 false
             }
