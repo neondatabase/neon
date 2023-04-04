@@ -114,8 +114,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         inner: Mutex::new(ComputeNodeInner {
             state: ComputeState {
-                // FIXME: should this be directly Init, if spec is set?
-                status: ComputeStatus::WaitingSpec,
+                status: ComputeStatus::Empty,
                 last_active: Utc::now(),
                 error: None,
             },

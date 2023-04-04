@@ -19,8 +19,9 @@ pub struct ComputeState {
 pub enum ComputeStatus {
     // Spec wasn't provided as start, waiting for it to be
     // provided by control-plane.
-    WaitingSpec,
-    // Compute node has initial spec and is starting up.
+    Empty,
+    // Compute node has spec and initial startup and
+    // configuration is in progress.
     Init,
     // Compute is configured and running.
     Running,
@@ -31,7 +32,7 @@ pub enum ComputeStatus {
     // Control-plane requested reconfiguration.
     ConfigurationPending,
     // New spec is being applied.
-    Reconfiguration,
+    Configuration,
 }
 
 fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>

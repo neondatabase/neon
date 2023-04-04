@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::compute::{ComputeNode, ParsedSpec};
+use crate::http::models::{ConfigurationRequest, GenericAPIError};
 use compute_api::models::ComputeStatus;
-use compute_api::spec::ComputeSpec;
 
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
@@ -15,26 +15,27 @@ use serde_json;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
-async fn handle_spec_request(req: Request<Body>, compute: &Arc<ComputeNode>) -> Result<(), String> {
+async fn handle_spec_request(req: Request<Body>, compute: &Arc<ComputeNode>) -> Result<(), (String, StatusCode)> {
     if !compute.live_config_allowed {
-        return Err("live reconfiguration is not allowed for this compute node".to_string());
+        return Err(("live reconfiguration is not allowed for this compute node".to_string(), StatusCode::PRECONDITION_FAILED));
     }
 
     let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
     let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
 
-    let spec = serde_json::from_str::<ComputeSpec>(&spec_raw)
-        .map_err(|err| format!("could not parse spec json: {err}"))?;
-    let spec = ParsedSpec::try_from(spec).map_err(|err| format!("could not parse spec: {err}"))?;
+    let request = serde_json::from_str::<ConfigurationRequest>(&spec_raw)
+        .map_err(|err| (format!("could not parse request json: {err}"), StatusCode::BAD_REQUEST))?;
+    let spec = ParsedSpec::try_from(request.spec)
+        .map_err(|err| (format!("could not parse spec: {err}"), StatusCode::BAD_REQUEST))?;
 
     let mut inner = compute.inner.lock().unwrap();
-    if !(inner.state.status == ComputeStatus::WaitingSpec
+    if !(inner.state.status == ComputeStatus::Empty
          || inner.state.status == ComputeStatus::Running)
     {
-        return Err(format!(
+        return Err((format!(
             "invalid compute status for reconfiguration request: {}",
             serde_json::to_string(&inner.state).unwrap()
-        ));
+        ), StatusCode::PRECONDITION_FAILED));
     }
     inner.spec = Some(spec);
     inner.state.status = ComputeStatus::ConfigurationPending;
@@ -119,22 +120,20 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             ))
         }
 
-        // Accept spec in JSON format and request compute reconfiguration from
+        // Accept spec in JSON format and request compute configuration from
         // the configurator thread. If anything goes wrong after we set the
         // compute state to `ConfigurationPending` and / or sent spec to the
         // configurator thread, we basically leave compute in the potentially
         // wrong state. That said, it's control-plane's responsibility to
         // watch compute state after reconfiguration request and to clean
         // restart in case of errors.
-        //
-        // TODO: Errors should be in JSON format with proper status codes.
-        (&Method::POST, "/spec") => {
-            info!("serving /spec POST request");
+        (&Method::POST, "/configure") => {
+            info!("serving /configure POST request");
             match handle_spec_request(req, compute).await {
                 Ok(()) => Response::new(Body::from("ok")),
-                Err(msg) => {
+                Err((msg, code) ) => {
                     error!("error handling /spec request: {msg}");
-                    Response::new(Body::from(msg))
+                    render_json_error(&msg, code)
                 }
             }
         }
@@ -146,6 +145,16 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             not_found
         }
     }
+}
+
+fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
+    let error = GenericAPIError {
+        error: e.to_string(),
+    };
+    Response::builder()
+        .status(status)
+        .body(Body::from(serde_json::to_string(&error).unwrap()))
+        .unwrap()
 }
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.

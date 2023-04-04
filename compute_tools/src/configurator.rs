@@ -15,22 +15,21 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
         let mut inner = compute.state_changed.wait(inner).unwrap();
 
         if inner.state.status == ComputeStatus::ConfigurationPending {
-            info!("got reconfiguration request");
-            inner.state.status = ComputeStatus::Reconfiguration;
+            info!("got configuration request");
+            inner.state.status = ComputeStatus::Configuration;
             compute.state_changed.notify_all();
             drop(inner);
 
             let mut new_status = ComputeStatus::Failed;
             if let Err(e) = compute.reconfigure() {
-                error!("could not reconfigure compute node: {}", e);
+                error!("could not configure compute node: {}", e);
             } else {
                 new_status = ComputeStatus::Running;
-                info!("compute node reconfigured");
+                info!("compute node configured");
             }
 
             // XXX: used to test that API is blocking
-            // TODO: remove before merge
-            std::thread::sleep(std::time::Duration::from_millis(2000));
+            // std::thread::sleep(std::time::Duration::from_millis(2000));
 
             compute.set_status(new_status);
         } else if inner.state.status == ComputeStatus::Failed {
