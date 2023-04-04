@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
 use serde::Serialize;
 use std::collections::HashMap;
-use tracing::{debug, error, info, instrument, trace};
+use tracing::{error, info, instrument, trace, warn};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
@@ -84,10 +84,14 @@ fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
 
                     let value = ms.get_counter().get_value() as u64;
 
-                    debug!(
-                        "branch_id {} endpoint_id {} val: {}",
-                        branch_id, endpoint_id, value
-                    );
+                    // Report if the metric value is suspiciously large
+                    if value > (1u64 << 40) {
+                        warn!(
+                            "potentially abnormal counter value: branch_id {} endpoint_id {} val: {}",
+                            branch_id, endpoint_id, value
+                        );
+                    }
+
                     current_metrics.push((
                         Ids {
                             endpoint_id: endpoint_id.to_string(),
@@ -124,11 +128,15 @@ async fn collect_metrics_iteration(
             let mut value = *curr_val;
 
             if let Some((prev_val, prev_time)) = cached_metrics.get(curr_key) {
-                // Only send metrics updates if the metric has changed
-                if curr_val - prev_val > 0 {
+                // Only send metrics updates if the metric has increased
+                if curr_val > prev_val {
                     value = curr_val - prev_val;
                     start_time = *prev_time;
                 } else {
+                    if curr_val < prev_val {
+                        error!("proxy_io_bytes_per_client metric value decreased from {} to {} for key {:?}",
+                        prev_val, curr_val, curr_key);
+                    }
                     return None;
                 }
             };
@@ -189,7 +197,7 @@ async fn collect_metrics_iteration(
                     })
                     // update cached value (add delta) and time
                     .and_modify(|e| {
-                        e.0 += send_metric.value;
+                        e.0 = e.0.saturating_add(send_metric.value);
                         e.1 = stop_time
                     })
                     // cache new metric
