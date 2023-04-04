@@ -850,23 +850,23 @@ impl RemoteTimelineClientMetrics {
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
     ) -> RemoteTimelineClientCallMetricGuard {
-        let unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
+        let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
         self.calls_started_hist(file_kind, op_kind)
-            .observe(unfinished_metric.get() as f64);
-        unfinished_metric.inc();
-        RemoteTimelineClientCallMetricGuard(Some(unfinished_metric))
+            .observe(calls_unfinished_metric.get() as f64);
+        calls_unfinished_metric.inc();
+        RemoteTimelineClientCallMetricGuard(Some(calls_unfinished_metric))
     }
 
     /// Manually decrement the metric instead of using the guard object.
     /// Using the guard object is generally preferable.
     /// See [`call_begin`] for more context.
     pub(crate) fn call_end(&self, file_kind: &RemoteOpFileKind, op_kind: &RemoteOpKind) {
-        let unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
+        let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
         debug_assert!(
-            unfinished_metric.get() > 0,
+            calls_unfinished_metric.get() > 0,
             "begin and end should cancel out"
         );
-        unfinished_metric.dec();
+        calls_unfinished_metric.dec();
     }
 }
 
