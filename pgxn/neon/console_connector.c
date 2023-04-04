@@ -39,8 +39,8 @@ typedef struct
 typedef struct DdlHashTable
 {
     struct DdlHashTable *prev_table;
-    HTAB *role_table;
     HTAB *db_table;
+    HTAB *role_table;
 } DdlHashTable;
 
 static DdlHashTable RootTable;
@@ -50,6 +50,7 @@ static DdlHashTable *CurrentDdlTable = &RootTable;
 static size_t ComputeLengthOfDeltas()
 {
     size_t length = sizeof('[');
+    if(RootTable.db_table)
     {
         HASH_SEQ_STATUS status;
         DbEntry *entry;
@@ -85,6 +86,7 @@ static size_t ComputeLengthOfDeltas()
         }
     }
 
+    if(RootTable.role_table)
     {
         HASH_SEQ_STATUS status;
         RoleEntry *entry;
@@ -221,8 +223,8 @@ void ConstructDeltaMessage(char *message)
             AppendChar(',');
         }
     }
-    *message++ = ']'; // Overwrite trailing comma
-    *message++ = '\0';
+    *(message - 1) = ']';
+    AppendChar('\0');
 #undef AppendChar
 #undef AppendString
 }
@@ -232,11 +234,14 @@ static void SendDeltasToConsole()
     if(!RootTable.db_table && !RootTable.role_table)
         return;
     if(!ConsoleURL)
+    {
+        elog(LOG, "ConsoleURL not set, skipping forwarding");
         return;
+    }
     CURL *curl = curl_easy_init();
     if(!curl)
     {
-        errmsg("Failed to initialize curl object");
+        elog(ERROR, "Failed to initialize curl object");
         return;
     }
 
@@ -252,7 +257,7 @@ static void SendDeltasToConsole()
     curl_easy_setopt(curl, CURLOPT_URL, ConsoleURL);
     if(curl_easy_perform(curl) != 0)
     {
-        errmsg("Failed to perform curl request");
+        elog(ERROR, "Failed to perform curl request");
     }
     curl_easy_cleanup(curl);
     curl_slist_free_all(header);
@@ -419,9 +424,10 @@ static void NeonXactCallback(XactEvent event, void *arg)
     if(event == XACT_EVENT_PRE_COMMIT || event == XACT_EVENT_PARALLEL_PRE_COMMIT)
     {
         SendDeltasToConsole();
-        RootTable.role_table = NULL;
-        RootTable.db_table = NULL;
     }
+    RootTable.role_table = NULL;
+    RootTable.db_table = NULL;
+    Assert(CurrentDdlTable == &RootTable);
 }
 
 static void HandleCreateDb(CreatedbStmt *stmt)
@@ -441,6 +447,8 @@ static void HandleCreateDb(CreatedbStmt *stmt)
         stmt->dbname,
         HASH_ENTER,
         &found);
+    if(!found)
+        entry->old_name[0] = '\0';
 
     entry->type = Op_Set;
     if(downer)
@@ -455,11 +463,14 @@ static void HandleAlterOwner(AlterOwnerStmt *stmt)
     if(stmt->objectType != OBJECT_DATABASE)
         return;
     const char *name = strVal(stmt->object);
+    bool found = false;
     DbEntry *entry = hash_search(
         CurrentDdlTable->db_table,
         name,
         HASH_ENTER,
-        NULL);
+        &found);
+    if(!found)
+        entry->old_name[0] = '\0';
 
     strncpy(entry->owner, get_rolespec_name(stmt->newowner), NAMEDATALEN);
     entry->type = Op_Set;
@@ -469,11 +480,10 @@ static void HandleDbRename(RenameStmt *stmt)
 {
     Assert(stmt->renameType == OBJECT_DATABASE);
     InitDbTableIfNeeded();
-    const char *name = strVal(stmt->object);
     bool found = false;
     DbEntry *entry = hash_search(
         CurrentDdlTable->db_table,
-        name,
+        stmt->subname,
         HASH_FIND,
         &found);
     DbEntry *entry_for_new_name = hash_search(
@@ -491,13 +501,13 @@ static void HandleDbRename(RenameStmt *stmt)
         strncpy(entry_for_new_name->owner, entry->owner, NAMEDATALEN);
         hash_search(
             CurrentDdlTable->db_table,
-            name,
+            stmt->subname,
             HASH_REMOVE,
             NULL);
     }
     else
     {
-        strncpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
+        strncpy(entry_for_new_name->old_name, stmt->subname, NAMEDATALEN);
         entry_for_new_name->owner[0] = '\0';
     }
 }
@@ -505,22 +515,27 @@ static void HandleDbRename(RenameStmt *stmt)
 static void HandleDropDb(DropdbStmt *stmt)
 {
     InitDbTableIfNeeded();
+    bool found = false;
     DbEntry *entry = hash_search(
         CurrentDdlTable->db_table,
         stmt->dbname,
         HASH_ENTER,
-        NULL);
+        &found);
     entry->type = Op_Delete;
+    entry->owner[0] = '\0';
+    if(!found)
+        entry->old_name[0] = '\0';
 }
 
 static void HandleCreateRole(CreateRoleStmt *stmt)
 {
     InitRoleTableIfNeeded();
+    bool found = false;
     RoleEntry *entry = hash_search(
         CurrentDdlTable->role_table,
         stmt->role,
         HASH_ENTER,
-        NULL);
+        &found);
     DefElem *dpass = NULL;
     ListCell *option;
     foreach(option, stmt->options)
@@ -529,6 +544,8 @@ static void HandleCreateRole(CreateRoleStmt *stmt)
         if(strcmp(defel->defname, "password") == 0)
             dpass = defel;
     }
+    if(!found)
+        entry->old_name[0] = '\0';
     if(dpass)
         entry->password = MemoryContextStrdup(CurTransactionContext, strVal(dpass->arg));
     else
@@ -550,12 +567,15 @@ static void HandleAlterRole(AlterRoleStmt *stmt)
     // We're not updating the password
     if(!dpass)
         return;
+    bool found = false;
     RoleEntry *entry = hash_search(
         CurrentDdlTable->role_table,
-        stmt->role,
+        stmt->role->rolename,
         HASH_ENTER,
-        NULL);
-    entry->password = strVal(dpass->arg);
+        &found);
+    if(!found)
+        entry->old_name[0] = '\0';
+    entry->password = MemoryContextStrdup(CurTransactionContext, strVal(dpass->arg));
     entry->type = Op_Set;
 }
 
@@ -563,11 +583,10 @@ static void HandleRoleRename(RenameStmt *stmt)
 {
     InitRoleTableIfNeeded();
     Assert(stmt->renameType == OBJECT_ROLE);
-    const char *name = strVal(stmt->object);
     bool found = false;
     RoleEntry *entry = hash_search(
         CurrentDdlTable->role_table,
-        name,
+        stmt->subname,
         HASH_FIND,
         &found);
 
@@ -585,14 +604,14 @@ static void HandleRoleRename(RenameStmt *stmt)
             strncpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
         entry_for_new_name->password = entry->password;
         hash_search(
-            CurrentDdlTable->db_table,
-            name,
+            CurrentDdlTable->role_table,
+            entry->name,
             HASH_REMOVE,
             NULL);
     }
     else
     {
-        strncpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
+        strncpy(entry_for_new_name->old_name, stmt->subname, NAMEDATALEN);
         entry_for_new_name->password = NULL;
     }
 }
@@ -604,12 +623,16 @@ static void HandleDropRole(DropRoleStmt *stmt)
     foreach(item, stmt->roles)
     {
         RoleSpec *spec = lfirst(item);
-        DbEntry *entry = hash_search(
+        bool found = false;
+        RoleEntry *entry = hash_search(
             CurrentDdlTable->role_table,
             spec->rolename,
             HASH_ENTER,
-            NULL);
+            &found);
         entry->type = Op_Delete;
+        entry->password = NULL;
+        if(!found)
+            entry->old_name[0] = '\0';
     }
 }
 
@@ -698,7 +721,7 @@ void InitConsoleConnector()
         NULL,
         &ConsoleURL,
         "",
-        PGC_POSTMASTER,
+        PGC_SUSET,
         0,
         NULL,
         NULL,
@@ -706,6 +729,6 @@ void InitConsoleConnector()
 
     if(curl_global_init(CURL_GLOBAL_DEFAULT))
     {
-        errmsg("Failed to initialize curl");
+        elog(ERROR, "Failed to initialize curl");
     }
 }
