@@ -1011,11 +1011,19 @@ impl RemoteTimelineClient {
 mod tests {
     use super::*;
     use crate::{
-        tenant::harness::{TenantHarness, TIMELINE_ID},
+        context::RequestContext,
+        tenant::{
+            harness::{TenantHarness, TIMELINE_ID},
+            Tenant,
+        },
         DEFAULT_PG_VERSION,
     };
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
-    use std::{collections::HashSet, path::Path};
+    use std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+    };
+    use tokio::runtime::EnterGuard;
     use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
@@ -1064,39 +1072,80 @@ mod tests {
         assert_eq!(found, expected);
     }
 
+    struct TestSetup {
+        runtime: &'static tokio::runtime::Runtime,
+        entered_runtime: EnterGuard<'static>,
+        harness: TenantHarness<'static>,
+        tenant: Arc<Tenant>,
+        tenant_ctx: RequestContext,
+        remote_fs_dir: PathBuf,
+        client: Arc<RemoteTimelineClient>,
+    }
+
+    impl TestSetup {
+        fn new(test_name: &str) -> anyhow::Result<Self> {
+            // Use a current-thread runtime in the test
+            let runtime = Box::leak(Box::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?,
+            ));
+            let entered_runtime = runtime.enter();
+
+            let test_name = Box::leak(Box::new(format!("remote_timeline_client__{test_name}")));
+            let harness = TenantHarness::create(test_name)?;
+            let (tenant, ctx) = runtime.block_on(harness.load());
+            // create an empty timeline directory
+            let timeline =
+                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            let _ = timeline.initialize(&ctx).unwrap();
+
+            let remote_fs_dir = harness.conf.workdir.join("remote_fs");
+            std::fs::create_dir_all(remote_fs_dir)?;
+            let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
+
+            let storage_config = RemoteStorageConfig {
+                max_concurrent_syncs: std::num::NonZeroUsize::new(
+                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
+                )
+                .unwrap(),
+                max_sync_errors: std::num::NonZeroU32::new(
+                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
+                )
+                .unwrap(),
+                storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            };
+
+            let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
+
+            let client = Arc::new(RemoteTimelineClient {
+                conf: harness.conf,
+                runtime,
+                tenant_id: harness.tenant_id,
+                timeline_id: TIMELINE_ID,
+                storage_impl: storage,
+                upload_queue: Mutex::new(UploadQueue::Uninitialized),
+                metrics: Arc::new(RemoteTimelineClientMetrics::new(
+                    &harness.tenant_id,
+                    &TIMELINE_ID,
+                )),
+            });
+
+            Ok(Self {
+                runtime,
+                entered_runtime,
+                harness,
+                tenant,
+                tenant_ctx: ctx,
+                remote_fs_dir,
+                client,
+            })
+        }
+    }
+
     // Test scheduling
     #[test]
     fn upload_scheduling() -> anyhow::Result<()> {
-        // Use a current-thread runtime in the test
-        let runtime = Box::leak(Box::new(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?,
-        ));
-        let _entered = runtime.enter();
-
-        let harness = TenantHarness::create("upload_scheduling")?;
-        let (tenant, ctx) = runtime.block_on(harness.load());
-        let _timeline =
-            tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let timeline_path = harness.timeline_path(&TIMELINE_ID);
-
-        let remote_fs_dir = harness.conf.workdir.join("remote_fs");
-        std::fs::create_dir_all(remote_fs_dir)?;
-        let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
-
-        let storage_config = RemoteStorageConfig {
-            max_concurrent_syncs: std::num::NonZeroUsize::new(
-                remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-            )
-            .unwrap(),
-            max_sync_errors: std::num::NonZeroU32::new(
-                remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-            )
-            .unwrap(),
-            storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
-        };
-
         // Test outline:
         //
         // Schedule upload of a bunch of layers. Check that they are started immediately, not queued
@@ -1111,21 +1160,19 @@ mod tests {
         // Schedule another deletion. Check that it's launched immediately.
         // Schedule index upload. Check that it's queued
 
-        println!("workdir: {}", harness.conf.workdir.display());
-
-        let storage_impl = GenericRemoteStorage::from_config(&storage_config)?;
-        let client = Arc::new(RemoteTimelineClient {
-            conf: harness.conf,
+        let TestSetup {
             runtime,
-            tenant_id: harness.tenant_id,
-            timeline_id: TIMELINE_ID,
-            storage_impl,
-            upload_queue: Mutex::new(UploadQueue::Uninitialized),
-            metrics: Arc::new(RemoteTimelineClientMetrics::new(
-                &harness.tenant_id,
-                &TIMELINE_ID,
-            )),
-        });
+            entered_runtime: _entered_runtime,
+            harness,
+            tenant: _tenant,
+            tenant_ctx: _tenant_ctx,
+            remote_fs_dir,
+            client,
+        } = TestSetup::new("upload_scheduling").unwrap();
+
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+
+        println!("workdir: {}", harness.conf.workdir.display());
 
         let remote_timeline_dir =
             remote_fs_dir.join(timeline_path.strip_prefix(&harness.conf.workdir)?);
