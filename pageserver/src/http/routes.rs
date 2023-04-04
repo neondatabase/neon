@@ -781,6 +781,19 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
 
+    if let Some(evictions_low_residence_duration_metric_threshold) =
+        request_data.evictions_low_residence_duration_metric_threshold
+    {
+        tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
+            humantime::parse_duration(&evictions_low_residence_duration_metric_threshold)
+                .with_context(bad_duration(
+                    "evictions_low_residence_duration_metric_threshold",
+                    &evictions_low_residence_duration_metric_threshold,
+                ))
+                .map_err(ApiError::BadRequest)?,
+        );
+    }
+
     let target_tenant_id = request_data
         .new_tenant_id
         .map(TenantId::from)
@@ -913,6 +926,19 @@ async fn update_tenant_config_handler(
     }
 
     tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
+
+    if let Some(evictions_low_residence_duration_metric_threshold) =
+        request_data.evictions_low_residence_duration_metric_threshold
+    {
+        tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
+            humantime::parse_duration(&evictions_low_residence_duration_metric_threshold)
+                .with_context(bad_duration(
+                    "evictions_low_residence_duration_metric_threshold",
+                    &evictions_low_residence_duration_metric_threshold,
+                ))
+                .map_err(ApiError::BadRequest)?,
+        );
+    }
 
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)

@@ -77,6 +77,7 @@ pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::config::TenantConf;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -1209,6 +1210,15 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
 
+    fn get_evictions_low_residence_duration_metric_threshold(
+        tenant_conf: &TenantConfOpt,
+        default_tenant_conf: &TenantConf,
+    ) -> Duration {
+        tenant_conf
+            .evictions_low_residence_duration_metric_threshold
+            .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
+    }
+
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory, but not the layer map.
@@ -1240,6 +1250,11 @@ impl Timeline {
         let max_lsn_wal_lag = tenant_conf_guard
             .max_lsn_wal_lag
             .unwrap_or(conf.default_tenant_conf.max_lsn_wal_lag);
+        let evictions_low_residence_duration_metric_threshold =
+            Self::get_evictions_low_residence_duration_metric_threshold(
+                &*tenant_conf_guard,
+                &conf.default_tenant_conf,
+            );
         drop(tenant_conf_guard);
 
         Arc::new_cyclic(|myself| {
@@ -1287,7 +1302,7 @@ impl Timeline {
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                         "mtime",
-                        conf.evictions_low_residence_duration_metric_threshold,
+                        evictions_low_residence_duration_metric_threshold,
                     ),
                 ),
 

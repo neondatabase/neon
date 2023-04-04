@@ -62,7 +62,6 @@ pub mod defaults {
     pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "1 hour";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 
     ///
     /// Default built-in configuration file.
@@ -91,7 +90,6 @@ pub mod defaults {
 #cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
 #synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
 
-#evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 
 #disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
 
@@ -108,6 +106,7 @@ pub mod defaults {
 #pitr_interval = '{DEFAULT_PITR_INTERVAL}'
 
 #min_resident_size_override = .. # in bytes
+#evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 
 # [remote_storage]
 
@@ -182,9 +181,6 @@ pub struct PageServerConf {
     pub metric_collection_endpoint: Option<Url>,
     pub synthetic_size_calculation_interval: Duration,
 
-    // See the corresponding metric's help string.
-    pub evictions_low_residence_duration_metric_threshold: Duration,
-
     pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
 
     pub test_remote_failures: u64,
@@ -257,8 +253,6 @@ struct PageServerConfigBuilder {
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
 
-    evictions_low_residence_duration_metric_threshold: BuilderValue<Duration>,
-
     disk_usage_based_eviction: BuilderValue<Option<DiskUsageEvictionTaskConfig>>,
 
     test_remote_failures: BuilderValue<u64>,
@@ -315,11 +309,6 @@ impl Default for PageServerConfigBuilder {
             )
             .expect("cannot parse default synthetic size calculation interval")),
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
-
-            evictions_low_residence_duration_metric_threshold: Set(humantime::parse_duration(
-                DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
-            )
-            .expect("cannot parse DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD")),
 
             disk_usage_based_eviction: Set(None),
 
@@ -438,10 +427,6 @@ impl PageServerConfigBuilder {
         self.test_remote_failures = BuilderValue::Set(fail_first);
     }
 
-    pub fn evictions_low_residence_duration_metric_threshold(&mut self, value: Duration) {
-        self.evictions_low_residence_duration_metric_threshold = BuilderValue::Set(value);
-    }
-
     pub fn disk_usage_based_eviction(&mut self, value: Option<DiskUsageEvictionTaskConfig>) {
         self.disk_usage_based_eviction = BuilderValue::Set(value);
     }
@@ -525,11 +510,6 @@ impl PageServerConfigBuilder {
             synthetic_size_calculation_interval: self
                 .synthetic_size_calculation_interval
                 .ok_or(anyhow!("missing synthetic_size_calculation_interval"))?,
-            evictions_low_residence_duration_metric_threshold: self
-                .evictions_low_residence_duration_metric_threshold
-                .ok_or(anyhow!(
-                    "missing evictions_low_residence_duration_metric_threshold"
-                ))?,
             disk_usage_based_eviction: self
                 .disk_usage_based_eviction
                 .ok_or(anyhow!("missing disk_usage_based_eviction"))?,
@@ -721,7 +701,6 @@ impl PageServerConf {
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
-                "evictions_low_residence_duration_metric_threshold" => builder.evictions_low_residence_duration_metric_threshold(parse_toml_duration(key, item)?),
                 "disk_usage_based_eviction" => {
                     tracing::info!("disk_usage_based_eviction: {:#?}", &item);
                     builder.disk_usage_based_eviction(
@@ -839,6 +818,13 @@ impl PageServerConf {
             );
         }
 
+        if let Some(item) = item.get("evictions_low_residence_duration_metric_threshold") {
+            t_conf.evictions_low_residence_duration_metric_threshold = Some(parse_toml_duration(
+                "evictions_low_residence_duration_metric_threshold",
+                item,
+            )?);
+        }
+
         Ok(t_conf)
     }
 
@@ -877,10 +863,6 @@ impl PageServerConf {
             cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
             synthetic_size_calculation_interval: Duration::from_secs(60),
-            evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
-                defaults::DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
-            )
-            .unwrap(),
             disk_usage_based_eviction: None,
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
@@ -1029,8 +1011,6 @@ cached_metric_collection_interval = '22200 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
 
-evictions_low_residence_duration_metric_threshold = '444 s'
-
 log_format = 'json'
 
 "#;
@@ -1087,9 +1067,6 @@ log_format = 'json'
                 synthetic_size_calculation_interval: humantime::parse_duration(
                     defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
                 )?,
-                evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
-                    defaults::DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD
-                )?,
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
@@ -1144,7 +1121,6 @@ log_format = 'json'
                 cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 synthetic_size_calculation_interval: Duration::from_secs(333),
-                evictions_low_residence_duration_metric_threshold: Duration::from_secs(444),
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,

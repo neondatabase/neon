@@ -2815,6 +2815,9 @@ pub mod harness {
                 trace_read_requests: Some(tenant_conf.trace_read_requests),
                 eviction_policy: Some(tenant_conf.eviction_policy),
                 min_resident_size_override: tenant_conf.min_resident_size_override,
+                evictions_low_residence_duration_metric_threshold: Some(
+                    tenant_conf.evictions_low_residence_duration_metric_threshold,
+                ),
             }
         }
     }
