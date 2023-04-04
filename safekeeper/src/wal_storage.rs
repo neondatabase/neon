@@ -512,7 +512,7 @@ impl WalReader {
                 .segment_lsn(state.server.wal_seg_size as usize)
         {
             bail!(
-                "Requested streaming from {}, which is before the start of the timeline {}",
+                "Requested streaming from {}, which is before the start of the timeline {}, and also doesn't start at the first segment of that timeline",
                 start_pos,
                 state.timeline_start_lsn
             );

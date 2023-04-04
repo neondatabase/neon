@@ -333,10 +333,9 @@ impl CheckPoint {
     }
 }
 
-//
-// Generate new, empty WAL segment.
-// We need this segment to start compute node.
-//
+/// Generate new, empty WAL segment, with correct block headers at the first
+/// page of the segment and the page that contains the given LSN.
+/// We need this segment to start compute node.
 pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Bytes, SerializeError> {
     let mut seg_buf = BytesMut::with_capacity(WAL_SEGMENT_SIZE);
 
@@ -346,17 +345,17 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
     let seg_off = lsn.segment_offset(WAL_SEGMENT_SIZE);
 
     let first_page_only = seg_off < XLOG_BLCKSZ;
-    let shdr_rem_len = if first_page_only {
-        seg_off
+    let (shdr_rem_len, infoflags) = if first_page_only {
+        (seg_off, pg_constants::XLP_FIRST_IS_CONTRECORD) 
     } else {
-        0
+        (0, 0)
     };
 
     let hdr = XLogLongPageHeaderData {
         std: {
             XLogPageHeaderData {
                 xlp_magic: XLOG_PAGE_MAGIC as u16,
-                xlp_info: pg_constants::XLP_LONG_HEADER,
+                xlp_info: pg_constants::XLP_LONG_HEADER | infoflags,
                 xlp_tli: PG_TLI,
                 xlp_pageaddr: pageaddr,
                 xlp_rem_len: shdr_rem_len as u32,
@@ -378,10 +377,18 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
         let block_offset = lsn.page_offset_in_segment(WAL_SEGMENT_SIZE) as usize;
         let header = XLogPageHeaderData {
             xlp_magic: XLOG_PAGE_MAGIC as u16,
-            xlp_info: 0,
+            xlp_info: if page_off >= pg_constants::SIZE_OF_PAGE_HEADER as u64 {
+                pg_constants::XLP_FIRST_IS_CONTRECORD
+            } else {
+                0
+            },
             xlp_tli: PG_TLI,
             xlp_pageaddr: lsn.page_lsn().0,
-            xlp_rem_len: page_off as u32,
+            xlp_rem_len: if page_off >= pg_constants::SIZE_OF_PAGE_HEADER as u64 {
+                page_off as u32
+            } else {
+                0u32
+            },
             ..Default::default() // Put 0 in padding fields.
         };
         let hdr_bytes = header.encode()?;

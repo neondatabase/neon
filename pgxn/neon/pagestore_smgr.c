@@ -2648,9 +2648,10 @@ smgr_init_neon(void)
  * the page isn't locked by the redo process, as there is no Buffer
  * being returned, nor is there a buffer descriptor to lock.
  * This means that any IO that wants to read this block needs to wait
- * for the WAL REDO process to finish before it allows the system to start
- * reading the block, as releasing the block early could lead to phantom
- * reads.
+ * for the WAL REDO process to finish processing the WAL record before
+ * it allows the system to start reading the block, as releasing the
+ * block early could lead to phantom reads.
+ *
  * For example, REDO for a WAL record that modifies 3 blocks could skip
  * the first block, wait for a lock on the second, and then modify the
  * third block. Without skipping, all blocks would be locked and phantom

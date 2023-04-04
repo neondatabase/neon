@@ -25,6 +25,9 @@ def test_hot_standby(neon_simple_env: NeonEnv):
             with primary.connect() as p_con:
                 with p_con.cursor() as p_cur:
                     p_cur.execute("CREATE TABLE test AS SELECT generate_series(1, 100) AS i")
+
+                # Explicit commit to make sure other connections (and replicas) can
+                # see the changes of this commit.
                 p_con.commit()
 
                 with p_con.cursor() as p_cur:
@@ -33,6 +36,11 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                     assert res is not None
                     (lsn,) = res
                     primary_lsn = lsn
+
+                # Explicit commit to make sure other connections (and replicas) can
+                # see the changes of this commit.
+                # Note that this may generate more WAL if the transaction has changed
+                # things, but we don't care about that.
                 p_con.commit()
 
                 for query in queries:
@@ -45,11 +53,9 @@ def test_hot_standby(neon_simple_env: NeonEnv):
 
             with secondary.connect() as s_con:
                 with s_con.cursor() as s_cur:
-                    s_cur.execute("SHOW transaction_read_only")
+                    s_cur.execute("SELECT 1 WHERE pg_is_in_recovery()")
                     res = s_cur.fetchone()
                     assert res is not None
-                    (result,) = res
-                    assert result == "on"
 
                 while not cought_up:
                     with s_con.cursor() as secondary_cursor:
@@ -57,8 +63,13 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                         res = secondary_cursor.fetchone()
                         assert res is not None
                         (secondary_lsn,) = res
+                        # There may be more changes on the primary after we got our LSN
+                        # due to e.g. autovacuum, but that shouldn't impact the content
+                        # of the tables, so we check whether we've replayed up to at
+                        # least after the commit of the `test` table.
                         cought_up = secondary_lsn >= primary_lsn
 
+                # Explicit commit to flush any transient transaction-level state.
                 s_con.commit()
 
                 for query in queries:
