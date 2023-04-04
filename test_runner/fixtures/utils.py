@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, TypeVar
 
-import allure  # type: ignore
+import allure
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
