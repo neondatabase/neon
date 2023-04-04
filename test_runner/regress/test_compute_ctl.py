@@ -60,11 +60,6 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
                 "vartype": "enum"
             },
             {
-                "name": "hot_standby",
-                "value": "on",
-                "vartype": "bool"
-            },
-            {
                 "name": "neon.safekeepers",
                 "value": """
         + f'"{cfg_map["neon.safekeepers"]}"'
