@@ -132,7 +132,11 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         args.get_one::<String>("tls-key"),
         args.get_one::<String>("tls-cert"),
     ) {
-        (Some(key_path), Some(cert_path)) => Some(config::configure_tls(key_path, cert_path)?),
+        (Some(key_path), Some(cert_path)) => Some(config::configure_tls(
+            key_path,
+            cert_path,
+            args.get_one::<String>("certs-dir"),
+        )?),
         (None, None) => None,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
@@ -253,6 +257,12 @@ fn cli() -> clap::Command {
                 .long("tls-cert")
                 .alias("ssl-cert") // backwards compatibility
                 .help("path to TLS cert for client postgres connections"),
+        )
+        // tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
+        .arg(
+            Arg::new("certs-dir")
+                .long("certs-dir")
+                .help("path to directory with TLS certificates for client postgres connections"),
         )
         .arg(
             Arg::new("metric-collection-endpoint")

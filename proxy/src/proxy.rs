@@ -124,11 +124,11 @@ pub async fn handle_ws_client(
 
     // Extract credentials which we're going to use for auth.
     let creds = {
-        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
@@ -163,11 +163,11 @@ async fn handle_client(
     // Extract credentials which we're going to use for auth.
     let creds = {
         let sni = stream.get_ref().sni_hostname();
-        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_names))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
