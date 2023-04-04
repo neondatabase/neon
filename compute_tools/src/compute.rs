@@ -272,7 +272,7 @@ impl ComputeNode {
         let replication = if hot_replica {
             Replication::HotStandby
         } else if let Some(lsn) = spec.cluster.settings.find("recovery_target_lsn") {
-                Replication::Static { lsn }
+            Replication::Static { lsn }
         } else {
             Replication::Primary
         };
