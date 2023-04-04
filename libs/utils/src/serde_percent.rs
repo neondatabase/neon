@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 pub struct Percent(#[serde(deserialize_with = "deserialize_pct_0_to_100")] u8);
 
 impl Percent {
+    pub const fn new(pct: u8) -> Option<Self> {
+        if pct <= 100 {
+            Some(Percent(pct))
+        } else {
+            None
+        }
+    }
+
     pub fn get(&self) -> u8 {
         self.0
     }
