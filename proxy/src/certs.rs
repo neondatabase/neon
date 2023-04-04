@@ -3,6 +3,7 @@ use rustls::{
     sign::CertifiedKey,
 };
 use std::{collections::BTreeMap, io, ops::Bound, sync::Arc};
+use tracing::{info, warn};
 
 /// App-level configuration structs for TLS certificates.
 pub mod config {
@@ -18,6 +19,7 @@ pub mod config {
     impl TlsServers {
         /// Load [`Self`] config from a file.
         pub fn from_config_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+            info!(path = %path.as_ref().display(), "loading TLS servers config file");
             let config = serde_dhall::from_file(path).parse()?;
             Ok(config)
         }
@@ -220,7 +222,7 @@ impl CertResolver {
         let mut builder = GlobMapBuilder::new();
         for server in config.0 {
             let Some(cert) = server.certificate.0.first() else {
-                tracing::warn!("found empty certificate, skipping");
+                warn!("found empty certificate, skipping");
                 continue;
             };
 
@@ -230,6 +232,7 @@ impl CertResolver {
                 .map(|s| globset::Glob::new(s))
                 .collect::<Result<Vec<_>, _>>()?;
 
+            info!(?names, "loading TLS certificate");
             let entry = CertResolverEntry {
                 raw: Arc::new(server.into_certified_key()?),
                 names,
@@ -243,8 +246,11 @@ impl CertResolver {
         })
     }
 
-    pub fn resolve_raw(&self, name: &str) -> Option<&CertResolverEntry> {
-        let entries = self.storage.query(name);
+    #[tracing::instrument(name = "resolve_tls_cert", fields(%server_name), skip_all)]
+    pub fn resolve_raw(&self, server_name: &str) -> Option<&CertResolverEntry> {
+        info!("trying to resolve TLS certificate");
+        let entries = self.storage.query(server_name);
+        info!("found {} matching entries", entries.len());
         entries.first().copied()
     }
 }
