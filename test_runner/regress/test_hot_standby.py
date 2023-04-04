@@ -10,7 +10,6 @@ def test_hot_standby(neon_simple_env: NeonEnv):
         branch_name="main",
         node_name="primary",
     ) as primary:
-        result = None
         with env.postgres.new_replica_start(origin=primary, name="secondary") as secondary:
             primary_lsn = None
             cought_up = False

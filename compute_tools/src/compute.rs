@@ -249,7 +249,7 @@ impl ComputeNode {
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip(self, compute_state))]
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
-        #[derive(Clone, Copy)]
+        #[derive(Clone)]
         enum Replication {
             Primary,
             Static { lsn: String },
@@ -274,12 +274,10 @@ impl ComputeNode {
 
         let replication = if hot_replica {
             Replication::HotStandby
-        } else {
-            if let Some(lsn) = spec.cluster.settings.find("recovery_target_lsn") {
+        } else if let Some(lsn) = spec.cluster.settings.find("recovery_target_lsn") {
                 Replication::Static { lsn }
-            } else {
-                Replication::Primary
-            }
+        } else {
+            Replication::Primary
         };
 
         // Remove/create an empty pgdata directory and put configuration there.

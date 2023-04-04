@@ -219,7 +219,7 @@ impl ConnCfg {
         Ok(connection)
     }
 
-    /// Connect to a corresponding compute node.
+    /// Connect to a cor responding compute node.
     pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
         self.do_connect()
             .inspect_err(|err| {
