@@ -23,7 +23,7 @@ module.exports = async ({ github, context, fetch, reports }) => {
     // GitHub bot id taken from (https://api.github.com/users/github-actions[bot])
     const githubActionsBotId = 41898282
     // The latest commit in the PR URL
-    const commitUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/pull/${context.payload.number}/commits/${context.sha}`
+    const commitUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/pull/${context.payload.number}/commits/${context.payload.pull_request.head.sha}`
     // Commend body itself
     let commentBody = `${startMarker}\n### Test results for ${commitUrl}:\n___\n`
 
