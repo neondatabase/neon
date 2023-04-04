@@ -78,9 +78,6 @@ impl RemotePath {
 /// providing basic CRUD operations for storage files.
 #[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync + 'static {
-    /// Lists all items the storage has right now.
-    async fn list(&self) -> anyhow::Result<Vec<RemotePath>>;
-
     /// Lists all top level subdirectories for a given prefix
     /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
     /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)

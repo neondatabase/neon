@@ -20,7 +20,6 @@ pub struct UnreliableWrapper {
 /// Used to identify retries of different unique operation.
 #[derive(Debug, Hash, Eq, PartialEq)]
 enum RemoteOp {
-    List,
     ListPrefixes(Option<RemotePath>),
     Upload(RemotePath),
     Download(RemotePath),
@@ -75,12 +74,6 @@ impl UnreliableWrapper {
 
 #[async_trait::async_trait]
 impl RemoteStorage for UnreliableWrapper {
-    /// Lists all items the storage has right now.
-    async fn list(&self) -> anyhow::Result<Vec<RemotePath>> {
-        self.attempt(RemoteOp::List)?;
-        self.inner.list().await
-    }
-
     async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,
