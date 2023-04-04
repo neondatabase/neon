@@ -9,6 +9,7 @@
 #include "utils/acl.h"
 #include "fmgr.h"
 #include "utils/guc.h"
+#include "port.h"
 #include <curl/curl.h>
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
@@ -255,10 +256,17 @@ static void SendDeltasToConsole()
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, message);
     curl_easy_setopt(curl, CURLOPT_URL, ConsoleURL);
-    if(curl_easy_perform(curl) != 0)
+
+    const int num_retries = 5;
+    int curl_status;
+    for(int i = 0; i < num_retries; i++)
     {
-        elog(ERROR, "Failed to perform curl request");
+        if((curl_status = curl_easy_perform(curl)) == 0)
+            break;
+        pg_usleep(1000);
     }
+    if(curl_status != 0)
+        elog(ERROR, "Failed to perform curl request");
     curl_easy_cleanup(curl);
     curl_slist_free_all(header);
     pfree(message);
