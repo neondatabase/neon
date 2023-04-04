@@ -97,7 +97,7 @@ postgres-headers-%: postgres-configure-%
 # Compile and install PostgreSQL
 .PHONY: postgres-%
 postgres-%: postgres-configure-% \
-			postgres-headers-% # to prevent `make install` conflicts with neon's `postgres-headers`
+		  postgres-headers-% # to prevent `make install` conflicts with neon's `postgres-headers`
 	+@echo "Compiling PostgreSQL $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$* MAKELEVEL=0 install
 	+@echo "Compiling libpq $*"
@@ -117,8 +117,7 @@ postgres-clean-%:
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/src/interfaces/libpq clean
 
 .PHONY: neon-pg-ext-%
-neon-pg-ext-%: postgres-configure-% \
-			   postgres-headers-%
+neon-pg-ext-%: postgres-%
 	+@echo "Compiling neon $*"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/neon-$*
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
