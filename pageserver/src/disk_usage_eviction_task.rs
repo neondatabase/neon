@@ -686,4 +686,43 @@ mod filesystem_level_usage {
             avail_bytes,
         })
     }
+
+    #[test]
+    fn has_pressure_rounds_up() {
+        use super::Usage as _;
+        use std::time::Duration;
+        use utils::serde_percent::Percent;
+
+        let mut usage = Usage {
+            config: &DiskUsageEvictionTaskConfig {
+                max_usage_pct: Percent::new(85).unwrap(),
+                min_avail_bytes: 0,
+                period: Duration::MAX,
+                #[cfg(feature = "testing")]
+                mock_statvfs: None,
+            },
+            total_bytes: 100_000,
+            avail_bytes: 0,
+        };
+
+        assert!(usage.has_pressure(), "expected pressure at 100%");
+
+        usage.add_available_bytes(14_000);
+        assert!(usage.has_pressure(), "expected pressure at 86%");
+
+        usage.add_available_bytes(999);
+        assert!(usage.has_pressure(), "expected pressure at 85.001%");
+
+        usage.add_available_bytes(1);
+        assert!(usage.has_pressure(), "expected pressure at precisely 85%");
+
+        usage.add_available_bytes(1);
+        assert!(!usage.has_pressure(), "no pressure at 84.999%");
+
+        usage.add_available_bytes(999);
+        assert!(!usage.has_pressure(), "no pressure at 84%");
+
+        usage.add_available_bytes(16_000);
+        assert!(!usage.has_pressure(), "still no pressure at 70%");
+    }
 }
