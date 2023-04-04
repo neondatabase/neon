@@ -639,7 +639,7 @@ mod filesystem_level_usage {
                 ),
                 (
                     "max_usage_pct",
-                    usage_pct > self.config.max_usage_pct.get() as u64,
+                    usage_pct >= self.config.max_usage_pct.get() as u64,
                 ),
             ];
 
