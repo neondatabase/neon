@@ -820,19 +820,28 @@ impl RemoteTimelineClientMetrics {
 
 /// See [`RemoteTimelineClientMetrics::call_begin`].
 #[must_use]
-pub(crate) struct RemoteTimelineClientCallMetricGuard(Option<IntGauge>);
+pub(crate) struct RemoteTimelineClientCallMetricGuard {
+    calls_unfinished_metric: Option<IntGauge>,
+}
 
 impl RemoteTimelineClientCallMetricGuard {
     /// Consume this guard object without decrementing the metric.
     /// The caller vouches to do this manually, so that the prior increment of the gauge will cancel out.
     pub fn will_decrement_manually(mut self) {
-        self.0 = None; // prevent drop() from decrementing
+        // prevent drop() from decrementing
+        let RemoteTimelineClientCallMetricGuard {
+            calls_unfinished_metric,
+        } = &mut self;
+        calls_unfinished_metric.take();
     }
 }
 
 impl Drop for RemoteTimelineClientCallMetricGuard {
     fn drop(&mut self) {
-        if let RemoteTimelineClientCallMetricGuard(Some(guard)) = self {
+        let RemoteTimelineClientCallMetricGuard {
+            calls_unfinished_metric,
+        } = self;
+        if let Some(guard) = calls_unfinished_metric.take() {
             guard.dec();
         }
     }
@@ -854,7 +863,9 @@ impl RemoteTimelineClientMetrics {
         self.calls_started_hist(file_kind, op_kind)
             .observe(calls_unfinished_metric.get() as f64);
         calls_unfinished_metric.inc();
-        RemoteTimelineClientCallMetricGuard(Some(calls_unfinished_metric))
+        RemoteTimelineClientCallMetricGuard {
+            calls_unfinished_metric: Some(calls_unfinished_metric),
+        }
     }
 
     /// Manually decrement the metric instead of using the guard object.
