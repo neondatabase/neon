@@ -219,7 +219,8 @@ use utils::lsn::Lsn;
 
 use crate::metrics::{
     MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
-    REMOTE_ONDEMAND_DOWNLOADED_BYTES, REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
+    RemoteTimelineMetricCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
+    REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
 };
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::{
@@ -367,9 +368,13 @@ impl RemoteTimelineClient {
 
     /// Download index file
     pub async fn download_index_file(&self) -> Result<IndexPart, DownloadError> {
-        let _unfinished_gauge_guard = self
-            .metrics
-            .call_begin(&RemoteOpFileKind::Index, &RemoteOpKind::Download);
+        let _unfinished_gauge_guard = self.metrics.call_begin(
+            &RemoteOpFileKind::Index,
+            &RemoteOpKind::Download,
+            crate::metrics::RemoteTimelineMetricCallTrackSize::DontCreateMetric {
+                reason: "no need for a downloads gauge",
+            },
+        );
 
         download::download_index_part(
             self.conf,
@@ -398,9 +403,13 @@ impl RemoteTimelineClient {
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
         let downloaded_size = {
-            let _unfinished_gauge_guard = self
-                .metrics
-                .call_begin(&RemoteOpFileKind::Layer, &RemoteOpKind::Download);
+            let _unfinished_gauge_guard = self.metrics.call_begin(
+                &RemoteOpFileKind::Layer,
+                &RemoteOpKind::Download,
+                crate::metrics::RemoteTimelineMetricCallTrackSize::DontCreateMetric {
+                    reason: "no need for a downloads gauge",
+                },
+            );
             download::download_layer_file(
                 self.conf,
                 &self.storage_impl,
@@ -886,11 +895,32 @@ impl RemoteTimelineClient {
     fn calls_unfinished_metric_impl(
         &self,
         op: &UploadOp,
-    ) -> Option<(RemoteOpFileKind, RemoteOpKind)> {
+    ) -> Option<(
+        RemoteOpFileKind,
+        RemoteOpKind,
+        RemoteTimelineMetricCallTrackSize,
+    )> {
+        use RemoteTimelineMetricCallTrackSize::DontCreateMetric;
         let res = match op {
-            UploadOp::UploadLayer(_, _) => (RemoteOpFileKind::Layer, RemoteOpKind::Upload),
-            UploadOp::UploadMetadata(_, _) => (RemoteOpFileKind::Index, RemoteOpKind::Upload),
-            UploadOp::Delete(file_kind, _) => (*file_kind, RemoteOpKind::Delete),
+            UploadOp::UploadLayer(_, m) => (
+                RemoteOpFileKind::Layer,
+                RemoteOpKind::Upload,
+                RemoteTimelineMetricCallTrackSize::Bytes(m.file_size().try_into().unwrap()),
+            ),
+            UploadOp::UploadMetadata(_, _) => (
+                RemoteOpFileKind::Index,
+                RemoteOpKind::Upload,
+                DontCreateMetric {
+                    reason: "metadata uploads are tiny",
+                },
+            ),
+            UploadOp::Delete(file_kind, _) => (
+                *file_kind,
+                RemoteOpKind::Delete,
+                DontCreateMetric {
+                    reason: "should we track deletes? positive or negative sign?",
+                },
+            ),
             UploadOp::Barrier(_) => {
                 // we do not account these
                 return None;
@@ -900,20 +930,20 @@ impl RemoteTimelineClient {
     }
 
     fn calls_unfinished_metric_begin(&self, op: &UploadOp) {
-        let (file_kind, op_kind) = match self.calls_unfinished_metric_impl(op) {
+        let (file_kind, op_kind, track_bytes) = match self.calls_unfinished_metric_impl(op) {
             Some(x) => x,
             None => return,
         };
-        let guard = self.metrics.call_begin(&file_kind, &op_kind);
+        let guard = self.metrics.call_begin(&file_kind, &op_kind, track_bytes);
         guard.will_decrement_manually(); // in unfinished_ops_metric_end()
     }
 
     fn calls_unfinished_metric_end(&self, op: &UploadOp) {
-        let (file_kind, op_kind) = match self.calls_unfinished_metric_impl(op) {
+        let (file_kind, op_kind, track_bytes) = match self.calls_unfinished_metric_impl(op) {
             Some(x) => x,
             None => return,
         };
-        self.metrics.call_end(&file_kind, &op_kind);
+        self.metrics.call_end(&file_kind, &op_kind, track_bytes);
     }
 
     fn stop(&self) {

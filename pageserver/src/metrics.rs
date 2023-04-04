@@ -377,6 +377,15 @@ static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new
     .expect("failed to define a metric")
 });
 
+static REMOTE_TIMELINE_CLIENT_BYTES_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_remote_timeline_client_bytes_unfinished",
+        "Bytes in flight",
+        &["tenant_id", "timeline_id", "file_kind", "op_kind"],
+    )
+    .expect("failed to define a metric")
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteOpKind {
     Upload,
@@ -727,6 +736,7 @@ pub struct RemoteTimelineClientMetrics {
     remote_operation_time: Mutex<HashMap<(&'static str, &'static str, &'static str), Histogram>>,
     calls_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
     calls_started_hist: Mutex<HashMap<(&'static str, &'static str), Histogram>>,
+    bytes_unfinished_gauge: Mutex<HashMap<(&'static str, &'static str), IntGauge>>,
 }
 
 impl RemoteTimelineClientMetrics {
@@ -737,6 +747,7 @@ impl RemoteTimelineClientMetrics {
             remote_operation_time: Mutex::new(HashMap::default()),
             calls_unfinished_gauge: Mutex::new(HashMap::default()),
             calls_started_hist: Mutex::new(HashMap::default()),
+            bytes_unfinished_gauge: Mutex::new(HashMap::default()),
             remote_physical_size_gauge: Mutex::new(None),
         }
     }
@@ -775,6 +786,7 @@ impl RemoteTimelineClientMetrics {
         });
         metric.clone()
     }
+
     fn calls_unfinished_gauge(
         &self,
         file_kind: &RemoteOpFileKind,
@@ -816,12 +828,34 @@ impl RemoteTimelineClientMetrics {
         });
         metric.clone()
     }
+
+    fn bytes_unfinished_gauge(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+    ) -> IntGauge {
+        // XXX would be nice to have an upgradable RwLock
+        let mut guard = self.bytes_unfinished_gauge.lock().unwrap();
+        let key = (file_kind.as_str(), op_kind.as_str());
+        let metric = guard.entry(key).or_insert_with(move || {
+            REMOTE_TIMELINE_CLIENT_BYTES_UNFINISHED_GAUGE
+                .get_metric_with_label_values(&[
+                    &self.tenant_id.to_string(),
+                    &self.timeline_id.to_string(),
+                    key.0,
+                    key.1,
+                ])
+                .unwrap()
+        });
+        metric.clone()
+    }
 }
 
 /// See [`RemoteTimelineClientMetrics::call_begin`].
 #[must_use]
 pub(crate) struct RemoteTimelineClientCallMetricGuard {
     calls_unfinished_metric: Option<IntGauge>,
+    bytes_unfinished_metric: Option<(IntGauge, i64)>,
 }
 
 impl RemoteTimelineClientCallMetricGuard {
@@ -831,8 +865,10 @@ impl RemoteTimelineClientCallMetricGuard {
         // prevent drop() from decrementing
         let RemoteTimelineClientCallMetricGuard {
             calls_unfinished_metric,
+            bytes_unfinished_metric,
         } = &mut self;
         calls_unfinished_metric.take();
+        bytes_unfinished_metric.take();
     }
 }
 
@@ -840,11 +876,20 @@ impl Drop for RemoteTimelineClientCallMetricGuard {
     fn drop(&mut self) {
         let RemoteTimelineClientCallMetricGuard {
             calls_unfinished_metric,
+            bytes_unfinished_metric,
         } = self;
         if let Some(guard) = calls_unfinished_metric.take() {
             guard.dec();
         }
+        if let Some((guard, value)) = bytes_unfinished_metric.take() {
+            guard.sub(value);
+        }
     }
+}
+
+pub(crate) enum RemoteTimelineMetricCallTrackSize {
+    DontCreateMetric { reason: &'static str },
+    Bytes(i64),
 }
 
 impl RemoteTimelineClientMetrics {
@@ -858,26 +903,56 @@ impl RemoteTimelineClientMetrics {
         &self,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
+        size: RemoteTimelineMetricCallTrackSize,
     ) -> RemoteTimelineClientCallMetricGuard {
         let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
         self.calls_started_hist(file_kind, op_kind)
             .observe(calls_unfinished_metric.get() as f64);
-        calls_unfinished_metric.inc();
+        calls_unfinished_metric.inc(); // NB: inc after the histogram, see comment on underlying metric
+
+        let bytes_unfinished_metric = match size {
+            RemoteTimelineMetricCallTrackSize::DontCreateMetric { reason: _reason } => {
+                // nothing to do
+                None
+            }
+            RemoteTimelineMetricCallTrackSize::Bytes(size) => {
+                let bytes_unfinished_metric = self.bytes_unfinished_gauge(file_kind, op_kind);
+                bytes_unfinished_metric.add(size);
+                Some((bytes_unfinished_metric, size))
+            }
+        };
         RemoteTimelineClientCallMetricGuard {
             calls_unfinished_metric: Some(calls_unfinished_metric),
+            bytes_unfinished_metric,
         }
     }
 
     /// Manually decrement the metric instead of using the guard object.
     /// Using the guard object is generally preferable.
     /// See [`call_begin`] for more context.
-    pub(crate) fn call_end(&self, file_kind: &RemoteOpFileKind, op_kind: &RemoteOpKind) {
+    pub(crate) fn call_end(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+        size: RemoteTimelineMetricCallTrackSize,
+    ) {
         let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
         debug_assert!(
             calls_unfinished_metric.get() > 0,
             "begin and end should cancel out"
         );
         calls_unfinished_metric.dec();
+        match size {
+            RemoteTimelineMetricCallTrackSize::DontCreateMetric { reason: _reason } => {}
+            RemoteTimelineMetricCallTrackSize::Bytes(size) => {
+                let bytes_unfinished_metric = self.bytes_unfinished_gauge(file_kind, op_kind);
+                bytes_unfinished_metric.sub(size);
+                debug_assert!(
+                    bytes_unfinished_metric.get() >= 0,
+                    "begin and end should cancel out"
+                );
+            }
+        }
     }
 }
 
@@ -890,6 +965,7 @@ impl Drop for RemoteTimelineClientMetrics {
             remote_operation_time,
             calls_unfinished_gauge,
             calls_started_hist,
+            bytes_unfinished_gauge,
         } = self;
         for ((a, b, c), _) in remote_operation_time.get_mut().unwrap().drain() {
             let _ = REMOTE_OPERATION_TIME.remove_label_values(&[tenant_id, timeline_id, a, b, c]);
@@ -904,6 +980,14 @@ impl Drop for RemoteTimelineClientMetrics {
         }
         for ((a, b), _) in calls_started_hist.get_mut().unwrap().drain() {
             let _ = REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST.remove_label_values(&[
+                tenant_id,
+                timeline_id,
+                a,
+                b,
+            ]);
+        }
+        for ((a, b), _) in bytes_unfinished_gauge.get_mut().unwrap().drain() {
+            let _ = REMOTE_TIMELINE_CLIENT_BYTES_UNFINISHED_GAUGE.remove_label_values(&[
                 tenant_id,
                 timeline_id,
                 a,
