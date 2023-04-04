@@ -851,6 +851,19 @@ impl RemoteTimelineClientMetrics {
     }
 }
 
+#[cfg(test)]
+impl RemoteTimelineClientMetrics {
+    pub fn test_get_bytes_unfinished_gauge_value(
+        &self,
+        file_kind: &RemoteOpFileKind,
+        op_kind: &RemoteOpKind,
+    ) -> Option<i64> {
+        let guard = self.bytes_unfinished_gauge.lock().unwrap();
+        let key = (file_kind.as_str(), op_kind.as_str());
+        guard.get(&key).map(|gauge| gauge.get())
+    }
+}
+
 /// See [`RemoteTimelineClientMetrics::call_begin`].
 #[must_use]
 pub(crate) struct RemoteTimelineClientCallMetricGuard {

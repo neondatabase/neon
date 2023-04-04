@@ -1293,4 +1293,47 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn bytes_unfinished_gauge_for_layer_file_uploads() -> anyhow::Result<()> {
+        let TestSetup {
+            runtime,
+            harness,
+            client,
+            ..
+        } = TestSetup::new("metrics")?;
+
+        let metadata = dummy_metadata(Lsn(0x10));
+        client.init_upload_queue_for_empty_remote(&metadata)?;
+
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+
+        let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
+        let content_1 = dummy_contents("foo");
+        std::fs::write(
+            timeline_path.join(layer_file_name_1.file_name()),
+            &content_1,
+        )?;
+
+        client.schedule_layer_file_upload(
+            &layer_file_name_1,
+            &LayerFileMetadata::new(content_1.len() as u64),
+        )?;
+
+        let queued = client
+            .metrics
+            .test_get_bytes_unfinished_gauge_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
+            .expect("scheduling the layer file upload should have added to the gauge");
+        assert_eq!(queued, content_1.len() as i64);
+
+        runtime.block_on(client.wait_completion())?;
+
+        let after_completion = client
+            .metrics
+            .test_get_bytes_unfinished_gauge_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
+            .unwrap();
+        assert_eq!(after_completion, 0);
+
+        Ok(())
+    }
 }
