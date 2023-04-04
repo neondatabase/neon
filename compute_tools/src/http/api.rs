@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::compute::{ComputeNode, ComputeStatus};
-use crate::spec::ComputeSpec;
+use crate::http::models::{ConfigurationRequest, GenericAPIError};
 
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
@@ -82,37 +82,35 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             ))
         }
 
-        // Accept spec in JSON format and request compute reconfiguration from
+        // Accept spec in JSON format and request compute configuration from
         // the configurator thread. If anything goes wrong after we set the
         // compute state to `ConfigurationPending` and / or sent spec to the
         // configurator thread, we basically leave compute in the potentially
         // wrong state. That said, it's control-plane's responsibility to
         // watch compute state after reconfiguration request and to clean
         // restart in case of errors.
-        //
-        // TODO: Errors should be in JSON format with proper status codes.
-        (&Method::POST, "/spec") => {
-            info!("serving /spec POST request");
+        (&Method::POST, "/configure") => {
+            info!("serving /configure POST request");
             if !compute.live_config_allowed {
                 let msg = "live reconfiguration is not allowed for this compute node";
                 error!(msg);
-                return Response::new(Body::from(msg));
+                return render_json_error(msg, StatusCode::PRECONDITION_FAILED);
             }
 
             let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
             let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
-            if let Ok(spec) = serde_json::from_str::<ComputeSpec>(&spec_raw) {
+            if let Ok(request) = serde_json::from_str::<ConfigurationRequest>(&spec_raw) {
+                let spec = request.spec;
                 let (state, state_changed) = &compute.state;
                 let mut state = state.lock().unwrap();
-                if !(state.status == ComputeStatus::WaitingSpec
-                    || state.status == ComputeStatus::Running)
+                if !(state.status == ComputeStatus::Empty || state.status == ComputeStatus::Running)
                 {
                     let msg = format!(
                         "invalid compute status for reconfiguration request: {}",
                         serde_json::to_string(&*state).unwrap()
                     );
                     error!(msg);
-                    return Response::new(Body::from(msg));
+                    return render_json_error(&msg, StatusCode::PRECONDITION_FAILED);
                 }
                 state.spec = spec;
                 state.status = ComputeStatus::ConfigurationPending;
@@ -129,11 +127,13 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                         state.status
                     );
                 }
-                Response::new(Body::from("ok"))
+
+                // Return current compute state if everything went well.
+                Response::new(Body::from(serde_json::to_string(&*state).unwrap()))
             } else {
                 let msg = "invalid spec";
                 error!(msg);
-                Response::new(Body::from(msg))
+                render_json_error(msg, StatusCode::BAD_REQUEST)
             }
         }
 
@@ -144,6 +144,16 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             not_found
         }
     }
+}
+
+fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
+    let error = GenericAPIError {
+        error: e.to_string(),
+    };
+    Response::builder()
+        .status(status)
+        .body(Body::from(serde_json::to_string(&error).unwrap()))
+        .unwrap()
 }
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
