@@ -2,7 +2,7 @@
 
 use crate::error::UserFacingError;
 use pq_proto::StartupMessageParams;
-use std::borrow::Cow;
+use std::collections::HashSet;
 use thiserror::Error;
 use tracing::info;
 
@@ -19,11 +19,10 @@ pub enum ClientCredsParseError {
     InconsistentProjectNames { domain: String, option: String },
 
     #[error(
-        "SNI ('{}') inconsistently formatted with respect to common name ('{}'). \
-         SNI should be formatted as '<project-name>.{}'.",
-        .sni, .cn, .cn,
+        "Common name inferred from SNI ('{}') is not known",
+        .cn,
     )]
-    InconsistentSni { sni: String, cn: String },
+    UnknownCommonName { cn: String },
 
     #[error("Project name ('{0}') must contain only alphanumeric characters and hyphen.")]
     MalformedProjectName(String),
@@ -37,7 +36,7 @@ impl UserFacingError for ClientCredsParseError {}
 pub struct ClientCredentials<'a> {
     pub user: &'a str,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
-    pub project: Option<Cow<'a, str>>,
+    pub project: Option<String>,
 }
 
 impl ClientCredentials<'_> {
@@ -51,7 +50,7 @@ impl<'a> ClientCredentials<'a> {
     pub fn parse(
         params: &'a StartupMessageParams,
         sni: Option<&str>,
-        common_name: Option<&str>,
+        common_names: Option<HashSet<String>>,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
@@ -60,37 +59,43 @@ impl<'a> ClientCredentials<'a> {
         let user = get_param("user")?;
 
         // Project name might be passed via PG's command-line options.
-        let project_option = params.options_raw().and_then(|mut options| {
-            options
-                .find_map(|opt| opt.strip_prefix("project="))
-                .map(Cow::Borrowed)
-        });
+        let project_option = params
+            .options_raw()
+            .and_then(|mut options| options.find_map(|opt| opt.strip_prefix("project=")))
+            .map(|name| name.to_string());
 
-        // Alternative project name is in fact a subdomain from SNI.
-        // NOTE: we do not consider SNI if `common_name` is missing.
-        let project_domain = sni
-            .zip(common_name)
-            .map(|(sni, cn)| {
-                subdomain_from_sni(sni, cn)
-                    .ok_or_else(|| InconsistentSni {
-                        sni: sni.into(),
-                        cn: cn.into(),
+        let project_from_domain = if let Some(sni_str) = sni {
+            if let Some(cn) = common_names {
+                let common_name_from_sni = sni_str.split_once('.').map(|(_, domain)| domain);
+
+                let project = common_name_from_sni
+                    .and_then(|domain| {
+                        if cn.contains(domain) {
+                            subdomain_from_sni(sni_str, domain)
+                        } else {
+                            None
+                        }
                     })
-                    .map(Cow::<'static, str>::Owned)
-            })
-            .transpose()?;
+                    .ok_or_else(|| UnknownCommonName {
+                        cn: common_name_from_sni.unwrap_or("").into(),
+                    })?;
 
-        let project = match (project_option, project_domain) {
+                Some(project)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let project = match (project_option, project_from_domain) {
             // Invariant: if we have both project name variants, they should match.
             (Some(option), Some(domain)) if option != domain => {
-                Some(Err(InconsistentProjectNames {
-                    domain: domain.into(),
-                    option: option.into(),
-                }))
+                Some(Err(InconsistentProjectNames { domain, option }))
             }
             // Invariant: project name may not contain certain characters.
             (a, b) => a.or(b).map(|name| match project_name_valid(&name) {
-                false => Err(MalformedProjectName(name.into())),
+                false => Err(MalformedProjectName(name)),
                 true => Ok(name),
             }),
         }
@@ -149,9 +154,9 @@ mod tests {
         let options = StartupMessageParams::new([("user", "john_doe")]);
 
         let sni = Some("foo.localhost");
-        let common_name = Some("localhost");
+        let common_names = Some(["localhost".into()].into());
 
-        let creds = ClientCredentials::parse(&options, sni, common_name)?;
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("foo"));
 
@@ -177,11 +182,28 @@ mod tests {
         let options = StartupMessageParams::new([("user", "john_doe"), ("options", "project=baz")]);
 
         let sni = Some("baz.localhost");
-        let common_name = Some("localhost");
+        let common_names = Some(["localhost".into()].into());
 
-        let creds = ClientCredentials::parse(&options, sni, common_name)?;
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("baz"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_multi_common_names() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([("user", "john_doe")]);
+
+        let common_names = Some(["a.com".into(), "b.com".into()].into());
+        let sni = Some("p1.a.com");
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        assert_eq!(creds.project.as_deref(), Some("p1"));
+
+        let common_names = Some(["a.com".into(), "b.com".into()].into());
+        let sni = Some("p1.b.com");
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        assert_eq!(creds.project.as_deref(), Some("p1"));
 
         Ok(())
     }
@@ -192,9 +214,9 @@ mod tests {
             StartupMessageParams::new([("user", "john_doe"), ("options", "project=first")]);
 
         let sni = Some("second.localhost");
-        let common_name = Some("localhost");
+        let common_names = Some(["localhost".into()].into());
 
-        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
+        let err = ClientCredentials::parse(&options, sni, common_names).expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -209,13 +231,12 @@ mod tests {
         let options = StartupMessageParams::new([("user", "john_doe")]);
 
         let sni = Some("project.localhost");
-        let common_name = Some("example.com");
+        let common_names = Some(["example.com".into()].into());
 
-        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
+        let err = ClientCredentials::parse(&options, sni, common_names).expect_err("should fail");
         match err {
-            InconsistentSni { sni, cn } => {
-                assert_eq!(sni, "project.localhost");
-                assert_eq!(cn, "example.com");
+            UnknownCommonName { cn } => {
+                assert_eq!(cn, "localhost");
             }
             _ => panic!("bad error: {err:?}"),
         }

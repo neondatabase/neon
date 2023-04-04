@@ -54,9 +54,11 @@ fn generate_tls_config<'a>(
             .with_single_cert(vec![cert], key)?
             .into();
 
+        let common_names = Some([common_name.to_owned()].iter().cloned().collect());
+
         TlsConfig {
             config,
-            common_name: Some(common_name.to_string()),
+            common_names,
         }
     };
 
