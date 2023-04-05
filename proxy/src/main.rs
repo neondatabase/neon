@@ -67,16 +67,17 @@ async fn main() -> anyhow::Result<()> {
     let proxy_address: SocketAddr = args.get_one::<String>("proxy").unwrap().parse()?;
     info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
-    let proxy_cancellation_token = CancellationToken::new();
+    let cancellation_token = CancellationToken::new();
+
+    let mut client_tasks = vec![tokio::spawn(proxy::task_main(
+        config,
+        proxy_listener,
+        cancellation_token.clone(),
+    ))];
 
     let mut tasks = vec![
-        tokio::spawn(handle_signals(proxy_cancellation_token.clone())),
+        tokio::spawn(handle_signals(cancellation_token.clone())),
         tokio::spawn(http::server::task_main(http_listener)),
-        tokio::spawn(proxy::task_main(
-            config,
-            proxy_listener,
-            proxy_cancellation_token,
-        )),
         tokio::spawn(console::mgmt::task_main(mgmt_listener)),
     ];
 
@@ -85,9 +86,10 @@ async fn main() -> anyhow::Result<()> {
         info!("Starting wss on {wss_address}");
         let wss_listener = TcpListener::bind(wss_address).await?;
 
-        tasks.push(tokio::spawn(http::websocket::task_main(
+        client_tasks.push(tokio::spawn(http::websocket::task_main(
             config,
             wss_listener,
+            cancellation_token
         )));
     }
 
@@ -98,7 +100,11 @@ async fn main() -> anyhow::Result<()> {
     // This combinator will block until either all tasks complete or
     // one of them finishes with an error (others will be cancelled).
     let tasks = tasks.into_iter().map(flatten_err);
-    let _: Vec<()> = futures::future::try_join_all(tasks).await?;
+    let all_tasks_done = futures::future::try_join_all(tasks);
+    let all_connections_closed = futures::future::try_join_all(client_tasks.into_iter())
+        .then(|_| async move {
+            bail!("All connections closed, exiting");
+        });
 
     Ok(())
 }

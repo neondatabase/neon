@@ -188,6 +188,7 @@ async fn ws_handler(
 pub async fn task_main(
     config: &'static ProxyConfig,
     ws_listener: TcpListener,
+    cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("websocket server has shut down");
@@ -231,6 +232,7 @@ pub async fn task_main(
 
     hyper::Server::builder(accept::from_stream(tls_listener))
         .serve(make_svc)
+        .with_graceful_shutdown(cancellation_token.cancelled())
         .await?;
 
     Ok(())
