@@ -81,7 +81,9 @@ def test_branching_with_pgbench(
 
         endpoints.append(env.endpoints.create_start("b{}".format(i + 1), tenant_id=tenant))
 
-        threads.append(threading.Thread(target=run_pgbench, args=(endpoints[-1],), daemon=True))
+        threads.append(
+            threading.Thread(target=run_pgbench, args=(endpoints[-1].connstr(),), daemon=True)
+        )
         threads[-1].start()
 
     for thread in threads:

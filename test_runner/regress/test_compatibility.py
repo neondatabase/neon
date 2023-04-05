@@ -1,3 +1,4 @@
+import copy
 import os
 import shutil
 import subprocess
@@ -94,6 +95,9 @@ def test_backward_compatibility(
     pg_version: str,
     request: FixtureRequest,
 ):
+    """
+    Test that the new binaries can read old data
+    """
     compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
     assert (
         compatibility_snapshot_dir_env is not None
@@ -115,6 +119,7 @@ def test_backward_compatibility(
 
         check_neon_works(
             test_output_dir / "compatibility_snapshot" / "repo",
+            neon_binpath,
             neon_binpath,
             pg_distrib_dir,
             pg_version,
@@ -143,7 +148,11 @@ def test_forward_compatibility(
     port_distributor: PortDistributor,
     pg_version: str,
     request: FixtureRequest,
+    neon_binpath: Path,
 ):
+    """
+    Test that the old binaries can read new data
+    """
     compatibility_neon_bin_env = os.environ.get("COMPATIBILITY_NEON_BIN")
     assert compatibility_neon_bin_env is not None, (
         "COMPATIBILITY_NEON_BIN is not set. It should be set to a path with Neon binaries "
@@ -178,6 +187,7 @@ def test_forward_compatibility(
         check_neon_works(
             test_output_dir / "compatibility_snapshot" / "repo",
             compatibility_neon_bin,
+            neon_binpath,
             compatibility_postgres_distrib_dir,
             pg_version,
             port_distributor,
@@ -218,9 +228,13 @@ def prepare_snapshot(
     for logfile in repo_dir.glob("**/*.log"):
         logfile.unlink()
 
-    # Remove old computes
-    for tenant in (repo_dir / "endpoints").glob("*"):
-        shutil.rmtree(tenant)
+    # Remove old computes in 'endpoints'. Old versions of the control plane used a directory
+    # called "pgdatadirs". Delete it, too.
+    if (repo_dir / "endpoints").exists():
+        shutil.rmtree(repo_dir / "endpoints")
+    if (repo_dir / "pgdatadirs").exists():
+        shutil.rmtree(repo_dir / "pgdatadirs")
+    os.mkdir(repo_dir / "endpoints")
 
     # Remove wal-redo temp directory if it exists. Newer pageserver versions don't create
     # them anymore, but old versions did.
@@ -321,7 +335,8 @@ def get_neon_version(neon_binpath: Path):
 
 def check_neon_works(
     repo_dir: Path,
-    neon_binpath: Path,
+    neon_target_binpath: Path,
+    neon_current_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: str,
     port_distributor: PortDistributor,
@@ -331,7 +346,7 @@ def check_neon_works(
 ):
     snapshot_config_toml = repo_dir / "config"
     snapshot_config = toml.load(snapshot_config_toml)
-    snapshot_config["neon_distrib_dir"] = str(neon_binpath)
+    snapshot_config["neon_distrib_dir"] = str(neon_target_binpath)
     snapshot_config["postgres_distrib_dir"] = str(pg_distrib_dir)
     with (snapshot_config_toml).open("w") as f:
         toml.dump(snapshot_config, f)
@@ -342,17 +357,25 @@ def check_neon_works(
     config.repo_dir = repo_dir
     config.pg_version = pg_version
     config.initial_tenant = snapshot_config["default_tenant_id"]
-    config.neon_binpath = neon_binpath
     config.pg_distrib_dir = pg_distrib_dir
     config.preserve_database_files = True
 
-    cli = NeonCli(config)
-    cli.raw_cli(["start"])
-    request.addfinalizer(lambda: cli.raw_cli(["stop"]))
+    # Use the "target" binaries to launch the storage nodes
+    config_target = config
+    config_target.neon_binpath = neon_target_binpath
+    cli_target = NeonCli(config_target)
+
+    # And the current binaries to launch computes
+    config_current = copy.copy(config)
+    config_current.neon_binpath = neon_current_binpath
+    cli_current = NeonCli(config_current)
+
+    cli_target.raw_cli(["start"])
+    request.addfinalizer(lambda: cli_target.raw_cli(["stop"]))
 
     pg_port = port_distributor.get_port()
-    cli.endpoint_start("main", port=pg_port)
-    request.addfinalizer(lambda: cli.endpoint_stop("main"))
+    cli_current.endpoint_start("main", port=pg_port)
+    request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
     pg_bin.run(["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"])

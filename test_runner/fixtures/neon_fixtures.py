@@ -2770,11 +2770,15 @@ class Endpoint(PgProtocol):
 
         return self
 
-    def pg_data_dir_path(self) -> str:
-        """Path to data directory"""
+    def endpoint_path(self) -> Path:
+        """Path to endpoint directory"""
         assert self.endpoint_id
-        path = Path("endpoints") / self.endpoint_id / "pgdata"
-        return os.path.join(self.env.repo_dir, path)
+        path = Path("endpoints") / self.endpoint_id
+        return self.env.repo_dir / path
+
+    def pg_data_dir_path(self) -> str:
+        """Path to Postgres data directory"""
+        return os.path.join(self.endpoint_path(), "pgdata")
 
     def pg_xact_dir_path(self) -> str:
         """Path to pg_xact dir"""

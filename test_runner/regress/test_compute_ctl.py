@@ -29,6 +29,9 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     endpoint.stop_and_destroy()
 
+    # stop_and_destroy removes the whole endpoint directory. Recreate it.
+    Path(pgdata).mkdir(parents=True)
+
     spec = (
         """
 {
