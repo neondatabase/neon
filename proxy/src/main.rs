@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         client_tasks.push(tokio::spawn(http::websocket::task_main(
             config,
             wss_listener,
-            cancellation_token
+            cancellation_token,
         )));
     }
 
@@ -100,12 +100,12 @@ async fn main() -> anyhow::Result<()> {
     // This combinator will block until either all tasks complete or
     // one of them finishes with an error (others will be cancelled).
     let tasks = tasks.into_iter().map(flatten_err);
-    let all_tasks_done = futures::future::try_join_all(tasks);
-    let all_connections_closed = futures::future::try_join_all(client_tasks.into_iter())
-        .then(|_| async move {
-            bail!("All connections closed, exiting");
-        });
-
+    let (all_tasks_done, abort_handle) =
+        futures::future::abortable(futures::future::try_join_all(tasks));
+    let _ = futures::future::try_join_all(client_tasks.into_iter()).then(|_| async move {
+        abort_handle.abort();
+    });
+    let _ = all_tasks_done.await?;
     Ok(())
 }
 

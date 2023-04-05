@@ -22,6 +22,7 @@ use tokio::{
     io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use utils::http::{error::ApiError, json::json_response};
 
