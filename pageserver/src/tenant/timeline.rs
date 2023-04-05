@@ -162,7 +162,7 @@ pub struct Timeline {
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
-    metrics: TimelineMetrics,
+    pub(super) metrics: TimelineMetrics,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
@@ -1137,6 +1137,8 @@ impl Timeline {
                 if let Some(delta) = local_layer_residence_duration {
                     self.metrics
                         .evictions_with_low_residence_duration
+                        .read()
+                        .unwrap()
                         .observe(delta);
                     info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
                 } else {
@@ -1217,6 +1219,26 @@ impl Timeline {
         tenant_conf
             .evictions_low_residence_duration_metric_threshold
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
+    }
+
+    pub(super) fn tenant_conf_updated(&self) {
+        // NB: Most tenant conf optiosn are read by background loops, so,
+        // changes will automatically be picked up.
+
+        // The threshold is embedded in the metric. So, we need to update it.
+        {
+            let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
+                &self.tenant_conf.read().unwrap(),
+                &self.conf.default_tenant_conf,
+            );
+            let tenant_id_str = self.tenant_id.to_string();
+            let timeline_id_str = self.timeline_id.to_string();
+            self.metrics
+                .evictions_with_low_residence_duration
+                .write()
+                .unwrap()
+                .change_threshold(&tenant_id_str, &timeline_id_str, new_threshold);
+        }
     }
 
     /// Open a Timeline handle.

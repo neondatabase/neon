@@ -1735,6 +1735,9 @@ impl Tenant {
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         *self.tenant_conf.write().unwrap() = new_tenant_conf;
+        for timeline in self.timelines.lock().unwrap().values() {
+            timeline.tenant_conf_updated();
+        }
     }
 
     fn create_timeline_data(
