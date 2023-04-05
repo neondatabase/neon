@@ -409,6 +409,8 @@ jobs:
             steps.create-allure-report-release.outputs.report-url
           )
         with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
           script: |
             const reports = [{
               buildType: "debug",
