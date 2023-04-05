@@ -75,12 +75,6 @@ async fn main() -> anyhow::Result<()> {
         cancellation_token.clone(),
     ))];
 
-    let mut tasks = vec![
-        tokio::spawn(handle_signals(cancellation_token.clone())),
-        tokio::spawn(http::server::task_main(http_listener)),
-        tokio::spawn(console::mgmt::task_main(mgmt_listener)),
-    ];
-
     if let Some(wss_address) = args.get_one::<String>("wss") {
         let wss_address: SocketAddr = wss_address.parse()?;
         info!("Starting wss on {wss_address}");
@@ -89,9 +83,15 @@ async fn main() -> anyhow::Result<()> {
         client_tasks.push(tokio::spawn(http::websocket::task_main(
             config,
             wss_listener,
-            cancellation_token,
+            cancellation_token.clone(),
         )));
     }
+
+    let mut tasks = vec![
+        tokio::spawn(handle_signals(cancellation_token)),
+        tokio::spawn(http::server::task_main(http_listener)),
+        tokio::spawn(console::mgmt::task_main(mgmt_listener)),
+    ];
 
     if let Some(metrics_config) = &config.metric_collection {
         tasks.push(tokio::spawn(metrics::task_main(metrics_config)));
@@ -100,12 +100,13 @@ async fn main() -> anyhow::Result<()> {
     // This combinator will block until either all tasks complete or
     // one of them finishes with an error (others will be cancelled).
     let tasks = tasks.into_iter().map(flatten_err);
-    let (all_tasks_done, abort_handle) =
+    let (tasks_done, abort_handle) =
         futures::future::abortable(futures::future::try_join_all(tasks));
-    let _ = futures::future::try_join_all(client_tasks.into_iter()).then(|_| async move {
-        abort_handle.abort();
-    });
-    let _ = all_tasks_done.await?;
+    let client_tasks_done =
+        futures::future::try_join_all(client_tasks.into_iter()).then(|_| async move {
+            abort_handle.abort();
+        });
+    let _ = tokio::join!(client_tasks_done, tasks_done);
     Ok(())
 }
 
