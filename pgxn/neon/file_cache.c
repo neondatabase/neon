@@ -17,7 +17,6 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <math.h>
 
 #include "postgres.h"
 #include "funcapi.h"
