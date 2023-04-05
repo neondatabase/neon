@@ -35,7 +35,7 @@ def httpserver_listen_address(port_distributor: PortDistributor):
 # Storage metrics tests
 # ==============================================================================
 
-initial_tenant = TenantId.generate()
+metrics_tenant_id = TenantId.generate()
 remote_uploaded = 0
 checks = {
     "written_size": lambda value: value > 0,
@@ -63,7 +63,7 @@ def metrics_handler(request: Request) -> Response:
 
     for event in events:
         assert event["tenant_id"] == str(
-            initial_tenant
+            metrics_tenant_id
         ), "Expecting metrics only from the initial tenant"
         metric_name = event["metric"]
 
@@ -110,15 +110,18 @@ def test_metric_collection(
     log.info(f"test_metric_collection endpoint is {metric_collection_endpoint}")
 
     # Set initial tenant of the test, that we expect the logs from
-    global initial_tenant
-    initial_tenant = neon_env_builder.initial_tenant
+    global metrics_tenant_id
+    metrics_tenant_id = TenantId.generate()
     # mock http server that returns OK for the metrics
     httpserver.expect_request("/billing/api/v1/usage_events", method="POST").respond_with_handler(
         metrics_handler
     )
 
     # spin up neon,  after http server is ready
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start_no_initial_tenant()
+
+    env.neon_cli.create_tenant(tenant_id=metrics_tenant_id, set_default=True)
+
     # Order of fixtures shutdown is not specified, and if http server gets down
     # before pageserver, pageserver log might contain such errors in the end.
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")

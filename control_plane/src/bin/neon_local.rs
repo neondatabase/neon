@@ -618,7 +618,9 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            cplane.new_node(tenant_id, &node_name, timeline_id, lsn, port, pg_version)?;
+            let node =
+                cplane.new_node(tenant_id, &node_name, timeline_id, lsn, port, pg_version)?;
+            println!("{}", node.pgdata().display());
         }
         "start" => {
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
