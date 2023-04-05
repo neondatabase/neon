@@ -15,7 +15,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
-    assert_tenant_status,
+    assert_tenant_state,
     tenant_exists,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -416,11 +416,11 @@ def test_tenant_relocation(
 
             # wait for tenant to finish attaching
             tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
-            assert tenant_status["state"] in ["Attaching", "Active"]
+            assert tenant_status["state"]["slug"] in ["Attaching", "Active"]
             wait_until(
                 number_of_iterations=10,
                 interval=1,
-                func=lambda: assert_tenant_status(new_pageserver_http, tenant_id, "Active"),
+                func=lambda: assert_tenant_state(new_pageserver_http, tenant_id, "Active"),
             )
 
             check_timeline_attached(

@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    assert_tenant_status,
+    assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_state,
@@ -239,7 +239,7 @@ def test_ondemand_download_timetravel(
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
+    wait_until(10, 0.2, lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     # The current_physical_size reports the sum of layers loaded in the layer
     # map, regardless of where the layer files are located. So even though we
@@ -392,7 +392,7 @@ def test_download_remote_layers_api(
         ]
     )
 
-    wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
+    wait_until(10, 0.2, lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     ###### Phase 1: exercise download error code path
     assert (

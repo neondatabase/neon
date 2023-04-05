@@ -587,7 +587,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
             raise RuntimeError("Timed out waiting for WAL redo")
 
         tenant_status = ps_cli.tenant_status(tenant_id)
-        if tenant_status["state"] == "Loading":
+        if tenant_status["state"]["slug"] == "Loading":
             log.debug(f"Tenant {tenant_id} is still loading, retrying")
         else:
             pageserver_lsn = Lsn(

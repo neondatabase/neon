@@ -1,4 +1,3 @@
-use std::convert::AsRef;
 use std::{
     collections::HashMap,
     num::{NonZeroU64, NonZeroUsize},
@@ -28,8 +27,10 @@ use bytes::{BufMut, Bytes, BytesMut};
     serde::Deserialize,
     strum_macros::Display,
     strum_macros::EnumString,
+    strum_macros::EnumVariantNames,
     strum_macros::AsRefStr,
 )]
+#[serde(tag = "slug", content = "data")]
 pub enum TenantState {
     /// This tenant is being loaded from local disk
     Loading,
@@ -43,14 +44,6 @@ pub enum TenantState {
     /// A tenant is recognized by the pageserver, but can no longer be used for
     /// any operations, because it failed to be activated.
     Broken { reason: String, backtrace: String },
-}
-
-pub mod state {
-    pub const LOADING: &str = "loading";
-    pub const ATTACHING: &str = "attaching";
-    pub const ACTIVE: &str = "active";
-    pub const STOPPING: &str = "stopping";
-    pub const BROKEN: &str = "broken";
 }
 
 impl TenantState {
@@ -71,25 +64,15 @@ impl TenantState {
             backtrace: backtrace_str,
         }
     }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TenantState::Loading => state::LOADING,
-            TenantState::Attaching => state::ATTACHING,
-            TenantState::Active => state::ACTIVE,
-            TenantState::Stopping => state::STOPPING,
-            TenantState::Broken { .. } => state::BROKEN,
-        }
-    }
 }
 
 impl std::fmt::Debug for TenantState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Broken { reason, backtrace } if !reason.is_empty() => {
-                write!(f, "Broken due to: {}. Backtrace:\n{}", &reason, &backtrace)
+                write!(f, "Broken due to: {reason}. Backtrace:\n{backtrace}")
             }
-            _ => write!(f, "{}", self.as_ref()),
+            _ => write!(f, "{self}"),
         }
     }
 }
@@ -227,7 +210,6 @@ impl TenantConfigRequest {
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
-    #[serde_as(as = "DisplayFromStr")]
     pub state: TenantState,
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
@@ -709,7 +691,9 @@ mod tests {
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
-            "state": "Active",
+            "state": {
+                "slug": "Active",
+            },
             "current_physical_size": 42,
             "has_in_progress_downloads": false,
         });
@@ -725,7 +709,13 @@ mod tests {
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
-            "state": "Broken",
+            "state": {
+                "slug": "Broken",
+                "data": {
+                    "backtrace": "backtrace info",
+                    "reason": "reason",
+                }
+            },
             "current_physical_size": 42,
             "has_in_progress_downloads": false,
         });
