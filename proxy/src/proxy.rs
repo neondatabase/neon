@@ -95,9 +95,9 @@ pub async fn task_main(
 
                         handle_client(config, &cancel_map, session_id, socket).await
                     }
-                    .unwrap_or_else(|e| {
+                    .unwrap_or_else(move |e| {
                         // Acknowledge that the task has finished with an error.
-                        error!("per-client task finished with an error: {e:#}");
+                        error!(?session_id, "per-client task finished with an error: {e:#}");
                     }),
                 );
             }
