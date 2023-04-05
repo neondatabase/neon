@@ -11,6 +11,7 @@
 #include "utils/guc.h"
 #include "port.h"
 #include <curl/curl.h>
+#include "utils/jsonb.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 static char *ConsoleURL = NULL;
@@ -47,10 +48,25 @@ typedef struct DdlHashTable
 static DdlHashTable RootTable;
 static DdlHashTable *CurrentDdlTable = &RootTable;
 
-// Includes null terminator
-static size_t ComputeLengthOfDeltas()
+static void PushKeyValue(JsonbParseState **state, int *estimated_len, char *key, char *value)
 {
-    size_t length = sizeof('[');
+    JsonbValue k, v;
+    *estimated_len += strlen(key) + strlen(value) + 6; // Add 6 because of two pairs of quotes, a comma, and a colon
+    k.type = jbvString;
+    k.val.string.len = strlen(key);
+    k.val.string.val = key;
+    v.type = jbvString;
+    v.val.string.len = strlen(value);
+    v.val.string.val = value;
+    pushJsonbValue(state, WJB_KEY, &k);
+    pushJsonbValue(state, WJB_VALUE, &v);
+}
+
+static char *ConstructDeltaMessage()
+{
+    JsonbParseState *state = NULL;
+    pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+    int estimated_len = 0;
     if(RootTable.db_table)
     {
         HASH_SEQ_STATUS status;
@@ -58,32 +74,20 @@ static size_t ComputeLengthOfDeltas()
         hash_seq_init(&status, RootTable.db_table);
         while((entry = hash_seq_search(&status)) != NULL)
         {
-            length += sizeof('{');
-            length += strlen("\"op\":");
-            length += sizeof('"');
-            length += entry->type == Op_Set ? strlen("set") : strlen("del");
-            length += sizeof('"');
-            length += strlen(", \"name\":");
-            length += sizeof('"');
-            length += strlen(entry->name);
-            length += sizeof('"');
-            length += strlen(", \"type\":\"db\"");
+            pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+            PushKeyValue(&state, &estimated_len, "op", entry->type == Op_Set ? "set" : "del");
+            PushKeyValue(&state, &estimated_len, "name", entry->name);
+            PushKeyValue(&state, &estimated_len, "type", "db");
             if(entry->owner[0] != '\0')
             {
-                length += strlen(", \"owner\":");
-                length += sizeof('"');
-                length += strlen(entry->owner);
-                length += sizeof('"');
+                PushKeyValue(&state, &estimated_len, "owner", entry->owner);
             }
             if(entry->old_name[0] != '\0')
             {
-                length += strlen(", \"old_name\":");
-                length += sizeof('"');
-                length += strlen(entry->old_name);
-                length += sizeof('"');
+                PushKeyValue(&state, &estimated_len, "old_name", entry->old_name);
             }
-            length += sizeof('}');
-            length += sizeof(',');
+            pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+            estimated_len += 3; // Add 3 for two curly braces and a comma
         }
     }
 
@@ -94,140 +98,25 @@ static size_t ComputeLengthOfDeltas()
         hash_seq_init(&status, RootTable.role_table);
         while((entry = hash_seq_search(&status)) != NULL)
         {
-            length += sizeof('{');
-            length += strlen("\"op\":");
-            length += sizeof('"');
-            length += entry->type == Op_Set ? strlen("set") : strlen("del");
-            length += sizeof('"');
-            length += strlen(", \"name\":");
-            length += sizeof('"');
-            length += strlen(entry->name);
-            length += sizeof('"');
-            length += strlen(", \"type\":\"role\"");
+            pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
+            PushKeyValue(&state, &estimated_len, "op", entry->type == Op_Set ? "set" : "del");
+            PushKeyValue(&state, &estimated_len, "name", entry->name);
+            PushKeyValue(&state, &estimated_len, "type", "role");
             if(entry->password)
             {
-                length += strlen(", \"password\":");
-                length += sizeof('"');
-                length += strlen(entry->password);
-                length += sizeof('"');
+                PushKeyValue(&state, &estimated_len, "password", (char *)entry->password);
             }
             if(entry->old_name[0] != '\0')
             {
-                length += strlen(", \"old_name\":");
-                length += sizeof('"');
-                length += strlen(entry->old_name);
-                length += sizeof('"');
+                PushKeyValue(&state, &estimated_len, "old_name", entry->old_name);
             }
-            length += sizeof('}');
-            length += sizeof(',');
+            pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+            estimated_len += 3;
         }
     }
-    // We have added an extra byte due to the trailing comma. However,
-    // we also need room for null terminator, so we don't touch it.
-    length += sizeof(']');
-    return length;
-}
-
-void AppendChar(char **message, char c)
-{
-    **message = c;
-    (*message) += 1;
-}
-
-void AppendString(char **message, const char *str)
-{
-    size_t length = strlen(str);
-    memcpy(*message, str, length);
-    (*message) += length;
-}
-
-void ConstructDeltaMessage(char *message)
-{
-#define AppendChar(x) AppendChar(&message, x)
-#define AppendString(x) AppendString(&message, x)
-
-    AppendChar('[');
-    if(RootTable.db_table)
-    {
-        HASH_SEQ_STATUS status;
-        DbEntry *entry;
-        hash_seq_init(&status, RootTable.db_table);
-        while((entry = hash_seq_search(&status)) != NULL)
-        {
-            AppendChar('{');
-            AppendString("\"op\":");
-            AppendChar('"');
-            if(entry->type == Op_Set)
-                AppendString("set");
-            else
-                AppendString("del");
-            AppendChar('"');
-            AppendString(", \"name\":");
-            AppendChar('"');
-            AppendString(entry->name);
-            AppendChar('"');
-            AppendString(", \"type\":\"db\"");
-            if(entry->owner[0] != '\0')
-            {
-                AppendString(", \"owner\":");
-                AppendChar('"');
-                AppendString(entry->owner);
-                AppendChar('"');
-            }
-            if(entry->old_name[0] != '\0')
-            {
-                AppendString(", \"old_name\":");
-                AppendChar('"');
-                AppendString(entry->old_name);
-                AppendChar('"');
-            }
-            AppendChar('}');
-            AppendChar(',');
-        }
-    }
-
-    if(RootTable.role_table)
-    {
-        HASH_SEQ_STATUS status;
-        RoleEntry *entry;
-        hash_seq_init(&status, RootTable.role_table);
-        while((entry = hash_seq_search(&status)) != NULL)
-        {
-            AppendChar('{');
-            AppendString("\"op\":");
-            AppendChar('"');
-            if(entry->type == Op_Set)
-                AppendString("set");
-            else
-                AppendString("del");
-            AppendChar('"');
-            AppendString(", \"name\":");
-            AppendChar('"');
-            AppendString(entry->name);
-            AppendChar('"');
-            AppendString(", \"type\":\"role\"");
-            if(entry->password)
-            {
-                AppendString(", \"password\":");
-                AppendChar('"');
-                AppendString(entry->password);
-                AppendChar('"');
-            }
-            if(entry->old_name[0] != '\0')
-            {
-                AppendString(", \"old_name\":");
-                AppendChar('"');
-                AppendString(entry->old_name);
-                AppendChar('"');
-            }
-            AppendChar('}');
-            AppendChar(',');
-        }
-    }
-    *(message - 1) = ']';
-    AppendChar('\0');
-#undef AppendChar
-#undef AppendString
+    JsonbValue *result = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+    Jsonb *jsonb = JsonbValueToJsonb(result);
+    return JsonbToCString(NULL, &jsonb->root, estimated_len);
 }
 
 static void SendDeltasToConsole()
@@ -246,9 +135,7 @@ static void SendDeltasToConsole()
         return;
     }
 
-    size_t length_of_message = ComputeLengthOfDeltas(); // Includes null terminator
-    char *message = palloc(length_of_message);
-    ConstructDeltaMessage(message);
+    char *message = ConstructDeltaMessage();
 
     struct curl_slist *header = NULL;
     header = curl_slist_append(header, "Content-Type: application/json");

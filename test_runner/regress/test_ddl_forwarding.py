@@ -71,7 +71,11 @@ class DdlForwardingContext:
         self.roles = {}
         endpoint = "/management/api/v1/roles_and_databases"
         ddl_url = f"http://{host}:{port}{endpoint}"
-        self.pg.configure([f"neon.console_url={ddl_url}", "shared_preload_libraries = 'neon'"])
+        self.pg.configure([
+            f"neon.console_url={ddl_url}",
+            "shared_preload_libraries = 'neon'",
+            "max_prepared_transactions=5"
+        ])
         log.info(f"Listening on {ddl_url}")
         self.server.expect_request(endpoint, method="PATCH").respond_with_handler(
             lambda request: ddl_forward_handler(request, self.dbs, self.roles)
@@ -123,3 +127,12 @@ def test_roles_simple(ddl: DdlForwardingContext):
     assert ddl.roles == {"tarzan": "jungle_man"}
     ddl.send_and_wait("ALTER ROLE tarzan RENAME TO mowgli")
     assert ddl.roles == {"mowgli": "jungle_man"}
+
+"""
+def test_transactions(ddl: DdlForwardingContext):
+    conn = ddl.pg.connect()
+    cur = conn.cursor()
+
+    cur.execute("BEGIN")
+    cur.execute("CREATE ROLE bork WITH PASSWORD 'cork'")
+"""
