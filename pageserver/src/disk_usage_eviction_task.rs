@@ -688,7 +688,7 @@ mod filesystem_level_usage {
     }
 
     #[test]
-    fn has_pressure_rounds_up() {
+    fn max_usage_pct_pressure() {
         use super::Usage as _;
         use std::time::Duration;
         use utils::serde_percent::Percent;
