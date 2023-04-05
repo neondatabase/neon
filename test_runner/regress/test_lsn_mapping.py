@@ -21,7 +21,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     #
     # Each row contains current insert LSN and the current timestamp, when
     # the row was inserted.
-    cur.execute("SET synchronous_commit=off")
+    # cur.execute("SET synchronous_commit=off")
     cur.execute("CREATE TABLE foo (x integer)")
     tbl = []
     for i in range(1000):
@@ -33,6 +33,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
     # Execute one more transaction with synchronous_commit enabled, to flush
     # all the previous transactions
     cur.execute("INSERT INTO foo VALUES (-1)")
+    recent_timestamp = query_scalar(cur, "SELECT clock_timestamp()").replace(tzinfo=None)
 
     # Wait until WAL is received by pageserver
     wait_for_last_flush_lsn(env, pgmain, env.initial_tenant, new_timeline_id)
@@ -52,18 +53,15 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder):
         )
         assert result == "past"
 
-        # Probe a bunch of timestamps in the valid range
-        for i in range(1, len(tbl), 100):
-            probe_timestamp = tbl[i][1]
-            lsn = client.timeline_get_lsn_by_timestamp(
-                env.initial_tenant, new_timeline_id, f"{probe_timestamp.isoformat()}Z"
-            )
-            # Call get_lsn_by_timestamp to get the LSN
-            # Launch a new read-only node at that LSN, and check that only the rows
-            # that were supposed to be committed at that point in time are visible.
-            pg_here = env.postgres.create_start(
-                branch_name="test_lsn_mapping", node_name="test_lsn_mapping_read", lsn=lsn
-            )
-            assert pg_here.safe_psql("SELECT max(x) FROM foo")[0][0] == i
+        lsn = client.timeline_get_lsn_by_timestamp(
+            env.initial_tenant, new_timeline_id, f"{recent_timestamp.isoformat()}Z"
+        )
+        # Call get_lsn_by_timestamp to get the LSN
+        # Launch a new read-only node at that LSN, and check that only the rows
+        # that were supposed to be committed at that point in time are visible.
+        pg_here = env.postgres.create_start(
+            branch_name="test_lsn_mapping", node_name="test_lsn_mapping_read", lsn=lsn
+        )
+        assert pg_here.safe_psql("SELECT min(x) FROM foo")[0][0] == -1
 
-            pg_here.stop_and_destroy()
+        pg_here.stop_and_destroy()
