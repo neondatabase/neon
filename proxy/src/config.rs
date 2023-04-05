@@ -48,8 +48,9 @@ pub fn configure_tls(
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                let key_path = path.join("key.pem");
-                let cert_path = path.join("cert.pem");
+                // file names aligned with default cert-manager names
+                let key_path = path.join("tls.key");
+                let cert_path = path.join("tls.crt");
                 if key_path.exists() && cert_path.exists() {
                     cert_resolver
                         .add_cert(&key_path.to_string_lossy(), &cert_path.to_string_lossy())?;
