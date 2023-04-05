@@ -299,3 +299,81 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
     # dont test applying the setting here, we have that another test case to show it
     # we just care about being able to create the file
     assert len(contents_first) > len(contents_later)
+
+
+def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
+    neon_env_builder: NeonEnvBuilder,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.LOCAL_FS,
+        test_name="test_live_reconfig_get_evictions_low_residence_duration_metric_threshold",
+    )
+
+    env = neon_env_builder.init_start()
+    assert isinstance(env.remote_storage, LocalFsStorage)
+
+    (tenant_id, timeline_id) = env.neon_cli.create_tenant()
+    ps_http = env.pageserver.http_client()
+
+    def get_metric():
+        metrics = ps_http.get_metrics()
+        metric = metrics.query_one(
+            "pageserver_evictions_with_low_residence_duration_total",
+            {
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+            },
+        )
+        return metric
+
+    default_value = ps_http.tenant_config(tenant_id).effective_config[
+        "evictions_low_residence_duration_metric_threshold"
+    ]
+    metric = get_metric()
+    assert int(metric.value) == 0, "metric is present with default value"
+
+    assert default_value == "1day"
+
+    ps_http.download_all_layers(tenant_id, timeline_id)
+    ps_http.evict_all_layers(tenant_id, timeline_id)
+    metric = get_metric()
+    assert int(metric.value) > 0, "metric is updated"
+
+    env.neon_cli.config_tenant(
+        tenant_id, {"evictions_low_residence_duration_metric_threshold": default_value}
+    )
+    updated_metric = get_metric()
+    assert int(updated_metric.value) == int(
+        metric.value
+    ), "metric is unchanged when setting same value"
+
+    env.neon_cli.config_tenant(
+        tenant_id, {"evictions_low_residence_duration_metric_threshold": "2day"}
+    )
+    metric = get_metric()
+    assert int(metric.labels["low_threshold_secs"]) == 2 * 24 * 60 * 60
+    assert int(metric.value) == 0
+
+    ps_http.download_all_layers(tenant_id, timeline_id)
+    ps_http.evict_all_layers(tenant_id, timeline_id)
+    metric = get_metric()
+    assert int(metric.labels["low_threshold_secs"]) == 2 * 24 * 60 * 60
+    assert int(metric.value) > 0
+
+    env.neon_cli.config_tenant(
+        tenant_id, {"evictions_low_residence_duration_metric_threshold": "2h"}
+    )
+    metric = get_metric()
+    assert int(metric.labels["low_threshold_secs"]) == 2 * 60 * 60
+    assert int(metric.value) == 0, "value resets if label changes"
+
+    ps_http.download_all_layers(tenant_id, timeline_id)
+    ps_http.evict_all_layers(tenant_id, timeline_id)
+    metric = get_metric()
+    assert int(metric.labels["low_threshold_secs"]) == 2 * 60 * 60
+    assert int(metric.value) > 0, "set a non-zero value for next step"
+
+    env.neon_cli.config_tenant(tenant_id, {})
+    metric = get_metric()
+    assert int(metric.labels["low_threshold_secs"]) == 24 * 60 * 60, "label resets to default"
+    assert int(metric.value) == 0, "value resets to default"
