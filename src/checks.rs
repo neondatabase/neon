@@ -264,10 +264,13 @@ async fn branch_cleanup_and_check_errors(
                                 .collect::<Vec<_>>(),
                         ));
                         keys_to_remove.extend(s3_layers.iter().map(|layer_name| {
-                            s3_root
-                                .timeline_root(id)
-                                .with_sub_segment(&layer_name.file_name())
-                                .prefix_in_bucket
+                            let mut key = s3_root.timeline_root(id).prefix_in_bucket;
+                            let delimiter = s3_root.delimiter();
+                            if !key.ends_with(delimiter) {
+                                key.push_str(delimiter);
+                            }
+                            key.push_str(&layer_name.file_name());
+                            key
                         }));
                     }
                 }

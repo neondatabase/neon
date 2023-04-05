@@ -83,6 +83,13 @@ impl RootTarget {
             Self::Safekeeper(root) => &root.bucket_name,
         }
     }
+
+    pub fn delimiter(&self) -> &str {
+        match self {
+            Self::Pageserver(root) => &root.delimiter,
+            Self::Safekeeper(root) => &root.delimiter,
+        }
+    }
 }
 
 pub fn get_cloud_admin_api_token_or_exit() -> String {
