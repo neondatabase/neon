@@ -25,12 +25,11 @@ impl CancelMap {
         cancel_closure.try_cancel_query().await
     }
 
-    /// Run async action within an ephemeral session identified by [`CancelKeyData`].
-    pub async fn with_session<'a, F, R, V>(&'a self, f: F) -> anyhow::Result<V>
-    where
-        F: FnOnce(Session<'a>) -> R,
-        R: std::future::Future<Output = anyhow::Result<V>>,
-    {
+    /// Create a new session, with a new client-facing random cancellation key.
+    ///
+    /// Use `enable_query_cancellation` to register the Postgres backend's cancellation
+    /// key with it.
+    pub fn new_session<'a>(&'a self) -> anyhow::Result<Session<'a>> {
         // HACK: We'd rather get the real backend_pid but tokio_postgres doesn't
         // expose it and we don't want to do another roundtrip to query
         // for it. The client will be able to notice that this is not the
@@ -44,17 +43,9 @@ impl CancelMap {
             .write()
             .try_insert(key, None)
             .map_err(|_| anyhow!("query cancellation key already exists: {key}"))?;
-
-        // This will guarantee that the session gets dropped
-        // as soon as the future is finished.
-        scopeguard::defer! {
-            self.0.write().remove(&key);
-            info!("dropped query cancellation key {key}");
-        }
-
         info!("registered new query cancellation key {key}");
-        let session = Session::new(key, self);
-        f(session).await
+
+        Ok(Session::new(key, self))
     }
 
     #[cfg(test)]
@@ -111,7 +102,7 @@ impl<'a> Session<'a> {
 impl Session<'_> {
     /// Store the cancel token for the given session.
     /// This enables query cancellation in [`crate::proxy::handshake`].
-    pub fn enable_query_cancellation(self, cancel_closure: CancelClosure) -> CancelKeyData {
+    pub fn enable_query_cancellation(&self, cancel_closure: CancelClosure) -> CancelKeyData {
         info!("enabling query cancellation for this session");
         self.cancel_map
             .0
@@ -119,6 +110,14 @@ impl Session<'_> {
             .insert(self.key, Some(cancel_closure));
 
         self.key
+    }
+}
+
+impl<'a> Drop for Session<'a> {
+    fn drop(&mut self) {
+        let key = &self.key;
+        self.cancel_map.0.write().remove(key);
+        info!("dropped query cancellation key {key}");
     }
 }
 
@@ -132,14 +131,14 @@ mod tests {
         static CANCEL_MAP: Lazy<CancelMap> = Lazy::new(Default::default);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(CANCEL_MAP.with_session(|session| async move {
+
+        let session = CANCEL_MAP.new_session()?;
+        let task = tokio::spawn(async move {
             assert!(CANCEL_MAP.contains(&session));
 
             tx.send(()).expect("failed to send");
             futures::future::pending::<()>().await; // sleep forever
-
-            Ok(())
-        }));
+        });
 
         // Wait until the task has been spawned.
         rx.await.context("failed to hear from the task")?;
