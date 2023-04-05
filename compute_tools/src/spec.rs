@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::Result;
 use postgres::config::Config;
 use postgres::{Client, NoTls};
-use serde::Deserialize;
 use tracing::{info, info_span, instrument, span_enabled, warn, Level};
 
 use crate::compute::ComputeNode;
@@ -13,46 +11,7 @@ use crate::config;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
-/// Cluster spec or configuration represented as an optional number of
-/// delta operations + final cluster state description.
-#[derive(Clone, Deserialize)]
-pub struct ComputeSpec {
-    pub format_version: f32,
-    pub timestamp: String,
-    pub operation_uuid: Option<String>,
-    /// Expected cluster state at the end of transition process.
-    pub cluster: Cluster,
-    pub delta_operations: Option<Vec<DeltaOp>>,
-
-    pub storage_auth_token: Option<String>,
-
-    pub startup_tracing_context: Option<HashMap<String, String>>,
-}
-
-/// Cluster state seen from the perspective of the external tools
-/// like Rails web console.
-#[derive(Clone, Deserialize)]
-pub struct Cluster {
-    pub cluster_id: String,
-    pub name: String,
-    pub state: Option<String>,
-    pub roles: Vec<Role>,
-    pub databases: Vec<Database>,
-    pub settings: GenericOptions,
-}
-
-/// Single cluster state changing operation that could not be represented as
-/// a static `Cluster` structure. For example:
-/// - DROP DATABASE
-/// - DROP ROLE
-/// - ALTER ROLE name RENAME TO new_name
-/// - ALTER DATABASE name RENAME TO new_name
-#[derive(Clone, Deserialize)]
-pub struct DeltaOp {
-    pub action: String,
-    pub name: PgIdent,
-    pub new_name: Option<PgIdent>,
-}
+use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
 
 /// It takes cluster specification and does the following:
 /// - Serialize cluster config and put it into `postgresql.conf` completely rewriting the file.

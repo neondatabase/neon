@@ -19,15 +19,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
-use serde::{Serialize, Serializer};
 use tokio_postgres;
 use tracing::{info, instrument, warn};
+
+use compute_api::models::{ComputeMetrics, ComputeState, ComputeStatus};
+use compute_api::spec::ComputeSpec;
 
 use crate::checker::create_writability_check_data;
 use crate::config;
@@ -46,60 +47,11 @@ pub struct ComputeNode {
     pub timeline: String,
     pub pageserver_connstr: String,
     pub storage_auth_token: Option<String>,
-    pub metrics: ComputeMetrics,
+    pub metrics: RwLock<ComputeMetrics>,
     /// Volatile part of the `ComputeNode` so should be used under `RwLock`
     /// to allow HTTP API server to serve status requests, while configuration
     /// is in progress.
     pub state: RwLock<ComputeState>,
-}
-
-fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    x.to_rfc3339().serialize(s)
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ComputeState {
-    pub status: ComputeStatus,
-    /// Timestamp of the last Postgres activity
-    #[serde(serialize_with = "rfc3339_serialize")]
-    pub last_active: DateTime<Utc>,
-    pub error: Option<String>,
-}
-
-impl ComputeState {
-    pub fn new() -> Self {
-        Self {
-            status: ComputeStatus::Init,
-            last_active: Utc::now(),
-            error: None,
-        }
-    }
-}
-
-impl Default for ComputeState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ComputeStatus {
-    Init,
-    Running,
-    Failed,
-}
-
-#[derive(Default, Serialize)]
-pub struct ComputeMetrics {
-    pub sync_safekeepers_ms: AtomicU64,
-    pub basebackup_ms: AtomicU64,
-    pub config_ms: AtomicU64,
-    pub total_startup_ms: AtomicU64,
 }
 
 impl ComputeNode {
@@ -155,15 +107,11 @@ impl ComputeNode {
         ar.set_ignore_zeros(true);
         ar.unpack(&self.pgdata)?;
 
-        self.metrics.basebackup_ms.store(
-            Utc::now()
-                .signed_duration_since(start_time)
-                .to_std()
-                .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
-
+        self.metrics.write().unwrap().basebackup_ms = Utc::now()
+            .signed_duration_since(start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
         Ok(())
     }
 
@@ -201,14 +149,11 @@ impl ComputeNode {
             );
         }
 
-        self.metrics.sync_safekeepers_ms.store(
-            Utc::now()
-                .signed_duration_since(start_time)
-                .to_std()
-                .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.metrics.write().unwrap().sync_safekeepers_ms = Utc::now()
+            .signed_duration_since(start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
 
         let lsn = String::from(String::from_utf8(sync_output.stdout)?.trim());
 
@@ -340,23 +285,19 @@ impl ComputeNode {
         self.apply_config()?;
 
         let startup_end_time = Utc::now();
-        self.metrics.config_ms.store(
-            startup_end_time
+        {
+            let mut metrics = self.metrics.write().unwrap();
+            metrics.config_ms = startup_end_time
                 .signed_duration_since(start_time)
                 .to_std()
                 .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
-        self.metrics.total_startup_ms.store(
-            startup_end_time
+                .as_millis() as u64;
+            metrics.total_startup_ms = startup_end_time
                 .signed_duration_since(self.start_time)
                 .to_std()
                 .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
-
+                .as_millis() as u64;
+        }
         self.set_status(ComputeStatus::Running);
 
         Ok(pg)

@@ -31,7 +31,8 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         // future use for Prometheus metrics format.
         (&Method::GET, "/metrics.json") => {
             info!("serving /metrics.json GET request");
-            Response::new(Body::from(serde_json::to_string(&compute.metrics).unwrap()))
+            let metrics = compute.metrics.read().unwrap();
+            Response::new(Body::from(serde_json::to_string(&*metrics).unwrap()))
         }
 
         // Collect Postgres current usage insights

@@ -41,15 +41,17 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
 use tracing::{error, info};
+use url::Url;
 
-use compute_tools::compute::{ComputeMetrics, ComputeNode, ComputeState, ComputeStatus};
+use compute_api::models::{ComputeMetrics, ComputeState, ComputeStatus};
+use compute_api::spec::ComputeSpec;
+
+use compute_tools::compute::ComputeNode;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::pg_helpers::*;
-use compute_tools::spec::*;
-use url::Url;
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
@@ -145,8 +147,10 @@ fn main() -> Result<()> {
         .find("neon.timeline_id")
         .expect("tenant id should be provided");
 
+    let now = Utc::now();
+
     let compute_state = ComputeNode {
-        start_time: Utc::now(),
+        start_time: now,
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
@@ -155,8 +159,12 @@ fn main() -> Result<()> {
         timeline,
         pageserver_connstr,
         storage_auth_token,
-        metrics: ComputeMetrics::default(),
-        state: RwLock::new(ComputeState::new()),
+        metrics: RwLock::new(ComputeMetrics::default()),
+        state: RwLock::new(ComputeState {
+            status: ComputeStatus::Init,
+            last_active: now,
+            error: None,
+        }),
     };
     let compute = Arc::new(compute_state);
 
