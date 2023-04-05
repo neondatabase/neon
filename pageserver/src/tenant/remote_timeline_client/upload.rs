@@ -31,6 +31,7 @@ pub(super) async fn upload_index_part<'a>(
         .metadata_path(timeline_id, tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
     let storage_path = conf.remote_path(&index_part_path)?;
+    tracing::info!("uploading new index part for {tenant_id}/{timeline_id}");
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &storage_path)
         .await

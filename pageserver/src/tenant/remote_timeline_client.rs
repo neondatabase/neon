@@ -620,8 +620,6 @@ impl RemoteTimelineClient {
     pub(crate) async fn persist_index_part_with_deleted_flag(
         self: &Arc<Self>,
     ) -> anyhow::Result<()> {
-        self.stop().context("stop")?;
-
         let index_part = {
             let mut locked = self.upload_queue.lock().unwrap();
 
@@ -952,7 +950,7 @@ impl RemoteTimelineClient {
         self.metrics.call_end(&file_kind, &op_kind);
     }
 
-    fn stop(&self) -> anyhow::Result<()> {
+    pub fn stop(&self) -> anyhow::Result<()> {
         // Whichever *task* for this RemoteTimelineClient grabs the mutex first will transition the queue
         // into stopped state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
         // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
