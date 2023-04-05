@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import re
 import subprocess
@@ -6,6 +7,7 @@ import tarfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, TypeVar
+from urllib.parse import urlencode
 
 import allure
 from psycopg2.extensions import cursor
@@ -182,6 +184,47 @@ def allure_attach_from_dir(dir: Path):
                 extension = attachment.suffix.removeprefix(".")
 
             allure.attach.file(source, name, attachment_type, extension)
+
+
+def allure_add_grafana_links(host: str, start_ms: int, end_ms: int):
+    """Add links to server logs in Grafana to Allure report"""
+    # We expect host to be in format like ep-divine-night-159320.us-east-2.aws.neon.build
+    endpoint_id, region_id, *_ = host.split(".")
+    # Add 10s margin to the start and end times
+    start_ms_str = str(start_ms - 10_000)
+    end_ms_str = str(end_ms + 10_000)
+
+    datasource = "xHHYY0dVz"
+    expressions = {
+        "compute logs": f'{{app="compute-node-{endpoint_id}", neon_region="{region_id}"}}',
+        "k8s events": f'{{job="integrations/kubernetes/eventhandler"}} |~ "name=compute-node-{endpoint_id}-"',
+        "console logs": f'{{neon_service="console", neon_region="{region_id}"}} | json | endpoint_id = "{endpoint_id}"',
+        "proxy logs": f'{{neon_service="proxy-scram", neon_region="{region_id}"}}',
+    }
+
+    params: Dict[str, Any] = {
+        "datasource": datasource,
+        "queries": [
+            {
+                "expr": "<PUT AN EXPRESSION HERE>",
+                "refId": "A",
+                "datasource": {"type": "loki", "uid": datasource},
+                "editorMode": "code",
+                "queryType": "range",
+            }
+        ],
+        "range": {
+            "from": start_ms_str,
+            "to": end_ms_str,
+        },
+    }
+    for name, expr in expressions.items():
+        params["queries"][0]["expr"] = expr
+        query_string = urlencode({"orgId": 1, "left": json.dumps(params)})
+        link = f"https://neonprod.grafana.net/explore?{query_string}"
+
+        allure.dynamic.link(link, name=name)
+        log.info(f"{name}: {link}")
 
 
 def start_in_background(
