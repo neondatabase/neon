@@ -16,7 +16,6 @@ pub struct MetricCollectionConfig {
 
 pub struct TlsConfig {
     pub config: Arc<rustls::ServerConfig>,
-    pub common_name: Option<String>,
 }
 
 impl TlsConfig {
@@ -27,19 +26,16 @@ impl TlsConfig {
 
 impl TlsConfig {
     pub fn new(resolver: certs::CertResolver) -> anyhow::Result<Self> {
-        let resolver = Arc::new(resolver);
-
         let rustls_config = rustls::ServerConfig::builder()
             .with_safe_default_cipher_suites()
             .with_safe_default_kx_groups()
             // allow TLS 1.2 to be compatible with older client libraries
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
             .with_no_client_auth()
-            .with_cert_resolver(resolver.clone());
+            .with_cert_resolver(Arc::new(resolver));
 
         let config = TlsConfig {
             config: Arc::new(rustls_config),
-            common_name: None,
         };
 
         Ok(config)

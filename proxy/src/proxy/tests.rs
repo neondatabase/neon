@@ -41,10 +41,7 @@ impl ClientConfig<'_> {
 }
 
 /// Generate TLS certificates and build rustls configs for client and server.
-fn generate_tls_config<'a>(
-    hostname: &'a str,
-    common_name: &'a str,
-) -> anyhow::Result<(ClientConfig<'a>, TlsConfig)> {
+fn generate_tls_config(hostname: &str) -> anyhow::Result<(ClientConfig<'_>, TlsConfig)> {
     let (ca, cert, key) = generate_certs(hostname)?;
 
     let tls_config = {
@@ -54,10 +51,7 @@ fn generate_tls_config<'a>(
             .with_single_cert(vec![cert], key)?
             .into();
 
-        TlsConfig {
-            config,
-            common_name: Some(common_name.to_string()),
-        }
+        TlsConfig { config }
     };
 
     let client_config = {
@@ -150,7 +144,7 @@ async fn dummy_proxy(
 async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
     let (client, server) = tokio::io::duplex(1024);
 
-    let (_, server_config) = generate_tls_config("generic-project-name.localhost", "localhost")?;
+    let (_, server_config) = generate_tls_config("generic-project-name.localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
     let client_err = tokio_postgres::Config::new()
@@ -178,8 +172,7 @@ async fn handshake_tls_is_enforced_by_proxy() -> anyhow::Result<()> {
 async fn handshake_tls() -> anyhow::Result<()> {
     let (client, server) = tokio::io::duplex(1024);
 
-    let (client_config, server_config) =
-        generate_tls_config("generic-project-name.localhost", "localhost")?;
+    let (client_config, server_config) = generate_tls_config("generic-project-name.localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), NoAuth));
 
     let (_client, _conn) = tokio_postgres::Config::new()
@@ -237,8 +230,7 @@ async fn keepalive_is_inherited() -> anyhow::Result<()> {
 async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
     let (client, server) = tokio::io::duplex(1024);
 
-    let (client_config, server_config) =
-        generate_tls_config("generic-project-name.localhost", "localhost")?;
+    let (client_config, server_config) = generate_tls_config("generic-project-name.localhost")?;
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
@@ -260,8 +252,7 @@ async fn scram_auth_good(#[case] password: &str) -> anyhow::Result<()> {
 async fn scram_auth_mock() -> anyhow::Result<()> {
     let (client, server) = tokio::io::duplex(1024);
 
-    let (client_config, server_config) =
-        generate_tls_config("generic-project-name.localhost", "localhost")?;
+    let (client_config, server_config) = generate_tls_config("generic-project-name.localhost")?;
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
