@@ -21,7 +21,7 @@ cat <<EOF | tee /tmp/payload
   "http_port": 9898,
   "active": false,
   "availability_zone_id": "${AZ_ID}",
-  "disk_size": "${DISK_SIZE}",
+  "disk_size": ${DISK_SIZE},
   "instance_type": "${INSTANCE_TYPE}"
 }
 EOF
