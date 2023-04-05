@@ -1220,6 +1220,28 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
         return TenantConfig.from_json(res.json())
 
+    def set_tenant_config(self, tenant_id: TenantId, config: dict[str, Any]):
+        assert "tenant_id" not in config.keys()
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/config",
+            json={**config, "tenant_id": str(tenant_id)},
+        )
+        self.verbose_error(res)
+
+    def patch_tenant_config_client_side(
+        self,
+        tenant_id: TenantId,
+        inserts: Optional[Dict[str, Any]] = None,
+        removes: Optional[List[str]] = None,
+    ):
+        current = self.tenant_config(tenant_id).tenant_specific_overrides
+        if inserts is not None:
+            current.update(inserts)
+        if removes is not None:
+            for key in removes:
+                del current[key]
+        self.set_tenant_config(tenant_id, current)
+
     def tenant_size(self, tenant_id: TenantId) -> int:
         return self.tenant_size_and_modelinputs(tenant_id)[0]
 
@@ -1535,6 +1557,18 @@ class PageserverHttpClient(requests.Session):
         info = self.layer_map_info(tenant_id, timeline_id)
         for layer in info.historic_layers:
             self.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
+
+    def disk_usage_eviction_run(self, request: dict[str, Any]):
+        res = self.put(
+            f"http://localhost:{self.port}/v1/disk_usage_eviction/run",
+            json=request,
+        )
+        self.verbose_error(res)
+        return res.json()
+
+    def tenant_break(self, tenant_id: TenantId):
+        res = self.put(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/break")
+        self.verbose_error(res)
 
 
 @dataclass

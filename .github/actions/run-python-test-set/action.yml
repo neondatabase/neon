@@ -44,6 +44,10 @@ inputs:
     description: 'Secret access key'
     required: false
     default: ''
+  rerun_flaky:
+    description: 'Whether to rerun flaky tests'
+    required: false
+    default: 'false'
 
 runs:
   using: "composite"
@@ -101,6 +105,7 @@ runs:
         COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg14
         ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
         ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
+        RERUN_FLAKY: ${{ inputs.rerun_flaky }}
       shell: bash -euxo pipefail {0}
       run: |
         # PLATFORM will be embedded in the perf test report
@@ -141,6 +146,13 @@ runs:
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
           mkdir -p "$PERF_REPORT_DIR"
           EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
+        fi
+
+        if [ "${RERUN_FLAKY}" == "true" ]; then
+          mkdir -p $TEST_OUTPUT
+          poetry run ./scripts/flaky_tests.py "${TEST_RESULT_CONNSTR}" --days 10 --output "$TEST_OUTPUT/flaky.json"
+
+          EXTRA_PARAMS="--flaky-tests-json $TEST_OUTPUT/flaky.json $EXTRA_PARAMS"
         fi
 
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then

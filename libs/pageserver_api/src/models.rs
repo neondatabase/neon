@@ -120,6 +120,7 @@ pub struct TenantCreateRequest {
     // We might do that once the eviction feature has stabilizied.
     // For now, this field is not even documented in the openapi_spec.yml.
     pub eviction_policy: Option<serde_json::Value>,
+    pub min_resident_size_override: Option<u64>,
 }
 
 #[serde_as]
@@ -165,6 +166,7 @@ pub struct TenantConfigRequest {
     // We might do that once the eviction feature has stabilizied.
     // For now, this field is not even documented in the openapi_spec.yml.
     pub eviction_policy: Option<serde_json::Value>,
+    pub min_resident_size_override: Option<u64>,
 }
 
 impl TenantConfigRequest {
@@ -185,6 +187,7 @@ impl TenantConfigRequest {
             max_lsn_wal_lag: None,
             trace_read_requests: None,
             eviction_policy: None,
+            min_resident_size_override: None,
         }
     }
 }

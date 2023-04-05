@@ -335,6 +335,9 @@ jobs:
           real_s3_region: us-west-2
           real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
+          rerun_flaky: true
+        env:
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
@@ -371,42 +374,88 @@ jobs:
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
-  merge-allure-report:
+  create-test-report:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ regress-tests, benchmarks ]
     if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: false
 
-      - name: Create Allure report
-        id: create-allure-report
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Create Allure report (debug)
+        if: ${{ !cancelled() }}
+        id: create-allure-report-debug
         uses: ./.github/actions/allure-report
         with:
           action: generate
-          build_type: ${{ matrix.build_type }}
+          build_type: debug
+
+      - name: Create Allure report (release)
+        if: ${{ !cancelled() }}
+        id: create-allure-report-release
+        uses: ./.github/actions/allure-report
+        with:
+          action: generate
+          build_type: release
+
+      - uses: actions/github-script@v6
+        if: >
+          !cancelled() &&
+          github.event_name == 'pull_request' && (
+            steps.create-allure-report-debug.outputs.report-url ||
+            steps.create-allure-report-release.outputs.report-url
+          )
+        with:
+          script: |
+            const reports = [{
+              buildType: "debug",
+              reportUrl: "${{ steps.create-allure-report-debug.outputs.report-url }}",
+              jsonUrl:   "${{ steps.create-allure-report-debug.outputs.report-json-url }}",
+            }, {
+              buildType: "release",
+              reportUrl: "${{ steps.create-allure-report-release.outputs.report-url }}",
+              jsonUrl:   "${{ steps.create-allure-report-release.outputs.report-json-url }}",
+            }]
+
+            const script = require("./scripts/pr-comment-test-report.js")
+            await script({
+              github,
+              context,
+              fetch,
+              reports,
+            })
 
       - name: Store Allure test stat in the DB
-        if: ${{ steps.create-allure-report.outputs.report-url }}
+        if: >
+          !cancelled() && (
+            steps.create-allure-report-debug.outputs.report-url ||
+            steps.create-allure-report-release.outputs.report-url
+          )
         env:
-          BUILD_TYPE: ${{ matrix.build_type }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_URL: ${{ steps.create-allure-report.outputs.report-url }}
+          REPORT_JSON_URL_DEBUG: ${{ steps.create-allure-report-debug.outputs.report-json-url }}
+          REPORT_JSON_URL_RELEASE: ${{ steps.create-allure-report-release.outputs.report-json-url }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
         run: |
-          curl --fail --output suites.json ${REPORT_URL%/index.html}/data/suites.json
           ./scripts/pysync
 
-          DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
+          for report_url in $REPORT_JSON_URL_DEBUG $REPORT_JSON_URL_RELEASE; do
+            if [ -z "$report_url" ]; then
+              continue
+            fi
+
+            if [[ "$report_url" == "$REPORT_JSON_URL_DEBUG" ]]; then
+              BUILD_TYPE=debug
+            else
+              BUILD_TYPE=release
+            fi
+
+            curl --fail --output suites.json "${report_url}"
+            DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
+          done
 
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]
@@ -898,6 +947,16 @@ jobs:
     needs: [ push-docker-hub, tag, regress-tests ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
+      - name: Fix git ownership
+        run: |
+          # Workaround for `fatal: detected dubious ownership in repository at ...`
+          #
+          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+          #   Ref https://github.com/actions/checkout/issues/785
+          #
+          git config --global --add safe.directory ${{ github.workspace }}
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
       - name: Checkout
         uses: actions/checkout@v3
         with:

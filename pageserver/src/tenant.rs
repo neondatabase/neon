@@ -95,7 +95,7 @@ mod timeline;
 
 pub mod size;
 
-pub use timeline::{PageReconstructError, Timeline};
+pub use timeline::{LocalLayerInfoForDiskUsageEviction, PageReconstructError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -1706,6 +1706,13 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.trace_read_requests)
     }
 
+    pub fn get_min_resident_size_override(&self) -> Option<u64> {
+        let tenant_conf = self.tenant_conf.read().unwrap();
+        tenant_conf
+            .min_resident_size_override
+            .or(self.conf.default_tenant_conf.min_resident_size_override)
+    }
+
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         *self.tenant_conf.write().unwrap() = new_tenant_conf;
     }
@@ -2783,6 +2790,7 @@ pub mod harness {
                 max_lsn_wal_lag: Some(tenant_conf.max_lsn_wal_lag),
                 trace_read_requests: Some(tenant_conf.trace_read_requests),
                 eviction_policy: Some(tenant_conf.eviction_policy),
+                min_resident_size_override: tenant_conf.min_resident_size_override,
             }
         }
     }

@@ -18,6 +18,7 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::disk_usage_eviction_task;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
@@ -48,6 +49,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
+    disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 }
 
 impl State {
@@ -55,6 +57,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
+        disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
             .iter()
@@ -65,6 +68,7 @@ impl State {
             auth,
             allowlist_routes,
             remote_storage,
+            disk_usage_eviction_state,
         })
     }
 }
@@ -775,6 +779,8 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         );
     }
 
+    tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
+
     let target_tenant_id = request_data
         .new_tenant_id
         .map(TenantId::from)
@@ -906,10 +912,26 @@ async fn update_tenant_config_handler(
         );
     }
 
+    tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
+
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
         .instrument(info_span!("tenant_config", tenant = ?tenant_id))
         .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
+/// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
+#[cfg(feature = "testing")]
+async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&r, "tenant_id")?;
+
+    let tenant = crate::tenant::mgr::get_tenant(tenant_id, true)
+        .await
+        .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
+
+    tenant.set_broken("broken from test");
 
     json_response(StatusCode::OK, ())
 }
@@ -1063,6 +1085,89 @@ async fn always_panic_handler(req: Request<Body>) -> Result<Response<Body>, ApiE
     json_response(StatusCode::NO_CONTENT, ())
 }
 
+async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+
+    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    struct Config {
+        /// How many bytes to evict before reporting that pressure is relieved.
+        evict_bytes: u64,
+    }
+
+    #[derive(Debug, Clone, Copy, serde::Serialize)]
+    struct Usage {
+        // remains unchanged after instantiation of the struct
+        config: Config,
+        // updated by `add_available_bytes`
+        freed_bytes: u64,
+    }
+
+    impl crate::disk_usage_eviction_task::Usage for Usage {
+        fn has_pressure(&self) -> bool {
+            self.config.evict_bytes > self.freed_bytes
+        }
+
+        fn add_available_bytes(&mut self, bytes: u64) {
+            self.freed_bytes += bytes;
+        }
+    }
+
+    let config = json_request::<Config>(&mut r)
+        .await
+        .map_err(|_| ApiError::BadRequest(anyhow::anyhow!("invalid JSON body")))?;
+
+    let usage = Usage {
+        config,
+        freed_bytes: 0,
+    };
+
+    use crate::task_mgr::MGMT_REQUEST_RUNTIME;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    let state = get_state(&r);
+
+    let Some(storage) = state.remote_storage.clone() else {
+        return Err(ApiError::InternalServerError(anyhow::anyhow!(
+            "remote storage not configured, cannot run eviction iteration"
+        )))
+    };
+
+    let state = state.disk_usage_eviction_state.clone();
+
+    let cancel = CancellationToken::new();
+    let child_cancel = cancel.clone();
+    let _g = cancel.drop_guard();
+
+    crate::task_mgr::spawn(
+        MGMT_REQUEST_RUNTIME.handle(),
+        TaskKind::DiskUsageEviction,
+        None,
+        None,
+        "ondemand disk usage eviction",
+        false,
+        async move {
+            let res = crate::disk_usage_eviction_task::disk_usage_eviction_task_iteration_impl(
+                &state,
+                &storage,
+                usage,
+                &child_cancel,
+            )
+            .await;
+
+            info!(?res, "disk_usage_eviction_task_iteration_impl finished");
+
+            let _ = tx.send(res);
+            Ok(())
+        }
+        .in_current_span(),
+    );
+
+    let response = rx.await.unwrap().map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, response)
+}
+
 async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(
         StatusCode::NOT_FOUND,
@@ -1075,6 +1180,7 @@ pub fn make_router(
     launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
     remote_storage: Option<GenericRemoteStorage>,
+    disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
     let spec = include_bytes!("openapi_spec.yml");
     let mut router = attach_openapi_ui(endpoint::make_router(), spec, "/swagger.yml", "/v1/doc");
@@ -1119,7 +1225,8 @@ pub fn make_router(
 
     Ok(router
         .data(Arc::new(
-            State::new(conf, auth, remote_storage).context("Failed to initialize router state")?,
+            State::new(conf, auth, remote_storage, disk_usage_eviction_state)
+                .context("Failed to initialize router state")?,
         ))
         .get("/v1/status", |r| RequestSpan(status_handler).handle(r))
         .put(
@@ -1199,6 +1306,13 @@ pub fn make_router(
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| RequestSpan(evict_timeline_layer_handler).handle(r),
+        )
+        .put("/v1/disk_usage_eviction/run", |r| {
+            RequestSpan(disk_usage_eviction_run).handle(r)
+        })
+        .put(
+            "/v1/tenant/:tenant_id/break",
+            testing_api!("set tenant state to broken", handle_tenant_break),
         )
         .get("/v1/panic", |r| RequestSpan(always_panic_handler).handle(r))
         .any(handler_404))

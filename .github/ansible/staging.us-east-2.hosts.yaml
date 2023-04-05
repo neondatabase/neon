@@ -8,11 +8,16 @@ storage:
       pg_distrib_dir: /usr/local
       metric_collection_endpoint: http://neon-internal-api.aws.neon.build/billing/api/v1/usage_events
       metric_collection_interval: 10min
+      disk_usage_based_eviction:
+        max_usage_pct: 80
+        min_avail_bytes: 0
+        period: "10s"
       tenant_config:
         eviction_policy:
           kind: "LayerAccessThreshold"
           period: "20m"
-          threshold: "20m"
+          threshold: &default_eviction_threshold "20m"
+      evictions_low_residence_duration_metric_threshold: *default_eviction_threshold
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"

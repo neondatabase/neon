@@ -525,6 +525,7 @@ mod tests {
             peer_horizon_lsn: 5,
             safekeeper_connstr: "neon-1-sk-1.local:7676".to_owned(),
             local_start_lsn: 0,
+            availability_zone: None,
         }
     }
 

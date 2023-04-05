@@ -18,7 +18,7 @@ use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::wal_storage;
-use pq_proto::{ReplicationFeedback, SystemId};
+use pq_proto::{PageserverFeedback, SystemId};
 use utils::{
     bin_ser::LeSer,
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -360,7 +360,7 @@ pub struct AppendResponse {
     // a criterion for walproposer --sync mode exit
     pub commit_lsn: Lsn,
     pub hs_feedback: HotStandbyFeedback,
-    pub pageserver_feedback: ReplicationFeedback,
+    pub pageserver_feedback: PageserverFeedback,
 }
 
 impl AppendResponse {
@@ -370,7 +370,7 @@ impl AppendResponse {
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
             hs_feedback: HotStandbyFeedback::empty(),
-            pageserver_feedback: ReplicationFeedback::empty(),
+            pageserver_feedback: PageserverFeedback::empty(),
         }
     }
 }
@@ -708,7 +708,7 @@ where
             commit_lsn: self.state.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
-            pageserver_feedback: ReplicationFeedback::empty(),
+            pageserver_feedback: PageserverFeedback::empty(),
         };
         trace!("formed AppendResponse {:?}", ar);
         ar

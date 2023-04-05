@@ -15,10 +15,32 @@ outputs:
   report-url:
     description: 'Allure report URL'
     value: ${{ steps.generate-report.outputs.report-url }}
+  report-json-url:
+    description: 'Allure report JSON URL'
+    value: ${{ steps.generate-report.outputs.report-json-url }}
 
 runs:
   using: "composite"
+
   steps:
+    # We're using some of env variables quite offen, so let's set them once.
+    #
+    # It would be nice to have them set in common runs.env[0] section, but it doesn't work[1]
+    #
+    # - [0] https://docs.github.com/en/actions/creating-actions/metadata-syntax-for-github-actions#runsenv
+    # - [1] https://github.com/neondatabase/neon/pull/3907#discussion_r1154703456
+    #
+    - name: Set common environment variables
+      shell: bash -euxo pipefail {0}
+      run: |
+        echo "BUILD_TYPE=${BUILD_TYPE}"   >> $GITHUB_ENV
+        echo "BUCKET=${BUCKET}"           >> $GITHUB_ENV
+        echo "TEST_OUTPUT=${TEST_OUTPUT}" >> $GITHUB_ENV
+      env:
+        BUILD_TYPE: ${{ inputs.build_type }}
+        BUCKET: neon-github-public-dev
+        TEST_OUTPUT: /tmp/test_output
+
     - name: Validate input parameters
       shell: bash -euxo pipefail {0}
       run: |
@@ -76,16 +98,14 @@ runs:
           rm -f ${ALLURE_ZIP}
         fi
       env:
-        ALLURE_VERSION: 2.19.0
-        ALLURE_ZIP_MD5: ced21401a1a8b9dfb68cee9e4c210464
+        ALLURE_VERSION: 2.21.0
+        ALLURE_ZIP_MD5: c8db4dd8e2a7882583d569ed2c82879c
 
     - name: Upload Allure results
       if: ${{ inputs.action == 'store' }}
       env:
         REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
         RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
-        TEST_OUTPUT: /tmp/test_output
-        BUCKET: neon-github-public-dev
         TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       shell: bash -euxo pipefail {0}
       run: |
@@ -104,7 +124,7 @@ runs:
         EOF
         cat <<EOF > $TEST_OUTPUT/allure/results/environment.properties
           TEST_SELECTION=${{ inputs.test_selection }}
-          BUILD_TYPE=${{ inputs.build_type }}
+          BUILD_TYPE=${BUILD_TYPE}
         EOF
 
         ARCHIVE="${GITHUB_RUN_ID}-${TEST_SELECTION}-${GITHUB_RUN_ATTEMPT}-$(date +%s).tar.zst"
@@ -113,13 +133,12 @@ runs:
         tar -C ${TEST_OUTPUT}/allure/results -cf ${ARCHIVE} --zstd .
         aws s3 mv --only-show-errors ${ARCHIVE} "s3://${BUCKET}/${RAW_PREFIX}/${ARCHIVE}"
 
-    # Potentially we could have several running build for the same key (for example for the main branch),  so we use improvised lock for this
+    # Potentially we could have several running build for the same key (for example for the main branch), so we use improvised lock for this
     - name: Acquire Allure lock
       if: ${{ inputs.action == 'generate' }}
       shell: bash -euxo pipefail {0}
       env:
         LOCK_FILE: reports/${{ steps.calculate-vars.outputs.KEY }}/lock.txt
-        BUCKET: neon-github-public-dev
         TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       run: |
         LOCK_TIMEOUT=300 # seconds
@@ -149,8 +168,6 @@ runs:
       env:
         REPORT_PREFIX: reports/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
         RAW_PREFIX: reports-raw/${{ steps.calculate-vars.outputs.KEY }}/${{ inputs.build_type }}
-        TEST_OUTPUT: /tmp/test_output
-        BUCKET: neon-github-public-dev
       shell: bash -euxo pipefail {0}
       run: |
         # Get previously uploaded data for this run
@@ -186,24 +203,24 @@ runs:
         REPORT_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html
 
         # Generate redirect
-        cat <<EOF > ./index.html
+        cat <<EOF > ${TEST_OUTPUT}/allure/index.html
           <!DOCTYPE html>
 
           <meta charset="utf-8">
           <title>Redirecting to ${REPORT_URL}</title>
           <meta http-equiv="refresh" content="0; URL=${REPORT_URL}">
         EOF
-        aws s3 cp --only-show-errors ./index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
+        aws s3 cp --only-show-errors ${TEST_OUTPUT}/allure/index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
         echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
+        echo "report-json-url=${REPORT_URL%/index.html}/data/suites.json" >> $GITHUB_OUTPUT
 
     - name: Release Allure lock
       if: ${{ inputs.action == 'generate' && always() }}
       shell: bash -euxo pipefail {0}
       env:
         LOCK_FILE: reports/${{ steps.calculate-vars.outputs.KEY }}/lock.txt
-        BUCKET: neon-github-public-dev
         TEST_SELECTION: ${{ steps.calculate-vars.outputs.TEST_SELECTION }}
       run: |
         aws s3 cp --only-show-errors "s3://${BUCKET}/${LOCK_FILE}" ./lock.txt || exit 0
@@ -212,11 +229,16 @@ runs:
           aws s3 rm "s3://${BUCKET}/${LOCK_FILE}"
         fi
 
+    - name: Cleanup
+      if: always()
+      shell: bash -euxo pipefail {0}
+      run: |
+        rm -rf ${TEST_OUTPUT}/allure
+
     - uses: actions/github-script@v6
       if: ${{ inputs.action == 'generate' && always() }}
       env:
         REPORT_URL: ${{ steps.generate-report.outputs.report-url }}
-        BUILD_TYPE: ${{ inputs.build_type }}
         SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       with:
         script: |

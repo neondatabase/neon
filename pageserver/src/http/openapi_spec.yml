@@ -27,6 +27,31 @@ paths:
                   id:
                     type: integer
 
+  /v1/disk_usage_eviction/run:
+    put:
+      description: Do an iteration of disk-usage-based eviction to evict a given amount of disk space.
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - evict_bytes
+              properties:
+                evict_bytes:
+                  type: integer
+      responses:
+        "200":
+          description: |
+            The run completed.
+            This does not necessarily mean that we actually evicted `evict_bytes`.
+            Examine the returned object for detail, or, just watch the actual effect of the call using `du` or `df`.
+          content:
+            application/json:
+              schema:
+                type: object
+
   /v1/tenant/{tenant_id}:
     parameters:
       - name: tenant_id
