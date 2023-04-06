@@ -2309,6 +2309,8 @@ impl Tenant {
                 )
             })?;
 
+        // We can not use initialize here because it calls initialize_with_lock with load_layer_map=true,
+        // which cause double loading layers in LayerMap
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
             raw_timeline.initialize_with_lock(ctx, &mut timelines, false, true)?

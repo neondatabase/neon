@@ -1420,7 +1420,7 @@ impl Timeline {
             let direntry_path = direntry.path();
             let fname = direntry.file_name();
             let fname = fname.to_string_lossy();
-            info!("Load layer {} from directory", &fname);
+
             if let Some(imgfilename) = ImageFileName::parse_str(&fname) {
                 // create an ImageLayer struct for each image file.
                 if imgfilename.lsn > disk_consistent_lsn {
