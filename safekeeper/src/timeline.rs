@@ -674,7 +674,8 @@ impl Timeline {
             bail!(TimelineError::Cancelled(self.ttid));
         }
 
-        self.write_shared_state().sk.inmem.backup_lsn = backup_lsn;
+        let mut state = self.write_shared_state();
+        state.sk.inmem.backup_lsn = max(state.sk.inmem.backup_lsn, backup_lsn);
         // we should check whether to shut down offloader, but this will be done
         // soon by peer communication anyway.
         Ok(())
