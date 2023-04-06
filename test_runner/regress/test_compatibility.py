@@ -37,6 +37,7 @@ from pytest import FixtureRequest
 
 # Note: if renaming this test, don't forget to update a reference to it in a workflow file:
 # "Upload compatibility snapshot" step in .github/actions/run-python-test-set/action.yml
+@pytest.mark.compatibility
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
 def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path):
@@ -81,6 +82,7 @@ def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_o
     # Directory `test_output_dir / "compatibility_snapshot_pg14"` is uploaded to S3 in a workflow, keep the name in sync with it
 
 
+@pytest.mark.compatibility
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_backward_compatibility(
@@ -134,6 +136,7 @@ def test_backward_compatibility(
     ), "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
+@pytest.mark.compatibility
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_forward_compatibility(
