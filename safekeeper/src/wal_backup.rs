@@ -364,11 +364,9 @@ pub async fn backup_lsn_range(
             .with_context(|| format!("offloading segno {}", s.seg_no))?;
 
         let new_backup_lsn = s.end_lsn;
-        let res = timeline.set_wal_backup_lsn(new_backup_lsn);
-        if let Err(e) = res {
-            error!("failed to set wal_backup_lsn: {}", e);
-            return Err(e);
-        }
+        timeline
+            .set_wal_backup_lsn(new_backup_lsn)
+            .context("setting wal_backup_lsn")?;
         *backup_lsn = new_backup_lsn;
     }
     info!(
