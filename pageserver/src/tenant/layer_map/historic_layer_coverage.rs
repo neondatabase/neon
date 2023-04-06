@@ -418,7 +418,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     }
 
     pub fn contains(&self, layer_key: &LayerKey) -> bool {
-        self.layers.contains_key(layer_key)
+        self.layers.contains_key(layer_key) || self.buffer.contains_key(layer_key)
     }
 
     pub fn insert(&mut self, layer_key: LayerKey, value: Value) {
