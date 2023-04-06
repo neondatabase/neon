@@ -111,6 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # neon-captest-freetier: Run pgbench with freetier-limited compute
         # neon-captest-new: Run pgbench in a freshly created project
         # neon-captest-reuse: Same, but reusing existing project
         # neon-captest-prefetch: Same, with prefetching enabled (new project)
@@ -120,6 +121,9 @@ jobs:
         db_size: [ 10gb ]
         runner: [ us-east-2 ]
         include:
+          - platform: neon-captest-freetier
+            db_size: 3gb
+            runner: us-east-2
           - platform: neon-captest-prefetch
             db_size: 50gb
             runner: us-east-2
@@ -160,13 +164,14 @@ jobs:
         echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
     - name: Create Neon Project
-      if: contains(fromJson('["neon-captest-new", "neon-captest-prefetch"]'), matrix.platform)
+      if: contains(fromJson('["neon-captest-new", "neon-captest-prefetch", "neon-captest-freetier"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
         region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        compute_units: ${{ (matrix.platform == 'neon-captest-freetier' && '[0.25, 0.25]') || '[1, 1]' }}
 
     - name: Set up Connection String
       id: set-up-connstr
@@ -175,7 +180,7 @@ jobs:
           neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
-          neon-captest-new | neon-captest-prefetch)
+          neon-captest-new | neon-captest-prefetch | neon-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
@@ -185,7 +190,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-prefetch', neon-captest-freetier, 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
