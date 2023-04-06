@@ -23,14 +23,97 @@
 mod connection_manager;
 mod walreceiver_connection;
 
-use crate::task_mgr::WALRECEIVER_RUNTIME;
+use crate::broker_client::is_broker_client_initialized;
+use crate::context::RequestContext;
+use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
 
+use anyhow::Context;
 use std::future::Future;
+use std::num::NonZeroU64;
+use std::sync::atomic::{self, AtomicBool};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
-pub use connection_manager::spawn_connection_manager_task;
+use utils::id::TenantTimelineId;
+
+use super::Timeline;
+
+pub struct WalReceiverConf {
+    pub wal_connect_timeout: Duration,
+    pub lagging_wal_timeout: Duration,
+    pub max_lsn_wal_lag: NonZeroU64,
+    pub auth_token: Option<Arc<String>>,
+    pub availability_zone: Option<String>,
+}
+
+pub struct WalReceiver {
+    timeline: TenantTimelineId,
+    timeline_ref: Weak<Timeline>,
+    conf: WalReceiverConf,
+    started: AtomicBool,
+}
+
+impl WalReceiver {
+    pub fn new(
+        timeline: TenantTimelineId,
+        timeline_ref: Weak<Timeline>,
+        conf: WalReceiverConf,
+    ) -> Self {
+        Self {
+            timeline,
+            timeline_ref,
+            conf,
+            started: AtomicBool::new(false),
+        }
+    }
+
+    pub fn start(&self, ctx: RequestContext) -> anyhow::Result<()> {
+        if !is_broker_client_initialized() {
+            if cfg!(test) {
+                info!("not launching WAL receiver because broker client hasn't been initialized");
+                return Ok(());
+            } else {
+                anyhow::bail!("broker client not initialized");
+            }
+        }
+
+        if self.started.load(atomic::Ordering::Relaxed) {
+            anyhow::bail!("Wal receiver is already started");
+        }
+
+        let timeline = self.timeline_ref.upgrade().with_context(|| {
+            format!("walreceiver start on a dropped timeline {}", self.timeline)
+        })?;
+
+        connection_manager::spawn_connection_manager_task(
+            timeline,
+            self.conf.wal_connect_timeout,
+            self.conf.lagging_wal_timeout,
+            self.conf.max_lsn_wal_lag,
+            self.conf.auth_token.clone(),
+            self.conf.availability_zone.clone(),
+            ctx,
+        );
+        self.started.store(true, atomic::Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    pub async fn stop(&self) {
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.timeline.tenant_id),
+            Some(self.timeline.timeline_id),
+        )
+        .await;
+        self.started.store(false, atomic::Ordering::Relaxed);
+    }
+}
+
+// TODO kb shutdown walreceiver on drop?
 
 /// A handle of an asynchronous task.
 /// The task has a channel that it can use to communicate its lifecycle events in a certain form, see [`TaskEvent`]
@@ -39,26 +122,26 @@ pub use connection_manager::spawn_connection_manager_task;
 /// Note that the communication happens via the `watch` channel, that does not accumulate the events, replacing the old one with the never one on submission.
 /// That may lead to certain events not being observed by the listener.
 #[derive(Debug)]
-pub struct TaskHandle<E> {
+struct TaskHandle<E> {
     join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     events_receiver: watch::Receiver<TaskStateUpdate<E>>,
     cancellation: CancellationToken,
 }
 
-pub enum TaskEvent<E> {
+enum TaskEvent<E> {
     Update(TaskStateUpdate<E>),
     End(anyhow::Result<()>),
 }
 
 #[derive(Debug, Clone)]
-pub enum TaskStateUpdate<E> {
+enum TaskStateUpdate<E> {
     Started,
     Progress(E),
 }
 
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
-    pub fn spawn<Fut>(
+    fn spawn<Fut>(
         task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, CancellationToken) -> Fut + Send + 'static,
     ) -> Self
     where
@@ -131,7 +214,7 @@ impl<E: Clone> TaskHandle<E> {
     }
 
     /// Aborts current task, waiting for it to finish.
-    pub async fn shutdown(self) {
+    async fn shutdown(self) {
         if let Some(jh) = self.join_handle {
             self.cancellation.cancel();
             match jh.await {

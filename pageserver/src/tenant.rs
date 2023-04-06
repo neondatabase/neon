@@ -229,7 +229,9 @@ impl UninitializedTimeline<'_> {
                 new_timeline.maybe_spawn_flush_loop();
 
                 if activate {
-                    new_timeline.activate();
+                    new_timeline
+                        .activate()
+                        .context("initializing timeline activation")?;
                 }
             }
         }
@@ -1484,7 +1486,20 @@ impl Tenant {
                     tasks::start_background_loops(self.tenant_id);
 
                     for timeline in not_broken_timelines {
-                        timeline.activate();
+                        match timeline
+                            .activate()
+                            .context("timeline activation for activating tenant")
+                        {
+                            Ok(()) => {}
+                            Err(e) => {
+                                error!(
+                                    "Failed to activate timeline {}: {:#}",
+                                    timeline.timeline_id, e
+                                );
+                                timeline.set_state(TimelineState::Broken);
+                                *current_state = TenantState::Broken;
+                            }
+                        }
                     }
                 }
             }
