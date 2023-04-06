@@ -38,6 +38,7 @@ RUN cd postgres && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/insert_username.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/intagg.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/moddatetime.control && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_stat_statements.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgrowlocks.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgstattuple.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/refint.control && \
