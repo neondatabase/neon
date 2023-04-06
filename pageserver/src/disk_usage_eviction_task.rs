@@ -723,6 +723,6 @@ mod filesystem_level_usage {
         assert!(!usage.has_pressure(), "no pressure at 84%");
 
         usage.add_available_bytes(16_000);
-        assert!(!usage.has_pressure(), "still no pressure at 70%");
+        assert!(!usage.has_pressure());
     }
 }
