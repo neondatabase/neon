@@ -9,8 +9,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    PageserverApiException,
-    PageserverHttpClient,
     Postgres,
     RemoteStorageKind,
     available_remote_storages,
@@ -19,6 +17,7 @@ from fixtures.neon_fixtures import (
     wait_until,
     wait_until_tenant_state,
 )
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
 

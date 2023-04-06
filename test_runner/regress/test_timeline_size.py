@@ -14,8 +14,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    PageserverApiException,
-    PageserverHttpClient,
     PgBin,
     PortDistributor,
     Postgres,
@@ -26,6 +24,7 @@ from fixtures.neon_fixtures import (
     wait_for_upload_queue_empty,
     wait_until,
 )
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size
 

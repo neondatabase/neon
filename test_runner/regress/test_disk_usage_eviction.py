@@ -11,13 +11,13 @@ from fixtures.neon_fixtures import (
     LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
-    PageserverHttpClient,
     PgBin,
     RemoteStorageKind,
     wait_for_last_flush_lsn,
     wait_for_upload_queue_empty,
     wait_until,
 )
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"

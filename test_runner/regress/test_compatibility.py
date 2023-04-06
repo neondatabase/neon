@@ -10,12 +10,12 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonCli,
     NeonEnvBuilder,
-    PageserverHttpClient,
     PgBin,
     PortDistributor,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 

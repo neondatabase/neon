@@ -10,7 +10,6 @@ from fixtures.neon_fixtures import (
     NeonBroker,
     NeonEnv,
     NeonEnvBuilder,
-    PageserverHttpClient,
     PortDistributor,
     Postgres,
     assert_tenant_status,
@@ -20,6 +19,7 @@ from fixtures.neon_fixtures import (
     wait_until,
     wait_while,
 )
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, start_in_background, subprocess_capture
 

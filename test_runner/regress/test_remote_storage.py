@@ -13,8 +13,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     LocalFsStorage,
     NeonEnvBuilder,
-    PageserverApiException,
-    PageserverHttpClient,
     RemoteStorageKind,
     available_remote_storages,
     wait_for_last_flush_lsn,
@@ -22,6 +20,7 @@ from fixtures.neon_fixtures import (
     wait_for_upload,
     wait_until_tenant_state,
 )
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import print_gc_result, query_scalar, wait_until
 

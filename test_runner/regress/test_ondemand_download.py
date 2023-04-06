@@ -10,8 +10,6 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
-    PageserverApiException,
-    PageserverHttpClient,
     RemoteStorageKind,
     assert_tenant_status,
     available_remote_storages,
@@ -22,6 +20,7 @@ from fixtures.neon_fixtures import (
     wait_until,
     wait_until_tenant_state,
 )
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 

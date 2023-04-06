@@ -6,11 +6,11 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    PageserverHttpClient,
     Postgres,
     wait_for_last_flush_lsn,
     wait_for_wal_insert_lsn,
 )
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
