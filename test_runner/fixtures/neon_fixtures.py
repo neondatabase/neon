@@ -48,6 +48,7 @@ from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
+    allure_add_grafana_links,
     allure_attach_from_dir,
     get_self_dir,
     subprocess_capture,
