@@ -322,25 +322,20 @@ impl WalBackupTask {
                 continue;
             }
 
-            match backup_lsn_range(
+            if let Err(e) = backup_lsn_range(
                 backup_lsn,
                 commit_lsn,
                 self.wal_seg_size,
                 &self.timeline_dir,
                 &self.workspace_dir,
+                &self.timeline,
             )
             .await
             {
-                Ok(backup_lsn_result) => {
-                    backup_lsn = backup_lsn_result;
-                    let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
-                    if let Err(e) = res {
-                        error!("failed to set wal_backup_lsn: {}", e);
-                        return;
-                    }
-                    retry_attempt = 0;
-                }
-                Err(e) => {
+                if e.to_string().contains("set_wal_backup_lsn") {
+                    error!("failed to set wal_backup_lsn: {e:#}");
+                    return;
+                } else {
                     error!(
                         "failed while offloading range {}-{}: {:?}",
                         backup_lsn, commit_lsn, e
@@ -359,15 +354,19 @@ pub async fn backup_lsn_range(
     wal_seg_size: usize,
     timeline_dir: &Path,
     workspace_dir: &Path,
-) -> Result<Lsn> {
-    let mut res = start_lsn;
+    timeline: &Arc<Timeline>,
+) -> Result<()> {
+    let mut backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
     for s in &segments {
         backup_single_segment(s, timeline_dir, workspace_dir)
             .await
             .with_context(|| format!("offloading segno {}", s.seg_no))?;
-
-        res = s.end_lsn;
+        backup_lsn = s.end_lsn;
+        // error is possible iff timeline was canceled
+        timeline
+            .set_wal_backup_lsn(backup_lsn)
+            .context("set_wal_backup_lsn")?;
     }
     info!(
         "offloaded segnos {:?} up to {}, previous backup_lsn {}",
@@ -375,7 +374,8 @@ pub async fn backup_lsn_range(
         end_lsn,
         start_lsn,
     );
-    Ok(res)
+
+    Ok(())
 }
 
 async fn backup_single_segment(
