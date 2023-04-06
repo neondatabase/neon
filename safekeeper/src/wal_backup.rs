@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
-use postgres_ffi::XLogFileName;
+use postgres_ffi::{XLogFileName, WAL_SEGMENT_SIZE};
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::fs::File;
@@ -322,9 +322,13 @@ impl WalBackupTask {
                 continue;
             }
 
+            const LSN_MAX_BACKUP_RANGE: u64 = (WAL_SEGMENT_SIZE * 10) as u64;
+            // Don't try to offload more than 10 segments at once.
+            let end_lsn = min(commit_lsn, backup_lsn + LSN_MAX_BACKUP_RANGE);
+
             match backup_lsn_range(
                 backup_lsn,
-                commit_lsn,
+                end_lsn,
                 self.wal_seg_size,
                 &self.timeline_dir,
                 &self.workspace_dir,
@@ -343,7 +347,7 @@ impl WalBackupTask {
                 Err(e) => {
                     error!(
                         "failed while offloading range {}-{}: {:?}",
-                        backup_lsn, commit_lsn, e
+                        backup_lsn, end_lsn, e
                     );
 
                     retry_attempt = retry_attempt.saturating_add(1);
