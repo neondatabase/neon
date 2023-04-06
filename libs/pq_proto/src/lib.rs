@@ -293,6 +293,9 @@ impl FeStartupPacket {
         // We shouldn't advance `buf` as probably full message is not there yet,
         // so can't directly use Bytes::get_u32 etc.
         let len = (&buf[0..4]).read_u32::<BigEndian>().unwrap() as usize;
+        // The proposed replacement is `!(4..=MAX_STARTUP_PACKET_LENGTH).contains(&len)`
+        // which is less readable
+        #[allow(clippy::manual_range_contains)]
         if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
             return Err(ProtocolError::Protocol(format!(
                 "invalid startup packet message length {}",
