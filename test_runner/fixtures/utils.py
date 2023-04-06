@@ -186,15 +186,14 @@ def allure_attach_from_dir(dir: Path):
             allure.attach.file(source, name, attachment_type, extension)
 
 
+DATASOURCE_ID = "xHHYY0dVz"
+
+
 def allure_add_grafana_links(host: str, start_ms: int, end_ms: int):
     """Add links to server logs in Grafana to Allure report"""
     # We expect host to be in format like ep-divine-night-159320.us-east-2.aws.neon.build
-    endpoint_id, region_id, *_ = host.split(".")
-    # Add 10s margin to the start and end times
-    start_ms_str = str(start_ms - 10_000)
-    end_ms_str = str(end_ms + 10_000)
+    endpoint_id, region_id, _ = host.split(".", 2)
 
-    datasource = "xHHYY0dVz"
     expressions = {
         "compute logs": f'{{app="compute-node-{endpoint_id}", neon_region="{region_id}"}}',
         "k8s events": f'{{job="integrations/kubernetes/eventhandler"}} |~ "name=compute-node-{endpoint_id}-"',
@@ -203,19 +202,19 @@ def allure_add_grafana_links(host: str, start_ms: int, end_ms: int):
     }
 
     params: Dict[str, Any] = {
-        "datasource": datasource,
+        "datasource": DATASOURCE_ID,
         "queries": [
             {
                 "expr": "<PUT AN EXPRESSION HERE>",
                 "refId": "A",
-                "datasource": {"type": "loki", "uid": datasource},
+                "datasource": {"type": "loki", "uid": DATASOURCE_ID},
                 "editorMode": "code",
                 "queryType": "range",
             }
         ],
         "range": {
-            "from": start_ms_str,
-            "to": end_ms_str,
+            "from": str(start_ms),
+            "to": str(end_ms),
         },
     }
     for name, expr in expressions.items():
