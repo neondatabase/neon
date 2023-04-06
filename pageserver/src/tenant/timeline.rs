@@ -1222,7 +1222,7 @@ impl Timeline {
     }
 
     pub(super) fn tenant_conf_updated(&self) {
-        // NB: Most tenant conf optiosn are read by background loops, so,
+        // NB: Most tenant conf options are read by background loops, so,
         // changes will automatically be picked up.
 
         // The threshold is embedded in the metric. So, we need to update it.

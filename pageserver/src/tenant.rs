@@ -1735,7 +1735,11 @@ impl Tenant {
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         *self.tenant_conf.write().unwrap() = new_tenant_conf;
-        for timeline in self.timelines.lock().unwrap().values() {
+        // Don't hold self.timelines.lock() during the notifies.
+        // There's no risk of deadlock right now, but there could be if we consolidate
+        // mutexes in struct Timeline in the future.
+        let timelines = self.timelines.lock().unwrap().values().collect::<Vec<_>>();
+        for timeline in timelines {
             timeline.tenant_conf_updated();
         }
     }
