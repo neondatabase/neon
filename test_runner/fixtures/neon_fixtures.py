@@ -17,6 +17,7 @@ import uuid
 from collections import defaultdict
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Flag, auto
 from functools import cached_property
 from itertools import chain, product
@@ -48,6 +49,7 @@ from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     Fn,
+    allure_add_grafana_links,
     allure_attach_from_dir,
     get_self_dir,
     subprocess_capture,
@@ -2436,9 +2438,15 @@ def remote_pg(
     connstr = os.getenv("BENCHMARK_CONNSTR")
     if connstr is None:
         raise ValueError("no connstr provided, use BENCHMARK_CONNSTR environment variable")
-
+    start_ms = int(datetime.utcnow().timestamp() * 1000)
     with RemotePostgres(pg_bin, connstr) as remote_pg:
         yield remote_pg
+
+    end_ms = int(datetime.utcnow().timestamp() * 1000)
+    host = parse_dsn(connstr).get("host", "")
+    if host.endswith(".neon.build"):
+        # Add 10s margin to the start and end times
+        allure_add_grafana_links(host, start_ms - 10_000, end_ms + 10_000)
 
 
 class PSQL:
