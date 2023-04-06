@@ -338,6 +338,7 @@ jobs:
           rerun_flaky: true
         env:
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+          CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
 
       - name: Merge and upload coverage data
         if: matrix.build_type == 'debug'
