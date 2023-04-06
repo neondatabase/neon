@@ -119,7 +119,18 @@ impl CertResolver {
                 ))?
                 .1;
             let common_name = pem.parse_x509()?.subject().to_string();
-            common_name.strip_prefix("CN=*.").map(|s| s.to_string())
+
+            // We only use non-wildcard certificates in link proxy so it seems okay to treat them the same as
+            // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
+            // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
+            // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
+            // here should better avoid Option for common_names, and do wildcard-based certificate selection instead
+            // of cutting off '*.' parts.
+            if common_name.starts_with("CN=*.") {
+                common_name.strip_prefix("CN=*.").map(|s| s.to_string())
+            } else {
+                common_name.strip_prefix("CN=").map(|s| s.to_string())
+            }
         }
         .context(format!(
             "Failed to parse common name from certificate at '{cert_path}'."
