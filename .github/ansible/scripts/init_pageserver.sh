@@ -3,6 +3,8 @@
 # fetch params from meta-data service
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 AZ_ID=$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)
+INSTANCE_TYPE=$(curl -s http://169.254.169.254/latest/meta-data/instance-type)
+DISK_SIZE=$(df -B1 /storage | tail -1 | awk '{print $2}')
 
 # store fqdn hostname in var
 HOST=$(hostname -f)
@@ -18,7 +20,9 @@ cat <<EOF | tee /tmp/payload
   "http_host": "${HOST}",
   "http_port": 9898,
   "active": false,
-  "availability_zone_id": "${AZ_ID}"
+  "availability_zone_id": "${AZ_ID}",
+  "disk_size": ${DISK_SIZE},
+  "instance_type": "${INSTANCE_TYPE}"
 }
 EOF
 
