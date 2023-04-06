@@ -11,18 +11,19 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
-    assert_tenant_status,
     available_remote_storages,
     wait_for_last_flush_lsn,
-    wait_for_last_record_lsn,
     wait_for_sk_commit_lsn_to_reach_remote_storage,
-    wait_for_upload,
-    wait_until,
-    wait_until_tenant_state,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.utils import (
+    assert_tenant_status,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+    wait_until_tenant_state,
+)
 from fixtures.types import Lsn
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
 
 
 def get_num_downloaded_layers(client: PageserverHttpClient, tenant_id, timeline_id):

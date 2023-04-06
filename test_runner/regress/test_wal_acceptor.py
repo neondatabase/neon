@@ -30,9 +30,8 @@ from fixtures.neon_fixtures import (
     SafekeeperHttpClient,
     SafekeeperPort,
     available_remote_storages,
-    wait_for_last_record_lsn,
-    wait_for_upload,
 )
+from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import get_dir_size, query_scalar, start_in_background
 

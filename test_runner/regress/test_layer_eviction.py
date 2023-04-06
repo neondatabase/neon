@@ -6,10 +6,9 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
     wait_for_last_flush_lsn,
-    wait_for_last_record_lsn,
     wait_for_sk_commit_lsn_to_reach_remote_storage,
-    wait_for_upload,
 )
+from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
 

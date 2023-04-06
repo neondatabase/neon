@@ -14,11 +14,11 @@ from fixtures.neon_fixtures import (
     PgBin,
     RemoteStorageKind,
     wait_for_last_flush_lsn,
-    wait_for_upload_queue_empty,
-    wait_until,
 )
 from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
 
@@ -138,7 +138,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
     # remove the initial tenant
     ## why wait for upload queue? => https://github.com/neondatabase/neon/issues/3865
     assert env.initial_timeline
-    wait_for_upload_queue_empty(env.pageserver, env.initial_tenant, env.initial_timeline)
+    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, env.initial_timeline)
     pageserver_http.tenant_detach(env.initial_tenant)
     assert isinstance(env.remote_storage, LocalFsStorage)
     tenant_remote_storage = env.remote_storage.root / "tenants" / str(env.initial_tenant)
@@ -182,7 +182,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
     # after stopping the safekeepers, we know that no new WAL will be coming in
     for tenant_id, timeline_id in timelines:
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-        wait_for_upload_queue_empty(env.pageserver, tenant_id, timeline_id)
+        wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
         tl_info = pageserver_http.timeline_detail(tenant_id, timeline_id)
         assert tl_info["last_record_lsn"] == tl_info["disk_consistent_lsn"]
         assert tl_info["disk_consistent_lsn"] == tl_info["remote_consistent_lsn"]

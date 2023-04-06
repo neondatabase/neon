@@ -16,11 +16,14 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
     available_remote_storages,
     wait_for_last_flush_lsn,
-    wait_for_last_record_lsn,
-    wait_for_upload,
-    wait_until_tenant_state,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.utils import (
+    wait_for_last_record_lsn,
+    wait_for_upload,
+    wait_until_tenant_active,
+    wait_until_tenant_state,
+)
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import print_gc_result, query_scalar, wait_until
 
@@ -171,15 +174,10 @@ def test_remote_storage_backup_and_restore(
         client.tenant_attach(tenant_id)
     log.info("waiting for tenant to become active. this should be quick with on-demand download")
 
-    def tenant_active():
-        all_states = client.tenant_list()
-        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["state"] == "Active"
-
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=tenant_active,
+    wait_until_tenant_active(
+        pageserver_http=client,
+        tenant_id=tenant_id,
+        iterations=5,
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
@@ -356,12 +354,7 @@ def test_remote_storage_upload_queue_retries(
 
     client.tenant_attach(tenant_id)
 
-    def tenant_active():
-        all_states = client.tenant_list()
-        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["state"] == "Active"
-
-    wait_until(30, 1, tenant_active)
+    wait_until_tenant_active(client, tenant_id)
 
     log.info("restarting postgres to validate")
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
@@ -496,12 +489,7 @@ def test_remote_timeline_client_calls_started_metric(
 
     client.tenant_attach(tenant_id)
 
-    def tenant_active():
-        all_states = client.tenant_list()
-        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["state"] == "Active"
-
-    wait_until(30, 1, tenant_active)
+    wait_until_tenant_active(client, tenant_id)
 
     log.info("restarting postgres to validate")
     pg = env.postgres.create_start("main", tenant_id=tenant_id)
