@@ -5,7 +5,7 @@ from typing import List
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, PgBin, Postgres
+from fixtures.neon_fixtures import Endpoint, NeonEnv, PgBin
 from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
@@ -40,20 +40,20 @@ def test_branching_with_pgbench(
         }
     )
 
-    def run_pgbench(pg: Postgres):
-        connstr = pg.connstr()
-
+    def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
 
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", "-T15", connstr])
 
     env.neon_cli.create_branch("b0", tenant_id=tenant)
-    pgs: List[Postgres] = []
-    pgs.append(env.postgres.create_start("b0", tenant_id=tenant))
+    endpoints: List[Endpoint] = []
+    endpoints.append(env.endpoints.create_start("b0", tenant_id=tenant))
 
     threads: List[threading.Thread] = []
-    threads.append(threading.Thread(target=run_pgbench, args=(pgs[0],), daemon=True))
+    threads.append(
+        threading.Thread(target=run_pgbench, args=(endpoints[0].connstr(),), daemon=True)
+    )
     threads[-1].start()
 
     thread_limit = 4
@@ -79,16 +79,18 @@ def test_branching_with_pgbench(
         else:
             env.neon_cli.create_branch("b{}".format(i + 1), "b0", tenant_id=tenant)
 
-        pgs.append(env.postgres.create_start("b{}".format(i + 1), tenant_id=tenant))
+        endpoints.append(env.endpoints.create_start("b{}".format(i + 1), tenant_id=tenant))
 
-        threads.append(threading.Thread(target=run_pgbench, args=(pgs[-1],), daemon=True))
+        threads.append(
+            threading.Thread(target=run_pgbench, args=(endpoints[-1].connstr(),), daemon=True)
+        )
         threads[-1].start()
 
     for thread in threads:
         thread.join()
 
-    for pg in pgs:
-        res = pg.safe_psql("SELECT count(*) from pgbench_accounts")
+    for ep in endpoints:
+        res = ep.safe_psql("SELECT count(*) from pgbench_accounts")
         assert res[0] == (100000 * scale,)
 
 
@@ -110,11 +112,11 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
     env = neon_simple_env
 
     env.neon_cli.create_branch("b0")
-    pg0 = env.postgres.create_start("b0")
+    endpoint0 = env.endpoints.create_start("b0")
 
-    pg_bin.run_capture(["pgbench", "-i", pg0.connstr()])
+    pg_bin.run_capture(["pgbench", "-i", endpoint0.connstr()])
 
-    with pg0.cursor() as cur:
+    with endpoint0.cursor() as cur:
         curr_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
     # Specify the `start_lsn` as a number that is divided by `XLOG_BLCKSZ`
@@ -123,6 +125,6 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
 
     log.info(f"Branching b1 from b0 starting at lsn {start_lsn}...")
     env.neon_cli.create_branch("b1", "b0", ancestor_start_lsn=start_lsn)
-    pg1 = env.postgres.create_start("b1")
+    endpoint1 = env.endpoints.create_start("b1")
 
-    pg_bin.run_capture(["pgbench", "-i", pg1.connstr()])
+    pg_bin.run_capture(["pgbench", "-i", endpoint1.connstr()])

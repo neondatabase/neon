@@ -12,10 +12,10 @@ def test_config(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch("test_config", "empty")
 
     # change config
-    pg = env.postgres.create_start("test_config", config_lines=["log_min_messages=debug1"])
+    endpoint = env.endpoints.create_start("test_config", config_lines=["log_min_messages=debug1"])
     log.info("postgres is running on test_config branch")
 
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """

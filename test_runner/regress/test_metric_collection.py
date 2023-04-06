@@ -123,9 +123,9 @@ def test_metric_collection(
     # before pageserver, pageserver log might contain such errors in the end.
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     env.neon_cli.create_branch("test_metric_collection")
-    pg = env.postgres.create_start("test_metric_collection")
+    endpoint = env.endpoints.create_start("test_metric_collection")
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     tenant_id = TenantId(query_scalar(cur, "SHOW neon.tenant_id"))
@@ -158,7 +158,7 @@ def test_metric_collection(
 
     # upload some data to remote storage
     if remote_storage_kind == RemoteStorageKind.LOCAL_FS:
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
         pageserver_http = env.pageserver.http_client()
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         pageserver_http.timeline_gc(tenant_id, timeline_id, 10000)

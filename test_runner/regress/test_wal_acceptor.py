@@ -16,6 +16,7 @@ from typing import Any, List, Optional
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonBroker,
     NeonEnv,
     NeonEnvBuilder,
@@ -23,7 +24,6 @@ from fixtures.neon_fixtures import (
     PgBin,
     PgProtocol,
     PortDistributor,
-    Postgres,
     RemoteStorageKind,
     RemoteStorageUsers,
     Safekeeper,
@@ -39,11 +39,11 @@ from fixtures.utils import get_dir_size, query_scalar, start_in_background
 def wait_lsn_force_checkpoint(
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    pg: Postgres,
+    endpoint: Endpoint,
     ps: NeonPageserver,
     pageserver_conn_options={},
 ):
-    lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     log.info(f"pg_current_wal_flush_lsn is {lsn}, waiting for it on pageserver")
 
     auth_token = None
@@ -97,10 +97,10 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
     branch_names_to_timeline_ids = {}
 
     # start postgres on each timeline
-    pgs = []
+    endpoints = []
     for branch_name in branch_names:
         new_timeline_id = env.neon_cli.create_branch(branch_name)
-        pgs.append(env.postgres.create_start(branch_name))
+        endpoints.append(env.endpoints.create_start(branch_name))
         branch_names_to_timeline_ids[branch_name] = new_timeline_id
 
     tenant_id = env.initial_tenant
@@ -160,8 +160,8 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
     # Do everything in different loops to have actions on different timelines
     # interleaved.
     # create schema
-    for pg in pgs:
-        pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
+    for endpoint in endpoints:
+        endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
     init_m = collect_metrics("after CREATE TABLE")
 
     # Populate data for 2/3 timelines
@@ -197,16 +197,16 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
     metrics_checker = MetricsChecker()
     metrics_checker.start()
 
-    for pg in pgs[:-1]:
-        pg.safe_psql("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+    for endpoint in endpoints[:-1]:
+        endpoint.safe_psql("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
 
     metrics_checker.stop()
 
     collect_metrics("after INSERT INTO")
 
     # Check data for 2/3 timelines
-    for pg in pgs[:-1]:
-        res = pg.safe_psql("SELECT sum(key) FROM t")
+    for endpoint in endpoints[:-1]:
+        res = endpoint.safe_psql("SELECT sum(key) FROM t")
         assert res[0] == (5000050000,)
 
     final_m = collect_metrics("after SELECT")
@@ -233,11 +233,11 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_safekeepers_restarts")
-    pg = env.postgres.create_start("test_safekeepers_restarts")
+    endpoint = env.endpoints.create_start("test_safekeepers_restarts")
 
     # we rely upon autocommit after each statement
     # as waiting for acceptors happens there
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     failed_node = None
@@ -268,22 +268,22 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
 
-    pg = env.postgres.create_start("test_broker")
-    pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
+    endpoint = env.endpoints.create_start("test_broker")
+    endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
     # learn neon timeline from compute
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     # wait until remote_consistent_lsn gets advanced on all safekeepers
     clients = [sk.http_client() for sk in env.safekeepers]
     stat_before = [cli.timeline_status(tenant_id, timeline_id) for cli in clients]
     log.info(f"statuses is {stat_before}")
 
-    pg.safe_psql("INSERT INTO t SELECT generate_series(1,100), 'payload'")
+    endpoint.safe_psql("INSERT INTO t SELECT generate_series(1,100), 'payload'")
 
     # force checkpoint in pageserver to advance remote_consistent_lsn
-    wait_lsn_force_checkpoint(tenant_id, timeline_id, pg, env.pageserver)
+    wait_lsn_force_checkpoint(tenant_id, timeline_id, endpoint, env.pageserver)
 
     # and wait till remote_consistent_lsn propagates to all safekeepers
     started_at = time.time()
@@ -317,26 +317,28 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     )
 
     env.neon_cli.create_branch("test_safekeepers_wal_removal")
-    pg = env.postgres.create_start("test_safekeepers_wal_removal")
+    endpoint = env.endpoints.create_start("test_safekeepers_wal_removal")
 
     # Note: it is important to insert at least two segments, as currently
     # control file is synced roughly once in segment range and WAL is not
     # removed until all horizons are persisted.
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE t(key int primary key, value text)",
             "INSERT INTO t SELECT generate_series(1,200000), 'payload'",
         ]
     )
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     # force checkpoint to advance remote_consistent_lsn
     pageserver_conn_options = {}
     if auth_enabled:
         pageserver_conn_options["password"] = env.auth_keys.generate_tenant_token(tenant_id)
-    wait_lsn_force_checkpoint(tenant_id, timeline_id, pg, env.pageserver, pageserver_conn_options)
+    wait_lsn_force_checkpoint(
+        tenant_id, timeline_id, endpoint, env.pageserver, pageserver_conn_options
+    )
 
     # We will wait for first segment removal. Make sure they exist for starter.
     first_segments = [
@@ -436,13 +438,13 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_safekeepers_wal_backup")
-    pg = env.postgres.create_start("test_safekeepers_wal_backup")
+    endpoint = env.endpoints.create_start("test_safekeepers_wal_backup")
 
     # learn neon timeline from compute
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
     cur.execute("create table t(key int, value text)")
 
@@ -465,9 +467,9 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Remot
     # put one of safekeepers down again
     env.safekeepers[0].stop()
     # restart postgres
-    pg.stop_and_destroy().create_start("test_safekeepers_wal_backup")
+    endpoint.stop_and_destroy().create_start("test_safekeepers_wal_backup")
     # and ensure offloading still works
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("insert into t select generate_series(1,250000), 'payload'")
     seg_end = Lsn("0/5000000")
@@ -491,15 +493,15 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("test_s3_wal_replay")
 
-    pg = env.postgres.create_start("test_s3_wal_replay")
+    endpoint = env.endpoints.create_start("test_s3_wal_replay")
 
     # learn neon timeline from compute
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     expected_sum = 0
 
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("create table t(key int, value text)")
             cur.execute("insert into t values (1, 'payload')")
@@ -547,7 +549,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         f"Pageserver last_record_lsn={pageserver_lsn}; flush_lsn={last_lsn}; lag before replay is {lag / 1024}kb"
     )
 
-    pg.stop_and_destroy()
+    endpoint.stop_and_destroy()
     ps_cli.timeline_delete(tenant_id, timeline_id)
 
     # Also delete and manually create timeline on safekeepers -- this tests
@@ -609,9 +611,9 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     log.info(f"WAL redo took {elapsed} s")
 
     # verify data
-    pg.create_start("test_s3_wal_replay")
+    endpoint.create_start("test_s3_wal_replay")
 
-    assert pg.safe_psql("select sum(key) from t")[0][0] == expected_sum
+    assert endpoint.safe_psql("select sum(key) from t")[0][0] == expected_sum
 
 
 class ProposerPostgres(PgProtocol):
@@ -762,13 +764,13 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_timeline_status")
-    pg = env.postgres.create_start("test_timeline_status")
+    endpoint = env.endpoints.create_start("test_timeline_status")
 
     wa = env.safekeepers[0]
 
     # learn neon timeline from compute
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     if not auth_enabled:
         wa_http_cli = wa.http_client()
@@ -806,11 +808,11 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert debug_dump_0["timelines_count"] == 1
     assert debug_dump_0["timelines"][0]["timeline_id"] == str(timeline_id)
 
-    pg.safe_psql("create table t(i int)")
+    endpoint.safe_psql("create table t(i int)")
 
     # ensure epoch goes up after reboot
-    pg.stop().start()
-    pg.safe_psql("insert into t values(10)")
+    endpoint.stop().start()
+    endpoint.safe_psql("insert into t values(10)")
 
     tli_status = wa_http_cli.timeline_status(tenant_id, timeline_id)
     epoch_after_reboot = tli_status.acceptor_epoch
@@ -992,8 +994,8 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
     def safekeepers_guc(env: NeonEnv, sk_names: List[int]) -> str:
         return ",".join([f"localhost:{sk.port.pg}" for sk in env.safekeepers if sk.id in sk_names])
 
-    def execute_payload(pg: Postgres):
-        with closing(pg.connect()) as conn:
+    def execute_payload(endpoint: Endpoint):
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 # we rely upon autocommit after each statement
                 # as waiting for acceptors happens there
@@ -1021,26 +1023,26 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
     active_safekeepers = [1, 2, 3]
-    pg = env.postgres.create("test_replace_safekeeper")
-    pg.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
-    pg.start()
+    endpoint = env.endpoints.create("test_replace_safekeeper")
+    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.start()
 
     # learn neon timeline from compute
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
-    execute_payload(pg)
+    execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     log.info("Restart all safekeepers to flush everything")
     env.safekeepers[0].stop(immediate=True)
-    execute_payload(pg)
+    execute_payload(endpoint)
     env.safekeepers[0].start()
     env.safekeepers[1].stop(immediate=True)
-    execute_payload(pg)
+    execute_payload(endpoint)
     env.safekeepers[1].start()
     env.safekeepers[2].stop(immediate=True)
-    execute_payload(pg)
+    execute_payload(endpoint)
     env.safekeepers[2].start()
 
     env.safekeepers[0].stop(immediate=True)
@@ -1050,27 +1052,27 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
     env.safekeepers[1].start()
     env.safekeepers[2].start()
 
-    execute_payload(pg)
+    execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     log.info("Stop sk1 (simulate failure) and use only quorum of sk2 and sk3")
     env.safekeepers[0].stop(immediate=True)
-    execute_payload(pg)
+    execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     log.info("Recreate postgres to replace failed sk1 with new sk4")
-    pg.stop_and_destroy().create("test_replace_safekeeper")
+    endpoint.stop_and_destroy().create("test_replace_safekeeper")
     active_safekeepers = [2, 3, 4]
     env.safekeepers[3].start()
-    pg.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
-    pg.start()
+    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.start()
 
-    execute_payload(pg)
+    execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
     log.info("Stop sk2 to require quorum of sk3 and sk4 for normal work")
     env.safekeepers[1].stop(immediate=True)
-    execute_payload(pg)
+    execute_payload(endpoint)
     show_statuses(env.safekeepers, tenant_id, timeline_id)
 
 
@@ -1082,13 +1084,13 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
     last_lsn = Lsn(0)
 
     # returns pg_wal size in MB
-    def collect_stats(pg: Postgres, cur, enable_logs=True):
+    def collect_stats(endpoint: Endpoint, cur, enable_logs=True):
         nonlocal last_lsn
-        assert pg.pgdata_dir is not None
+        assert endpoint.pgdata_dir is not None
 
         log.info("executing INSERT to generate WAL")
         current_lsn = Lsn(query_scalar(cur, "select pg_current_wal_lsn()"))
-        pg_wal_size_mb = get_dir_size(os.path.join(pg.pgdata_dir, "pg_wal")) / 1024 / 1024
+        pg_wal_size_mb = get_dir_size(os.path.join(endpoint.pgdata_dir, "pg_wal")) / 1024 / 1024
         if enable_logs:
             lsn_delta_mb = (current_lsn - last_lsn) / 1024 / 1024
             log.info(f"LSN delta: {lsn_delta_mb} MB, current WAL size: {pg_wal_size_mb} MB")
@@ -1104,25 +1106,25 @@ def test_wal_deleted_after_broadcast(neon_env_builder: NeonEnvBuilder):
 
     env.neon_cli.create_branch("test_wal_deleted_after_broadcast")
     # Adjust checkpoint config to prevent keeping old WAL segments
-    pg = env.postgres.create_start(
+    endpoint = env.endpoints.create_start(
         "test_wal_deleted_after_broadcast",
         config_lines=["min_wal_size=32MB", "max_wal_size=32MB", "log_checkpoints=on"],
     )
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
     cur.execute("CREATE TABLE t(key int, value text)")
 
-    collect_stats(pg, cur)
+    collect_stats(endpoint, cur)
 
     # generate WAL to simulate normal workload
     for i in range(5):
         generate_wal(cur)
-        collect_stats(pg, cur)
+        collect_stats(endpoint, cur)
 
     log.info("executing checkpoint")
     cur.execute("CHECKPOINT")
-    wal_size_after_checkpoint = collect_stats(pg, cur)
+    wal_size_after_checkpoint = collect_stats(endpoint, cur)
 
     # there shouldn't be more than 2 WAL segments (but dir may have archive_status files)
     assert wal_size_after_checkpoint < 16 * 2.5
@@ -1151,13 +1153,13 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     tenant_id_other, timeline_id_other = env.neon_cli.create_tenant()
 
     # Populate branches
-    pg_1 = env.postgres.create_start("br1")
-    pg_2 = env.postgres.create_start("br2")
-    pg_3 = env.postgres.create_start("br3")
-    pg_4 = env.postgres.create_start("br4")
-    pg_other = env.postgres.create_start("main", tenant_id=tenant_id_other)
-    for pg in [pg_1, pg_2, pg_3, pg_4, pg_other]:
-        with closing(pg.connect()) as conn:
+    endpoint_1 = env.endpoints.create_start("br1")
+    endpoint_2 = env.endpoints.create_start("br2")
+    endpoint_3 = env.endpoints.create_start("br3")
+    endpoint_4 = env.endpoints.create_start("br4")
+    endpoint_other = env.endpoints.create_start("main", tenant_id=tenant_id_other)
+    for endpoint in [endpoint_1, endpoint_2, endpoint_3, endpoint_4, endpoint_other]:
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE t(key int primary key)")
     sk = env.safekeepers[0]
@@ -1178,14 +1180,14 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert (sk_data_dir / str(tenant_id_other) / str(timeline_id_other)).is_dir()
 
     # Stop branches which should be inactive and restart Safekeeper to drop its in-memory state.
-    pg_2.stop_and_destroy()
-    pg_4.stop_and_destroy()
+    endpoint_2.stop_and_destroy()
+    endpoint_4.stop_and_destroy()
     sk.stop()
     sk.start()
 
     # Ensure connections to Safekeeper are established
-    for pg in [pg_1, pg_3, pg_other]:
-        with closing(pg.connect()) as conn:
+    for endpoint in [endpoint_1, endpoint_3, endpoint_other]:
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO t (key) VALUES (1)")
 
@@ -1244,6 +1246,6 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # Ensure the other tenant still works
     sk_http_other.timeline_status(tenant_id_other, timeline_id_other)
-    with closing(pg_other.connect()) as conn:
+    with closing(endpoint_other.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO t (key) VALUES (123)")

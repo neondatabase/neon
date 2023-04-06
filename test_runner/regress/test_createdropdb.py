@@ -13,10 +13,10 @@ def test_createdb(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_createdb", "empty")
 
-    pg = env.postgres.create_start("test_createdb")
+    endpoint = env.endpoints.create_start("test_createdb")
     log.info("postgres is running on 'test_createdb' branch")
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         # Cause a 'relmapper' change in the original branch
         cur.execute("VACUUM FULL pg_class")
 
@@ -26,10 +26,10 @@ def test_createdb(neon_simple_env: NeonEnv):
 
     # Create a branch
     env.neon_cli.create_branch("test_createdb2", "test_createdb", ancestor_start_lsn=lsn)
-    pg2 = env.postgres.create_start("test_createdb2")
+    endpoint2 = env.endpoints.create_start("test_createdb2")
 
     # Test that you can connect to the new database on both branches
-    for db in (pg, pg2):
+    for db in (endpoint, endpoint2):
         with db.cursor(dbname="foodb") as cur:
             # Check database size in both branches
             cur.execute(
@@ -55,17 +55,17 @@ def test_createdb(neon_simple_env: NeonEnv):
 def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
     env = neon_simple_env
     env.neon_cli.create_branch("test_dropdb", "empty")
-    pg = env.postgres.create_start("test_dropdb")
+    endpoint = env.endpoints.create_start("test_dropdb")
     log.info("postgres is running on 'test_dropdb' branch")
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("CREATE DATABASE foodb")
 
         lsn_before_drop = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 
         dboid = query_scalar(cur, "SELECT oid FROM pg_database WHERE datname='foodb';")
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("DROP DATABASE foodb")
 
         cur.execute("CHECKPOINT")
@@ -76,29 +76,29 @@ def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
     env.neon_cli.create_branch(
         "test_before_dropdb", "test_dropdb", ancestor_start_lsn=lsn_before_drop
     )
-    pg_before = env.postgres.create_start("test_before_dropdb")
+    endpoint_before = env.endpoints.create_start("test_before_dropdb")
 
     env.neon_cli.create_branch(
         "test_after_dropdb", "test_dropdb", ancestor_start_lsn=lsn_after_drop
     )
-    pg_after = env.postgres.create_start("test_after_dropdb")
+    endpoint_after = env.endpoints.create_start("test_after_dropdb")
 
     # Test that database exists on the branch before drop
-    pg_before.connect(dbname="foodb").close()
+    endpoint_before.connect(dbname="foodb").close()
 
     # Test that database subdir exists on the branch before drop
-    assert pg_before.pgdata_dir
-    dbpath = pathlib.Path(pg_before.pgdata_dir) / "base" / str(dboid)
+    assert endpoint_before.pgdata_dir
+    dbpath = pathlib.Path(endpoint_before.pgdata_dir) / "base" / str(dboid)
     log.info(dbpath)
 
     assert os.path.isdir(dbpath) is True
 
     # Test that database subdir doesn't exist on the branch after drop
-    assert pg_after.pgdata_dir
-    dbpath = pathlib.Path(pg_after.pgdata_dir) / "base" / str(dboid)
+    assert endpoint_after.pgdata_dir
+    dbpath = pathlib.Path(endpoint_after.pgdata_dir) / "base" / str(dboid)
     log.info(dbpath)
 
     assert os.path.isdir(dbpath) is False
 
     # Check that we restore the content of the datadir correctly
-    check_restored_datadir_content(test_output_dir, env, pg)
+    check_restored_datadir_content(test_output_dir, env, endpoint)
