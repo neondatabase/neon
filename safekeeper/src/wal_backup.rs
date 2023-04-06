@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
-use postgres_ffi::{XLogFileName, WAL_SEGMENT_SIZE};
+use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::fs::File;
@@ -322,32 +322,23 @@ impl WalBackupTask {
                 continue;
             }
 
-            const LSN_MAX_BACKUP_RANGE: u64 = (WAL_SEGMENT_SIZE * 10) as u64;
-            // Don't try to offload more than 10 segments at once.
-            let end_lsn = min(commit_lsn, backup_lsn + LSN_MAX_BACKUP_RANGE);
-
             match backup_lsn_range(
-                backup_lsn,
-                end_lsn,
+                &self.timeline,
+                &mut backup_lsn,
+                commit_lsn,
                 self.wal_seg_size,
                 &self.timeline_dir,
                 &self.workspace_dir,
             )
             .await
             {
-                Ok(backup_lsn_result) => {
-                    backup_lsn = backup_lsn_result;
-                    let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
-                    if let Err(e) = res {
-                        error!("failed to set wal_backup_lsn: {}", e);
-                        return;
-                    }
+                Ok(()) => {
                     retry_attempt = 0;
                 }
                 Err(e) => {
                     error!(
                         "failed while offloading range {}-{}: {:?}",
-                        backup_lsn, end_lsn, e
+                        backup_lsn, commit_lsn, e
                     );
 
                     retry_attempt = retry_attempt.saturating_add(1);
@@ -358,20 +349,27 @@ impl WalBackupTask {
 }
 
 pub async fn backup_lsn_range(
-    start_lsn: Lsn,
+    timeline: &Arc<Timeline>,
+    backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
     timeline_dir: &Path,
     workspace_dir: &Path,
-) -> Result<Lsn> {
-    let mut res = start_lsn;
+) -> Result<()> {
+    let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
     for s in &segments {
         backup_single_segment(s, timeline_dir, workspace_dir)
             .await
             .with_context(|| format!("offloading segno {}", s.seg_no))?;
 
-        res = s.end_lsn;
+        let new_backup_lsn = s.end_lsn;
+        let res = timeline.set_wal_backup_lsn(new_backup_lsn);
+        if let Err(e) = res {
+            error!("failed to set wal_backup_lsn: {}", e);
+            return Err(e);
+        }
+        *backup_lsn = new_backup_lsn;
     }
     info!(
         "offloaded segnos {:?} up to {}, previous backup_lsn {}",
@@ -379,7 +377,7 @@ pub async fn backup_lsn_range(
         end_lsn,
         start_lsn,
     );
-    Ok(res)
+    Ok(())
 }
 
 async fn backup_single_segment(
