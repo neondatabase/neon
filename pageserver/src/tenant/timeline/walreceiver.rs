@@ -23,16 +23,21 @@
 mod connection_manager;
 mod walreceiver_connection;
 
-use crate::broker_client::is_broker_client_initialized;
-use crate::context::RequestContext;
+use crate::broker_client::{get_broker_client, is_broker_client_initialized};
+use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::timeline::walreceiver::connection_manager::{
+    connection_manager_loop_step, ConnectionManagerState,
+};
 
 use anyhow::Context;
 use std::future::Future;
 use std::num::NonZeroU64;
+use std::ops::ControlFlow;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
+use tokio::select;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -41,9 +46,13 @@ use utils::id::TenantTimelineId;
 
 use super::Timeline;
 
+#[derive(Clone)]
 pub struct WalReceiverConf {
+    /// The timeout on the connection to safekeeper for WAL streaming.
     pub wal_connect_timeout: Duration,
+    /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
     pub lagging_wal_timeout: Duration,
+    /// The Lsn lag to use to determine when the current connection is lagging to much behind and reconnect to the other one.
     pub max_lsn_wal_lag: NonZeroU64,
     pub auth_token: Option<Arc<String>>,
     pub availability_zone: Option<String>,
@@ -88,15 +97,53 @@ impl WalReceiver {
             format!("walreceiver start on a dropped timeline {}", self.timeline)
         })?;
 
-        connection_manager::spawn_connection_manager_task(
-            timeline,
-            self.conf.wal_connect_timeout,
-            self.conf.lagging_wal_timeout,
-            self.conf.max_lsn_wal_lag,
-            self.conf.auth_token.clone(),
-            self.conf.availability_zone.clone(),
-            ctx,
-        );
+        let mut broker_client = get_broker_client().clone();
+
+        let tenant_id = timeline.tenant_id;
+        let timeline_id = timeline.timeline_id;
+        let walreceiver_ctx =
+            ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
+
+        let wal_receiver_conf = self.conf.clone();
+        task_mgr::spawn(
+        WALRECEIVER_RUNTIME.handle(),
+        TaskKind::WalReceiverManager,
+        Some(tenant_id),
+        Some(timeline_id),
+        &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
+        false,
+        async move {
+            info!("WAL receiver manager started, connecting to broker");
+            let mut connection_manager_state = ConnectionManagerState::new(
+                timeline,
+                wal_receiver_conf,
+            );
+            loop {
+                select! {
+                    _ = task_mgr::shutdown_watcher() => {
+                        info!("WAL receiver shutdown requested, shutting down");
+                        connection_manager_state.shutdown().await;
+                        return Ok(());
+                    },
+                    loop_step_result = connection_manager_loop_step(
+                        &mut broker_client,
+                        &mut connection_manager_state,
+                        &walreceiver_ctx,
+                    ) => match loop_step_result {
+                        ControlFlow::Continue(()) => continue,
+                        ControlFlow::Break(()) => {
+                            info!("Connection manager loop ended, shutting down");
+                            connection_manager_state.shutdown().await;
+                            return Ok(());
+                        }
+                    },
+                }
+            }
+        }
+        .instrument(
+            info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id),
+        ));
+
         self.started.store(true, atomic::Ordering::Release);
 
         Ok(())

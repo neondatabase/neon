@@ -1361,12 +1361,7 @@ impl Tenant {
 
         // Stop the walreceiver first.
         debug!("waiting for wal receiver to shutdown");
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_id),
-            Some(timeline_id),
-        )
-        .await;
+        timeline.walreceiver.stop().await;
         debug!("wal receiver shutdown confirmed");
 
         info!("waiting for timeline tasks to shutdown");
