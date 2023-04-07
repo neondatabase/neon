@@ -34,7 +34,7 @@ use std::fs::File;
 use std::panic;
 use std::path::Path;
 use std::process::exit;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -239,10 +239,25 @@ fn main() -> Result<()> {
         thread::sleep(Duration::from_secs(30));
     }
 
-    info!("shutting down tracing");
     // Shutdown trace pipeline gracefully, so that it has a chance to send any
-    // pending traces before we exit.
-    tracing_utils::shutdown_tracing();
+    // pending traces before we exit. Shutting down OTEL tracing provider may
+    // hang for quite some time, see, for example:
+    // - https://github.com/open-telemetry/opentelemetry-rust/issues/868
+    // - and our problems with staging https://github.com/neondatabase/cloud/issues/3707#issuecomment-1493983636
+    //
+    // Yet, we want computes to shut down fast enough, as we may need a new one
+    // for the same timeline ASAP. So wait no longer than 2s for the shutdown to
+    // complete, then just error out and exit the main thread.
+    info!("shutting down tracing");
+    let (sender, receiver) = mpsc::channel();
+    let _ = thread::spawn(move || {
+        tracing_utils::shutdown_tracing();
+        sender.send(()).ok()
+    });
+    let shutdown_res = receiver.recv_timeout(Duration::from_millis(2000));
+    if shutdown_res.is_err() {
+        error!("timed out while shutting down tracing, exiting anyway");
+    }
 
     info!("shutting down");
     exit(exit_code.unwrap_or(1))
