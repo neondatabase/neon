@@ -866,9 +866,9 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn activate(self: &Arc<Self>) -> anyhow::Result<()> {
+    pub fn activate(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
         self.set_state(TimelineState::Active);
-        self.launch_wal_receiver()?;
+        self.launch_wal_receiver(ctx)?;
         self.launch_eviction_task();
         Ok(())
     }
@@ -1376,16 +1376,13 @@ impl Timeline {
         *flush_loop_state = FlushLoopState::Running;
     }
 
-    pub(super) fn launch_wal_receiver(&self) -> anyhow::Result<()> {
+    pub(super) fn launch_wal_receiver(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
             self.timeline_id, self.tenant_id
         );
         // TODO update walreceiver conf now?
-        let background_ctx =
-            // XXX: this is a detached_child. Plumb through the ctx from call sites.
-            RequestContext::todo_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-        self.walreceiver.start(background_ctx)?;
+        self.walreceiver.start(ctx)?;
         Ok(())
     }
 

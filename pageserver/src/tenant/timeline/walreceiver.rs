@@ -70,7 +70,7 @@ impl WalReceiver {
         }
     }
 
-    pub fn start(&self, ctx: RequestContext) -> anyhow::Result<()> {
+    pub fn start(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         if !is_broker_client_initialized() {
             if cfg!(test) {
                 info!("not launching WAL receiver because broker client hasn't been initialized");
@@ -80,7 +80,7 @@ impl WalReceiver {
             }
         }
 
-        if self.started.load(atomic::Ordering::Relaxed) {
+        if self.started.load(atomic::Ordering::Acquire) {
             anyhow::bail!("Wal receiver is already started");
         }
 
@@ -97,7 +97,7 @@ impl WalReceiver {
             self.conf.availability_zone.clone(),
             ctx,
         );
-        self.started.store(true, atomic::Ordering::Relaxed);
+        self.started.store(true, atomic::Ordering::Release);
 
         Ok(())
     }
@@ -109,11 +109,9 @@ impl WalReceiver {
             Some(self.timeline.timeline_id),
         )
         .await;
-        self.started.store(false, atomic::Ordering::Relaxed);
+        self.started.store(false, atomic::Ordering::Release);
     }
 }
-
-// TODO kb shutdown walreceiver on drop?
 
 /// A handle of an asynchronous task.
 /// The task has a channel that it can use to communicate its lifecycle events in a certain form, see [`TaskEvent`]

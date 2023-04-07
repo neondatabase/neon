@@ -46,12 +46,13 @@ pub fn spawn_connection_manager_task(
     max_lsn_wal_lag: NonZeroU64,
     auth_token: Option<Arc<String>>,
     availability_zone: Option<String>,
-    ctx: RequestContext,
+    ctx: &RequestContext,
 ) {
     let mut broker_client = get_broker_client().clone();
 
     let tenant_id = timeline.tenant_id;
     let timeline_id = timeline.timeline_id;
+    let walreceiver_ctx = ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
 
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
@@ -80,7 +81,7 @@ pub fn spawn_connection_manager_task(
                     loop_step_result = connection_manager_loop_step(
                         &mut broker_client,
                         &mut walreceiver_state,
-                        &ctx,
+                        &walreceiver_ctx,
                     ) => match loop_step_result {
                         ControlFlow::Continue(()) => continue,
                         ControlFlow::Break(()) => {
