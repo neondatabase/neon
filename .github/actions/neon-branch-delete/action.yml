@@ -48,7 +48,7 @@ runs:
         done
 
         if [ -z "${branch_id}" ] || [ "${branch_id}" == "null" ]; then
-          echo 2>&1 "Failed to delete branch after 10 attempts, the latest response was: ${deleted_branch}"
+          echo >&2 "Failed to delete branch after 10 attempts, the latest response was: ${deleted_branch}"
           exit 1
         fi
       env:

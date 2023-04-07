@@ -58,7 +58,7 @@ runs:
         done
 
         if [ -z "${branch_id}" ] || [ "${branch_id}" == "null" ]; then
-          echo 2>&1 "Failed to create branch after 10 attempts, the latest response was: ${branch}"
+          echo >&2 "Failed to create branch after 10 attempts, the latest response was: ${branch}"
           exit 1
         fi
 
@@ -122,7 +122,7 @@ runs:
         done
 
         if [ -z "${password}" ] || [ "${password}" == "null" ]; then
-          echo 2>&1 "Failed to reset password after 10 attempts, the latest response was: ${reset_password}"
+          echo >&2 "Failed to reset password after 10 attempts, the latest response was: ${reset_password}"
           exit 1
         fi
 

@@ -45,12 +45,12 @@ runs:
       shell: bash -euxo pipefail {0}
       run: |
         if [ "${{ inputs.action }}" != "store" ] && [ "${{ inputs.action }}" != "generate" ]; then
-          echo 2>&1 "Unknown inputs.action type '${{ inputs.action }}'; allowed 'generate' or 'store' only"
+          echo >&2 "Unknown inputs.action type '${{ inputs.action }}'; allowed 'generate' or 'store' only"
           exit 1
         fi
 
         if [ -z "${{ inputs.test_selection }}" ] && [ "${{ inputs.action }}" == "store" ]; then
-          echo 2>&1 "inputs.test_selection must be set for 'store' action"
+          echo >&2 "inputs.test_selection must be set for 'store' action"
           exit 2
         fi
 

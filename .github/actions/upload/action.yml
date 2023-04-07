@@ -23,7 +23,7 @@ runs:
         mkdir -p $(dirname $ARCHIVE)
 
         if [ -f ${ARCHIVE} ]; then
-          echo 2>&1 "File ${ARCHIVE} already exist. Something went wrong before"
+          echo >&2 "File ${ARCHIVE} already exist. Something went wrong before"
           exit 1
         fi
 
@@ -33,10 +33,10 @@ runs:
         elif [ -f ${SOURCE} ]; then
           time tar -cf ${ARCHIVE} --zstd ${SOURCE}
         elif ! ls ${SOURCE} > /dev/null 2>&1; then
-          echo 2>&1 "${SOURCE} does not exist"
+          echo >&2 "${SOURCE} does not exist"
           exit 2
         else
-          echo 2>&1 "${SOURCE} is neither a directory nor a file, do not know how to handle it"
+          echo >&2 "${SOURCE} is neither a directory nor a file, do not know how to handle it"
           exit 3
         fi
 
