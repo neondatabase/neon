@@ -207,6 +207,7 @@ static void MergeTable()
 
     if(old_table->db_table)
     {
+        InitDbTableIfNeeded();
         DbEntry *entry;
         HASH_SEQ_STATUS status;
         hash_seq_init(&status, old_table->db_table);
@@ -249,6 +250,7 @@ static void MergeTable()
 
     if(old_table->role_table)
     {
+        InitRoleTableIfNeeded();
         RoleEntry *entry;
         HASH_SEQ_STATUS status;
         hash_seq_init(&status, old_table->role_table);
@@ -268,7 +270,7 @@ static void MergeTable()
                 bool found_old = false;
                 RoleEntry *old = hash_search(
                     CurrentDdlTable->role_table,
-                    entry->name,
+                    entry->old_name,
                     HASH_FIND,
                     &found_old);
                 if(found_old)
@@ -343,7 +345,7 @@ static void HandleCreateDb(CreatedbStmt *stmt)
         HASH_ENTER,
         &found);
     if(!found)
-        entry->old_name[0] = '\0';
+        memset(entry->old_name, 0, sizeof(entry->old_name));
 
     entry->type = Op_Set;
     if(downer)
@@ -365,7 +367,7 @@ static void HandleAlterOwner(AlterOwnerStmt *stmt)
         HASH_ENTER,
         &found);
     if(!found)
-        entry->old_name[0] = '\0';
+        memset(entry->old_name, 0, sizeof(entry->old_name));
 
     strncpy(entry->owner, get_rolespec_name(stmt->newowner), NAMEDATALEN);
     entry->type = Op_Set;
@@ -417,9 +419,10 @@ static void HandleDropDb(DropdbStmt *stmt)
         HASH_ENTER,
         &found);
     entry->type = Op_Delete;
-    entry->owner[0] = '\0';
+    memset(entry->owner, 0, sizeof(entry->owner));
     if(!found)
-        entry->old_name[0] = '\0';
+        memset(entry->old_name, 0, sizeof(entry->owner));
+
 }
 
 static void HandleCreateRole(CreateRoleStmt *stmt)
@@ -440,7 +443,7 @@ static void HandleCreateRole(CreateRoleStmt *stmt)
             dpass = defel;
     }
     if(!found)
-        entry->old_name[0] = '\0';
+        memset(entry->old_name, 0, sizeof(entry->old_name));
     if(dpass)
         entry->password = MemoryContextStrdup(CurTransactionContext, strVal(dpass->arg));
     else
@@ -469,7 +472,7 @@ static void HandleAlterRole(AlterRoleStmt *stmt)
         HASH_ENTER,
         &found);
     if(!found)
-        entry->old_name[0] = '\0';
+        memset(entry->old_name, 0, sizeof(entry->old_name));
     entry->password = MemoryContextStrdup(CurTransactionContext, strVal(dpass->arg));
     entry->type = Op_Set;
 }
@@ -527,7 +530,7 @@ static void HandleDropRole(DropRoleStmt *stmt)
         entry->type = Op_Delete;
         entry->password = NULL;
         if(!found)
-            entry->old_name[0] = '\0';
+            memset(entry->old_name, 0, sizeof(entry));
     }
 }
 
