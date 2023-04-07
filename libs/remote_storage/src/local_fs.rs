@@ -118,7 +118,7 @@ impl RemoteStorage for LocalFs {
 
     async fn upload(
         &self,
-        data: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
+        data: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,

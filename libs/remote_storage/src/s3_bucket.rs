@@ -343,7 +343,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn upload(
         &self,
-        from: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
+        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
