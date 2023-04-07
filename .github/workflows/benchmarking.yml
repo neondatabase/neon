@@ -30,7 +30,7 @@ defaults:
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: "neon-staging"
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -174,7 +174,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -317,7 +317,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -413,7 +413,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -503,7 +503,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]

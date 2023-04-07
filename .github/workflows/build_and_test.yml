@@ -13,7 +13,7 @@ defaults:
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
 
 env:
@@ -368,7 +368,7 @@ jobs:
           build_type: ${{ matrix.build_type }}
           test_selection: performance
           run_in_parallel: false
-          save_perf_report: ${{ github.ref == 'refs/heads/main' }}
+          save_perf_report: ${{ github.ref_name == 'main' }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
