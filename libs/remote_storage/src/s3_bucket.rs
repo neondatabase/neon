@@ -273,7 +273,6 @@ impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
     }
 }
 
-#[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
     /// See the doc for `RemoteStorage::list_prefixes`
     /// Note: it wont include empty "directories"

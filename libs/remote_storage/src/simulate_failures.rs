@@ -72,51 +72,50 @@ impl UnreliableWrapper {
     }
 }
 
-#[async_trait::async_trait]
-impl RemoteStorage for UnreliableWrapper {
-    async fn list_prefixes(
-        &self,
-        prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))?;
-        self.inner.list_prefixes(prefix).await
-    }
+// impl RemoteStorage for UnreliableWrapper {
+//     async fn list_prefixes(
+//         &self,
+//         prefix: Option<&RemotePath>,
+//     ) -> Result<Vec<RemotePath>, DownloadError> {
+//         self.attempt(RemoteOp::ListPrefixes(prefix.cloned()))?;
+//         self.inner.list_prefixes(prefix).await
+//     }
 
-    async fn upload(
-        &self,
-        data: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
-        // S3 PUT request requires the content length to be specified,
-        // otherwise it starts to fail with the concurrent connection count increasing.
-        data_size_bytes: usize,
-        to: &RemotePath,
-        metadata: Option<StorageMetadata>,
-    ) -> anyhow::Result<()> {
-        self.attempt(RemoteOp::Upload(to.clone()))?;
-        self.inner.upload(data, data_size_bytes, to, metadata).await
-    }
+//     async fn upload(
+//         &self,
+//         data: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
+//         // S3 PUT request requires the content length to be specified,
+//         // otherwise it starts to fail with the concurrent connection count increasing.
+//         data_size_bytes: usize,
+//         to: &RemotePath,
+//         metadata: Option<StorageMetadata>,
+//     ) -> anyhow::Result<()> {
+//         self.attempt(RemoteOp::Upload(to.clone()))?;
+//         self.inner.upload(data, data_size_bytes, to, metadata).await
+//     }
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
-        self.attempt(RemoteOp::Download(from.clone()))?;
-        self.inner.download(from).await
-    }
+//     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+//         self.attempt(RemoteOp::Download(from.clone()))?;
+//         self.inner.download(from).await
+//     }
 
-    async fn download_byte_range(
-        &self,
-        from: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: Option<u64>,
-    ) -> Result<Download, DownloadError> {
-        // Note: We treat any download_byte_range as an "attempt" of the same
-        // operation. We don't pay attention to the ranges. That's good enough
-        // for now.
-        self.attempt(RemoteOp::Download(from.clone()))?;
-        self.inner
-            .download_byte_range(from, start_inclusive, end_exclusive)
-            .await
-    }
+//     async fn download_byte_range(
+//         &self,
+//         from: &RemotePath,
+//         start_inclusive: u64,
+//         end_exclusive: Option<u64>,
+//     ) -> Result<Download, DownloadError> {
+//         // Note: We treat any download_byte_range as an "attempt" of the same
+//         // operation. We don't pay attention to the ranges. That's good enough
+//         // for now.
+//         self.attempt(RemoteOp::Download(from.clone()))?;
+//         self.inner
+//             .download_byte_range(from, start_inclusive, end_exclusive)
+//             .await
+//     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        self.attempt(RemoteOp::Delete(path.clone()))?;
-        self.inner.delete(path).await
-    }
-}
+//     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+//         self.attempt(RemoteOp::Delete(path.clone()))?;
+//         self.inner.delete(path).await
+//     }
+// }

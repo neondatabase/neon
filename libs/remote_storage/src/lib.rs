@@ -1,3 +1,5 @@
+#![feature(async_fn_in_trait)]
+
 //! A set of generic storage abstractions for the page server to use when backing up and restoring its state from the external storage.
 //! No other modules from this tree are supposed to be used directly by the external code.
 //!
@@ -75,7 +77,6 @@ impl RemotePath {
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
-#[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync + 'static {
     /// Lists all top level subdirectories for a given prefix
     /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
@@ -157,7 +158,7 @@ impl std::error::Error for DownloadError {}
 pub enum GenericRemoteStorage {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
-    Unreliable(Arc<UnreliableWrapper>),
+    // Unreliable(Arc<UnreliableWrapper>),
 }
 
 impl GenericRemoteStorage {
@@ -168,7 +169,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.list_prefixes(prefix).await,
             Self::AwsS3(s) => s.list_prefixes(prefix).await,
-            Self::Unreliable(s) => s.list_prefixes(prefix).await,
+            // Self::Unreliable(s) => s.list_prefixes(prefix).await,
         }
     }
 
@@ -182,7 +183,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata).await,
             Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            // Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
         }
     }
 
@@ -190,7 +191,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.download(from).await,
             Self::AwsS3(s) => s.download(from).await,
-            Self::Unreliable(s) => s.download(from).await,
+            // Self::Unreliable(s) => s.download(from).await,
         }
     }
 
@@ -209,10 +210,10 @@ impl GenericRemoteStorage {
                 s.download_byte_range(from, start_inclusive, end_exclusive)
                     .await
             }
-            Self::Unreliable(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
-                    .await
-            }
+            // Self::Unreliable(s) => {
+            //     s.download_byte_range(from, start_inclusive, end_exclusive)
+            //         .await
+            // }
         }
     }
 
@@ -220,7 +221,7 @@ impl GenericRemoteStorage {
         match self {
             Self::LocalFs(s) => s.delete(path).await,
             Self::AwsS3(s) => s.delete(path).await,
-            Self::Unreliable(s) => s.delete(path).await,
+            // Self::Unreliable(s) => s.delete(path).await,
         }
     }
 }
@@ -241,7 +242,8 @@ impl GenericRemoteStorage {
     }
 
     pub fn unreliable_wrapper(s: Self, fail_first: u64) -> Self {
-        Self::Unreliable(Arc::new(UnreliableWrapper::new(s, fail_first)))
+        // Self::Unreliable(Arc::new(UnreliableWrapper::new(s, fail_first)))
+        unimplemented!("TODO kb")
     }
 
     /// Takes storage object contents and its size and uploads to remote storage,

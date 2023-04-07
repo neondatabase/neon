@@ -91,7 +91,6 @@ impl LocalFs {
     }
 }
 
-#[async_trait::async_trait]
 impl RemoteStorage for LocalFs {
     async fn list_prefixes(
         &self,
