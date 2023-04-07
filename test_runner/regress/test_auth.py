@@ -1,7 +1,8 @@
 from contextlib import closing
 
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException, PgProtocol
+from fixtures.neon_fixtures import NeonEnvBuilder, PgProtocol
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.types import TenantId
 
 

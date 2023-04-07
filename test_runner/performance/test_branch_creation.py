@@ -10,7 +10,7 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import wait_for_last_record_lsn
+from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.types import Lsn
 
 

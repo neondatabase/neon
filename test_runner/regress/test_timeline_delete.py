@@ -1,5 +1,6 @@
 import pytest
-from fixtures.neon_fixtures import NeonEnv, PageserverApiException
+from fixtures.neon_fixtures import NeonEnv
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 

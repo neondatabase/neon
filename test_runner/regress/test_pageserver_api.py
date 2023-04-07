@@ -6,8 +6,8 @@ from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
-    PageserverHttpClient,
 )
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 

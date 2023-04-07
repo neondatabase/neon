@@ -9,18 +9,18 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    PageserverApiException,
-    PageserverHttpClient,
     Postgres,
     RemoteStorageKind,
     available_remote_storages,
+)
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_until,
     wait_until_tenant_state,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
 
 
 def do_gc_target(
