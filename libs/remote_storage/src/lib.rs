@@ -13,7 +13,6 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
-    ops::Deref,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -90,7 +89,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
         &self,
-        data: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
+        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,
@@ -161,14 +160,67 @@ pub enum GenericRemoteStorage {
     Unreliable(Arc<UnreliableWrapper>),
 }
 
-impl Deref for GenericRemoteStorage {
-    type Target = dyn RemoteStorage;
-
-    fn deref(&self) -> &Self::Target {
+impl GenericRemoteStorage {
+    pub async fn list_prefixes(
+        &self,
+        prefix: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
-            GenericRemoteStorage::LocalFs(local_fs) => local_fs,
-            GenericRemoteStorage::AwsS3(s3_bucket) => s3_bucket.as_ref(),
-            GenericRemoteStorage::Unreliable(s) => s.as_ref(),
+            Self::LocalFs(s) => s.list_prefixes(prefix).await,
+            Self::AwsS3(s) => s.list_prefixes(prefix).await,
+            Self::Unreliable(s) => s.list_prefixes(prefix).await,
+        }
+    }
+
+    pub async fn upload(
+        &self,
+        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
+        }
+    }
+
+    pub async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.download(from).await,
+            Self::AwsS3(s) => s.download(from).await,
+            Self::Unreliable(s) => s.download(from).await,
+        }
+    }
+
+    pub async fn download_byte_range(
+        &self,
+        from: &RemotePath,
+        start_inclusive: u64,
+        end_exclusive: Option<u64>,
+    ) -> Result<Download, DownloadError> {
+        match self {
+            Self::LocalFs(s) => {
+                s.download_byte_range(from, start_inclusive, end_exclusive)
+                    .await
+            }
+            Self::AwsS3(s) => {
+                s.download_byte_range(from, start_inclusive, end_exclusive)
+                    .await
+            }
+            Self::Unreliable(s) => {
+                s.download_byte_range(from, start_inclusive, end_exclusive)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.delete(path).await,
+            Self::AwsS3(s) => s.delete(path).await,
+            Self::Unreliable(s) => s.delete(path).await,
         }
     }
 }
@@ -199,7 +251,7 @@ impl GenericRemoteStorage {
     /// this path is used for the remote object id conversion only.
     pub async fn upload_storage_object(
         &self,
-        from: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>,
+        from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
     ) -> anyhow::Result<()> {
