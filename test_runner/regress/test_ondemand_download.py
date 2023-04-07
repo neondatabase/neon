@@ -63,7 +63,7 @@ def test_ondemand_download_large_rel(
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             # disable background GC
-            "gc_period": "10 m",
+            "gc_period": "0s",
             "gc_horizon": f"{10 * 1024 ** 3}",  # 10 GB
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{10 * 1024 ** 2}",  # 10 MB
