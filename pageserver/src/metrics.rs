@@ -167,11 +167,11 @@ pub static TENANT_STATE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
 
 pub static TENANT_SYNTHETIC_SIZE_METRIC: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
-        "pageserver_tenant_synthetic_size",
+        "pageserver_tenant_synthetic_cached_size_bytes",
         "Synthetic size of each tenant",
         &["tenant_id"]
     )
-    .expect("Failed to register pageserver_tenant_synthetic_size metric")
+    .expect("Failed to register pageserver_tenant_synthetic_cached_size_bytes metric")
 });
 
 // Metrics for cloud upload. These metrics reflect data uploaded to cloud storage,
