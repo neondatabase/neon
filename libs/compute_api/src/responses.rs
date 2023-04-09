@@ -12,8 +12,8 @@ pub struct GenericAPIError {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeStatusResponse {
-    pub tenant: String,
-    pub timeline: String,
+    pub tenant: Option<String>,
+    pub timeline: Option<String>,
     pub status: ComputeStatus,
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: DateTime<Utc>,
