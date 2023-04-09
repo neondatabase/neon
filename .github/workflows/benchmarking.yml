@@ -114,17 +114,16 @@ jobs:
         # neon-captest-freetier: Run pgbench with freetier-limited compute
         # neon-captest-new: Run pgbench in a freshly created project
         # neon-captest-reuse: Same, but reusing existing project
-        # neon-captest-prefetch: Same, with prefetching enabled (new project)
         # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
         # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-reuse, neon-captest-prefetch, rds-postgres ]
+        platform: [ neon-captest-reuse, neon-captest-new, rds-postgres ]
         db_size: [ 10gb ]
         runner: [ us-east-2 ]
         include:
           - platform: neon-captest-freetier
             db_size: 3gb
             runner: us-east-2
-          - platform: neon-captest-prefetch
+          - platform: neon-captest-new
             db_size: 50gb
             runner: us-east-2
           - platform: rds-aurora
@@ -164,7 +163,7 @@ jobs:
         echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
     - name: Create Neon Project
-      if: contains(fromJson('["neon-captest-new", "neon-captest-prefetch", "neon-captest-freetier"]'), matrix.platform)
+      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -180,7 +179,7 @@ jobs:
           neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
-          neon-captest-new | neon-captest-prefetch | neon-captest-freetier)
+          neon-captest-new | neon-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
@@ -190,7 +189,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-prefetch', neon-captest-freetier, 'rds-aurora', or 'rds-postgres'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-freetier', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -198,17 +197,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Set database options
-      if: matrix.platform == 'neon-captest-prefetch'
-      run: |
-        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
-
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -286,10 +274,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # neon-captest-prefetch: We have pre-created projects with prefetch enabled
+        # neon-captest-reuse: We have pre-created projects 1 CU
         # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
         # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-prefetch, rds-postgres, rds-aurora ]
+        platform: [ neon-captest-reuse, rds-postgres, rds-aurora ]
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -325,7 +313,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-prefetch)
+          neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_10M_CONNSTR }}
             ;;
           rds-aurora)
@@ -335,7 +323,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CLICKBENCH_10M_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -343,17 +331,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Set database options
-      if: matrix.platform == 'neon-captest-prefetch'
-      run: |
-        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
-
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
@@ -397,10 +374,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # neon-captest-prefetch: We have pre-created projects with prefetch enabled
+        # neon-captest-reuse: We have pre-created projects 1 CU
         # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
         # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-prefetch, rds-postgres, rds-aurora ]
+        platform: [ neon-captest-reuse, rds-postgres, rds-aurora ]
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -436,7 +413,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-prefetch)
+          neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_TPCH_S10_CONNSTR }}
             ;;
           rds-aurora)
@@ -446,7 +423,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_TPCH_S10_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -454,17 +431,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Set database options
-      if: matrix.platform == 'neon-captest-prefetch'
-      run: |
-        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
-
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Run TPC-H benchmark
       uses: ./.github/actions/run-python-test-set
@@ -502,10 +468,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # neon-captest-prefetch: We have pre-created projects with prefetch enabled
+        # neon-captest-reuse: We have pre-created projects with 1 CU
         # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
         # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-prefetch, rds-postgres, rds-aurora ]
+        platform: [ neon-captest-reuse, rds-postgres, rds-aurora ]
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -541,7 +507,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-prefetch)
+          neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_CAPTEST_CONNSTR }}
             ;;
           rds-aurora)
@@ -551,7 +517,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -559,17 +525,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Set database options
-      if: matrix.platform == 'neon-captest-prefetch'
-      run: |
-        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
-
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Run user examples
       uses: ./.github/actions/run-python-test-set
