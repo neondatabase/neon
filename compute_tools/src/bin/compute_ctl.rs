@@ -43,7 +43,9 @@ use clap::Arg;
 use tracing::{error, info};
 use url::Url;
 
-use compute_tools::compute::{ComputeMetrics, ComputeNode, ComputeState, ComputeStatus};
+use compute_api::responses::ComputeStatus;
+
+use compute_tools::compute::{ComputeNode, ComputeState};
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -116,7 +118,6 @@ fn main() -> Result<()> {
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
         live_config_allowed,
-        metrics: ComputeMetrics::default(),
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
     };

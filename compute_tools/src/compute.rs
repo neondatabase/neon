@@ -19,15 +19,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
-use serde::Serialize;
 use tokio_postgres;
 use tracing::{info, instrument, warn};
+
+use compute_api::responses::{ComputeMetrics, ComputeStatus};
+use compute_api::spec::ComputeSpec;
 
 use crate::checker::create_writability_check_data;
 use crate::config;
@@ -41,7 +42,6 @@ pub struct ComputeNode {
     pub connstr: url::Url,
     pub pgdata: String,
     pub pgbin: String,
-    pub metrics: ComputeMetrics,
     /// We should only allow live re- / configuration of the compute node if
     /// it uses 'pull model', i.e. it can go to control-plane and fetch
     /// the latest configuration. Otherwise, there could be a case:
@@ -74,6 +74,8 @@ pub struct ComputeState {
     pub timeline: String,
     pub pageserver_connstr: String,
     pub storage_auth_token: Option<String>,
+
+    pub metrics: ComputeMetrics,
 }
 
 impl ComputeState {
@@ -87,6 +89,7 @@ impl ComputeState {
             timeline: String::new(),
             pageserver_connstr: String::new(),
             storage_auth_token: None,
+            metrics: ComputeMetrics::default(),
         }
     }
 }
@@ -95,33 +98,6 @@ impl Default for ComputeState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum ComputeStatus {
-    // Spec wasn't provided at start, waiting for it to be
-    // provided by control-plane.
-    Empty,
-    // Compute configuration was requested.
-    ConfigurationPending,
-    // Compute node has spec and initial startup and
-    // configuration is in progress.
-    Init,
-    // Compute is configured and running.
-    Running,
-    // Either startup or configuration failed,
-    // compute will exit soon or is waiting for
-    // control-plane to terminate it.
-    Failed,
-}
-
-#[derive(Default, Serialize)]
-pub struct ComputeMetrics {
-    pub sync_safekeepers_ms: AtomicU64,
-    pub basebackup_ms: AtomicU64,
-    pub config_ms: AtomicU64,
-    pub total_startup_ms: AtomicU64,
 }
 
 impl ComputeNode {
@@ -185,15 +161,11 @@ impl ComputeNode {
         ar.set_ignore_zeros(true);
         ar.unpack(&self.pgdata)?;
 
-        self.metrics.basebackup_ms.store(
-            Utc::now()
-                .signed_duration_since(start_time)
-                .to_std()
-                .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
-
+        self.state.lock().unwrap().metrics.basebackup_ms = Utc::now()
+            .signed_duration_since(start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
         Ok(())
     }
 
@@ -231,14 +203,11 @@ impl ComputeNode {
             );
         }
 
-        self.metrics.sync_safekeepers_ms.store(
-            Utc::now()
-                .signed_duration_since(start_time)
-                .to_std()
-                .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.state.lock().unwrap().metrics.sync_safekeepers_ms = Utc::now()
+            .signed_duration_since(start_time)
+            .to_std()
+            .unwrap()
+            .as_millis() as u64;
 
         let lsn = String::from(String::from_utf8(sync_output.stdout)?.trim());
 
@@ -375,23 +344,19 @@ impl ComputeNode {
         self.apply_config(&compute_state)?;
 
         let startup_end_time = Utc::now();
-        self.metrics.config_ms.store(
-            startup_end_time
+        {
+            let mut state = self.state.lock().unwrap();
+            state.metrics.config_ms = startup_end_time
                 .signed_duration_since(start_time)
                 .to_std()
                 .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
-        self.metrics.total_startup_ms.store(
-            startup_end_time
+                .as_millis() as u64;
+            state.metrics.total_startup_ms = startup_end_time
                 .signed_duration_since(self.start_time)
                 .to_std()
                 .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
-
+                .as_millis() as u64;
+        }
         self.set_status(ComputeStatus::Running);
 
         Ok(pg)

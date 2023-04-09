@@ -3,9 +3,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
-use crate::compute::{ComputeNode, ComputeStatus};
-use crate::http::requests::ConfigurationRequest;
-use crate::http::responses::{ComputeStatusResponse, GenericAPIError};
+use crate::compute::{ComputeNode, ComputeState};
+use compute_api::requests::ConfigurationRequest;
+use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
@@ -15,6 +15,16 @@ use serde_json;
 use tokio::task;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
+
+fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
+    ComputeStatusResponse {
+        tenant: state.tenant.clone(),
+        timeline: state.timeline.clone(),
+        status: state.status,
+        last_active: state.last_active,
+        error: state.error.clone(),
+    }
+}
 
 // Service function to handle all available routes.
 async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
@@ -28,8 +38,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::GET, "/status") => {
             info!("serving /status GET request");
             let state = compute.state.lock().unwrap();
-            let status_response = ComputeStatusResponse::from(state.clone());
-
+            let status_response = status_response_from_state(&state);
             Response::new(Body::from(serde_json::to_string(&status_response).unwrap()))
         }
 
@@ -37,7 +46,8 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         // future use for Prometheus metrics format.
         (&Method::GET, "/metrics.json") => {
             info!("serving /metrics.json GET request");
-            Response::new(Body::from(serde_json::to_string(&compute.metrics).unwrap()))
+            let metrics = compute.state.lock().unwrap().metrics.clone();
+            Response::new(Body::from(serde_json::to_string(&metrics).unwrap()))
         }
 
         // Collect Postgres current usage insights
@@ -162,7 +172,7 @@ async fn handle_configure_request(
                 );
 
                 if state.status == ComputeStatus::Failed {
-                    let err = state.error.clone().unwrap_or("unknown error".to_string());
+                    let err = state.error.as_ref().map_or("unknown error", |x| x);
                     let msg = format!("compute configuration failed: {:?}", err);
                     return Err((msg, StatusCode::INTERNAL_SERVER_ERROR));
                 }
@@ -175,7 +185,7 @@ async fn handle_configure_request(
 
         // Return current compute state if everything went well.
         let state = compute.state.lock().unwrap().clone();
-        let status_response = ComputeStatusResponse::from(state);
+        let status_response = status_response_from_state(&state);
         Ok(serde_json::to_string(&status_response).unwrap())
     } else {
         Err(("invalid spec".to_string(), StatusCode::BAD_REQUEST))

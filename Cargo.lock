@@ -842,12 +842,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "compute_api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "workspace_hack",
+]
+
+[[package]]
 name = "compute_tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap 4.1.4",
+ "compute_api",
  "futures",
  "hyper",
  "notify",
