@@ -21,9 +21,10 @@ anyhow = { version = "1.0", features = ["backtrace"] }
 async-stream = "0.3"
 async-trait = "0.1"
 atty = "0.2.14"
-aws-config = { version = "0.51.0", default-features = false, features=["rustls"] }
-aws-sdk-s3 = "0.21.0"
-aws-smithy-http = "0.51.0"
+aws-config = { version = "0.55", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "0.25"
+aws-smithy-http = "0.55"
+aws-credential-types = "0.55"
 aws-types = "0.55"
 base64 = "0.13.0"
 bincode = "1.3"
