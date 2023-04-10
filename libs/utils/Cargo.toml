@@ -33,7 +33,7 @@ serde_with.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 url.workspace = true
-uuid = { version = "1.2", features = ["v4", "serde"] }
+uuid.workspace = true
 
 metrics.workspace = true
 workspace_hack.workspace = true
