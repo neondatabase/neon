@@ -9,6 +9,13 @@
  * To prevent this, it has been decided to limit possible interactions
  * with the outside world using the Secure Computing BPF mode.
  *
+ * This code is intended to support both x86_64 and aarch64. The latter
+ * doesn't implement some syscalls like open and select. We allow both
+ * select (absent on aarch64) and pselect6 (present on both architectures)
+ * Since we don't call select syscall directly we may expect that libc will
+ * call pselect6 on aarch64. One may check syscalls presense on a certain
+ * architecture using `scmp_sys_resolver` tool from seccomp package.
+ *
  * We use this mode to disable all syscalls not in the allowlist. This
  * approach has its pros & cons:
  *
@@ -73,8 +80,6 @@
  *    I suspect that certain libc functions might involve slightly
  *    different syscalls, e.g. select/pselect6/pselect6_time64/whatever.
  *
- *  - Test on any arch other than amd64 to see if it works there.
- *
  *-------------------------------------------------------------------------
  */
 
@@ -122,9 +127,10 @@ seccomp_load_rules(PgSeccompRule *rules, int count)
 
 	/*
 	 * First, check that open of a well-known file works.
-	 * XXX: We use raw syscall() to call the very open().
+	 * XXX: We use raw syscall() to call the very openat() which is
+	 * present both on x86_64 and on aarch64.
 	 */
-	fd = syscall(SCMP_SYS(open), "/dev/null", O_RDONLY, 0);
+	fd = syscall(SCMP_SYS(openat), AT_FDCWD, "/dev/null", O_RDONLY, 0);
 	if (seccomp_test_sighandler_done)
 		ereport(FATAL,
 				(errcode(ERRCODE_SYSTEM_ERROR),
@@ -135,15 +141,15 @@ seccomp_load_rules(PgSeccompRule *rules, int count)
 				 errmsg("seccomp: could not open /dev/null for seccomp testing: %m")));
 	close((int) fd);
 
-	/* Set a trap on open() to test seccomp bpf */
-	rule = PG_SCMP(open, SCMP_ACT_TRAP);
+	/* Set a trap on openat() to test seccomp bpf */
+	rule = PG_SCMP(openat, SCMP_ACT_TRAP);
 	if (do_seccomp_load_rules(&rule, 1, SCMP_ACT_ALLOW) != 0)
 		ereport(FATAL,
 				(errcode(ERRCODE_SYSTEM_ERROR),
 				 errmsg("seccomp: could not load test trap")));
 
-	/* Finally, check that open() now raises SIGSYS */
-	(void) syscall(SCMP_SYS(open), "/dev/null", O_RDONLY, 0);
+	/* Finally, check that openat() now raises SIGSYS */
+	(void) syscall(SCMP_SYS(openat), AT_FDCWD, "/dev/null", O_RDONLY, 0);
 	if (!seccomp_test_sighandler_done)
 		ereport(FATAL,
 				(errcode(ERRCODE_SYSTEM_ERROR),
@@ -224,7 +230,7 @@ seccomp_test_sighandler(int signum, siginfo_t *info, void *cxt pg_attribute_unus
 		die(1, DIE_PREFIX "bad signal number\n");
 
 	/* TODO: maybe somehow extract the hardcoded syscall number */
-	if (info->si_syscall != SCMP_SYS(open))
+	if (info->si_syscall != SCMP_SYS(openat))
 		die(1, DIE_PREFIX "bad syscall number\n");
 
 #undef DIE_PREFIX
