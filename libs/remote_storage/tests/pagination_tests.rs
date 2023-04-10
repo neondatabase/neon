@@ -204,12 +204,7 @@ async fn upload_s3_data(
             let data = format!("remote blob data {i}").into_bytes();
             let data_len = data.len();
             task_client
-                .upload(
-                    Box::new(std::io::Cursor::new(data)),
-                    data_len,
-                    &blob_path,
-                    None,
-                )
+                .upload(std::io::Cursor::new(data), data_len, &blob_path, None)
                 .await?;
 
             Ok::<_, anyhow::Error>((blob_prefix, blob_path))
