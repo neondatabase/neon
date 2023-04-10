@@ -14,6 +14,7 @@ use pageserver_api::models::{
     DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceStatus, TimelineState,
 };
 use remote_storage::GenericRemoteStorage;
+use storage_broker::BrokerClientChannel;
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -30,6 +31,7 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::broker_client::{get_broker_client, is_broker_client_initialized};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
@@ -867,8 +869,15 @@ impl Timeline {
     }
 
     pub fn activate(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+        if is_broker_client_initialized() {
+            self.launch_wal_receiver(ctx, get_broker_client().clone())?;
+        } else if cfg!(test) {
+            info!("not launching WAL receiver because broker client hasn't been initialized");
+        } else {
+            anyhow::bail!("broker client not initialized");
+        }
+
         self.set_state(TimelineState::Active);
-        self.launch_wal_receiver(ctx)?;
         self.launch_eviction_task();
         Ok(())
     }
@@ -1376,13 +1385,16 @@ impl Timeline {
         *flush_loop_state = FlushLoopState::Running;
     }
 
-    pub(super) fn launch_wal_receiver(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub(super) fn launch_wal_receiver(
+        &self,
+        ctx: &RequestContext,
+        broker_client: BrokerClientChannel,
+    ) -> anyhow::Result<()> {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
             self.timeline_id, self.tenant_id
         );
-        // TODO update walreceiver conf now?
-        self.walreceiver.start(ctx)?;
+        self.walreceiver.start(ctx, broker_client)?;
         Ok(())
     }
 

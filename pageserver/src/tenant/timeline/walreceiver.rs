@@ -23,7 +23,6 @@
 mod connection_manager;
 mod walreceiver_connection;
 
-use crate::broker_client::{get_broker_client, is_broker_client_initialized};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
 use crate::tenant::timeline::walreceiver::connection_manager::{
@@ -37,6 +36,7 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{self, AtomicBool};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
+use storage_broker::BrokerClientChannel;
 use tokio::select;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -79,16 +79,11 @@ impl WalReceiver {
         }
     }
 
-    pub fn start(&self, ctx: &RequestContext) -> anyhow::Result<()> {
-        if !is_broker_client_initialized() {
-            if cfg!(test) {
-                info!("not launching WAL receiver because broker client hasn't been initialized");
-                return Ok(());
-            } else {
-                anyhow::bail!("broker client not initialized");
-            }
-        }
-
+    pub fn start(
+        &self,
+        ctx: &RequestContext,
+        mut broker_client: BrokerClientChannel,
+    ) -> anyhow::Result<()> {
         if self.started.load(atomic::Ordering::Acquire) {
             anyhow::bail!("Wal receiver is already started");
         }
@@ -97,8 +92,6 @@ impl WalReceiver {
             format!("walreceiver start on a dropped timeline {}", self.timeline)
         })?;
 
-        let mut broker_client = get_broker_client().clone();
-
         let tenant_id = timeline.tenant_id;
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
@@ -106,43 +99,41 @@ impl WalReceiver {
 
         let wal_receiver_conf = self.conf.clone();
         task_mgr::spawn(
-        WALRECEIVER_RUNTIME.handle(),
-        TaskKind::WalReceiverManager,
-        Some(tenant_id),
-        Some(timeline_id),
-        &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
-        false,
-        async move {
-            info!("WAL receiver manager started, connecting to broker");
-            let mut connection_manager_state = ConnectionManagerState::new(
-                timeline,
-                wal_receiver_conf,
-            );
-            loop {
-                select! {
-                    _ = task_mgr::shutdown_watcher() => {
-                        info!("WAL receiver shutdown requested, shutting down");
-                        connection_manager_state.shutdown().await;
-                        return Ok(());
-                    },
-                    loop_step_result = connection_manager_loop_step(
-                        &mut broker_client,
-                        &mut connection_manager_state,
-                        &walreceiver_ctx,
-                    ) => match loop_step_result {
-                        ControlFlow::Continue(()) => continue,
-                        ControlFlow::Break(()) => {
-                            info!("Connection manager loop ended, shutting down");
+            WALRECEIVER_RUNTIME.handle(),
+            TaskKind::WalReceiverManager,
+            Some(tenant_id),
+            Some(timeline_id),
+            &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
+            false,
+            async move {
+                info!("WAL receiver manager started, connecting to broker");
+                let mut connection_manager_state = ConnectionManagerState::new(
+                    timeline,
+                    wal_receiver_conf,
+                );
+                loop {
+                    select! {
+                        _ = task_mgr::shutdown_watcher() => {
+                            info!("WAL receiver shutdown requested, shutting down");
                             connection_manager_state.shutdown().await;
                             return Ok(());
-                        }
-                    },
+                        },
+                        loop_step_result = connection_manager_loop_step(
+                            &mut broker_client,
+                            &mut connection_manager_state,
+                            &walreceiver_ctx,
+                        ) => match loop_step_result {
+                            ControlFlow::Continue(()) => continue,
+                            ControlFlow::Break(()) => {
+                                info!("Connection manager loop ended, shutting down");
+                                connection_manager_state.shutdown().await;
+                                return Ok(());
+                            }
+                        },
+                    }
                 }
-            }
-        }
-        .instrument(
-            info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id),
-        ));
+            }.instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
+        );
 
         self.started.store(true, atomic::Ordering::Release);
 
