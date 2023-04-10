@@ -15,6 +15,8 @@
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 static char *ConsoleURL = NULL;
+static CURL *CurlHandle;
+static struct curl_slist *ContentHeader = NULL;
 
 typedef enum
 {
@@ -48,10 +50,9 @@ typedef struct DdlHashTable
 static DdlHashTable RootTable;
 static DdlHashTable *CurrentDdlTable = &RootTable;
 
-static void PushKeyValue(JsonbParseState **state, int *estimated_len, char *key, char *value)
+static void PushKeyValue(JsonbParseState **state, char *key, char *value)
 {
     JsonbValue k, v;
-    *estimated_len += strlen(key) + strlen(value) + 6; // Add 6 because of two pairs of quotes, a comma, and a colon
     k.type = jbvString;
     k.val.string.len = strlen(key);
     k.val.string.val = key;
@@ -66,7 +67,6 @@ static char *ConstructDeltaMessage()
 {
     JsonbParseState *state = NULL;
     pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
-    int estimated_len = 0;
     if(RootTable.db_table)
     {
         HASH_SEQ_STATUS status;
@@ -75,19 +75,18 @@ static char *ConstructDeltaMessage()
         while((entry = hash_seq_search(&status)) != NULL)
         {
             pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
-            PushKeyValue(&state, &estimated_len, "op", entry->type == Op_Set ? "set" : "del");
-            PushKeyValue(&state, &estimated_len, "name", entry->name);
-            PushKeyValue(&state, &estimated_len, "type", "db");
+            PushKeyValue(&state, "op", entry->type == Op_Set ? "set" : "del");
+            PushKeyValue(&state, "name", entry->name);
+            PushKeyValue(&state, "type", "db");
             if(entry->owner[0] != '\0')
             {
-                PushKeyValue(&state, &estimated_len, "owner", entry->owner);
+                PushKeyValue(&state, "owner", entry->owner);
             }
             if(entry->old_name[0] != '\0')
             {
-                PushKeyValue(&state, &estimated_len, "old_name", entry->old_name);
+                PushKeyValue(&state, "old_name", entry->old_name);
             }
             pushJsonbValue(&state, WJB_END_OBJECT, NULL);
-            estimated_len += 3; // Add 3 for two curly braces and a comma
         }
     }
 
@@ -99,24 +98,23 @@ static char *ConstructDeltaMessage()
         while((entry = hash_seq_search(&status)) != NULL)
         {
             pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
-            PushKeyValue(&state, &estimated_len, "op", entry->type == Op_Set ? "set" : "del");
-            PushKeyValue(&state, &estimated_len, "name", entry->name);
-            PushKeyValue(&state, &estimated_len, "type", "role");
+            PushKeyValue(&state, "op", entry->type == Op_Set ? "set" : "del");
+            PushKeyValue(&state, "name", entry->name);
+            PushKeyValue(&state, "type", "role");
             if(entry->password)
             {
-                PushKeyValue(&state, &estimated_len, "password", (char *)entry->password);
+                PushKeyValue(&state, "password", (char *)entry->password);
             }
             if(entry->old_name[0] != '\0')
             {
-                PushKeyValue(&state, &estimated_len, "old_name", entry->old_name);
+                PushKeyValue(&state, "old_name", entry->old_name);
             }
             pushJsonbValue(&state, WJB_END_OBJECT, NULL);
-            estimated_len += 3;
         }
     }
     JsonbValue *result = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
     Jsonb *jsonb = JsonbValueToJsonb(result);
-    return JsonbToCString(NULL, &jsonb->root, estimated_len);
+    return JsonbToCString(NULL, &jsonb->root, 0 /*estimated_len*/);
 }
 
 static void SendDeltasToConsole()
@@ -128,35 +126,24 @@ static void SendDeltasToConsole()
         elog(LOG, "ConsoleURL not set, skipping forwarding");
         return;
     }
-    CURL *curl = curl_easy_init();
-    if(!curl)
-    {
-        elog(ERROR, "Failed to initialize curl object");
-        return;
-    }
 
     char *message = ConstructDeltaMessage();
 
-    struct curl_slist *header = NULL;
-    header = curl_slist_append(header, "Content-Type: application/json");
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, message);
-    curl_easy_setopt(curl, CURLOPT_URL, ConsoleURL);
+    curl_easy_setopt(CurlHandle, CURLOPT_CUSTOMREQUEST, "PATCH");
+    curl_easy_setopt(CurlHandle, CURLOPT_HTTPHEADER, ContentHeader);
+    curl_easy_setopt(CurlHandle, CURLOPT_POSTFIELDS, message);
+    curl_easy_setopt(CurlHandle, CURLOPT_URL, ConsoleURL);
 
     const int num_retries = 5;
     int curl_status;
     for(int i = 0; i < num_retries; i++)
     {
-        if((curl_status = curl_easy_perform(curl)) == 0)
+        if((curl_status = curl_easy_perform(CurlHandle)) == 0)
             break;
-        pg_usleep(1000);
+        pg_usleep(1000 * 1000);
     }
     if(curl_status != 0)
         elog(ERROR, "Failed to perform curl request");
-    curl_easy_cleanup(curl);
-    curl_slist_free_all(header);
-    pfree(message);
 }
 
 static void InitDbTableIfNeeded()
@@ -221,8 +208,8 @@ static void MergeTable()
 
             to_write->type = entry->type;
             if(entry->owner[0] != '\0')
-                strncpy(to_write->owner, entry->owner, NAMEDATALEN);
-            strncpy(to_write->old_name, entry->old_name, NAMEDATALEN);
+                strlcpy(to_write->owner, entry->owner, NAMEDATALEN);
+            strlcpy(to_write->old_name, entry->old_name, NAMEDATALEN);
             if(entry->old_name[0] != '\0')
             {
                 bool found_old = false;
@@ -234,9 +221,9 @@ static void MergeTable()
                 if(found_old)
                 {
                     if(old->old_name[0] != '\0')
-                        strncpy(to_write->old_name, old->old_name, NAMEDATALEN);
+                        strlcpy(to_write->old_name, old->old_name, NAMEDATALEN);
                     else
-                        strncpy(to_write->old_name, entry->old_name, NAMEDATALEN);
+                        strlcpy(to_write->old_name, entry->old_name, NAMEDATALEN);
                     hash_search(
                         CurrentDdlTable->db_table,
                         entry->old_name,
@@ -264,7 +251,7 @@ static void MergeTable()
             to_write->type = entry->type;
             if(entry->password)
                 to_write->password = entry->password;
-            strncpy(to_write->old_name, entry->old_name, NAMEDATALEN);
+            strlcpy(to_write->old_name, entry->old_name, NAMEDATALEN);
             if(entry->old_name[0] != '\0')
             {
                 bool found_old = false;
@@ -276,9 +263,9 @@ static void MergeTable()
                 if(found_old)
                 {
                     if(old->old_name[0] != '\0')
-                        strncpy(to_write->old_name, old->old_name, NAMEDATALEN);
+                        strlcpy(to_write->old_name, old->old_name, NAMEDATALEN);
                     else
-                        strncpy(to_write->old_name, entry->old_name, NAMEDATALEN);
+                        strlcpy(to_write->old_name, entry->old_name, NAMEDATALEN);
                     hash_search(CurrentDdlTable->role_table,
                                 entry->old_name,
                                 HASH_REMOVE,
@@ -349,9 +336,9 @@ static void HandleCreateDb(CreatedbStmt *stmt)
 
     entry->type = Op_Set;
     if(downer)
-        strncpy(entry->owner, defGetString(downer), NAMEDATALEN);
+        strlcpy(entry->owner, defGetString(downer), NAMEDATALEN);
     else
-        strncpy(entry->owner, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
+        strlcpy(entry->owner, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
 }
 
 static void HandleAlterOwner(AlterOwnerStmt *stmt)
@@ -369,7 +356,7 @@ static void HandleAlterOwner(AlterOwnerStmt *stmt)
     if(!found)
         memset(entry->old_name, 0, sizeof(entry->old_name));
 
-    strncpy(entry->owner, get_rolespec_name(stmt->newowner), NAMEDATALEN);
+    strlcpy(entry->owner, get_rolespec_name(stmt->newowner), NAMEDATALEN);
     entry->type = Op_Set;
 }
 
@@ -392,10 +379,10 @@ static void HandleDbRename(RenameStmt *stmt)
     if(found)
     {
         if(entry->old_name[0] != '\0')
-            strncpy(entry_for_new_name->old_name, entry->old_name, NAMEDATALEN);
+            strlcpy(entry_for_new_name->old_name, entry->old_name, NAMEDATALEN);
         else
-            strncpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
-        strncpy(entry_for_new_name->owner, entry->owner, NAMEDATALEN);
+            strlcpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
+        strlcpy(entry_for_new_name->owner, entry->owner, NAMEDATALEN);
         hash_search(
             CurrentDdlTable->db_table,
             stmt->subname,
@@ -404,7 +391,7 @@ static void HandleDbRename(RenameStmt *stmt)
     }
     else
     {
-        strncpy(entry_for_new_name->old_name, stmt->subname, NAMEDATALEN);
+        strlcpy(entry_for_new_name->old_name, stmt->subname, NAMEDATALEN);
         entry_for_new_name->owner[0] = '\0';
     }
 }
@@ -497,9 +484,9 @@ static void HandleRoleRename(RenameStmt *stmt)
     if(found)
     {
         if(entry->old_name[0] != '\0')
-            strncpy(entry_for_new_name->old_name, entry->old_name, NAMEDATALEN);
+            strlcpy(entry_for_new_name->old_name, entry->old_name, NAMEDATALEN);
         else
-            strncpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
+            strlcpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
         entry_for_new_name->password = entry->password;
         hash_search(
             CurrentDdlTable->role_table,
@@ -509,7 +496,7 @@ static void HandleRoleRename(RenameStmt *stmt)
     }
     else
     {
-        strncpy(entry_for_new_name->old_name, stmt->subname, NAMEDATALEN);
+        strlcpy(entry_for_new_name->old_name, stmt->subname, NAMEDATALEN);
         entry_for_new_name->password = NULL;
     }
 }
@@ -628,5 +615,13 @@ void InitConsoleConnector()
     if(curl_global_init(CURL_GLOBAL_DEFAULT))
     {
         elog(ERROR, "Failed to initialize curl");
+    }
+    if((CurlHandle = curl_easy_init()) == NULL)
+    {
+        elog(ERROR, "Failed to initialize curl handle");
+    }
+    if((ContentHeader = curl_slist_append(ContentHeader, "Content-Type: application/json")) == NULL)
+    {
+        elog(ERROR, "Failed to initialize content header");
     }
 }

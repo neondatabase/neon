@@ -175,4 +175,18 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     cur.execute("COMMIT")
     ddl.wait()
     assert ddl.roles == {"stork": "pork", "zork": "fork"}
+
+    cur.execute("DROP ROLE stork")
+    cur.execute("DROP ROLE zork")
+    ddl.wait()
+    assert ddl.roles == {}
+
+    cur.execute("CREATE ROLE bork WITH PASSWORD 'dork'")
+    cur.execute("CREATE ROLE stork WITH PASSWORD 'cork'")
+    cur.execute("BEGIN")
+    cur.execute("DROP ROLE bork")
+    cur.execute("ALTER ROLE stork RENAME TO bork")
+    cur.execute("COMMIT")
+    ddl.wait()
+    assert ddl.roles == {"bork" : "cork"}
     conn.close()

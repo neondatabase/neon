@@ -37,7 +37,7 @@ _PG_init(void)
 	pg_init_walproposer();
 
 	EmitWarningsOnPlaceholders("neon");
-        InitConsoleConnector();
+	InitConsoleConnector();
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
