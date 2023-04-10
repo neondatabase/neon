@@ -275,9 +275,9 @@ mod tests {
             ..TenantConfOpt::default()
         };
 
-        let toml_form = toml_edit::easy::to_string(&small_conf).unwrap();
+        let toml_form = toml_edit::ser::to_string(&small_conf).unwrap();
         assert_eq!(toml_form, "gc_horizon = 42\n");
-        assert_eq!(small_conf, toml_edit::easy::from_str(&toml_form).unwrap());
+        assert_eq!(small_conf, toml_edit::de::from_str(&toml_form).unwrap());
 
         let json_form = serde_json::to_string(&small_conf).unwrap();
         assert_eq!(json_form, "{\"gc_horizon\":42}");
