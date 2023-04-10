@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use aws_config::{
-    environment::credentials::EnvironmentVariableCredentialsProvider,
+    endpoint, environment::credentials::EnvironmentVariableCredentialsProvider,
     imds::credentials::ImdsCredentialsProvider, meta::credentials::CredentialsProviderChain,
 };
 use aws_credential_types::cache::CredentialsCache;
@@ -110,12 +110,25 @@ pub struct S3Bucket {
     concurrency_limiter: Arc<Semaphore>,
 }
 
+struct PredefinedEndpointResolver {
+    endpoint: hyper::Uri,
+}
+
+impl endpoint::ResolveEndpoint<aws_sdk_s3::endpoint::Params> for PredefinedEndpointResolver {
+    fn resolve_endpoint(&self, _params: &aws_sdk_s3::endpoint::Params) -> endpoint::Result {
+        Ok(aws_smithy_types::endpoint::Endpoint::builder()
+            .url(self.endpoint.to_string())
+            .build())
+    }
+}
+
 #[derive(Default)]
 struct GetObjectRequest {
     bucket: String,
     key: String,
     range: Option<String>,
 }
+
 impl S3Bucket {
     /// Creates the S3 storage, errors if incorrect AWS S3 configuration provided.
     pub fn new(aws_config: &S3Config) -> anyhow::Result<Self> {
@@ -139,8 +152,13 @@ impl S3Bucket {
             .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider);
 
-        if let Some(custom_endpoint) = aws_config.endpoint.clone() {
-            config_builder = config_builder.endpoint_url(custom_endpoint);
+        if let Some(custom_endpoint) = aws_config.endpoint.as_ref() {
+            let resolver = PredefinedEndpointResolver {
+                endpoint: custom_endpoint
+                    .parse()
+                    .with_context(|| format!("Custom endpoint {custom_endpoint} parse as Uri"))?,
+            };
+            config_builder = config_builder.endpoint_resolver(resolver);
         }
         let client = Client::from_conf(config_builder.build());
 

@@ -24,6 +24,7 @@ atty = "0.2.14"
 aws-config = { version = "0.55", default-features = false, features=["rustls"] }
 aws-sdk-s3 = "0.25"
 aws-smithy-http = "0.55"
+aws-smithy-types = "0.55"
 aws-credential-types = "0.55"
 aws-types = "0.55"
 base64 = "0.13.0"
