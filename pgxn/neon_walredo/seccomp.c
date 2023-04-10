@@ -9,6 +9,13 @@
  * To prevent this, it has been decided to limit possible interactions
  * with the outside world using the Secure Computing BPF mode.
  *
+ * This code is intended to support both x86_64 and aarch64. The latter
+ * doesn't implement some syscalls like open and select. So instead of
+ * open we use openat. We add both select (absend on aarch64) and
+ * pselect6 (present on both architectures) to the allowlist. Since we
+ * don't call select syscall directly we may expect that libc will call
+ * pselect6 on aarch64.
+ *
  * We use this mode to disable all syscalls not in the allowlist. This
  * approach has its pros & cons:
  *
@@ -122,9 +129,10 @@ seccomp_load_rules(PgSeccompRule *rules, int count)
 
 	/*
 	 * First, check that open of a well-known file works.
-	 * XXX: We use raw syscall() to call the very open().
+	 * XXX: We use raw syscall() to call the very openat() which is
+	 * present both on x86_64 and on aarch64.
 	 */
-	fd = syscall(SCMP_SYS(open), "/dev/null", O_RDONLY, 0);
+	fd = syscall(SCMP_SYS(openat), AT_FDCWD, "/dev/null", O_RDONLY, 0);
 	if (seccomp_test_sighandler_done)
 		ereport(FATAL,
 				(errcode(ERRCODE_SYSTEM_ERROR),
@@ -142,8 +150,8 @@ seccomp_load_rules(PgSeccompRule *rules, int count)
 				(errcode(ERRCODE_SYSTEM_ERROR),
 				 errmsg("seccomp: could not load test trap")));
 
-	/* Finally, check that open() now raises SIGSYS */
-	(void) syscall(SCMP_SYS(open), "/dev/null", O_RDONLY, 0);
+	/* Finally, check that openat() now raises SIGSYS */
+	(void) syscall(SCMP_SYS(openat), AT_FDCWD, "/dev/null", O_RDONLY, 0);
 	if (!seccomp_test_sighandler_done)
 		ereport(FATAL,
 				(errcode(ERRCODE_SYSTEM_ERROR),
