@@ -438,6 +438,7 @@ COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgtap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=ip4r-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=prefix-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
