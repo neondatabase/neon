@@ -23,7 +23,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
@@ -374,7 +373,7 @@ impl BrokerService for Broker {
                     Ok(info) => yield info,
                     Err(RecvError::Lagged(skipped_msg)) => {
                         missed_msgs += skipped_msg;
-                        if let Poll::Ready(_) = futures::poll!(Box::pin(warn_interval.tick())) {
+                        if (futures::poll!(Box::pin(warn_interval.tick()))).is_ready() {
                             warn!("subscription id={}, key={:?} addr={:?} dropped {} messages, channel is full",
                                 subscriber.id, subscriber.key, subscriber.remote_addr, missed_msgs);
                             missed_msgs = 0;
