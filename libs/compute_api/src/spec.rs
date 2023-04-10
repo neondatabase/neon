@@ -15,7 +15,10 @@ pub type PgIdent = String;
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ComputeSpec {
     pub format_version: f32,
-    pub timestamp: String,
+
+    // The control plane also includes a 'timestamp' field in the JSON document,
+    // but we don't use it for anything. Serde will ignore missing fields when
+    // deserializing it.
     pub operation_uuid: Option<String>,
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
