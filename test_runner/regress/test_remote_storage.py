@@ -822,24 +822,21 @@ def test_timeline_resurrection_on_attach(
     shutil.rmtree(dir_to_clear)
     os.mkdir(dir_to_clear)
 
-    ##### Second start, restore the data and ensure it's the same
+    ##### Second start, restore the data and ensure that we see only timeline that wasnt deleted
     env.pageserver.start()
 
     client.tenant_attach(tenant_id=tenant_id)
 
-    def tenant_active():
-        all_states = client.tenant_list()
-        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["state"] == "Active"
-
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=tenant_active,
-    )
+    wait_until_tenant_active(client, tenant_id=tenant_id, iterations=5)
 
     timelines = client.timeline_list(tenant_id=tenant_id)
-    assert len(timelines) == 1
+    assert len(timelines) == 1, f"Expected to see only one non deleted timeline, got {timelines}"
+    timeline = timelines.pop()
+    loaded_timeline_id = timeline["timeline_id"]
+    assert (
+        TimelineId(loaded_timeline_id) == timeline_id
+    ), f"expected to load only {timeline_id} but got {loaded_timeline_id}"
+    assert timeline["state"] == "Active"
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
