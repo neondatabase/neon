@@ -363,7 +363,7 @@ impl ComputeNode {
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
             spec.spec.cluster.cluster_id,
-            spec.spec.operation_uuid.as_ref().unwrap(),
+            spec.spec.operation_uuid.as_deref().unwrap_or("None"),
             spec.tenant_id,
             spec.timeline_id,
         );
