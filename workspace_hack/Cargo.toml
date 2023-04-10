@@ -18,6 +18,7 @@ byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive", "string"] }
+clap_builder = { version = "4", default-features = false, features = ["color", "help", "std", "string", "suggestions", "usage"] }
 crossbeam-utils = { version = "0.8" }
 digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1" }
@@ -52,7 +53,6 @@ socket2 = { version = "0.4", default-features = false, features = ["all"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.23" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
-tonic = { version = "0.8", features = ["tls-roots"] }
 tower = { version = "0.4", features = ["balance", "buffer", "limit", "retry", "timeout", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
@@ -74,6 +74,7 @@ prost = { version = "0.11" }
 regex = { version = "1" }
 regex-syntax = { version = "0.6" }
 serde = { version = "1", features = ["alloc", "derive"] }
-syn = { version = "1", features = ["extra-traits", "full", "visit", "visit-mut"] }
+syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full", "visit", "visit-mut"] }
+syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["full", "visit-mut"] }
 
 ### END HAKARI SECTION
