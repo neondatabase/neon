@@ -18,8 +18,14 @@ use tracing_utils::http::OtelName;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
-        tenant: state.pspec.as_ref().map(|pspec| pspec.tenant.clone()),
-        timeline: state.pspec.as_ref().map(|pspec| pspec.timeline.clone()),
+        tenant: state
+            .pspec
+            .as_ref()
+            .map(|pspec| pspec.tenant_id.to_string()),
+        timeline: state
+            .pspec
+            .as_ref()
+            .map(|pspec| pspec.timeline_id.to_string()),
         status: state.status,
         last_active: state.last_active,
         error: state.error.clone(),

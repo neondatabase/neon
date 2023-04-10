@@ -28,4 +28,5 @@ tracing-utils.workspace = true
 url.workspace = true
 
 compute_api.workspace = true
+utils.workspace = true
 workspace_hack.workspace = true
