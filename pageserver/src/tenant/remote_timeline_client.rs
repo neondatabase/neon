@@ -253,6 +253,11 @@ const FAILED_DOWNLOAD_RETRIES: u32 = 10;
 // retries. Uploads and deletions are retried forever, though.
 const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 
+pub enum MaybeDeletedIndexPart {
+    IndexPart(IndexPart),
+    Deleted,
+}
+
 /// A client for accessing a timeline's data in remote storage.
 ///
 /// This takes care of managing the number of connections, and balancing them
@@ -367,12 +372,12 @@ impl RemoteTimelineClient {
     //
 
     /// Download index file
-    pub async fn download_index_file(&self) -> Result<IndexPart, DownloadError> {
+    pub async fn download_index_file(&self) -> Result<MaybeDeletedIndexPart, DownloadError> {
         let _unfinished_gauge_guard = self
             .metrics
             .call_begin(&RemoteOpFileKind::Index, &RemoteOpKind::Download);
 
-        download::download_index_part(
+        let index_part = download::download_index_part(
             self.conf,
             &self.storage_impl,
             self.tenant_id,
@@ -385,7 +390,13 @@ impl RemoteTimelineClient {
             RemoteOpKind::Download,
             Arc::clone(&self.metrics),
         )
-        .await
+        .await?;
+
+        if index_part.is_deleted {
+            Ok(MaybeDeletedIndexPart::Deleted)
+        } else {
+            Ok(MaybeDeletedIndexPart::IndexPart(index_part))
+        }
     }
 
     /// Download a (layer) file from `path`, into local filesystem.
@@ -1209,7 +1220,11 @@ mod tests {
         }
 
         // Download back the index.json, and check that the list of files is correct
-        let index_part = runtime.block_on(client.download_index_file())?;
+        let index_part = match runtime.block_on(client.download_index_file())? {
+            MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+            MaybeDeletedIndexPart::Deleted => panic!("unexpectedly got deleted index part"),
+        };
+
         assert_file_list(
             &index_part.timeline_layers,
             &[
