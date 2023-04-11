@@ -1322,7 +1322,7 @@ mod tests {
 
         let queued = client
             .metrics
-            .test_get_bytes_unfinished_gauge_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
+            .get_bytes_unfinished_gauge_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
             .expect("scheduling the layer file upload should have added to the gauge");
         assert_eq!(queued, content_1.len() as i64);
 
@@ -1330,7 +1330,7 @@ mod tests {
 
         let after_completion = client
             .metrics
-            .test_get_bytes_unfinished_gauge_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
+            .get_bytes_unfinished_gauge_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
             .unwrap();
         assert_eq!(after_completion, 0);
 

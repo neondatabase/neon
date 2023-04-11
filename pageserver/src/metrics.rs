@@ -853,7 +853,7 @@ impl RemoteTimelineClientMetrics {
 
 #[cfg(test)]
 impl RemoteTimelineClientMetrics {
-    pub fn test_get_bytes_unfinished_gauge_value(
+    pub fn get_bytes_unfinished_gauge_value(
         &self,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
