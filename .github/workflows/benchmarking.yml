@@ -107,28 +107,65 @@ jobs:
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
+  generate-matrices:
+    # Create matrices for the benchmarking jobs, so we run benchmarks on rds only once a week (on Saturday)
+    #
+    # Available platforms:
+    # - neon-captest-new: Freshly created project (1 CU)
+    # - neon-captest-freetier: Use freetier-sized compute (0.25 CU)
+    # - neon-captest-reuse: Reusing existing project
+    # - rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
+    # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
+    runs-on: ubuntu-latest
+    outputs:
+      pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
+      olap-compare-matrix: ${{ steps.olap-compare-matrix.outputs.matrix }}
+
+    steps:
+    - name: Generate matrix for pgbench benchmark
+      id: pgbench-compare-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-new",
+            "neon-captest-reuse"
+          ],
+          "db_size": [ "10gb" ],
+          "include": [
+            { "platform": "neon-captest-freetier", "db_size": "3gb"  },
+            { "platform": "neon-captest-new",      "db_size": "50gb" }
+          ]
+        }'
+
+        if [ "$(date +%A)" = "Saturday" ]; then
+          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
+                                                   { "platform": "rds-aurora",   "db_size": "50gb"}]')
+        fi
+
+        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+
+    - name: Generate matrix for OLAP benchmarks
+      id: olap-compare-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-reuse"
+          ]
+        }'
+
+        if [ "$(date +%A)" = "Saturday" ]; then
+          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres" },
+                                                   { "platform": "rds-aurora"   }]')
+        fi
+
+        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+
   pgbench-compare:
+    needs: [ generate-matrices ]
+
     strategy:
       fail-fast: false
-      matrix:
-        # neon-captest-freetier: Run pgbench with freetier-limited compute
-        # neon-captest-new: Run pgbench in a freshly created project
-        # neon-captest-reuse: Same, but reusing existing project
-        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
-        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-reuse, neon-captest-new, rds-postgres ]
-        db_size: [ 10gb ]
-        runner: [ us-east-2 ]
-        include:
-          - platform: neon-captest-freetier
-            db_size: 3gb
-            runner: us-east-2
-          - platform: neon-captest-new
-            db_size: 50gb
-            runner: us-east-2
-          - platform: rds-aurora
-            db_size: 50gb
-            runner: us-east-2
+      matrix: ${{fromJson(needs.generate-matrices.outputs.pgbench-compare-matrix)}}
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
@@ -140,7 +177,7 @@ jobs:
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    runs-on: [ self-hosted, "${{ matrix.runner }}", x64 ]
+    runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -269,15 +306,11 @@ jobs:
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
     if: success() || failure()
-    needs: [ pgbench-compare ]
+    needs: [ generate-matrices, pgbench-compare ]
 
     strategy:
       fail-fast: false
-      matrix:
-        # neon-captest-reuse: We have pre-created projects 1 CU
-        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
-        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-reuse, rds-postgres, rds-aurora ]
+      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -369,15 +402,11 @@ jobs:
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
     if: success() || failure()
-    needs: [ clickbench-compare ]
+    needs: [ generate-matrices, clickbench-compare ]
 
     strategy:
       fail-fast: false
-      matrix:
-        # neon-captest-reuse: We have pre-created projects 1 CU
-        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
-        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-reuse, rds-postgres, rds-aurora ]
+      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
@@ -463,15 +492,11 @@ jobs:
 
   user-examples-compare:
     if: success() || failure()
-    needs: [ tpch-compare ]
+    needs: [ generate-matrices, tpch-compare ]
 
     strategy:
       fail-fast: false
-      matrix:
-        # neon-captest-reuse: We have pre-created projects with 1 CU
-        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
-        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-reuse, rds-postgres, rds-aurora ]
+      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
