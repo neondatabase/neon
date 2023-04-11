@@ -902,11 +902,11 @@ impl Drop for RemoteTimelineClientCallMetricGuard {
 
 /// The enum variants communicate to the [`RemoteTimelineClientMetrics`] whether to
 /// track the byte size of this call in applicable metric(s).
-pub(crate) enum RemoteTimelineMetricCallTrackSize {
+pub(crate) enum RemoteTimelineClientMetricsCallTrackSize {
     /// Do not account for this call's byte size in any metrics.
     /// The `reason` field is there to make the call sites self-documenting
     /// about why they don't need the metric.
-    DontCreateMetric { reason: &'static str },
+    DontTrackSize { reason: &'static str },
     /// Track the byte size of the call in applicable metric(s).
     Bytes(i64),
 }
@@ -922,7 +922,7 @@ impl RemoteTimelineClientMetrics {
         &self,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
-        size: RemoteTimelineMetricCallTrackSize,
+        size: RemoteTimelineClientMetricsCallTrackSize,
     ) -> RemoteTimelineClientCallMetricGuard {
         let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
         self.calls_started_hist(file_kind, op_kind)
@@ -930,11 +930,11 @@ impl RemoteTimelineClientMetrics {
         calls_unfinished_metric.inc(); // NB: inc after the histogram, see comment on underlying metric
 
         let bytes_unfinished_metric = match size {
-            RemoteTimelineMetricCallTrackSize::DontCreateMetric { reason: _reason } => {
+            RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {
                 // nothing to do
                 None
             }
-            RemoteTimelineMetricCallTrackSize::Bytes(size) => {
+            RemoteTimelineClientMetricsCallTrackSize::Bytes(size) => {
                 let bytes_unfinished_metric = self.bytes_unfinished_gauge(file_kind, op_kind);
                 bytes_unfinished_metric.add(size);
                 Some((bytes_unfinished_metric, size))
@@ -953,7 +953,7 @@ impl RemoteTimelineClientMetrics {
         &self,
         file_kind: &RemoteOpFileKind,
         op_kind: &RemoteOpKind,
-        size: RemoteTimelineMetricCallTrackSize,
+        size: RemoteTimelineClientMetricsCallTrackSize,
     ) {
         let calls_unfinished_metric = self.calls_unfinished_gauge(file_kind, op_kind);
         debug_assert!(
@@ -962,8 +962,8 @@ impl RemoteTimelineClientMetrics {
         );
         calls_unfinished_metric.dec();
         match size {
-            RemoteTimelineMetricCallTrackSize::DontCreateMetric { reason: _reason } => {}
-            RemoteTimelineMetricCallTrackSize::Bytes(size) => {
+            RemoteTimelineClientMetricsCallTrackSize::DontTrackSize { reason: _reason } => {}
+            RemoteTimelineClientMetricsCallTrackSize::Bytes(size) => {
                 let bytes_unfinished_metric = self.bytes_unfinished_gauge(file_kind, op_kind);
                 bytes_unfinished_metric.sub(size);
                 debug_assert!(

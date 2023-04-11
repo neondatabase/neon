@@ -219,7 +219,7 @@ use utils::lsn::Lsn;
 
 use crate::metrics::{
     MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
-    RemoteTimelineMetricCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
+    RemoteTimelineClientMetricsCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
     REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
 };
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
@@ -371,7 +371,7 @@ impl RemoteTimelineClient {
         let _unfinished_gauge_guard = self.metrics.call_begin(
             &RemoteOpFileKind::Index,
             &RemoteOpKind::Download,
-            crate::metrics::RemoteTimelineMetricCallTrackSize::DontCreateMetric {
+            crate::metrics::RemoteTimelineClientMetricsCallTrackSize::DontTrackSize {
                 reason: "no need for a downloads gauge",
             },
         );
@@ -406,7 +406,7 @@ impl RemoteTimelineClient {
             let _unfinished_gauge_guard = self.metrics.call_begin(
                 &RemoteOpFileKind::Layer,
                 &RemoteOpKind::Download,
-                crate::metrics::RemoteTimelineMetricCallTrackSize::DontCreateMetric {
+                crate::metrics::RemoteTimelineClientMetricsCallTrackSize::DontTrackSize {
                     reason: "no need for a downloads gauge",
                 },
             );
@@ -898,26 +898,26 @@ impl RemoteTimelineClient {
     ) -> Option<(
         RemoteOpFileKind,
         RemoteOpKind,
-        RemoteTimelineMetricCallTrackSize,
+        RemoteTimelineClientMetricsCallTrackSize,
     )> {
-        use RemoteTimelineMetricCallTrackSize::DontCreateMetric;
+        use RemoteTimelineClientMetricsCallTrackSize::DontTrackSize;
         let res = match op {
             UploadOp::UploadLayer(_, m) => (
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Upload,
-                RemoteTimelineMetricCallTrackSize::Bytes(m.file_size().try_into().unwrap()),
+                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size().try_into().unwrap()),
             ),
             UploadOp::UploadMetadata(_, _) => (
                 RemoteOpFileKind::Index,
                 RemoteOpKind::Upload,
-                DontCreateMetric {
+                DontTrackSize {
                     reason: "metadata uploads are tiny",
                 },
             ),
             UploadOp::Delete(file_kind, _) => (
                 *file_kind,
                 RemoteOpKind::Delete,
-                DontCreateMetric {
+                DontTrackSize {
                     reason: "should we track deletes? positive or negative sign?",
                 },
             ),
