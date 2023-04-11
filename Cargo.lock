@@ -879,6 +879,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-utils",
  "url",
+ "utils",
  "workspace_hack",
 ]
 
