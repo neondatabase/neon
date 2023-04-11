@@ -97,16 +97,13 @@ async fn main() -> anyhow::Result<()> {
         tasks.push(tokio::spawn(metrics::task_main(metrics_config)));
     }
 
-    // This combinator will block until either all tasks complete or
-    // one of them finishes with an error (others will be cancelled).
-    let tasks = tasks.into_iter().map(flatten_err);
-    let (tasks_done, abort_handle) =
-        futures::future::abortable(futures::future::try_join_all(tasks));
-    let client_tasks_done =
-        futures::future::try_join_all(client_tasks.into_iter()).then(|_| async move {
-            abort_handle.abort();
-        });
-    let _ = tokio::join!(client_tasks_done, tasks_done);
+    let tasks = futures::future::try_join_all(tasks.into_iter().map(flatten_err));
+    let client_tasks = futures::future::try_join_all(client_tasks.into_iter().map(flatten_err));
+    tokio::select! {
+        // We are only expecting an error from these forever tasks
+        res = tasks => { res?; },
+        res = client_tasks => { res?; },
+    }
     Ok(())
 }
 
