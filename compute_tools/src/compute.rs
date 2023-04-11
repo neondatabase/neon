@@ -69,12 +69,7 @@ pub struct ComputeState {
     /// Timestamp of the last Postgres activity
     pub last_active: DateTime<Utc>,
     pub error: Option<String>,
-    pub spec: ComputeSpec,
-    pub tenant: String,
-    pub timeline: String,
-    pub pageserver_connstr: String,
-    pub storage_auth_token: Option<String>,
-
+    pub pspec: Option<ParsedSpec>,
     pub metrics: ComputeMetrics,
 }
 
@@ -84,11 +79,7 @@ impl ComputeState {
             status: ComputeStatus::Empty,
             last_active: Utc::now(),
             error: None,
-            spec: ComputeSpec::default(),
-            tenant: String::new(),
-            timeline: String::new(),
-            pageserver_connstr: String::new(),
-            storage_auth_token: None,
+            pspec: None,
             metrics: ComputeMetrics::default(),
         }
     }
@@ -97,6 +88,45 @@ impl ComputeState {
 impl Default for ComputeState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ParsedSpec {
+    pub spec: ComputeSpec,
+    pub tenant: String,
+    pub timeline: String,
+    pub pageserver_connstr: String,
+    pub storage_auth_token: Option<String>,
+}
+
+impl TryFrom<ComputeSpec> for ParsedSpec {
+    type Error = String;
+    fn try_from(spec: ComputeSpec) -> Result<Self, String> {
+        let pageserver_connstr = spec
+            .cluster
+            .settings
+            .find("neon.pageserver_connstring")
+            .ok_or("pageserver connstr should be provided")?;
+        let storage_auth_token = spec.storage_auth_token.clone();
+        let tenant = spec
+            .cluster
+            .settings
+            .find("neon.tenant_id")
+            .ok_or("tenant id should be provided")?;
+        let timeline = spec
+            .cluster
+            .settings
+            .find("neon.timeline_id")
+            .ok_or("tenant id should be provided")?;
+
+        Ok(ParsedSpec {
+            spec,
+            pageserver_connstr,
+            storage_auth_token,
+            tenant,
+            timeline,
+        })
     }
 }
 
@@ -126,13 +156,14 @@ impl ComputeNode {
     // unarchive it to `pgdata` directory overriding all its previous content.
     #[instrument(skip(self, compute_state))]
     fn get_basebackup(&self, compute_state: &ComputeState, lsn: &str) -> Result<()> {
+        let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Utc::now();
 
-        let mut config = postgres::Config::from_str(&compute_state.pageserver_connstr)?;
+        let mut config = postgres::Config::from_str(&spec.pageserver_connstr)?;
 
         // Use the storage auth token from the config file, if given.
         // Note: this overrides any password set in the connection string.
-        if let Some(storage_auth_token) = &compute_state.storage_auth_token {
+        if let Some(storage_auth_token) = &spec.storage_auth_token {
             info!("Got storage auth token from spec file");
             config.password(storage_auth_token);
         } else {
@@ -141,14 +172,8 @@ impl ComputeNode {
 
         let mut client = config.connect(NoTls)?;
         let basebackup_cmd = match lsn {
-            "0/0" => format!(
-                "basebackup {} {}",
-                &compute_state.tenant, &compute_state.timeline
-            ), // First start of the compute
-            _ => format!(
-                "basebackup {} {} {}",
-                &compute_state.tenant, &compute_state.timeline, lsn
-            ),
+            "0/0" => format!("basebackup {} {}", &spec.tenant, &spec.timeline), // First start of the compute
+            _ => format!("basebackup {} {} {}", &spec.tenant, &spec.timeline, lsn),
         };
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;
 
@@ -218,27 +243,27 @@ impl ComputeNode {
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip(self, compute_state))]
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
-        let spec = &compute_state.spec;
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let pgdata_path = Path::new(&self.pgdata);
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), spec)?;
+        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &pspec.spec)?;
 
         info!("starting safekeepers syncing");
         let lsn = self
-            .sync_safekeepers(compute_state.storage_auth_token.clone())
+            .sync_safekeepers(pspec.storage_auth_token.clone())
             .with_context(|| "failed to sync safekeepers")?;
         info!("safekeepers synced at LSN {}", lsn);
 
         info!(
             "getting basebackup@{} from pageserver {}",
-            lsn, &compute_state.pageserver_connstr
+            lsn, &pspec.pageserver_connstr
         );
         self.get_basebackup(compute_state, &lsn).with_context(|| {
             format!(
                 "failed to get basebackup@{} from pageserver {}",
-                lsn, &compute_state.pageserver_connstr
+                lsn, &pspec.pageserver_connstr
             )
         })?;
 
@@ -306,19 +331,20 @@ impl ComputeNode {
         };
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
-        handle_roles(&compute_state.spec, &mut client)?;
-        handle_databases(&compute_state.spec, &mut client)?;
-        handle_role_deletions(&compute_state.spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(&compute_state.spec, self.connstr.as_str(), &mut client)?;
+        let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
+        handle_roles(spec, &mut client)?;
+        handle_databases(spec, &mut client)?;
+        handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
+        handle_grants(spec, self.connstr.as_str(), &mut client)?;
         create_writability_check_data(&mut client)?;
-        handle_extensions(&compute_state.spec, &mut client)?;
+        handle_extensions(spec, &mut client)?;
 
         // 'Close' connection
         drop(client);
 
         info!(
             "finished configuration of compute for project {}",
-            compute_state.spec.cluster.cluster_id
+            spec.cluster.cluster_id
         );
 
         Ok(())
@@ -327,19 +353,20 @@ impl ComputeNode {
     #[instrument(skip(self))]
     pub fn start_compute(&self) -> Result<std::process::Child> {
         let compute_state = self.state.lock().unwrap().clone();
+        let spec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            compute_state.spec.cluster.cluster_id,
-            compute_state.spec.operation_uuid.as_ref().unwrap(),
-            compute_state.tenant,
-            compute_state.timeline,
+            spec.spec.cluster.cluster_id,
+            spec.spec.operation_uuid.as_ref().unwrap(),
+            spec.tenant,
+            spec.timeline,
         );
 
         self.prepare_pgdata(&compute_state)?;
 
         let start_time = Utc::now();
 
-        let pg = self.start_postgres(compute_state.storage_auth_token.clone())?;
+        let pg = self.start_postgres(spec.storage_auth_token.clone())?;
 
         self.apply_config(&compute_state)?;
 
