@@ -13,9 +13,8 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     Postgres,
-    wait_for_last_record_lsn,
-    wait_for_upload,
 )
+from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 

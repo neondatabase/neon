@@ -14,20 +14,21 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
-    PageserverApiException,
-    PageserverHttpClient,
     PgBin,
     PortDistributor,
     Postgres,
     RemoteStorageKind,
     VanillaPostgres,
-    assert_tenant_status,
     wait_for_last_flush_lsn,
+)
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.utils import (
+    assert_tenant_status,
     wait_for_upload_queue_empty,
-    wait_until,
+    wait_until_tenant_active,
 )
 from fixtures.types import TenantId, TimelineId
-from fixtures.utils import get_timeline_dir_size
+from fixtures.utils import get_timeline_dir_size, wait_until
 
 
 def test_timeline_size(neon_simple_env: NeonEnv):
@@ -246,12 +247,7 @@ def test_timeline_initial_logical_size_calculation_cancellation(
         extra_env_vars={"FAILPOINTS": "timeline-calculate-logical-size-pause=pause"}
     )
 
-    def tenant_active():
-        all_states = client.tenant_list()
-        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["state"] == "Active"
-
-    wait_until(30, 1, tenant_active)
+    wait_until_tenant_active(client, tenant_id)
 
     # kick off initial size calculation task (the response we get here is the estimated size)
     def assert_size_calculation_not_done():
@@ -425,7 +421,7 @@ def test_timeline_physical_size_post_compaction(
     pageserver_http.timeline_compact(env.initial_tenant, new_timeline_id)
 
     if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(env.pageserver, env.initial_tenant, new_timeline_id)
+        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
 
     assert_physical_size_invariants(
         get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
@@ -478,7 +474,7 @@ def test_timeline_physical_size_post_gc(
     pageserver_http.timeline_gc(env.initial_tenant, new_timeline_id, gc_horizon=None)
 
     if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(env.pageserver, env.initial_tenant, new_timeline_id)
+        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, new_timeline_id)
 
     assert_physical_size_invariants(
         get_physical_size_values(env, env.initial_tenant, new_timeline_id, remote_storage_kind),
@@ -584,7 +580,7 @@ def test_tenant_physical_size(
 
     tenant, timeline = env.neon_cli.create_tenant()
     if remote_storage_kind is not None:
-        wait_for_upload_queue_empty(env.pageserver, tenant, timeline)
+        wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
 
     def get_timeline_resident_physical_size(timeline: TimelineId):
         sizes = get_physical_size_values(env, tenant, timeline, remote_storage_kind)
@@ -609,7 +605,7 @@ def test_tenant_physical_size(
         pageserver_http.timeline_checkpoint(tenant, timeline)
 
         if remote_storage_kind is not None:
-            wait_for_upload_queue_empty(env.pageserver, tenant, timeline)
+            wait_for_upload_queue_empty(pageserver_http, tenant, timeline)
 
         timeline_total_resident_physical_size += get_timeline_resident_physical_size(timeline)
 

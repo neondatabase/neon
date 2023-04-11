@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import re
 import subprocess
@@ -6,8 +7,9 @@ import tarfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, TypeVar
+from urllib.parse import urlencode
 
-import allure  # type: ignore
+import allure
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
@@ -184,6 +186,46 @@ def allure_attach_from_dir(dir: Path):
             allure.attach.file(source, name, attachment_type, extension)
 
 
+DATASOURCE_ID = "xHHYY0dVz"
+
+
+def allure_add_grafana_links(host: str, start_ms: int, end_ms: int):
+    """Add links to server logs in Grafana to Allure report"""
+    # We expect host to be in format like ep-divine-night-159320.us-east-2.aws.neon.build
+    endpoint_id, region_id, _ = host.split(".", 2)
+
+    expressions = {
+        "compute logs": f'{{app="compute-node-{endpoint_id}", neon_region="{region_id}"}}',
+        "k8s events": f'{{job="integrations/kubernetes/eventhandler"}} |~ "name=compute-node-{endpoint_id}-"',
+        "console logs": f'{{neon_service="console", neon_region="{region_id}"}} | json | endpoint_id = "{endpoint_id}"',
+        "proxy logs": f'{{neon_service="proxy-scram", neon_region="{region_id}"}}',
+    }
+
+    params: Dict[str, Any] = {
+        "datasource": DATASOURCE_ID,
+        "queries": [
+            {
+                "expr": "<PUT AN EXPRESSION HERE>",
+                "refId": "A",
+                "datasource": {"type": "loki", "uid": DATASOURCE_ID},
+                "editorMode": "code",
+                "queryType": "range",
+            }
+        ],
+        "range": {
+            "from": str(start_ms),
+            "to": str(end_ms),
+        },
+    }
+    for name, expr in expressions.items():
+        params["queries"][0]["expr"] = expr
+        query_string = urlencode({"orgId": 1, "left": json.dumps(params)})
+        link = f"https://neonprod.grafana.net/explore?{query_string}"
+
+        allure.dynamic.link(link, name=name)
+        log.info(f"{name}: {link}")
+
+
 def start_in_background(
     command: list[str], cwd: Path, log_file_name: str, is_started: Fn
 ) -> subprocess.Popen[bytes]:
@@ -236,3 +278,19 @@ def wait_until(number_of_iterations: int, interval: float, func: Fn):
             continue
         return res
     raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def wait_while(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns false, or throws an exception.
+    """
+    for i in range(number_of_iterations):
+        try:
+            if not func():
+                return
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            time.sleep(interval)
+            continue
+        except Exception:
+            return
+    raise Exception("timed out while waiting for %s" % func)

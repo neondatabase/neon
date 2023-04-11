@@ -101,6 +101,7 @@ test-context = "0.1"
 thiserror = "1.0"
 tls-listener = { version = "0.6", features = ["rustls", "hyper-h1"] }
 tokio = { version = "1.17", features = ["macros"] }
+tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.9.0"
 tokio-rustls = "0.23"
 tokio-stream = "0.1"
@@ -132,6 +133,7 @@ tokio-tar = { git = "https://github.com/neondatabase/tokio-tar.git", rev="404df6
 heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
 
 ## Local libraries
+compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }

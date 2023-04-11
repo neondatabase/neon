@@ -53,7 +53,7 @@ pub async fn password_hack(
         .await?;
 
     info!(project = &payload.project, "received missing parameter");
-    creds.project = Some(payload.project.into());
+    creds.project = Some(payload.project);
 
     let mut node = api.wake_compute(extra, creds).await?;
     node.config.password(payload.password);

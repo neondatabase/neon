@@ -26,7 +26,7 @@ prometheus-client = "^0.14.1"
 pytest-timeout = "^2.1.0"
 Werkzeug = "^2.2.3"
 pytest-order = "^1.0.1"
-allure-pytest = "^2.10.0"
+allure-pytest = "^2.13.1"
 pytest-asyncio = "^0.19.0"
 toml = "^0.10.2"
 psutil = "^5.9.4"
@@ -34,6 +34,7 @@ types-psutil = "^5.9.5.4"
 types-toml = "^0.10.8"
 pytest-httpserver = "^1.0.6"
 aiohttp = "3.7.4"
+pytest-rerunfailures = "^11.1.2"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.1.0"
@@ -69,6 +70,9 @@ strict = true
 module = [
     "asyncpg.*",
     "pg8000.*",
+    "allure.*",
+    "allure_commons.*",
+    "allure_pytest.*",
 ]
 ignore_missing_imports = true
 

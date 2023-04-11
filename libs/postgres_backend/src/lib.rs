@@ -54,7 +54,7 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(
         e.kind(),
-        ConnectionRefused | ConnectionAborted | ConnectionReset
+        ConnectionRefused | ConnectionAborted | ConnectionReset | TimedOut
     )
 }
 
@@ -320,9 +320,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         if let ProtoState::Closed = self.state {
             Ok(None)
         } else {
-            let m = self.framed.read_message().await?;
-            trace!("read msg {:?}", m);
-            Ok(m)
+            match self.framed.read_message().await {
+                Ok(m) => {
+                    trace!("read msg {:?}", m);
+                    Ok(m)
+                }
+                Err(e) => {
+                    // remember not to try to read anymore
+                    self.state = ProtoState::Closed;
+                    Err(e)
+                }
+            }
         }
     }
 
@@ -493,7 +501,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             MaybeWriteOnly::Full(framed) => {
                 let (reader, writer) = framed.split();
                 self.framed = MaybeWriteOnly::WriteOnly(writer);
-                Ok(PostgresBackendReader(reader))
+                Ok(PostgresBackendReader {
+                    reader,
+                    closed: false,
+                })
             }
             MaybeWriteOnly::WriteOnly(_) => {
                 anyhow::bail!("PostgresBackend is already split")
@@ -510,8 +521,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 anyhow::bail!("PostgresBackend is not split")
             }
             MaybeWriteOnly::WriteOnly(writer) => {
-                let joined = Framed::unsplit(reader.0, writer);
+                let joined = Framed::unsplit(reader.reader, writer);
                 self.framed = MaybeWriteOnly::Full(joined);
+                // if reader encountered connection error, do not attempt reading anymore
+                if reader.closed {
+                    self.state = ProtoState::Closed;
+                }
                 Ok(())
             }
             MaybeWriteOnly::Broken => panic!("unsplit on framed in invalid state"),
@@ -797,15 +812,25 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
     }
 }
 
-pub struct PostgresBackendReader<IO>(FramedReader<MaybeTlsStream<IO>>);
+pub struct PostgresBackendReader<IO> {
+    reader: FramedReader<MaybeTlsStream<IO>>,
+    closed: bool, // true if received error closing the connection
+}
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackendReader<IO> {
     /// Read full message or return None if connection is cleanly closed with no
     /// unprocessed data.
     pub async fn read_message(&mut self) -> Result<Option<FeMessage>, ConnectionError> {
-        let m = self.0.read_message().await?;
-        trace!("read msg {:?}", m);
-        Ok(m)
+        match self.reader.read_message().await {
+            Ok(m) => {
+                trace!("read msg {:?}", m);
+                Ok(m)
+            }
+            Err(e) => {
+                self.closed = true;
+                Err(e)
+            }
+        }
     }
 
     /// Get CopyData contents of the next message in COPY stream or error
@@ -923,7 +948,7 @@ pub enum CopyStreamHandlerEnd {
     #[error("EOF on COPY stream")]
     EOF,
     /// The connection was lost
-    #[error(transparent)]
+    #[error("connection error: {0}")]
     Disconnected(#[from] ConnectionError),
     /// Some other error
     #[error(transparent)]

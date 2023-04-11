@@ -6,9 +6,8 @@ from fixtures.neon_fixtures import (
     LocalFsStorage,
     NeonEnvBuilder,
     RemoteStorageKind,
-    assert_tenant_status,
-    wait_for_upload,
 )
+from fixtures.pageserver.utils import assert_tenant_status, wait_for_upload
 from fixtures.types import Lsn
 from fixtures.utils import wait_until
 

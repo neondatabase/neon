@@ -23,6 +23,7 @@ settings:
   authBackend: "console"
   authEndpoint: "http://neon-internal-api.aws.neon.build/management/api/v2"
   domain: "*.us-east-2.aws.neon.build"
+  extraDomains: ["*.us-east-2.postgres.zenith.tech", "*.us-east-2.retooldb-staging.com"]
   sentryEnvironment: "staging"
   wssPort: 8443
   metricCollectionEndpoint: "http://neon-internal-api.aws.neon.build/billing/api/v1/usage_events"

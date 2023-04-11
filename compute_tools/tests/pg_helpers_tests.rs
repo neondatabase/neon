@@ -1,14 +1,13 @@
 #[cfg(test)]
 mod pg_helpers_tests {
-
     use std::fs::File;
 
+    use compute_api::spec::{ComputeSpec, GenericOption, GenericOptions, PgIdent};
     use compute_tools::pg_helpers::*;
-    use compute_tools::spec::ComputeSpec;
 
     #[test]
     fn params_serialize() {
-        let file = File::open("tests/cluster_spec.json").unwrap();
+        let file = File::open("../libs/compute_api/tests/cluster_spec.json").unwrap();
         let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
 
         assert_eq!(
@@ -23,7 +22,7 @@ mod pg_helpers_tests {
 
     #[test]
     fn settings_serialize() {
-        let file = File::open("tests/cluster_spec.json").unwrap();
+        let file = File::open("../libs/compute_api/tests/cluster_spec.json").unwrap();
         let spec: ComputeSpec = serde_json::from_reader(file).unwrap();
 
         assert_eq!(

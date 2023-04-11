@@ -1,6 +1,7 @@
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PageserverHttpClient
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+from fixtures.pageserver.http import PageserverHttpClient
 
 
 def check_tenant(env: NeonEnv, pageserver_http: PageserverHttpClient):

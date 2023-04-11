@@ -323,7 +323,8 @@ impl WalBackupTask {
             }
 
             match backup_lsn_range(
-                backup_lsn,
+                &self.timeline,
+                &mut backup_lsn,
                 commit_lsn,
                 self.wal_seg_size,
                 &self.timeline_dir,
@@ -331,13 +332,7 @@ impl WalBackupTask {
             )
             .await
             {
-                Ok(backup_lsn_result) => {
-                    backup_lsn = backup_lsn_result;
-                    let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
-                    if let Err(e) = res {
-                        error!("failed to set wal_backup_lsn: {}", e);
-                        return;
-                    }
+                Ok(()) => {
                     retry_attempt = 0;
                 }
                 Err(e) => {
@@ -354,20 +349,25 @@ impl WalBackupTask {
 }
 
 pub async fn backup_lsn_range(
-    start_lsn: Lsn,
+    timeline: &Arc<Timeline>,
+    backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
     timeline_dir: &Path,
     workspace_dir: &Path,
-) -> Result<Lsn> {
-    let mut res = start_lsn;
+) -> Result<()> {
+    let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
     for s in &segments {
         backup_single_segment(s, timeline_dir, workspace_dir)
             .await
             .with_context(|| format!("offloading segno {}", s.seg_no))?;
 
-        res = s.end_lsn;
+        let new_backup_lsn = s.end_lsn;
+        timeline
+            .set_wal_backup_lsn(new_backup_lsn)
+            .context("setting wal_backup_lsn")?;
+        *backup_lsn = new_backup_lsn;
     }
     info!(
         "offloaded segnos {:?} up to {}, previous backup_lsn {}",
@@ -375,7 +375,7 @@ pub async fn backup_lsn_range(
         end_lsn,
         start_lsn,
     );
-    Ok(res)
+    Ok(())
 }
 
 async fn backup_single_segment(

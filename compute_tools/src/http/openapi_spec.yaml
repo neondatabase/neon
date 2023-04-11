@@ -11,7 +11,7 @@ paths:
     get:
       tags:
       - Info
-      summary: Get compute node internal status
+      summary: Get compute node internal status.
       description: ""
       operationId: getComputeStatus
       responses:
@@ -26,7 +26,7 @@ paths:
     get:
       tags:
       - Info
-      summary: Get compute node startup metrics in JSON format
+      summary: Get compute node startup metrics in JSON format.
       description: ""
       operationId: getComputeMetricsJSON
       responses:
@@ -41,9 +41,9 @@ paths:
     get:
       tags:
       - Info
-      summary: Get current compute insights in JSON format
+      summary: Get current compute insights in JSON format.
       description: |
-        Note, that this doesn't include any historical data
+        Note, that this doesn't include any historical data.
       operationId: getComputeInsights
       responses:
         200:
@@ -56,12 +56,12 @@ paths:
   /info:
     get:
       tags:
-      - "info"
-      summary: Get info about the compute Pod/VM
+      - Info
+      summary: Get info about the compute pod / VM.
       description: ""
       operationId: getInfo
       responses:
-        "200":
+        200:
           description: Info
           content:
             application/json:
@@ -72,7 +72,7 @@ paths:
     post:
       tags:
       - Check
-      summary: Check that we can write new data on this compute
+      summary: Check that we can write new data on this compute.
       description: ""
       operationId: checkComputeWritability
       responses:
@@ -82,8 +82,63 @@ paths:
             text/plain:
               schema:
                 type: string
-                description: Error text or 'true' if check passed
+                description: Error text or 'true' if check passed.
                 example: "true"
+
+  /configure:
+    post:
+      tags:
+      - Configure
+      summary: Perform compute node configuration.
+      description: |
+        This is a blocking API endpoint, i.e. it blocks waiting until
+        compute is finished configuration and is in `Running` state.
+        Optional non-blocking mode could be added later.
+      operationId: configureCompute
+      requestBody:
+        description: Configuration request.
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - spec
+              properties:
+                spec:
+                  # XXX: I don't want to explain current spec in the OpenAPI format,
+                  # as it could be changed really soon. Consider doing it later.
+                  type: object
+      responses:
+        200:
+          description: Compute configuration finished.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComputeState"
+        400:
+          description: Provided spec is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+        412:
+          description: |
+            It's not possible to do live-configuration of the compute.
+            It's either in the wrong state, or compute doesn't use pull
+            mode of configuration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+        500:
+          description: |
+            Compute configuration request was processed, but error
+            occurred. Compute will likely shutdown soon.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
 
 components:
   securitySchemes:
@@ -95,7 +150,7 @@ components:
   schemas:
     ComputeMetrics:
       type: object
-      description: Compute startup metrics
+      description: Compute startup metrics.
       required:
         - sync_safekeepers_ms
         - basebackup_ms
@@ -113,7 +168,7 @@ components:
 
     Info:
       type: object
-      description: Information about VM/Pod
+      description: Information about VM/Pod.
       required:
         - num_cpus
       properties:
@@ -130,17 +185,26 @@ components:
           $ref: '#/components/schemas/ComputeStatus'
         last_active:
           type: string
-          description: The last detected compute activity timestamp in UTC and RFC3339 format
+          description: The last detected compute activity timestamp in UTC and RFC3339 format.
           example: "2022-10-12T07:20:50.52Z"
         error:
           type: string
-          description: Text of the error during compute startup, if any
+          description: Text of the error during compute startup, if any.
+          example: ""
+        tenant:
+          type: string
+          description: Identifier of the current tenant served by compute node, if any.
+          example: c9269c359e9a199fad1ea0981246a78f
+        timeline:
+          type: string
+          description: Identifier of the current timeline served by compute node, if any.
+          example: ece7de74d4b8cbe5433a68ce4d1b97b4
 
     ComputeInsights:
       type: object
       properties:
         pg_stat_statements:
-          description: Contains raw output from pg_stat_statements in JSON format
+          description: Contains raw output from pg_stat_statements in JSON format.
           type: array
           items:
             type: object
@@ -151,6 +215,19 @@ components:
         - init
         - failed
         - running
+      example: running
+
+    #
+    # Errors
+    #
+
+    GenericError:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
 
 security:
   - JWT: []

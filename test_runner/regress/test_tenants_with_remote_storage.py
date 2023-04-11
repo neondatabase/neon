@@ -20,10 +20,12 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     Postgres,
     RemoteStorageKind,
-    assert_tenant_status,
     available_remote_storages,
-    wait_for_last_record_lsn,
     wait_for_sk_commit_lsn_to_reach_remote_storage,
+)
+from fixtures.pageserver.utils import (
+    assert_tenant_status,
+    wait_for_last_record_lsn,
     wait_for_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
