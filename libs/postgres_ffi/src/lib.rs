@@ -106,18 +106,6 @@ pub fn generate_wal_segment(
     }
 }
 
-pub fn generate_wal_block(
-    system_id: u64,
-    pg_version: u32,
-    empty_up_to_lsn: Lsn,
-) -> Result<Bytes, SerializeError> {
-    match pg_version {
-        14 => v14::xlog_utils::generate_wal_block(empty_up_to_lsn, system_id),
-        15 => v15::xlog_utils::generate_wal_block(empty_up_to_lsn, system_id),
-        _ => Err(SerializeError::BadInput),
-    }
-}
-
 pub fn generate_pg_control(
     pg_control_bytes: &[u8],
     checkpoint_bytes: &[u8],

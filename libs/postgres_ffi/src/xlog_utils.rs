@@ -401,51 +401,6 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
     Ok(seg_buf.freeze())
 }
-/// Generate the wal block that contains the provided Lsn; zero-ed up to the provided Lsn.
-/// The SystemId is required for segment start blocks.
-pub fn generate_wal_block(start_from: Lsn, system_id: u64) -> Result<Bytes, SerializeError> {
-    let mut blk_buf = BytesMut::with_capacity(XLOG_BLCKSZ);
-    let block_offset: u64 = start_from.block_offset();
-    let block_lsn: u64 = start_from.0 - block_offset;
-    let seg_lsn = start_from.segment_lsn(WAL_SEGMENT_SIZE);
-
-    let is_firstblock = seg_lsn.0 == block_lsn;
-
-    let hdr_len: u64 = if is_firstblock {
-        std::mem::size_of::<XLogLongPageHeaderData>()
-    } else {
-        std::mem::size_of::<XLogPageHeaderData>()
-    } as u64;
-
-    let hdr = XLogLongPageHeaderData {
-        std: {
-            XLogPageHeaderData {
-                xlp_magic: XLOG_PAGE_MAGIC as u16,
-                xlp_info: if is_firstblock { pg_constants::XLP_LONG_HEADER } else { 0 },
-                xlp_tli: PG_TLI,
-                xlp_pageaddr: block_lsn,
-                xlp_rem_len: block_offset.max(hdr_len) as u32,
-                ..Default::default() // Put 0 in padding fields.
-            }
-        },
-        xlp_sysid: system_id,
-        xlp_seg_size: WAL_SEGMENT_SIZE as u32,
-        xlp_xlog_blcksz: XLOG_BLCKSZ as u32,
-    };
-
-    // If it's the first block in a segment, then we need to initialize the
-    // large block header.
-    let hdr_bytes = if (start_from.0 - seg_lsn.0) < XLOG_BLCKSZ as u64 {
-        hdr.encode()?
-    } else {
-        hdr.std.encode()?
-    };
-
-    blk_buf.extend_from_slice(&hdr_bytes);
-    blk_buf.resize(block_offset as usize, 0);
-    
-    Ok(blk_buf.freeze())
-}
 
 
 #[repr(C)]
