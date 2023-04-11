@@ -380,7 +380,7 @@ static REMOTE_TIMELINE_CLIENT_CALLS_STARTED_HIST: Lazy<HistogramVec> = Lazy::new
 static REMOTE_TIMELINE_CLIENT_BYTES_UNFINISHED_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_remote_timeline_client_bytes_unfinished",
-        "Bytes in flight",
+        "Bytes currently in flight, by file_kind (layer vs index) and op_kind (upload vs download).",
         &["tenant_id", "timeline_id", "file_kind", "op_kind"],
     )
     .expect("failed to define a metric")
@@ -900,8 +900,14 @@ impl Drop for RemoteTimelineClientCallMetricGuard {
     }
 }
 
+/// The enum variants communicate to the [`RemoteTimelineClientMetrics`] whether to
+/// track the byte size of this call in applicable metric(s).
 pub(crate) enum RemoteTimelineMetricCallTrackSize {
+    /// Do not account for this call's byte size in any metrics.
+    /// The `reason` field is there to make the call sites self-documenting
+    /// about why they don't need the metric.
     DontCreateMetric { reason: &'static str },
+    /// Track the byte size of the call in applicable metric(s).
     Bytes(i64),
 }
 
