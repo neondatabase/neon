@@ -12,9 +12,10 @@
  * This code is intended to support both x86_64 and aarch64. The latter
  * doesn't implement some syscalls like open and select. We allow both
  * select (absent on aarch64) and pselect6 (present on both architectures)
- * Since we don't call select syscall directly we may expect that libc will
- * call pselect6 on aarch64. One may check syscalls presense on a certain
- * architecture using `scmp_sys_resolver` tool from seccomp package.
+ * We call select(2) through libc, and the libc wrapper calls select or pselect6
+ * depending on the architecture. You can check which syscalls are present on
+ * different architectures with the `scmp_sys_resolver` tool from the
+ * seccomp package.
  *
  * We use this mode to disable all syscalls not in the allowlist. This
  * approach has its pros & cons:
