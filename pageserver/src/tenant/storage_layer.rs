@@ -168,7 +168,7 @@ impl LayerAccessStats {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
         new.record_residence_event(
             LayerResidenceStatus::Resident,
-            LayerResidenceEventReason::LayerCreate,
+            LayerResidenceEventReason::LayerCreateFileWritten,
         );
         new
     }
@@ -255,25 +255,40 @@ impl LayerAccessStats {
         ret
     }
 
-    fn most_recent_access_or_residence_event(
-        &self,
-    ) -> Either<LayerAccessStatFullDetails, LayerResidenceEvent> {
-        let locked = self.0.lock().unwrap();
-        let inner = &locked.for_eviction_policy;
-        match inner.last_accesses.recent() {
-            Some(a) => Either::Left(*a),
-            None => match inner.last_residence_changes.recent() {
-                Some(e) => Either::Right(e.clone()),
-                None => unreachable!("constructors for LayerAccessStats ensure that there's always a residence change event"),
-            }
-        }
+    pub(crate) fn record_layer_map_insert_of_created_layer(&self) {
+        self.record_residence_event(
+            LayerResidenceStatus::Resident,
+            LayerResidenceEventReason::LayerCreateMapInserted,
+        );
     }
 
-    pub(crate) fn latest_activity(&self) -> SystemTime {
-        match self.most_recent_access_or_residence_event() {
+    fn most_recent_access_or_residence_event(
+        &self,
+    ) -> anyhow::Result<Either<LayerAccessStatFullDetails, LayerResidenceEvent>> {
+        let locked = self.0.lock().unwrap();
+        let inner = &locked.for_eviction_policy;
+        let res = match inner.last_accesses.recent() {
+            Some(a) => Either::Left(*a),
+            None => match inner.last_residence_changes.recent() {
+                Some(e) => {
+                    if e.reason == LayerResidenceEventReason::LayerCreateFileWritten {
+                        anyhow::bail!("layer is not part of the layer map, call record_layer_map_insert_of_created_layer first");
+                    }
+                    Either::Right(e.clone())
+                }
+                None => unreachable!("constructors for LayerAccessStats ensure that there's always a residence change event"),
+            }
+        };
+        Ok(res)
+    }
+
+    /// Fails until `record_layer_map_insert` was called on this instance
+    /// or a predecessor from which this instance was `clone_for_residence_change`'d from.
+    pub(crate) fn latest_activity(&self) -> anyhow::Result<SystemTime> {
+        Ok(match self.most_recent_access_or_residence_event()? {
             Either::Left(mra) => mra.when,
             Either::Right(re) => re.timestamp,
-        }
+        })
     }
 }
 

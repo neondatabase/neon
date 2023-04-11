@@ -1446,7 +1446,9 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(Arc::new(layer))?;
+                let l = Arc::new(layer);
+                l.access_stats().record_layer_map_insert_of_created_layer();
+                updates.insert_historic(l)?;
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -2687,11 +2689,13 @@ impl Timeline {
         ])?;
 
         // Add it to the layer map
+        let l = Arc::new(new_delta);
+        l.access_stats().record_layer_map_insert_of_created_layer();
         self.layers
             .write()
             .unwrap()
             .batch_update()
-            .insert_historic(Arc::new(new_delta))?;
+            .insert_historic(l)?;
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
@@ -2896,7 +2900,9 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            updates.insert_historic(Arc::new(l))?;
+            let l = Arc::new(l);
+            l.access_stats().record_layer_map_insert_of_created_layer();
+            updates.insert_historic(l)?;
         }
         updates.flush();
         drop(layers);
@@ -3329,6 +3335,7 @@ impl Timeline {
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
+            x.access_stats().record_layer_map_insert_of_created_layer();
             updates.insert_historic(x)?;
         }
 
@@ -4107,7 +4114,14 @@ impl Timeline {
                 continue;
             }
 
-            let last_activity_ts = l.access_stats().latest_activity();
+            let last_activity_ts = match l.access_stats().latest_activity() {
+                Ok(ts) => ts,
+                Err(error) => {
+                    warn!(%error, layer=%l.filename().file_name(), "latest activity not available, using UNIX epoch as fallback");
+                    // If we're under disk pressure, we should not hide this layer's existence.
+                    SystemTime::UNIX_EPOCH
+                }
+            };
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
                 layer: l,

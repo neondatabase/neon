@@ -272,6 +272,7 @@ pub enum LayerAccessKind {
     Iter,
     KeyIter,
     Dump,
+    LayerMapInsertion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,15 +300,19 @@ pub struct LayerResidenceEvent {
 }
 
 /// The reason for recording a given [`ResidenceEvent`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum LayerResidenceEventReason {
     /// The layer map is being populated, e.g. during timeline load or attach.
     /// This includes [`RemoteLayer`] objects created in [`reconcile_with_remote`].
     /// We need to record such events because there is no persistent storage for the events.
     LayerLoad,
-    /// We just created the layer (e.g., freeze_and_flush or compaction).
+    /// We just wrote the layer file to disk (e.g., freeze_and_flush or compaction).
+    /// The layer file is not yet part of the layer map.
     /// Such layers are always [`LayerResidenceStatus::Resident`].
-    LayerCreate,
+    LayerCreateFileWritten,
+    /// We just inserted the layer file to the layer map.
+    /// Such layers are always [`LayerResidenceStatus::Resident`].
+    LayerCreateMapInserted,
     /// We on-demand downloaded or evicted the given layer.
     ResidenceChange,
 }

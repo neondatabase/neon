@@ -184,7 +184,14 @@ impl Timeline {
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
-                let last_activity_ts = hist_layer.access_stats().latest_activity();
+                let last_activity_ts = match hist_layer.access_stats().latest_activity() {
+                    Ok(ts) => ts,
+                    Err(error) => {
+                        warn!(%error, layer=%hist_layer.filename().file_name(), "latest activity not available, likely implementation error");
+                        stats.errors += 1;
+                        continue;
+                    }
+                };
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
                     Err(_e) => {

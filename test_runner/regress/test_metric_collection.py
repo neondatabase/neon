@@ -24,13 +24,6 @@ from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
-
-@pytest.fixture(scope="session")
-def httpserver_listen_address(port_distributor: PortDistributor):
-    port = port_distributor.get_port()
-    return ("localhost", port)
-
-
 # ==============================================================================
 # Storage metrics tests
 # ==============================================================================
