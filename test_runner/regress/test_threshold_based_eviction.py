@@ -115,36 +115,32 @@ def test_threshold_based_eviction(
 
     # wait for evictions and assert that they stabilize
     @dataclass
-    class MapInfoProjection:
-        original_data: LayerMapInfo
+    class ByLocalAndRemote:
         remote_layers: Set[str]
         local_layers: Set[str]
-        layer_file_names: Set[str]
 
-        @classmethod
-        def from_map_info(cls, info: LayerMapInfo):
-            return cls(
-                original_data=info,
+    class MapInfoProjection:
+        def __init__(self, info: LayerMapInfo):
+            self.info = info
+
+        def by_local_and_remote(self) -> ByLocalAndRemote:
+            return ByLocalAndRemote(
                 remote_layers={
-                    layer.layer_file_name for layer in info.historic_layers if layer.remote
+                    layer.layer_file_name for layer in self.info.historic_layers if layer.remote
                 },
                 local_layers={
-                    layer.layer_file_name for layer in info.historic_layers if not layer.remote
+                    layer.layer_file_name for layer in self.info.historic_layers if not layer.remote
                 },
-                layer_file_names={layer.layer_file_name for layer in info.historic_layers},
             )
 
         def __eq__(self, other):
-            return (
-                self.remote_layers == other.remote_layers
-                and self.local_layers == other.local_layers
-            )
+            if not isinstance(other, MapInfoProjection):
+                return False
+            return self.by_local_and_remote() == other.by_local_and_remote()
 
         def __repr__(self) -> str:
             out = ["MapInfoProjection:"]
-            for layer in sorted(
-                self.original_data.historic_layers, key=lambda layer: layer.layer_file_name
-            ):
+            for layer in sorted(self.info.historic_layers, key=lambda layer: layer.layer_file_name):
                 remote = "R" if layer.remote else "L"
                 out += [f"  {remote} {layer.layer_file_name}"]
             return "\n".join(out)
@@ -157,7 +153,7 @@ def test_threshold_based_eviction(
     while time.time() - started_waiting_at < observation_window:
         current = (
             time.time(),
-            MapInfoProjection.from_map_info(ps_http.layer_map_info(tenant_id, timeline_id)),
+            MapInfoProjection(ps_http.layer_map_info(tenant_id, timeline_id)),
         )
         last = map_info_changes[-1] if map_info_changes else (0, None)
         if last[1] is None or current[1] != last[1]:
@@ -178,10 +174,10 @@ def test_threshold_based_eviction(
         stable_for > consider_stable_when_no_change_for_seconds
     ), "layer residencies did not become stable within the observation window"
 
-    pre, post = map_info_changes[0][1], map_info_changes[-1][1]
-    log.info("pre: %s", pre)
-    log.info("post: %s", post)
+    post = map_info_changes[-1][1].by_local_and_remote()
+    assert len(post.remote_layers) > 0, "some layers should be evicted once it's stabilized"
+    assert len(post.local_layers) > 0, "the imitate accesses should keep some layers resident"
 
-    assert len(post.local_layers) < len(pre.local_layers), "some layers should have been evicted"
-
-    assert env.pageserver.log_contains(metrics_refused_log_line)
+    assert env.pageserver.log_contains(
+        metrics_refused_log_line
+    ), "ensure the metrics collection worker ran"
