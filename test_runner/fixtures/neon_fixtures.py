@@ -2586,6 +2586,7 @@ class SafekeeperTimelineStatus:
     commit_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
+    peer_horizon_lsn: Lsn
     remote_consistent_lsn: Lsn
 
 
@@ -2643,6 +2644,7 @@ class SafekeeperHttpClient(requests.Session):
             commit_lsn=Lsn(resj["commit_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
+            peer_horizon_lsn=Lsn(resj["peer_horizon_lsn"]),
             remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
         )
 

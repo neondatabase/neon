@@ -144,7 +144,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         commit_lsn: inmem.commit_lsn,
         backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
-        remote_consistent_lsn: inmem.remote_consistent_lsn,
+        remote_consistent_lsn: tli.get_walsenders().get_remote_consistent_lsn(),
     };
     json_response(StatusCode::OK, status)
 }
@@ -246,7 +246,7 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
     };
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
-    tli.record_safekeeper_info(&proto_sk_info)
+    tli.record_safekeeper_info(proto_sk_info)
         .await
         .map_err(ApiError::InternalServerError)?;
 
