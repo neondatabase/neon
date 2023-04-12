@@ -40,7 +40,7 @@ pub fn configure_tls(
     let mut cert_resolver = CertResolver::new();
 
     // add default certificate
-    cert_resolver.add_cert(key_path, cert_path)?;
+    cert_resolver.add_cert(key_path, cert_path, true)?;
 
     // add extra certificates
     if let Some(certs_dir) = certs_dir {
@@ -52,8 +52,11 @@ pub fn configure_tls(
                 let key_path = path.join("tls.key");
                 let cert_path = path.join("tls.crt");
                 if key_path.exists() && cert_path.exists() {
-                    cert_resolver
-                        .add_cert(&key_path.to_string_lossy(), &cert_path.to_string_lossy())?;
+                    cert_resolver.add_cert(
+                        &key_path.to_string_lossy(),
+                        &cert_path.to_string_lossy(),
+                        false,
+                    )?;
                 }
             }
         }
@@ -78,16 +81,23 @@ pub fn configure_tls(
 
 struct CertResolver {
     certs: HashMap<String, Arc<rustls::sign::CertifiedKey>>,
+    default: Option<Arc<rustls::sign::CertifiedKey>>,
 }
 
 impl CertResolver {
     fn new() -> Self {
         Self {
             certs: HashMap::new(),
+            default: None,
         }
     }
 
-    fn add_cert(&mut self, key_path: &str, cert_path: &str) -> anyhow::Result<()> {
+    fn add_cert(
+        &mut self,
+        key_path: &str,
+        cert_path: &str,
+        is_default: bool,
+    ) -> anyhow::Result<()> {
         let priv_key = {
             let key_bytes = std::fs::read(key_path).context("TLS key file")?;
             let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
@@ -136,10 +146,13 @@ impl CertResolver {
             "Failed to parse common name from certificate at '{cert_path}'."
         ))?;
 
-        self.certs.insert(
-            common_name,
-            Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key)),
-        );
+        let cert = Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key));
+
+        if is_default {
+            self.default = Some(cert.clone());
+        }
+
+        self.certs.insert(common_name, cert);
 
         Ok(())
     }
@@ -172,7 +185,17 @@ impl rustls::server::ResolvesServerCert for CertResolver {
                 }
             }
         } else {
-            None
+            // No SNI, use the default certificate, otherwise we can't get to
+            // options parameter which can be used to set endpoint name too.
+            // That means that non-SNI flow will not work for CNAME domains in
+            // verify-full mode.
+            //
+            // If that will be a problem we can:
+            //
+            // a) Instead of multi-cert approach use single cert with extra
+            //    domains listed in Subject Alternative Name (SAN).
+            // b) Deploy separate proxy instances for extra domains.
+            self.default.as_ref().cloned()
         }
     }
 }
