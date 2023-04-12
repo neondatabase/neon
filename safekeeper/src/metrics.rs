@@ -15,7 +15,7 @@ use metrics::{
 use once_cell::sync::Lazy;
 
 use postgres_ffi::XLogSegNo;
-use pq_proto::PageserverFeedback;
+use utils::pageserver_feedback::PageserverFeedback;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
@@ -557,7 +557,7 @@ impl Collector for TimelineCollector {
 
             self.ps_last_received_lsn
                 .with_label_values(labels)
-                .set(tli.ps_feedback.last_received_lsn);
+                .set(tli.ps_feedback.last_received_lsn.0);
             if let Ok(unix_time) = tli
                 .ps_feedback
                 .replytime

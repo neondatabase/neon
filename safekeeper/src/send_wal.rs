@@ -13,12 +13,13 @@ use postgres_backend::PostgresBackend;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
-use pq_proto::{BeMessage, PageserverFeedback, WalSndKeepAlive, XLogDataBody};
+use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::http::json::display_serialize;
 use utils::id::TenantTimelineId;
 use utils::lsn::AtomicLsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
 use std::cmp::{max, min};
 use std::net::SocketAddr;
@@ -155,7 +156,7 @@ impl WalSenders {
         let mut shared = self.mutex.lock();
         shared.get_slot_mut(id).feedback = ReplicationFeedback::Pageserver(*feedback);
         shared.update_ps_feedback();
-        self.update_remote_consistent_lsn(Lsn(shared.agg_ps_feedback.remote_consistent_lsn));
+        self.update_remote_consistent_lsn(shared.agg_ps_feedback.remote_consistent_lsn);
     }
 
     /// Record standby reply.
@@ -195,7 +196,7 @@ impl WalSenders {
         let shared = self.mutex.lock();
         let slot = shared.get_slot(id);
         match slot.feedback {
-            ReplicationFeedback::Pageserver(feedback) => Some(Lsn(feedback.remote_consistent_lsn)),
+            ReplicationFeedback::Pageserver(feedback) => Some(feedback.remote_consistent_lsn),
             _ => None,
         }
     }

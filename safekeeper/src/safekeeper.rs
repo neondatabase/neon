@@ -18,7 +18,8 @@ use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::wal_storage;
-use pq_proto::{PageserverFeedback, SystemId};
+use pq_proto::SystemId;
+use utils::pageserver_feedback::PageserverFeedback;
 use utils::{
     bin_ser::LeSer,
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -346,7 +347,7 @@ pub struct AppendRequestHeader {
 }
 
 /// Report safekeeper state to proposer
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct AppendResponse {
     // Current term of the safekeeper; if it is higher than proposer's, the
     // compute is out of date.
