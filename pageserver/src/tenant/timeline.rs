@@ -14,6 +14,7 @@ use pageserver_api::models::{
     DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceStatus, TimelineState,
 };
 use remote_storage::GenericRemoteStorage;
+use storage_broker::BrokerClientChannel;
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -30,7 +31,7 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::broker_client::is_broker_client_initialized;
+use crate::broker_client::{get_broker_client, is_broker_client_initialized};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
@@ -71,10 +72,10 @@ use crate::walredo::WalRedoManager;
 use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
-use walreceiver::spawn_connection_manager_task;
 
 pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
+use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
@@ -214,6 +215,7 @@ pub struct Timeline {
     /// or None if WAL receiver has not received anything for this timeline
     /// yet.
     pub last_received_wal: Mutex<Option<WalReceiverInfo>>,
+    pub walreceiver: WalReceiver,
 
     /// Relation size cache
     pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
@@ -866,10 +868,18 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn activate(self: &Arc<Self>) {
+    pub fn activate(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+        if is_broker_client_initialized() {
+            self.launch_wal_receiver(ctx, get_broker_client().clone())?;
+        } else if cfg!(test) {
+            info!("not launching WAL receiver because broker client hasn't been initialized");
+        } else {
+            anyhow::bail!("broker client not initialized");
+        }
+
         self.set_state(TimelineState::Active);
-        self.launch_wal_receiver();
         self.launch_eviction_task();
+        Ok(())
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -1220,7 +1230,31 @@ impl Timeline {
         let (layer_flush_start_tx, _) = tokio::sync::watch::channel(0);
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
 
+        let tenant_conf_guard = tenant_conf.read().unwrap();
+        let wal_connect_timeout = tenant_conf_guard
+            .walreceiver_connect_timeout
+            .unwrap_or(conf.default_tenant_conf.walreceiver_connect_timeout);
+        let lagging_wal_timeout = tenant_conf_guard
+            .lagging_wal_timeout
+            .unwrap_or(conf.default_tenant_conf.lagging_wal_timeout);
+        let max_lsn_wal_lag = tenant_conf_guard
+            .max_lsn_wal_lag
+            .unwrap_or(conf.default_tenant_conf.max_lsn_wal_lag);
+        drop(tenant_conf_guard);
+
         Arc::new_cyclic(|myself| {
+            let walreceiver = WalReceiver::new(
+                TenantTimelineId::new(tenant_id, timeline_id),
+                Weak::clone(myself),
+                WalReceiverConf {
+                    wal_connect_timeout,
+                    lagging_wal_timeout,
+                    max_lsn_wal_lag,
+                    auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
+                    availability_zone: conf.availability_zone.clone(),
+                },
+            );
+
             let mut result = Timeline {
                 conf,
                 tenant_conf,
@@ -1231,6 +1265,7 @@ impl Timeline {
                 layers: RwLock::new(LayerMap::default()),
 
                 walredo_mgr,
+                walreceiver,
 
                 remote_client: remote_client.map(Arc::new),
 
@@ -1350,44 +1385,17 @@ impl Timeline {
         *flush_loop_state = FlushLoopState::Running;
     }
 
-    pub(super) fn launch_wal_receiver(self: &Arc<Self>) {
-        if !is_broker_client_initialized() {
-            if cfg!(test) {
-                info!("not launching WAL receiver because broker client hasn't been initialized");
-                return;
-            } else {
-                panic!("broker client not initialized");
-            }
-        }
-
+    pub(super) fn launch_wal_receiver(
+        &self,
+        ctx: &RequestContext,
+        broker_client: BrokerClientChannel,
+    ) -> anyhow::Result<()> {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
             self.timeline_id, self.tenant_id
         );
-        let tenant_conf_guard = self.tenant_conf.read().unwrap();
-        let lagging_wal_timeout = tenant_conf_guard
-            .lagging_wal_timeout
-            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
-        let walreceiver_connect_timeout = tenant_conf_guard
-            .walreceiver_connect_timeout
-            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
-        let max_lsn_wal_lag = tenant_conf_guard
-            .max_lsn_wal_lag
-            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
-        drop(tenant_conf_guard);
-        let self_clone = Arc::clone(self);
-        let background_ctx =
-            // XXX: this is a detached_child. Plumb through the ctx from call sites.
-            RequestContext::todo_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-        spawn_connection_manager_task(
-            self_clone,
-            walreceiver_connect_timeout,
-            lagging_wal_timeout,
-            max_lsn_wal_lag,
-            crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
-            self.conf.availability_zone.clone(),
-            background_ctx,
-        );
+        self.walreceiver.start(ctx, broker_client)?;
+        Ok(())
     }
 
     ///

@@ -42,7 +42,7 @@ use utils::lsn::Lsn;
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
-pub struct WalConnectionStatus {
+pub(super) struct WalConnectionStatus {
     /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
     pub is_connected: bool,
     /// Defines a healthy connection as one on which pageserver received WAL from safekeeper
@@ -60,7 +60,7 @@ pub struct WalConnectionStatus {
 
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
-pub async fn handle_walreceiver_connection(
+pub(super) async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,

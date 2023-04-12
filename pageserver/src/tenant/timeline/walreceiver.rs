@@ -23,14 +23,133 @@
 mod connection_manager;
 mod walreceiver_connection;
 
-use crate::task_mgr::WALRECEIVER_RUNTIME;
+use crate::context::{DownloadBehavior, RequestContext};
+use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::timeline::walreceiver::connection_manager::{
+    connection_manager_loop_step, ConnectionManagerState,
+};
 
+use anyhow::Context;
 use std::future::Future;
+use std::num::NonZeroU64;
+use std::ops::ControlFlow;
+use std::sync::atomic::{self, AtomicBool};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+use storage_broker::BrokerClientChannel;
+use tokio::select;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
-pub use connection_manager::spawn_connection_manager_task;
+use utils::id::TenantTimelineId;
+
+use super::Timeline;
+
+#[derive(Clone)]
+pub struct WalReceiverConf {
+    /// The timeout on the connection to safekeeper for WAL streaming.
+    pub wal_connect_timeout: Duration,
+    /// The timeout to use to determine when the current connection is "stale" and reconnect to the other one.
+    pub lagging_wal_timeout: Duration,
+    /// The Lsn lag to use to determine when the current connection is lagging to much behind and reconnect to the other one.
+    pub max_lsn_wal_lag: NonZeroU64,
+    pub auth_token: Option<Arc<String>>,
+    pub availability_zone: Option<String>,
+}
+
+pub struct WalReceiver {
+    timeline: TenantTimelineId,
+    timeline_ref: Weak<Timeline>,
+    conf: WalReceiverConf,
+    started: AtomicBool,
+}
+
+impl WalReceiver {
+    pub fn new(
+        timeline: TenantTimelineId,
+        timeline_ref: Weak<Timeline>,
+        conf: WalReceiverConf,
+    ) -> Self {
+        Self {
+            timeline,
+            timeline_ref,
+            conf,
+            started: AtomicBool::new(false),
+        }
+    }
+
+    pub fn start(
+        &self,
+        ctx: &RequestContext,
+        mut broker_client: BrokerClientChannel,
+    ) -> anyhow::Result<()> {
+        if self.started.load(atomic::Ordering::Acquire) {
+            anyhow::bail!("Wal receiver is already started");
+        }
+
+        let timeline = self.timeline_ref.upgrade().with_context(|| {
+            format!("walreceiver start on a dropped timeline {}", self.timeline)
+        })?;
+
+        let tenant_id = timeline.tenant_id;
+        let timeline_id = timeline.timeline_id;
+        let walreceiver_ctx =
+            ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
+
+        let wal_receiver_conf = self.conf.clone();
+        task_mgr::spawn(
+            WALRECEIVER_RUNTIME.handle(),
+            TaskKind::WalReceiverManager,
+            Some(tenant_id),
+            Some(timeline_id),
+            &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
+            false,
+            async move {
+                info!("WAL receiver manager started, connecting to broker");
+                let mut connection_manager_state = ConnectionManagerState::new(
+                    timeline,
+                    wal_receiver_conf,
+                );
+                loop {
+                    select! {
+                        _ = task_mgr::shutdown_watcher() => {
+                            info!("WAL receiver shutdown requested, shutting down");
+                            connection_manager_state.shutdown().await;
+                            return Ok(());
+                        },
+                        loop_step_result = connection_manager_loop_step(
+                            &mut broker_client,
+                            &mut connection_manager_state,
+                            &walreceiver_ctx,
+                        ) => match loop_step_result {
+                            ControlFlow::Continue(()) => continue,
+                            ControlFlow::Break(()) => {
+                                info!("Connection manager loop ended, shutting down");
+                                connection_manager_state.shutdown().await;
+                                return Ok(());
+                            }
+                        },
+                    }
+                }
+            }.instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
+        );
+
+        self.started.store(true, atomic::Ordering::Release);
+
+        Ok(())
+    }
+
+    pub async fn stop(&self) {
+        task_mgr::shutdown_tasks(
+            Some(TaskKind::WalReceiverManager),
+            Some(self.timeline.tenant_id),
+            Some(self.timeline.timeline_id),
+        )
+        .await;
+        self.started.store(false, atomic::Ordering::Release);
+    }
+}
 
 /// A handle of an asynchronous task.
 /// The task has a channel that it can use to communicate its lifecycle events in a certain form, see [`TaskEvent`]
@@ -39,26 +158,26 @@ pub use connection_manager::spawn_connection_manager_task;
 /// Note that the communication happens via the `watch` channel, that does not accumulate the events, replacing the old one with the never one on submission.
 /// That may lead to certain events not being observed by the listener.
 #[derive(Debug)]
-pub struct TaskHandle<E> {
+struct TaskHandle<E> {
     join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     events_receiver: watch::Receiver<TaskStateUpdate<E>>,
     cancellation: CancellationToken,
 }
 
-pub enum TaskEvent<E> {
+enum TaskEvent<E> {
     Update(TaskStateUpdate<E>),
     End(anyhow::Result<()>),
 }
 
 #[derive(Debug, Clone)]
-pub enum TaskStateUpdate<E> {
+enum TaskStateUpdate<E> {
     Started,
     Progress(E),
 }
 
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
-    pub fn spawn<Fut>(
+    fn spawn<Fut>(
         task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, CancellationToken) -> Fut + Send + 'static,
     ) -> Self
     where
@@ -131,7 +250,7 @@ impl<E: Clone> TaskHandle<E> {
     }
 
     /// Aborts current task, waiting for it to finish.
-    pub async fn shutdown(self) {
+    async fn shutdown(self) {
         if let Some(jh) = self.join_handle {
             self.cancellation.cancel();
             match jh.await {

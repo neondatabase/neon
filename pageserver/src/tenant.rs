@@ -177,9 +177,9 @@ impl UninitializedTimeline<'_> {
     ///
     /// The new timeline is initialized in Active state, and its background jobs are
     /// started
-    pub fn initialize(self, _ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
+    pub fn initialize(self, ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(&mut timelines, true, true)
+        self.initialize_with_lock(ctx, &mut timelines, true, true)
     }
 
     /// Like `initialize`, but the caller is already holding lock on Tenant::timelines.
@@ -189,6 +189,7 @@ impl UninitializedTimeline<'_> {
     /// been initialized.
     fn initialize_with_lock(
         mut self,
+        ctx: &RequestContext,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
         load_layer_map: bool,
         activate: bool,
@@ -229,7 +230,9 @@ impl UninitializedTimeline<'_> {
                 new_timeline.maybe_spawn_flush_loop();
 
                 if activate {
-                    new_timeline.activate();
+                    new_timeline
+                        .activate(ctx)
+                        .context("initializing timeline activation")?;
                 }
             }
         }
@@ -469,7 +472,7 @@ impl Tenant {
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
 
@@ -504,7 +507,7 @@ impl Tenant {
             // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
             // will ingest data which may require looking at the layers which are not yet available locally
-            match timeline.initialize_with_lock(&mut timelines_accessor, true, false) {
+            match timeline.initialize_with_lock(ctx, &mut timelines_accessor, true, false) {
                 Ok(new_timeline) => new_timeline,
                 Err(e) => {
                     error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
@@ -629,7 +632,7 @@ impl Tenant {
     ///
     /// Background task that downloads all data for a tenant and brings it to Active state.
     ///
-    #[instrument(skip(self, ctx), fields(tenant_id=%self.tenant_id))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     async fn attach(self: &Arc<Tenant>, ctx: RequestContext) -> anyhow::Result<()> {
         // Create directory with marker file to indicate attaching state.
         // The load_local_tenants() function in tenant::mgr relies on the marker file
@@ -750,7 +753,7 @@ impl Tenant {
 
         // Start background operations and open the tenant for business.
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate()?;
+        self.activate(&ctx)?;
 
         info!("Done");
 
@@ -1022,7 +1025,7 @@ impl Tenant {
 
         // Start background operations and open the tenant for business.
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate()?;
+        self.activate(ctx)?;
 
         info!("Done");
 
@@ -1358,12 +1361,7 @@ impl Tenant {
 
         // Stop the walreceiver first.
         debug!("waiting for wal receiver to shutdown");
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_id),
-            Some(timeline_id),
-        )
-        .await;
+        timeline.walreceiver.stop().await;
         debug!("wal receiver shutdown confirmed");
 
         info!("waiting for timeline tasks to shutdown");
@@ -1450,7 +1448,7 @@ impl Tenant {
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
-    fn activate(&self) -> anyhow::Result<()> {
+    fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut result = Ok(());
         self.state.send_modify(|current_state| {
             match *current_state {
@@ -1484,7 +1482,20 @@ impl Tenant {
                     tasks::start_background_loops(self.tenant_id);
 
                     for timeline in not_broken_timelines {
-                        timeline.activate();
+                        match timeline
+                            .activate(ctx)
+                            .context("timeline activation for activating tenant")
+                        {
+                            Ok(()) => {}
+                            Err(e) => {
+                                error!(
+                                    "Failed to activate timeline {}: {:#}",
+                                    timeline.timeline_id, e
+                                );
+                                timeline.set_state(TimelineState::Broken);
+                                *current_state = TenantState::Broken;
+                            }
+                        }
                     }
                 }
             }
@@ -2093,7 +2104,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let src_id = src_timeline.timeline_id;
 
@@ -2186,7 +2197,7 @@ impl Tenant {
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
-            .initialize_with_lock(&mut timelines, true, true)?;
+            .initialize_with_lock(ctx, &mut timelines, true, true)?;
         drop(timelines);
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
@@ -2299,7 +2310,7 @@ impl Tenant {
 
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
-            raw_timeline.initialize_with_lock(&mut timelines, false, true)?
+            raw_timeline.initialize_with_lock(ctx, &mut timelines, false, true)?
         };
 
         info!(
