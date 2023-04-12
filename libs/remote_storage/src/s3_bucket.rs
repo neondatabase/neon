@@ -111,13 +111,13 @@ pub struct S3Bucket {
 }
 
 struct PredefinedEndpointResolver {
-    endpoint: String,
+    endpoint: hyper::Uri,
 }
 
 impl endpoint::ResolveEndpoint<aws_sdk_s3::endpoint::Params> for PredefinedEndpointResolver {
     fn resolve_endpoint(&self, _params: &aws_sdk_s3::endpoint::Params) -> endpoint::Result {
         Ok(aws_smithy_types::endpoint::Endpoint::builder()
-            .url(self.endpoint.clone())
+            .url(self.endpoint.to_string())
             .build())
     }
 }
@@ -152,13 +152,11 @@ impl S3Bucket {
             .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider);
 
-        if let Some(custom_endpoint) = aws_config
-            .endpoint
-            .as_ref()
-            .filter(|url| !url.trim().is_empty())
-        {
+        if let Some(custom_endpoint) = aws_config.endpoint.as_ref() {
             let resolver = PredefinedEndpointResolver {
-                endpoint: custom_endpoint.trim().to_string(),
+                endpoint: custom_endpoint
+                    .parse()
+                    .with_context(|| format!("Custom endpoint {custom_endpoint} parse as Uri"))?,
             };
             config_builder = config_builder.endpoint_resolver(resolver);
         }
