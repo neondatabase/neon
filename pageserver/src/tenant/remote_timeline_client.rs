@@ -342,7 +342,7 @@ impl RemoteTimelineClient {
         match &*self.upload_queue.lock().unwrap() {
             UploadQueue::Uninitialized => None,
             UploadQueue::Initialized(q) => Some(q.last_uploaded_consistent_lsn),
-            UploadQueue::Stopped(q) => Some(q.last_uploaded_consistent_lsn),
+            UploadQueue::Stopped(q) => Some(q.last_uploaded_index_part.disk_consistent_lsn),
         }
     }
 
@@ -643,9 +643,8 @@ impl RemoteTimelineClient {
                 UploadQueue::Stopped(stopped) => stopped,
             };
 
-            stopped.index_part.is_deleted = true;
-
-            stopped.index_part.clone()
+            stopped.last_uploaded_index_part.is_deleted = true;
+            stopped.last_uploaded_index_part.clone()
         };
 
         upload::upload_index_part(
@@ -990,12 +989,10 @@ impl RemoteTimelineClient {
                 // Replace the queue with the Stopped state, taking ownership of the old
                 // Initialized queue. We will do some checks on it, and then drop it.
                 let qi = {
-                    let last_uploaded_consistent_lsn = qi.last_uploaded_consistent_lsn;
                     let upload_queue = std::mem::replace(
                         &mut *guard,
                         UploadQueue::Stopped(UploadQueueStopped {
-                            last_uploaded_consistent_lsn,
-                            index_part,
+                            last_uploaded_index_part: index_part,
                         }),
                     );
                     if let UploadQueue::Initialized(qi) = upload_queue {

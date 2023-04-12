@@ -76,9 +76,8 @@ pub(crate) struct UploadQueueInitialized {
 }
 
 pub(crate) struct UploadQueueStopped {
-    pub(crate) last_uploaded_consistent_lsn: Lsn,
-    // Index part is needed here so timeline_delete can access it
-    pub(super) index_part: IndexPart,
+    /// Index part is needed here so timeline_delete can access it
+    pub(super) last_uploaded_index_part: IndexPart,
 }
 
 impl UploadQueue {
