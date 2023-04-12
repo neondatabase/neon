@@ -22,7 +22,7 @@ use crate::safekeeper::SafekeeperMemState;
 use crate::safekeeper::TermHistory;
 use crate::SafeKeeperConf;
 
-use crate::timeline::ReplicaState;
+use crate::send_wal::WalSenderState;
 use crate::GlobalTimelines;
 
 /// Various filters that influence the resulting JSON output.
@@ -87,7 +87,7 @@ pub struct Timeline {
 pub struct Memory {
     pub is_cancelled: bool,
     pub peers_info_len: usize,
-    pub replicas: Vec<Option<ReplicaState>>,
+    pub walsenders: Vec<WalSenderState>,
     pub wal_backup_active: bool,
     pub active: bool,
     pub num_computes: u32,

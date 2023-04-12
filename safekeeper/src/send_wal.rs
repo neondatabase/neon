@@ -1,12 +1,14 @@
 //! This module implements the streaming side of replication protocol, starting
-//! with the "START_REPLICATION" message.
+//! with the "START_REPLICATION" message, and registry of walsenders.
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::timeline::{ReplicaState, Timeline};
+use crate::timeline::Timeline;
+use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
 use anyhow::Context as AnyhowContext;
 use bytes::Bytes;
+use parking_lot::Mutex;
 use postgres_backend::PostgresBackend;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
@@ -14,8 +16,12 @@ use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, PageserverFeedback, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
+use utils::http::json::display_serialize;
+use utils::id::TenantTimelineId;
+use utils::lsn::AtomicLsn;
 
-use std::cmp::min;
+use std::cmp::{max, min};
+use std::net::SocketAddr;
 use std::str;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +46,8 @@ pub struct HotStandbyFeedback {
     pub catalog_xmin: FullTransactionId,
 }
 
+const INVALID_FULL_TRANSACTION_ID: FullTransactionId = 0;
+
 impl HotStandbyFeedback {
     pub fn empty() -> HotStandbyFeedback {
         HotStandbyFeedback {
@@ -51,24 +59,293 @@ impl HotStandbyFeedback {
 }
 
 /// Standby status update
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StandbyReply {
-    pub write_lsn: Lsn, // last lsn received by pageserver
-    pub flush_lsn: Lsn, // pageserver's disk consistent lSN
-    pub apply_lsn: Lsn, // pageserver's remote consistent lSN
-    pub reply_ts: TimestampTz,
+    pub write_lsn: Lsn, // The location of the last WAL byte + 1 received and written to disk in the standby.
+    pub flush_lsn: Lsn, // The location of the last WAL byte + 1 flushed to disk in the standby.
+    pub apply_lsn: Lsn, // The location of the last WAL byte + 1 applied in the standby.
+    pub reply_ts: TimestampTz, // The client's system clock at the time of transmission, as microseconds since midnight on 2000-01-01.
     pub reply_requested: bool,
 }
 
-/// Scope guard to unregister replication connection from timeline
-struct ReplicationConnGuard {
-    replica: usize, // replica internal ID assigned by timeline
-    timeline: Arc<Timeline>,
+impl StandbyReply {
+    fn empty() -> Self {
+        StandbyReply {
+            write_lsn: Lsn::INVALID,
+            flush_lsn: Lsn::INVALID,
+            apply_lsn: Lsn::INVALID,
+            reply_ts: 0,
+            reply_requested: false,
+        }
+    }
 }
 
-impl Drop for ReplicationConnGuard {
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StandbyFeedback {
+    reply: StandbyReply,
+    hs_feedback: HotStandbyFeedback,
+}
+
+/// WalSenders registry. Timeline holds it (wrapped in Arc).
+pub struct WalSenders {
+    /// Lsn maximized over all walsenders *and* peer data, so might be higher
+    /// than what we receive from replicas.
+    remote_consistent_lsn: AtomicLsn,
+    mutex: Mutex<WalSendersShared>,
+}
+
+impl WalSenders {
+    pub fn new(remote_consistent_lsn: Lsn) -> Arc<WalSenders> {
+        Arc::new(WalSenders {
+            remote_consistent_lsn: AtomicLsn::from(remote_consistent_lsn),
+            mutex: Mutex::new(WalSendersShared::new()),
+        })
+    }
+
+    /// Register new walsender. Returned guard provides access to the slot and
+    /// automatically deregisters in Drop.
+    fn register(
+        self: &Arc<WalSenders>,
+        ttid: TenantTimelineId,
+        addr: SocketAddr,
+        conn_id: ConnectionId,
+        appname: Option<String>,
+    ) -> WalSenderGuard {
+        let slots = &mut self.mutex.lock().slots;
+        let walsender_state = WalSenderState {
+            ttid,
+            addr,
+            conn_id,
+            appname,
+            feedback: ReplicationFeedback::Pageserver(PageserverFeedback::empty()),
+        };
+        // find empty slot or create new one
+        let pos = if let Some(pos) = slots.iter().position(|s| s.is_none()) {
+            slots[pos] = Some(walsender_state);
+            pos
+        } else {
+            let pos = slots.len();
+            slots.push(Some(walsender_state));
+            pos
+        };
+        WalSenderGuard {
+            id: pos,
+            walsenders: self.clone(),
+        }
+    }
+
+    /// Get state of all walsenders.
+    pub fn get_all(self: &Arc<WalSenders>) -> Vec<WalSenderState> {
+        self.mutex.lock().slots.iter().flatten().cloned().collect()
+    }
+
+    /// Get aggregated pageserver feedback.
+    pub fn get_ps_feedback(self: &Arc<WalSenders>) -> PageserverFeedback {
+        self.mutex.lock().agg_ps_feedback
+    }
+
+    /// Get aggregated pageserver and hot standby feedback (we send them to compute).
+    pub fn get_feedbacks(self: &Arc<WalSenders>) -> (PageserverFeedback, HotStandbyFeedback) {
+        let shared = self.mutex.lock();
+        (shared.agg_ps_feedback, shared.agg_hs_feedback)
+    }
+
+    /// Record new pageserver feedback, update aggregated values.
+    fn record_ps_feedback(self: &Arc<WalSenders>, id: WalSenderId, feedback: &PageserverFeedback) {
+        let mut shared = self.mutex.lock();
+        shared.get_slot_mut(id).feedback = ReplicationFeedback::Pageserver(*feedback);
+        shared.update_ps_feedback();
+        self.update_remote_consistent_lsn(Lsn(shared.agg_ps_feedback.remote_consistent_lsn));
+    }
+
+    /// Record standby reply.
+    fn record_standby_reply(self: &Arc<WalSenders>, id: WalSenderId, reply: &StandbyReply) {
+        let mut shared = self.mutex.lock();
+        let slot = shared.get_slot_mut(id);
+        match &mut slot.feedback {
+            ReplicationFeedback::Standby(sf) => sf.reply = *reply,
+            ReplicationFeedback::Pageserver(_) => {
+                slot.feedback = ReplicationFeedback::Standby(StandbyFeedback {
+                    reply: *reply,
+                    hs_feedback: HotStandbyFeedback::empty(),
+                })
+            }
+        }
+    }
+
+    /// Record hot standby feedback, update aggregated value.
+    fn record_hs_feedback(self: &Arc<WalSenders>, id: WalSenderId, feedback: &HotStandbyFeedback) {
+        let mut shared = self.mutex.lock();
+        let slot = shared.get_slot_mut(id);
+        match &mut slot.feedback {
+            ReplicationFeedback::Standby(sf) => sf.hs_feedback = *feedback,
+            ReplicationFeedback::Pageserver(_) => {
+                slot.feedback = ReplicationFeedback::Standby(StandbyFeedback {
+                    reply: StandbyReply::empty(),
+                    hs_feedback: *feedback,
+                })
+            }
+        }
+        shared.update_hs_feedback();
+    }
+
+    /// Get remote_consistent_lsn reported by the pageserver. Returns None if
+    /// client is not pageserver.
+    fn get_ws_remote_consistent_lsn(self: &Arc<WalSenders>, id: WalSenderId) -> Option<Lsn> {
+        let shared = self.mutex.lock();
+        let slot = shared.get_slot(id);
+        match slot.feedback {
+            ReplicationFeedback::Pageserver(feedback) => Some(Lsn(feedback.remote_consistent_lsn)),
+            _ => None,
+        }
+    }
+
+    /// Get remote_consistent_lsn maximized across all walsenders and peers.
+    pub fn get_remote_consistent_lsn(self: &Arc<WalSenders>) -> Lsn {
+        self.remote_consistent_lsn.load()
+    }
+
+    /// Update maximized remote_consistent_lsn, return new (potentially) value.
+    pub fn update_remote_consistent_lsn(self: &Arc<WalSenders>, candidate: Lsn) -> Lsn {
+        self.remote_consistent_lsn
+            .fetch_max(candidate)
+            .max(candidate)
+    }
+
+    /// Unregister walsender.
+    fn unregister(self: &Arc<WalSenders>, id: WalSenderId) {
+        let mut shared = self.mutex.lock();
+        shared.slots[id] = None;
+        shared.update_hs_feedback();
+    }
+}
+
+struct WalSendersShared {
+    // aggregated over all walsenders value
+    agg_hs_feedback: HotStandbyFeedback,
+    // aggregated over all walsenders value
+    agg_ps_feedback: PageserverFeedback,
+    slots: Vec<Option<WalSenderState>>,
+}
+
+impl WalSendersShared {
+    fn new() -> Self {
+        WalSendersShared {
+            agg_hs_feedback: HotStandbyFeedback::empty(),
+            agg_ps_feedback: PageserverFeedback::empty(),
+            slots: Vec::new(),
+        }
+    }
+
+    /// Get content of provided id slot, it must exist.
+    fn get_slot(&self, id: WalSenderId) -> &WalSenderState {
+        self.slots[id].as_ref().expect("walsender doesn't exist")
+    }
+
+    /// Get mut content of provided id slot, it must exist.
+    fn get_slot_mut(&mut self, id: WalSenderId) -> &mut WalSenderState {
+        self.slots[id].as_mut().expect("walsender doesn't exist")
+    }
+
+    /// Update aggregated hot standy feedback. We just take min of valid xmins
+    /// and ts.
+    fn update_hs_feedback(&mut self) {
+        let mut agg = HotStandbyFeedback::empty();
+        for ws_state in self.slots.iter().flatten() {
+            if let ReplicationFeedback::Standby(standby_feedback) = ws_state.feedback {
+                let hs_feedback = standby_feedback.hs_feedback;
+                // doing Option math like op1.iter().chain(op2.iter()).min()
+                // would be nicer, but we serialize/deserialize this struct
+                // directly, so leave as is for now
+                if hs_feedback.xmin != INVALID_FULL_TRANSACTION_ID {
+                    if agg.xmin != INVALID_FULL_TRANSACTION_ID {
+                        agg.xmin = min(agg.xmin, hs_feedback.xmin);
+                    } else {
+                        agg.xmin = hs_feedback.xmin;
+                    }
+                    agg.ts = min(agg.ts, hs_feedback.ts);
+                }
+                if hs_feedback.catalog_xmin != INVALID_FULL_TRANSACTION_ID {
+                    if agg.catalog_xmin != INVALID_FULL_TRANSACTION_ID {
+                        agg.catalog_xmin = min(agg.catalog_xmin, hs_feedback.catalog_xmin);
+                    } else {
+                        agg.catalog_xmin = hs_feedback.catalog_xmin;
+                    }
+                    agg.ts = min(agg.ts, hs_feedback.ts);
+                }
+            }
+        }
+        self.agg_hs_feedback = agg;
+    }
+
+    /// Update aggregated pageserver feedback. LSNs (last_received,
+    /// disk_consistent, remote_consistent) and reply timestamp are just
+    /// maximized; timeline_size if taken from feedback with highest
+    /// last_received lsn. This is generally reasonable, but we might want to
+    /// implement other policies once multiple pageservers start to be actively
+    /// used.
+    fn update_ps_feedback(&mut self) {
+        let init = PageserverFeedback::empty();
+        let acc =
+            self.slots
+                .iter()
+                .flatten()
+                .fold(init, |mut acc, ws_state| match ws_state.feedback {
+                    ReplicationFeedback::Pageserver(feedback) => {
+                        if feedback.last_received_lsn > acc.last_received_lsn {
+                            acc.current_timeline_size = feedback.current_timeline_size;
+                        }
+                        acc.last_received_lsn =
+                            max(feedback.last_received_lsn, acc.last_received_lsn);
+                        acc.disk_consistent_lsn =
+                            max(feedback.disk_consistent_lsn, acc.disk_consistent_lsn);
+                        acc.remote_consistent_lsn =
+                            max(feedback.remote_consistent_lsn, acc.remote_consistent_lsn);
+                        acc.replytime = max(feedback.replytime, acc.replytime);
+                        acc
+                    }
+                    ReplicationFeedback::Standby(_) => acc,
+                });
+        self.agg_ps_feedback = acc;
+    }
+}
+
+// Serialized is used only for pretty printing in json.
+#[derive(Debug, Clone, Serialize)]
+pub struct WalSenderState {
+    #[serde(serialize_with = "display_serialize")]
+    ttid: TenantTimelineId,
+    addr: SocketAddr,
+    conn_id: ConnectionId,
+    // postgres application_name
+    appname: Option<String>,
+    feedback: ReplicationFeedback,
+}
+
+// Receiver is either pageserver or regular standby, which have different
+// feedbacks.
+#[derive(Debug, Clone, Copy, Serialize)]
+enum ReplicationFeedback {
+    Pageserver(PageserverFeedback),
+    Standby(StandbyFeedback),
+}
+
+// id of the occupied slot in WalSenders to access it (and save in the
+// WalSenderGuard). We could give Arc directly to the slot, but there is not
+// much sense in that as values aggregation which is performed on each feedback
+// receival iterates over all walsenders.
+pub type WalSenderId = usize;
+
+/// Scope guard to access slot in WalSenders registry and unregister from it in
+/// Drop.
+pub struct WalSenderGuard {
+    id: WalSenderId,
+    walsenders: Arc<WalSenders>,
+}
+
+impl Drop for WalSenderGuard {
     fn drop(&mut self) {
-        self.timeline.remove_replica(self.replica);
+        self.walsenders.unregister(self.id);
     }
 }
 
@@ -97,16 +374,13 @@ impl SafekeeperPostgresHandler {
         let tli =
             GlobalTimelines::get(self.ttid).map_err(|e| CopyStreamHandlerEnd::Other(e.into()))?;
 
-        let state = ReplicaState::new();
-        // This replica_id is used below to check if it's time to stop replication.
-        let replica_id = tli.add_replica(state);
-
-        // Use a guard object to remove our entry from the timeline, when the background
-        // thread and us have both finished using it.
-        let _guard = Arc::new(ReplicationConnGuard {
-            replica: replica_id,
-            timeline: tli.clone(),
-        });
+        // Use a guard object to remove our entry from the timeline when we are done.
+        let ws_guard = Arc::new(tli.get_walsenders().register(
+            self.ttid,
+            *pgb.get_peer_addr(),
+            self.conn_id,
+            self.appname.clone(),
+        ));
 
         // Walproposer gets special handling: safekeeper must give proposer all
         // local WAL till the end, whether committed or not (walproposer will
@@ -154,16 +428,11 @@ impl SafekeeperPostgresHandler {
             end_pos,
             stop_pos,
             commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
-            replica_id,
+            ws_guard: ws_guard.clone(),
             wal_reader,
             send_buf: [0; MAX_SEND_SIZE],
         };
-        let mut reply_reader = ReplyReader {
-            reader,
-            tli,
-            replica_id,
-            feedback: ReplicaState::new(),
-        };
+        let mut reply_reader = ReplyReader { reader, ws_guard };
 
         let res = tokio::select! {
             // todo: add read|write .context to these errors
@@ -190,7 +459,7 @@ struct WalSender<'a, IO> {
     // in recovery.
     stop_pos: Option<Lsn>,
     commit_lsn_watch_rx: Receiver<Lsn>,
-    replica_id: usize,
+    ws_guard: Arc<WalSenderGuard>,
     wal_reader: WalReader,
     // buffer for readling WAL into to send it
     send_buf: [u8; MAX_SEND_SIZE],
@@ -264,14 +533,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 return Ok(());
             }
             // Timed out waiting for WAL, check for termination and send KA
-            if self.tli.should_walsender_stop(self.replica_id) {
-                // Terminate if there is nothing more to send.
-                // TODO close the stream properly
-                return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
-                    "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
-                    self.appname, self.start_pos,
-                )));
+            if let Some(remote_consistent_lsn) = self
+                .ws_guard
+                .walsenders
+                .get_ws_remote_consistent_lsn(self.ws_guard.id)
+            {
+                if self.tli.should_walsender_stop(remote_consistent_lsn) {
+                    // Terminate if there is nothing more to send.
+                    return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
+                        "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",
+                        self.appname, self.start_pos,
+                    )));
+                }
             }
+
             self.pgb
                 .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
                     sent_ptr: self.end_pos.0,
@@ -286,9 +561,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
 /// A half driving receiving replies.
 struct ReplyReader<IO> {
     reader: PostgresBackendReader<IO>,
-    tli: Arc<Timeline>,
-    replica_id: usize,
-    feedback: ReplicaState,
+    ws_guard: Arc<WalSenderGuard>,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
@@ -303,29 +576,32 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
         match msg.first().cloned() {
             Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
                 // Note: deserializing is on m[1..] because we skip the tag byte.
-                self.feedback.hs_feedback = HotStandbyFeedback::des(&msg[1..])
+                let hs_feedback = HotStandbyFeedback::des(&msg[1..])
                     .context("failed to deserialize HotStandbyFeedback")?;
-                self.tli
-                    .update_replica_state(self.replica_id, self.feedback);
+                self.ws_guard
+                    .walsenders
+                    .record_hs_feedback(self.ws_guard.id, &hs_feedback);
             }
             Some(STANDBY_STATUS_UPDATE_TAG_BYTE) => {
-                let _reply =
+                let reply =
                     StandbyReply::des(&msg[1..]).context("failed to deserialize StandbyReply")?;
-                // This must be a regular postgres replica,
-                // because pageserver doesn't send this type of messages to safekeeper.
-                // Currently we just ignore this, tracking progress for them is not supported.
+                self.ws_guard
+                    .walsenders
+                    .record_standby_reply(self.ws_guard.id, &reply);
             }
             Some(NEON_STATUS_UPDATE_TAG_BYTE) => {
                 // pageserver sends this.
                 // Note: deserializing is on m[9..] because we skip the tag byte and len bytes.
                 let buf = Bytes::copy_from_slice(&msg[9..]);
-                let reply = PageserverFeedback::parse(buf);
+                let ps_feedback = PageserverFeedback::parse(buf);
 
-                trace!("PageserverFeedback is {:?}", reply);
-                self.feedback.pageserver_feedback = Some(reply);
-
-                self.tli
-                    .update_replica_state(self.replica_id, self.feedback);
+                trace!("PageserverFeedback is {:?}", ps_feedback);
+                self.ws_guard
+                    .walsenders
+                    .record_ps_feedback(self.ws_guard.id, &ps_feedback);
+                // in principle new remote_consistent_lsn could allow to
+                // deactivate the timeline, but we check that regularly through
+                // broker updated, not need to do it here
             }
             _ => warn!("unexpected message {:?}", msg),
         }
@@ -366,5 +642,91 @@ async fn wait_for_lsn(rx: &mut Receiver<Lsn>, lsn: Lsn) -> anyhow::Result<Option
         Ok(Err(err)) => Err(err),
         // timeout
         Err(_) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use postgres_protocol::PG_EPOCH;
+    use utils::id::{TenantId, TimelineId};
+
+    use super::*;
+
+    fn mock_ttid() -> TenantTimelineId {
+        TenantTimelineId {
+            tenant_id: TenantId::from_slice(&[0x00; 16]).unwrap(),
+            timeline_id: TimelineId::from_slice(&[0x00; 16]).unwrap(),
+        }
+    }
+
+    fn mock_addr() -> SocketAddr {
+        "127.0.0.1:8080".parse().unwrap()
+    }
+
+    // add to wss specified feedback setting other fields to dummy values
+    fn push_feedback(wss: &mut WalSendersShared, feedback: ReplicationFeedback) {
+        let walsender_state = WalSenderState {
+            ttid: mock_ttid(),
+            addr: mock_addr(),
+            conn_id: 1,
+            appname: None,
+            feedback,
+        };
+        wss.slots.push(Some(walsender_state))
+    }
+
+    // form standby feedback with given hot standby feedback ts/xmin and the
+    // rest set to dummy values.
+    fn hs_feedback(ts: TimestampTz, xmin: FullTransactionId) -> ReplicationFeedback {
+        ReplicationFeedback::Standby(StandbyFeedback {
+            reply: StandbyReply::empty(),
+            hs_feedback: HotStandbyFeedback {
+                ts,
+                xmin,
+                catalog_xmin: 0,
+            },
+        })
+    }
+
+    // test that hs aggregation works as expected
+    #[test]
+    fn test_hs_feedback_no_valid() {
+        let mut wss = WalSendersShared::new();
+        push_feedback(&mut wss, hs_feedback(1, INVALID_FULL_TRANSACTION_ID));
+        wss.update_hs_feedback();
+        assert_eq!(wss.agg_hs_feedback.xmin, INVALID_FULL_TRANSACTION_ID);
+    }
+
+    #[test]
+    fn test_hs_feedback() {
+        let mut wss = WalSendersShared::new();
+        push_feedback(&mut wss, hs_feedback(1, INVALID_FULL_TRANSACTION_ID));
+        push_feedback(&mut wss, hs_feedback(1, 42));
+        push_feedback(&mut wss, hs_feedback(1, 64));
+        wss.update_hs_feedback();
+        assert_eq!(wss.agg_hs_feedback.xmin, 42);
+    }
+
+    // form pageserver feedback with given last_record_lsn / tli size and the
+    // rest set to dummy values.
+    fn ps_feedback(current_timeline_size: u64, last_received_lsn: Lsn) -> ReplicationFeedback {
+        ReplicationFeedback::Pageserver(PageserverFeedback {
+            current_timeline_size,
+            last_received_lsn,
+            disk_consistent_lsn: Lsn::INVALID,
+            remote_consistent_lsn: Lsn::INVALID,
+            replytime: *PG_EPOCH,
+        })
+    }
+
+    // test that ps aggregation works as expected
+    #[test]
+    fn test_ps_feedback() {
+        let mut wss = WalSendersShared::new();
+        push_feedback(&mut wss, ps_feedback(8, Lsn(42)));
+        push_feedback(&mut wss, ps_feedback(4, Lsn(84)));
+        wss.update_ps_feedback();
+        assert_eq!(wss.agg_ps_feedback.current_timeline_size, 4);
+        assert_eq!(wss.agg_ps_feedback.last_received_lsn, Lsn(84));
     }
 }

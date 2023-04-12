@@ -947,9 +947,10 @@ impl<'a> BeMessage<'a> {
 pub struct PageserverFeedback {
     /// Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,
-    /// LSN last received and ingested by the pageserver.
+    /// LSN last received and ingested by the pageserver. Controls backpressure.
     pub last_received_lsn: u64,
     /// LSN up to which data is persisted by the pageserver to its local disc.
+    /// Controls backpressure.
     pub disk_consistent_lsn: u64,
     /// LSN up to which data is persisted by the pageserver on s3; safekeepers
     /// consider WAL before it can be removed.
@@ -968,7 +969,7 @@ impl PageserverFeedback {
             last_received_lsn: 0,
             remote_consistent_lsn: 0,
             disk_consistent_lsn: 0,
-            replytime: SystemTime::now(),
+            replytime: *PG_EPOCH,
         }
     }
 
