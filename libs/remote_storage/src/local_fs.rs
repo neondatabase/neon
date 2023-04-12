@@ -136,7 +136,7 @@ impl RemoteStorage for LocalFs {
         // T2: rename(temp, dst) -> fails, temp no longet exists
         // This can be solved by supplying unique temp suffix every time, but this situation
         // is not normall in the first place, the error can help (and helped at least once)
-        // to discover bugs in upper level synhronization.
+        // to discover bugs in upper level synchronization.
         let temp_file_path =
             path_with_suffix_extension(&target_file_path, LOCAL_FS_TEMP_FILE_SUFFIX);
         let mut destination = io::BufWriter::new(
