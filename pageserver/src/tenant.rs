@@ -268,7 +268,7 @@ impl UninitializedTimeline<'_> {
             .context("Failed to flush after basebackup import")?;
 
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(&mut timelines, false, true)
+        self.initialize_with_lock(ctx, &mut timelines, false, true)
     }
 
     fn raw_timeline(&self) -> anyhow::Result<&Arc<Timeline>> {
