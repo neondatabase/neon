@@ -9,15 +9,14 @@ use std::sync::Arc;
 use anyhow::Context;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
-    imds::credentials::ImdsCredentialsProvider, meta::credentials::CredentialsProviderChain,
+    imds::credentials::ImdsCredentialsProvider,
+    meta::credentials::{CredentialsProviderChain, LazyCachingCredentialsProvider},
 };
-use aws_credential_types::cache::CredentialsCache;
 use aws_sdk_s3::{
-    config::{Config, Region},
-    error::SdkError,
-    operation::get_object::GetObjectError,
-    primitives::ByteStream,
-    Client,
+    config::Config,
+    error::{GetObjectError, GetObjectErrorKind},
+    types::{ByteStream, SdkError},
+    Client, Endpoint, Region,
 };
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
@@ -126,21 +125,28 @@ impl S3Bucket {
 
         let credentials_provider = {
             // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-            CredentialsProviderChain::first_try(
-                "env",
-                EnvironmentVariableCredentialsProvider::new(),
-            )
+            let env_creds = EnvironmentVariableCredentialsProvider::new();
             // uses imds v2
-            .or_else("imds", ImdsCredentialsProvider::builder().build())
+            let imds = ImdsCredentialsProvider::builder().build();
+
+            // finally add caching.
+            // this might change in future, see https://github.com/awslabs/aws-sdk-rust/issues/629
+            LazyCachingCredentialsProvider::builder()
+                .load(CredentialsProviderChain::first_try("env", env_creds).or_else("imds", imds))
+                .build()
         };
 
         let mut config_builder = Config::builder()
             .region(Region::new(aws_config.bucket_region.clone()))
-            .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider);
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
-            config_builder = config_builder.endpoint_url(custom_endpoint);
+            let endpoint = Endpoint::immutable(
+                custom_endpoint
+                    .parse()
+                    .expect("Failed to parse S3 custom endpoint"),
+            );
+            config_builder.set_endpoint_resolver(Some(Arc::new(endpoint)));
         }
         let client = Client::from_conf(config_builder.build());
 
@@ -223,9 +229,14 @@ impl S3Bucket {
                     ))),
                 })
             }
-            Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
-                Err(DownloadError::NotFound)
-            }
+            Err(SdkError::ServiceError {
+                err:
+                    GetObjectError {
+                        kind: GetObjectErrorKind::NoSuchKey(..),
+                        ..
+                    },
+                ..
+            }) => Err(DownloadError::NotFound),
             Err(e) => {
                 metrics::inc_get_object_fail();
                 Err(DownloadError::Other(anyhow::anyhow!(
