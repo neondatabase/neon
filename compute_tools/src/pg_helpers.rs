@@ -23,7 +23,7 @@ fn escape_literal(s: &str) -> String {
 
 /// Escape a string so that it can be used in postgresql.conf.
 /// Same as escape_literal, currently.
-fn escape_conf_value(s: &str) -> String {
+pub fn escape_conf_value(s: &str) -> String {
     s.replace('\'', "''").replace('\\', "\\\\")
 }
 

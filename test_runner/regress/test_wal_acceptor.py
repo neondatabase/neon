@@ -18,7 +18,6 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
     NeonBroker,
-    NeonEnv,
     NeonEnvBuilder,
     NeonPageserver,
     PgBin,
@@ -991,9 +990,6 @@ def test_safekeeper_without_pageserver(
 
 
 def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
-    def safekeepers_guc(env: NeonEnv, sk_names: List[int]) -> str:
-        return ",".join([f"localhost:{sk.port.pg}" for sk in env.safekeepers if sk.id in sk_names])
-
     def execute_payload(endpoint: Endpoint):
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
@@ -1022,9 +1018,8 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
-    active_safekeepers = [1, 2, 3]
     endpoint = env.endpoints.create("test_replace_safekeeper")
-    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.active_safekeepers = [1, 2, 3]
     endpoint.start()
 
     # learn neon timeline from compute
@@ -1062,9 +1057,8 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
 
     log.info("Recreate postgres to replace failed sk1 with new sk4")
     endpoint.stop_and_destroy().create("test_replace_safekeeper")
-    active_safekeepers = [2, 3, 4]
     env.safekeepers[3].start()
-    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.active_safekeepers = [2, 3, 4]
     endpoint.start()
 
     execute_payload(endpoint)

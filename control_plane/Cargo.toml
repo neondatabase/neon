@@ -26,6 +26,7 @@ url.workspace = true
 pageserver_api.workspace = true
 postgres_backend.workspace = true
 safekeeper_api.workspace = true
+compute_api.workspace = true
 postgres_connection.workspace = true
 storage_broker.workspace = true
 utils.workspace = true

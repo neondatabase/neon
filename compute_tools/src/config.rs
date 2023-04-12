@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use crate::pg_helpers::escape_conf_value;
 use crate::pg_helpers::PgOptionsSerialize;
 use compute_api::spec::ComputeSpec;
 
@@ -34,18 +35,50 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 /// Create or completely rewrite configuration file specified by `path`
 pub fn write_postgres_conf(path: &Path, spec: &ComputeSpec) -> Result<()> {
     // File::create() destroys the file content if it exists.
-    let mut postgres_conf = File::create(path)?;
+    let mut file = File::create(path)?;
 
-    write_auto_managed_block(&mut postgres_conf, &spec.cluster.settings.as_pg_settings())?;
+    // Write the postgresql.conf content from the spec file as is.
+    if let Some(conf) = &spec.cluster.postgresql_conf {
+        writeln!(file, "{}", conf)?;
+    }
 
-    Ok(())
-}
+    // Add options for connecting to storage
+    writeln!(file, "# Neon storage settings")?;
+    if let Some(s) = &spec.pageserver_connstring {
+        writeln!(
+            file,
+            "neon.pageserver_connstring='{}'",
+            escape_conf_value(s)
+        )?;
+    }
+    if !spec.safekeeper_connstrings.is_empty() {
+        writeln!(
+            file,
+            "neon.safekeepers='{}'",
+            escape_conf_value(&spec.safekeeper_connstrings.join(","))
+        )?;
+    }
+    if let Some(s) = &spec.tenant_id {
+        writeln!(
+            file,
+            "neon.tenant_id='{}'",
+            escape_conf_value(&s.to_string())
+        )?;
+    }
+    if let Some(s) = &spec.timeline_id {
+        writeln!(
+            file,
+            "neon.timeline_id='{}'",
+            escape_conf_value(&s.to_string())
+        )?;
+    }
 
-// Write Postgres config block wrapped with generated comment section
-fn write_auto_managed_block(file: &mut File, buf: &str) -> Result<()> {
-    writeln!(file, "# Managed by compute_ctl: begin")?;
-    writeln!(file, "{}", buf)?;
-    writeln!(file, "# Managed by compute_ctl: end")?;
+    // If there are any extra options in the 'settings' field, append those
+    if spec.cluster.settings.is_some() {
+        writeln!(file, "# Managed by compute_ctl: begin")?;
+        writeln!(file, "{}", spec.cluster.settings.as_pg_settings())?;
+        writeln!(file, "# Managed by compute_ctl: end")?;
+    }
 
     Ok(())
 }

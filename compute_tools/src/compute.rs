@@ -98,6 +98,7 @@ pub struct ParsedSpec {
     pub spec: ComputeSpec,
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
+    pub lsn: Option<Lsn>,
     pub pageserver_connstr: String,
     pub storage_auth_token: Option<String>,
 }
@@ -105,26 +106,39 @@ pub struct ParsedSpec {
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
+        // Extract the options from the spec file that are needed to connect to
+        // the storage system.
+        //
+        // For backwards-compatibility, the top-level fields in the spec file
+        // may be empty. In that case, we need to dig them from the GUCs in the
+        // cluster.settings field.
         let pageserver_connstr = spec
-            .cluster
-            .settings
-            .find("neon.pageserver_connstring")
+            .pageserver_connstring
+            .clone()
+            .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
             .ok_or("pageserver connstr should be provided")?;
         let storage_auth_token = spec.storage_auth_token.clone();
-        let tenant_id: TenantId = spec
-            .cluster
-            .settings
-            .find("neon.tenant_id")
-            .ok_or("tenant id should be provided")
-            .map(|s| TenantId::from_str(&s))?
-            .or(Err("invalid tenant id"))?;
-        let timeline_id: TimelineId = spec
-            .cluster
-            .settings
-            .find("neon.timeline_id")
-            .ok_or("timeline id should be provided")
-            .map(|s| TimelineId::from_str(&s))?
-            .or(Err("invalid timeline id"))?;
+        let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
+            tenant_id
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.tenant_id")
+                .ok_or("tenant id should be provided")
+                .map(|s| TenantId::from_str(&s))?
+                .or(Err("invalid tenant id"))?
+        };
+        let timeline_id: TimelineId = if let Some(timeline_id) = spec.timeline_id {
+            timeline_id
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.timeline_id")
+                .ok_or("timeline id should be provided")
+                .map(|s| TimelineId::from_str(&s))?
+                .or(Err("invalid timeline id"))?
+        };
+        let lsn = spec.lsn;
 
         Ok(ParsedSpec {
             spec,
@@ -132,6 +146,7 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             storage_auth_token,
             tenant_id,
             timeline_id,
+            lsn,
         })
     }
 }
@@ -256,11 +271,18 @@ impl ComputeNode {
         self.create_pgdata()?;
         config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &pspec.spec)?;
 
-        info!("starting safekeepers syncing");
-        let lsn = self
-            .sync_safekeepers(pspec.storage_auth_token.clone())
-            .with_context(|| "failed to sync safekeepers")?;
-        info!("safekeepers synced at LSN {}", lsn);
+        let lsn = if let Some(lsn) = pspec.lsn {
+            // Read-only node, anchored at 'lsn'
+            lsn
+        } else {
+            // Primary that continues to write at end of the timeline
+            info!("starting safekeepers syncing");
+            let last_lsn = self
+                .sync_safekeepers(pspec.storage_auth_token.clone())
+                .with_context(|| "failed to sync safekeepers")?;
+            info!("safekeepers synced at LSN {}", last_lsn);
+            last_lsn
+        };
 
         info!(
             "getting basebackup@{} from pageserver {}",

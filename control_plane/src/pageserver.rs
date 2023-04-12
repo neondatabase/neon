@@ -1,3 +1,9 @@
+//! Code to manage pageservers
+//!
+//! In the local test environment, the pageserver stores its data directly in
+//!
+//!   .neon/
+//!
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
