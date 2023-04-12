@@ -74,7 +74,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     })?;
 
     storage
-        .upload(source_file, fs_size, &storage_path, None)
+        .upload(Box::new(source_file), fs_size, &storage_path, None)
         .await
         .with_context(|| {
             format!(
