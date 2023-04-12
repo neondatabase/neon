@@ -725,8 +725,9 @@ impl PageServerConf {
                 "disk_usage_based_eviction" => {
                     tracing::info!("disk_usage_based_eviction: {:#?}", &item);
                     builder.disk_usage_based_eviction(
-                    toml_edit::de::from_item(item.clone())
-                    .context("parse disk_usage_based_eviction")?)
+                        deserialize_from_item_string("disk_usage_based_eviction", item)
+                            .context("parse disk_usage_based_eviction")?
+                    )
                 },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
@@ -827,14 +828,14 @@ impl PageServerConf {
 
         if let Some(eviction_policy) = item.get("eviction_policy") {
             t_conf.eviction_policy = Some(
-                toml_edit::de::from_item(eviction_policy.clone())
+                deserialize_from_item_string("eviction_policy", eviction_policy)
                     .context("parse eviction_policy")?,
             );
         }
 
         if let Some(item) = item.get("min_resident_size_override") {
             t_conf.min_resident_size_override = Some(
-                toml_edit::de::from_item(item.clone())
+                deserialize_from_item_string("min_resident_size_override", item)
                     .context("parse min_resident_size_override")?,
             );
         }
@@ -936,6 +937,19 @@ where
             parse_type = stringify!(T)
         )
     })
+}
+
+fn deserialize_from_item_string<T>(name: &str, item: &Item) -> anyhow::Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    // ValueDeserializer::new is not public, so use the ValueDeserializer's documented way
+    let item_string = item.to_string();
+    let deserializer = item_string
+        .trim()
+        .parse::<toml_edit::de::ValueDeserializer>()
+        .with_context(|| format!("parsing item for node {name} as ValueDeserializer"))?;
+    T::deserialize(deserializer).with_context(|| format!("deserializing item for node {name}"))
 }
 
 /// Configurable semaphore permits setting.
