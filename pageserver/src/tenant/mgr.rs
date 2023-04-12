@@ -565,7 +565,7 @@ where
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
                 Some(tenant) => {
-                    tenant.set_broken(&e.to_string());
+                    tenant.set_broken(e.to_string());
                 }
                 None => {
                     warn!("Tenant {tenant_id} got removed from memory");

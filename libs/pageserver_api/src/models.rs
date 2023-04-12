@@ -57,10 +57,10 @@ impl TenantState {
         }
     }
 
-    pub fn broken_from_reason(reason: &str) -> Self {
+    pub fn broken_from_reason(reason: String) -> Self {
         let backtrace_str: String = format!("{}", std::backtrace::Backtrace::force_capture());
         Self::Broken {
-            reason: reason.into(),
+            reason,
             backtrace: backtrace_str,
         }
     }

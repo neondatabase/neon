@@ -619,7 +619,7 @@ impl Tenant {
                 match tenant_clone.attach(ctx).await {
                     Ok(_) => {}
                     Err(e) => {
-                        tenant_clone.set_broken(&e.to_string());
+                        tenant_clone.set_broken(e.to_string());
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
@@ -891,7 +891,7 @@ impl Tenant {
                 match tenant_clone.load(&ctx).await {
                     Ok(()) => {}
                     Err(err) => {
-                        tenant_clone.set_broken(&err.to_string());
+                        tenant_clone.set_broken(err.to_string());
                         error!("could not load tenant {tenant_id}: {err:?}");
                     }
                 }
@@ -1496,7 +1496,10 @@ impl Tenant {
                                     timeline.timeline_id, e
                                 );
                                 timeline.set_state(TimelineState::Broken);
-                                *current_state = TenantState::Broken;
+                                *current_state = TenantState::broken_from_reason(format!(
+                                    "failed to activate timeline {}: {}",
+                                    timeline.timeline_id, e
+                                ));
                             }
                         }
                     }
@@ -1537,7 +1540,7 @@ impl Tenant {
         });
     }
 
-    pub fn set_broken(&self, reason: &str) {
+    pub fn set_broken(&self, reason: String) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Active => {
@@ -1545,8 +1548,8 @@ impl Tenant {
                     // while loading or attaching a tenant. A tenant that has already been
                     // activated should never be marked as broken. We cope with it the best
                     // we can, but it shouldn't happen.
-                    *current_state = TenantState::broken_from_reason(reason);
                     warn!("Changing Active tenant to Broken state, reason: {}", reason);
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
                 TenantState::Broken { .. } => {
                     // This shouldn't happen either
@@ -1554,15 +1557,15 @@ impl Tenant {
                 }
                 TenantState::Stopping => {
                     // This shouldn't happen either
-                    *current_state = TenantState::broken_from_reason(reason);
                     warn!(
                         "Marking Stopping tenant as Broken state, reason: {}",
                         reason
                     );
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
                 TenantState::Loading | TenantState::Attaching => {
-                    *current_state = TenantState::broken_from_reason(reason);
                     info!("Setting tenant as Broken state, reason: {}", reason);
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
             }
         });

@@ -931,7 +931,7 @@ async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiErro
         .await
         .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
 
-    tenant.set_broken("broken from test");
+    tenant.set_broken("broken from test".to_owned());
 
     json_response(StatusCode::OK, ())
 }
