@@ -1776,17 +1776,17 @@ impl Tenant {
             let mut current_state: &'static str = From::from(&*rx.borrow_and_update());
             let tid = tenant_id.to_string();
             TENANT_STATE_METRIC
-                .with_label_values(&[&tid, &current_state])
+                .with_label_values(&[&tid, current_state])
                 .inc();
             loop {
                 match rx.changed().await {
                     Ok(()) => {
                         let new_state: &'static str = From::from(&*rx.borrow_and_update());
                         TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, &current_state])
+                            .with_label_values(&[&tid, current_state])
                             .dec();
                         TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, &new_state])
+                            .with_label_values(&[&tid, new_state])
                             .inc();
 
                         current_state = new_state;
