@@ -1876,7 +1876,7 @@ impl Tenant {
             .to_string();
 
             // Convert the config to a toml file.
-            conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
+            conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
 
             let mut target_config_file = VirtualFile::open_with_options(
                 target_config_path,
