@@ -11,14 +11,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
 
-use crate::local_env::{LocalEnv, DEFAULT_PG_VERSION};
+use crate::local_env::LocalEnv;
 use crate::pageserver::PageServerNode;
 use crate::postgresql_conf::PostgresConf;
+
+// contents of a endpoint.json file
+#[serde_as]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+pub struct EndpointConf {
+    name: String,
+    #[serde_as(as = "DisplayFromStr")]
+    tenant_id: TenantId,
+    #[serde_as(as = "DisplayFromStr")]
+    timeline_id: TimelineId,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    lsn: Option<Lsn>,
+    port: u16,
+    pg_version: u32,
+}
 
 //
 // ComputeControlPlane
@@ -83,8 +100,18 @@ impl ComputeControlPlane {
             tenant_id,
             pg_version,
         });
-
         ep.create_pgdata()?;
+        std::fs::write(
+            ep.endpoint_path().join("endpoint.json"),
+            serde_json::to_string_pretty(&EndpointConf {
+                name: name.to_string(),
+                tenant_id,
+                timeline_id,
+                lsn,
+                port,
+                pg_version,
+            })?,
+        )?;
         ep.setup_pg_conf()?;
 
         self.endpoints.insert(ep.name.clone(), Arc::clone(&ep));
@@ -131,42 +158,20 @@ impl Endpoint {
         let fname = entry.file_name();
         let name = fname.to_str().unwrap().to_string();
 
-        // Read config file into memory
-        let cfg_path = entry.path().join("pgdata").join("postgresql.conf");
-        let cfg_path_str = cfg_path.to_string_lossy();
-        let mut conf_file = File::open(&cfg_path)
-            .with_context(|| format!("failed to open config file in {}", cfg_path_str))?;
-        let conf = PostgresConf::read(&mut conf_file)
-            .with_context(|| format!("failed to read config file in {}", cfg_path_str))?;
-
-        // Read a few options from the config file
-        let context = format!("in config file {}", cfg_path_str);
-        let port: u16 = conf.parse_field("port", &context)?;
-        let timeline_id: TimelineId = conf.parse_field("neon.timeline_id", &context)?;
-        let tenant_id: TenantId = conf.parse_field("neon.tenant_id", &context)?;
-
-        // Read postgres version from PG_VERSION file to determine which postgres version binary to use.
-        // If it doesn't exist, assume broken data directory and use default pg version.
-        let pg_version_path = entry.path().join("PG_VERSION");
-
-        let pg_version_str =
-            fs::read_to_string(pg_version_path).unwrap_or_else(|_| DEFAULT_PG_VERSION.to_string());
-        let pg_version = u32::from_str(&pg_version_str)?;
-
-        // parse recovery_target_lsn, if any
-        let recovery_target_lsn: Option<Lsn> =
-            conf.parse_field_optional("recovery_target_lsn", &context)?;
+        // Read the endpoint.json file
+        let conf: EndpointConf =
+            serde_json::from_slice(&std::fs::read(entry.path().join("endpoint.json"))?)?;
 
         // ok now
         Ok(Endpoint {
-            address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
+            address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.port),
             name,
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
-            timeline_id,
-            lsn: recovery_target_lsn,
-            tenant_id,
-            pg_version,
+            timeline_id: conf.timeline_id,
+            lsn: conf.lsn,
+            tenant_id: conf.tenant_id,
+            pg_version: conf.pg_version,
         })
     }
 
