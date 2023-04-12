@@ -323,6 +323,35 @@ RUN apt-get update && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/timescaledb.control
 
 #########################################################################################
+#
+# Layer "pg-hint-plan-pg-build"
+# compile pg_hint_plan extension
+#
+#########################################################################################
+FROM build-deps AS pg-hint-plan-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ARG PG_VERSION
+ENV PATH "/usr/local/pgsql/bin:$PATH"
+
+RUN case "${PG_VERSION}" in \
+      "v14") \
+        export PG_HINT_PLAN_VERSION=14_1_4_1 \
+        ;; \
+      "v15") \
+        export PG_HINT_PLAN_VERSION=15_1_5_0 \
+        ;; \
+      *) \
+        echo "Export the valid PG_HINT_PLAN_VERSION variable" && exit 1 \
+        ;; \
+    esac && \
+    wget https://github.com/ossc-db/pg_hint_plan/archive/refs/tags/REL${PG_HINT_PLAN_VERSION}.tar.gz -O pg_hint_plan.tar.gz && \
+    mkdir pg_hint_plan-src && cd pg_hint_plan-src && tar xvzf ../pg_hint_plan.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make install -j $(getconf _NPROCESSORS_ONLN) && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_hint_plan.control
+
+#########################################################################################
 # 
 # Layer "rust extensions"
 # This layer is used to build `pgx` deps
@@ -427,6 +456,7 @@ COPY --from=prefix-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
