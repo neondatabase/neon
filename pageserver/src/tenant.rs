@@ -1773,7 +1773,7 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            let mut current_state = format!("{}", &*rx.borrow_and_update());
+            let mut current_state: &'static str = From::from(&*rx.borrow_and_update());
             let tid = tenant_id.to_string();
             TENANT_STATE_METRIC
                 .with_label_values(&[&tid, &current_state])
@@ -1781,7 +1781,7 @@ impl Tenant {
             loop {
                 match rx.changed().await {
                     Ok(()) => {
-                        let new_state = format!("{}", &*rx.borrow_and_update());
+                        let new_state: &'static str = From::from(&*rx.borrow_and_update());
                         TENANT_STATE_METRIC
                             .with_label_values(&[&tid, &current_state])
                             .dec();

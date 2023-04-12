@@ -29,6 +29,7 @@ use bytes::{BufMut, Bytes, BytesMut};
     strum_macros::EnumString,
     strum_macros::EnumVariantNames,
     strum_macros::AsRefStr,
+    strum_macros::IntoStaticStr,
 )]
 #[serde(tag = "slug", content = "data")]
 pub enum TenantState {
