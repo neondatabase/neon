@@ -44,8 +44,9 @@ use tracing::{error, info};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
+use compute_api::spec::{ComputeSpecAnyVersion, ComputeSpecV2};
 
-use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
+use compute_tools::compute::{ComputeNode, ComputeState};
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -75,7 +76,7 @@ fn main() -> Result<()> {
     // Try to use just 'postgres' if no path is provided
     let pgbin = matches.get_one::<String>("pgbin").unwrap();
 
-    let mut spec = None;
+    let mut spec: Option<ComputeSpecAnyVersion> = None;
     let mut live_config_allowed = false;
     match spec_json {
         // First, try to get cluster spec from the cli argument
@@ -109,8 +110,9 @@ fn main() -> Result<()> {
     let mut new_state = ComputeState::new();
     let spec_set;
     if let Some(spec) = spec {
-        let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
-        new_state.pspec = Some(pspec);
+        // Parse the spec file, upgrading it from older format if necessary
+        let spec: ComputeSpecV2 = ComputeSpecV2::try_from(spec)?;
+        new_state.spec = Some(spec);
         spec_set = true;
     } else {
         spec_set = false;
@@ -148,8 +150,8 @@ fn main() -> Result<()> {
 
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
-    let pspec = state.pspec.as_ref().expect("spec must be set");
-    let startup_tracing_context = pspec.spec.startup_tracing_context.clone();
+    let spec = state.spec.as_ref().expect("spec must be set");
+    let startup_tracing_context = spec.startup_tracing_context.clone();
     state.status = ComputeStatus::Init;
     compute.state_changed.notify_all();
     drop(state);

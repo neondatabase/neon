@@ -29,7 +29,6 @@ pub fn escape_conf_value(s: &str) -> String {
 
 trait GenericOptionExt {
     fn to_pg_option(&self) -> String;
-    fn to_pg_setting(&self) -> String;
 }
 
 impl GenericOptionExt for GenericOption {
@@ -44,23 +43,10 @@ impl GenericOptionExt for GenericOption {
             self.name.to_owned()
         }
     }
-
-    /// Represent `GenericOption` as configuration option.
-    fn to_pg_setting(&self) -> String {
-        if let Some(val) = &self.value {
-            match self.vartype.as_ref() {
-                "string" => format!("{} = '{}'", self.name, escape_conf_value(val)),
-                _ => format!("{} = {}", self.name, val),
-            }
-        } else {
-            self.name.to_owned()
-        }
-    }
 }
 
 pub trait PgOptionsSerialize {
     fn as_pg_options(&self) -> String;
-    fn as_pg_settings(&self) -> String;
 }
 
 impl PgOptionsSerialize for GenericOptions {
@@ -72,20 +58,6 @@ impl PgOptionsSerialize for GenericOptions {
                 .map(|op| op.to_pg_option())
                 .collect::<Vec<String>>()
                 .join(" ")
-        } else {
-            "".to_string()
-        }
-    }
-
-    /// Serialize an optional collection of `GenericOption`'s to
-    /// `postgresql.conf` compatible format.
-    fn as_pg_settings(&self) -> String {
-        if let Some(ops) = &self {
-            ops.iter()
-                .map(|op| op.to_pg_setting())
-                .collect::<Vec<String>>()
-                .join("\n")
-                + "\n" // newline after last setting
         } else {
             "".to_string()
         }

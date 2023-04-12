@@ -1,6 +1,7 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
+use crate::rfc3339_serialize;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 /// Response of the /status API
 #[derive(Deserialize, Serialize)]
@@ -19,13 +20,6 @@ pub enum ComputeStatus {
     Init,
     Running,
     Failed,
-}
-
-fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    x.to_rfc3339().serialize(s)
 }
 
 /// Response of the /metrics.json API
