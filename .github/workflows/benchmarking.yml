@@ -92,7 +92,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
@@ -282,7 +282,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
@@ -305,7 +305,7 @@ jobs:
     #
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
-    if: success() || failure()
+    if: ${{ !cancelled() }}
     needs: [ generate-matrices, pgbench-compare ]
 
     strategy:
@@ -379,7 +379,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
@@ -401,7 +401,7 @@ jobs:
     # We might change it after https://github.com/neondatabase/neon/issues/2900.
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
-    if: success() || failure()
+    if: ${{ !cancelled() }}
     needs: [ generate-matrices, clickbench-compare ]
 
     strategy:
@@ -475,7 +475,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
@@ -491,7 +491,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   user-examples-compare:
-    if: success() || failure()
+    if: ${{ !cancelled() }}
     needs: [ generate-matrices, tpch-compare ]
 
     strategy:
@@ -565,7 +565,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
