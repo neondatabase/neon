@@ -643,6 +643,10 @@ impl RemoteTimelineClient {
                 UploadQueue::Stopped(stopped) => stopped,
             };
 
+            assert!(
+                !stopped.last_uploaded_index_part.is_deleted,
+                "deleted flag already set"
+            );
             stopped.last_uploaded_index_part.is_deleted = true;
             stopped.last_uploaded_index_part.clone()
         };

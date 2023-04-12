@@ -87,7 +87,7 @@ impl IndexPart {
     /// used to understand later versions.
     ///
     /// Version is currently informative only.
-    const LATEST_VERSION: usize = 1;
+    const LATEST_VERSION: usize = 2;
     pub const FILE_NAME: &'static str = "index_part.json";
 
     pub fn new(

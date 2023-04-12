@@ -19,9 +19,12 @@ pub(super) async fn upload_index_part<'a>(
     timeline_id: TimelineId,
     index_part: &'a IndexPart,
 ) -> anyhow::Result<()> {
+    tracing::trace!("uploading new index part");
+
     fail_point!("before-upload-index", |_| {
         bail!("failpoint before-upload-index")
     });
+
     let index_part_bytes = serde_json::to_vec(&index_part)
         .context("Failed to serialize index part file into bytes")?;
     let index_part_size = index_part_bytes.len();
@@ -31,7 +34,7 @@ pub(super) async fn upload_index_part<'a>(
         .metadata_path(timeline_id, tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
     let storage_path = conf.remote_path(&index_part_path)?;
-    tracing::info!("uploading new index part for {tenant_id}/{timeline_id}");
+
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &storage_path)
         .await
