@@ -33,11 +33,11 @@ def test_compaction(neon_compare: NeonCompare):
 
     # Create some tables, and run a bunch of INSERTs and UPDATes on them,
     # to generate WAL and layers
-    pg = env.postgres.create_start(
+    endpoint = env.endpoints.create_start(
         "main", tenant_id=tenant_id, config_lines=["shared_buffers=512MB"]
     )
 
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             for i in range(100):
                 cur.execute(f"create table tbl{i} (i int, j int);")
@@ -45,7 +45,7 @@ def test_compaction(neon_compare: NeonCompare):
                 for j in range(100):
                     cur.execute(f"update tbl{i} set j = {j};")
 
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     # First compaction generates L1 layers
     with neon_compare.zenbenchmark.record_duration("compaction"):

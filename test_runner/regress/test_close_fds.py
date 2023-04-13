@@ -24,8 +24,8 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
 
     def start_workload():
         env.neon_cli.create_branch("test_lsof_pageserver_pid")
-        pg = env.postgres.create_start("test_lsof_pageserver_pid")
-        with closing(pg.connect()) as conn:
+        endpoint = env.endpoints.create_start("test_lsof_pageserver_pid")
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE foo as SELECT x FROM generate_series(1,100000) x")
                 cur.execute("update foo set x=x+1")

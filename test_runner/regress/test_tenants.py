@@ -66,17 +66,17 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_1)
     env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_2)
 
-    pg_tenant1 = env.postgres.create_start(
+    endpoint_tenant1 = env.endpoints.create_start(
         "test_tenants_normal_work",
         tenant_id=tenant_1,
     )
-    pg_tenant2 = env.postgres.create_start(
+    endpoint_tenant2 = env.endpoints.create_start(
         "test_tenants_normal_work",
         tenant_id=tenant_2,
     )
 
-    for pg in [pg_tenant1, pg_tenant2]:
-        with closing(pg.connect()) as conn:
+    for endpoint in [endpoint_tenant1, endpoint_tenant2]:
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 # we rely upon autocommit after each statement
                 # as waiting for acceptors happens there
@@ -97,11 +97,11 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     timeline_1 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_1)
     timeline_2 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_2)
 
-    pg_tenant1 = env.postgres.create_start("test_metrics_normal_work", tenant_id=tenant_1)
-    pg_tenant2 = env.postgres.create_start("test_metrics_normal_work", tenant_id=tenant_2)
+    endpoint_tenant1 = env.endpoints.create_start("test_metrics_normal_work", tenant_id=tenant_1)
+    endpoint_tenant2 = env.endpoints.create_start("test_metrics_normal_work", tenant_id=tenant_2)
 
-    for pg in [pg_tenant1, pg_tenant2]:
-        with closing(pg.connect()) as conn:
+    for endpoint in [endpoint_tenant1, endpoint_tenant2]:
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
@@ -242,11 +242,15 @@ def test_pageserver_metrics_removed_after_detach(
     env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_1)
     env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_2)
 
-    pg_tenant1 = env.postgres.create_start("test_metrics_removed_after_detach", tenant_id=tenant_1)
-    pg_tenant2 = env.postgres.create_start("test_metrics_removed_after_detach", tenant_id=tenant_2)
+    endpoint_tenant1 = env.endpoints.create_start(
+        "test_metrics_removed_after_detach", tenant_id=tenant_1
+    )
+    endpoint_tenant2 = env.endpoints.create_start(
+        "test_metrics_removed_after_detach", tenant_id=tenant_2
+    )
 
-    for pg in [pg_tenant1, pg_tenant2]:
-        with closing(pg.connect()) as conn:
+    for endpoint in [endpoint_tenant1, endpoint_tenant2]:
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
@@ -317,7 +321,7 @@ def test_pageserver_with_empty_tenants(
     ), f"Tenant {tenant_with_empty_timelines_dir} should have an empty timelines/ directory"
 
     # Trigger timeline re-initialization after pageserver restart
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     env.pageserver.stop()
 
     tenant_without_timelines_dir = env.initial_tenant

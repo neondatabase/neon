@@ -15,10 +15,10 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
     )
 
     env = neon_env_builder.init_start()
-    pgmain = env.postgres.create_start("main")
+    endpoint_main = env.endpoints.create_start("main")
     log.info("postgres is running on 'main' branch")
 
-    main_pg_conn = pgmain.connect()
+    main_pg_conn = endpoint_main.connect()
     main_cur = main_pg_conn.cursor()
     timeline = TimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
 
@@ -62,10 +62,10 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
     # It must have been preserved by PITR setting
     env.neon_cli.create_branch("test_pitr_gc_hundred", "main", ancestor_start_lsn=lsn_a)
 
-    pg_hundred = env.postgres.create_start("test_pitr_gc_hundred")
+    endpoint_hundred = env.endpoints.create_start("test_pitr_gc_hundred")
 
     # On the 'hundred' branch, we should see only 100 rows
-    hundred_pg_conn = pg_hundred.connect()
+    hundred_pg_conn = endpoint_hundred.connect()
     hundred_cur = hundred_pg_conn.cursor()
     hundred_cur.execute("SELECT count(*) FROM foo")
     assert hundred_cur.fetchone() == (100,)

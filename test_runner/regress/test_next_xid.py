@@ -8,9 +8,9 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 def test_next_xid(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
-    conn = pg.connect()
+    conn = endpoint.connect()
     cur = conn.cursor()
     cur.execute("CREATE TABLE t(x integer)")
 
@@ -19,17 +19,17 @@ def test_next_xid(neon_env_builder: NeonEnvBuilder):
         print(f"iteration {i} / {iterations}")
 
         # Kill and restart the pageserver.
-        pg.stop()
+        endpoint.stop()
         env.pageserver.stop(immediate=True)
         env.pageserver.start()
-        pg.start()
+        endpoint.start()
 
         retry_sleep = 0.5
         max_retries = 200
         retries = 0
         while True:
             try:
-                conn = pg.connect()
+                conn = endpoint.connect()
                 cur = conn.cursor()
                 cur.execute(f"INSERT INTO t values({i})")
                 conn.close()
@@ -48,7 +48,7 @@ def test_next_xid(neon_env_builder: NeonEnvBuilder):
                     raise
             break
 
-    conn = pg.connect()
+    conn = endpoint.connect()
     cur = conn.cursor()
     cur.execute("SELECT count(*) FROM t")
     assert cur.fetchone() == (iterations,)

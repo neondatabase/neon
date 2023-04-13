@@ -11,11 +11,11 @@ def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder)
 
     env.neon_cli.create_branch("test_pageserver_catchup_while_compute_down")
     # Make shared_buffers large to ensure we won't query pageserver while it is down.
-    pg = env.postgres.create_start(
+    endpoint = env.endpoints.create_start(
         "test_pageserver_catchup_while_compute_down", config_lines=["shared_buffers=512MB"]
     )
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     # Create table, and insert some rows.
@@ -59,10 +59,10 @@ def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder)
     env.safekeepers[2].start()
 
     # restart compute node
-    pg.stop_and_destroy().create_start("test_pageserver_catchup_while_compute_down")
+    endpoint.stop_and_destroy().create_start("test_pageserver_catchup_while_compute_down")
 
     # Ensure that basebackup went correct and pageserver returned all data
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     cur.execute("SELECT count(*) FROM foo")

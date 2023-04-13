@@ -25,54 +25,45 @@ use crate::postgresql_conf::PostgresConf;
 //
 pub struct ComputeControlPlane {
     base_port: u16,
-    pageserver: Arc<PageServerNode>,
-    pub nodes: BTreeMap<(TenantId, String), Arc<PostgresNode>>,
+
+    // endpoint ID is the key
+    pub endpoints: BTreeMap<String, Arc<Endpoint>>,
+
     env: LocalEnv,
+    pageserver: Arc<PageServerNode>,
 }
 
 impl ComputeControlPlane {
-    // Load current nodes with ports from data directories on disk
-    // Directory structure has the following layout:
-    // pgdatadirs
-    // |- tenants
-    // |  |- <tenant_id>
-    // |  |   |- <node name>
+    // Load current endpoints from the endpoints/ subdirectories
     pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
         let pageserver = Arc::new(PageServerNode::from_env(&env));
 
-        let mut nodes = BTreeMap::default();
-        let pgdatadirspath = &env.pg_data_dirs_path();
-
-        for tenant_dir in fs::read_dir(pgdatadirspath)
-            .with_context(|| format!("failed to list {}", pgdatadirspath.display()))?
+        let mut endpoints = BTreeMap::default();
+        for endpoint_dir in fs::read_dir(env.endpoints_path())
+            .with_context(|| format!("failed to list {}", env.endpoints_path().display()))?
         {
-            let tenant_dir = tenant_dir?;
-            for timeline_dir in fs::read_dir(tenant_dir.path())
-                .with_context(|| format!("failed to list {}", tenant_dir.path().display()))?
-            {
-                let node = PostgresNode::from_dir_entry(timeline_dir?, &env, &pageserver)?;
-                nodes.insert((node.tenant_id, node.name.clone()), Arc::new(node));
-            }
+            let ep = Endpoint::from_dir_entry(endpoint_dir?, &env, &pageserver)?;
+            endpoints.insert(ep.name.clone(), Arc::new(ep));
         }
 
         Ok(ComputeControlPlane {
             base_port: 55431,
-            pageserver,
-            nodes,
+            endpoints,
             env,
+            pageserver,
         })
     }
 
     fn get_port(&mut self) -> u16 {
         1 + self
-            .nodes
+            .endpoints
             .values()
-            .map(|node| node.address.port())
+            .map(|ep| ep.address.port())
             .max()
             .unwrap_or(self.base_port)
     }
 
-    pub fn new_node(
+    pub fn new_endpoint(
         &mut self,
         tenant_id: TenantId,
         name: &str,
@@ -80,9 +71,9 @@ impl ComputeControlPlane {
         lsn: Option<Lsn>,
         port: Option<u16>,
         pg_version: u32,
-    ) -> Result<Arc<PostgresNode>> {
+    ) -> Result<Arc<Endpoint>> {
         let port = port.unwrap_or_else(|| self.get_port());
-        let node = Arc::new(PostgresNode {
+        let ep = Arc::new(Endpoint {
             name: name.to_owned(),
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
             env: self.env.clone(),
@@ -93,39 +84,45 @@ impl ComputeControlPlane {
             pg_version,
         });
 
-        node.create_pgdata()?;
-        node.setup_pg_conf()?;
+        ep.create_pgdata()?;
+        ep.setup_pg_conf()?;
 
-        self.nodes
-            .insert((tenant_id, node.name.clone()), Arc::clone(&node));
+        self.endpoints.insert(ep.name.clone(), Arc::clone(&ep));
 
-        Ok(node)
+        Ok(ep)
     }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug)]
-pub struct PostgresNode {
-    pub address: SocketAddr,
+pub struct Endpoint {
+    /// used as the directory name
     name: String,
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    // Some(lsn) if this is a read-only endpoint anchored at 'lsn'. None for the primary.
+    pub lsn: Option<Lsn>,
+
+    // port and address of the Postgres server
+    pub address: SocketAddr,
+    pg_version: u32,
+
+    // These are not part of the endpoint as such, but the environment
+    // the endpoint runs in.
     pub env: LocalEnv,
     pageserver: Arc<PageServerNode>,
-    pub timeline_id: TimelineId,
-    pub lsn: Option<Lsn>, // if it's a read-only node. None for primary
-    pub tenant_id: TenantId,
-    pg_version: u32,
 }
 
-impl PostgresNode {
+impl Endpoint {
     fn from_dir_entry(
         entry: std::fs::DirEntry,
         env: &LocalEnv,
         pageserver: &Arc<PageServerNode>,
-    ) -> Result<PostgresNode> {
+    ) -> Result<Endpoint> {
         if !entry.file_type()?.is_dir() {
             anyhow::bail!(
-                "PostgresNode::from_dir_entry failed: '{}' is not a directory",
+                "Endpoint::from_dir_entry failed: '{}' is not a directory",
                 entry.path().display()
             );
         }
@@ -135,7 +132,7 @@ impl PostgresNode {
         let name = fname.to_str().unwrap().to_string();
 
         // Read config file into memory
-        let cfg_path = entry.path().join("postgresql.conf");
+        let cfg_path = entry.path().join("pgdata").join("postgresql.conf");
         let cfg_path_str = cfg_path.to_string_lossy();
         let mut conf_file = File::open(&cfg_path)
             .with_context(|| format!("failed to open config file in {}", cfg_path_str))?;
@@ -161,7 +158,7 @@ impl PostgresNode {
             conf.parse_field_optional("recovery_target_lsn", &context)?;
 
         // ok now
-        Ok(PostgresNode {
+        Ok(Endpoint {
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
             name,
             env: env.clone(),
@@ -269,7 +266,7 @@ impl PostgresNode {
     }
 
     // Write postgresql.conf with default configuration
-    // and PG_VERSION file to the data directory of a new node.
+    // and PG_VERSION file to the data directory of a new endpoint.
     fn setup_pg_conf(&self) -> Result<()> {
         let mut conf = PostgresConf::new();
         conf.append("max_wal_senders", "10");
@@ -289,7 +286,7 @@ impl PostgresNode {
         // walproposer panics when basebackup is invalid, it is pointless to restart in this case.
         conf.append("restart_after_crash", "off");
 
-        // Configure the node to fetch pages from pageserver
+        // Configure the Neon Postgres extension to fetch pages from pageserver
         let pageserver_connstr = {
             let config = &self.pageserver.pg_connection_config;
             let (host, port) = (config.host(), config.port());
@@ -325,7 +322,7 @@ impl PostgresNode {
         conf.append("max_replication_flush_lag", "10GB");
 
         if !self.env.safekeepers.is_empty() {
-            // Configure the node to connect to the safekeepers
+            // Configure Postgres to connect to the safekeepers
             conf.append("synchronous_standby_names", "walproposer");
 
             let safekeepers = self
@@ -380,8 +377,12 @@ impl PostgresNode {
         Ok(())
     }
 
+    pub fn endpoint_path(&self) -> PathBuf {
+        self.env.endpoints_path().join(&self.name)
+    }
+
     pub fn pgdata(&self) -> PathBuf {
-        self.env.pg_data_dir(&self.tenant_id, &self.name)
+        self.endpoint_path().join("pgdata")
     }
 
     pub fn status(&self) -> &str {
@@ -443,12 +444,11 @@ impl PostgresNode {
     }
 
     pub fn start(&self, auth_token: &Option<String>) -> Result<()> {
-        // Bail if the node already running.
         if self.status() == "running" {
-            anyhow::bail!("The node is already running");
+            anyhow::bail!("The endpoint is already running");
         }
 
-        // 1. We always start compute node from scratch, so
+        // 1. We always start Postgres from scratch, so
         // if old dir exists, preserve 'postgresql.conf' and drop the directory
         let postgresql_conf_path = self.pgdata().join("postgresql.conf");
         let postgresql_conf = fs::read(&postgresql_conf_path).with_context(|| {
@@ -470,8 +470,8 @@ impl PostgresNode {
             File::create(self.pgdata().join("standby.signal"))?;
         }
 
-        // 4. Finally start the compute node postgres
-        println!("Starting postgres node at '{}'", self.connstr());
+        // 4. Finally start postgres
+        println!("Starting postgres at '{}'", self.connstr());
         self.pg_ctl(&["start"], auth_token)
     }
 
@@ -480,7 +480,7 @@ impl PostgresNode {
         // use immediate shutdown mode, otherwise,
         // shutdown gracefully to leave the data directory sane.
         //
-        // Compute node always starts from scratch, so stop
+        // Postgres is always started from scratch, so stop
         // without destroy only used for testing and debugging.
         //
         if destroy {
@@ -489,7 +489,7 @@ impl PostgresNode {
                 "Destroying postgres data directory '{}'",
                 self.pgdata().to_str().unwrap()
             );
-            fs::remove_dir_all(self.pgdata())?;
+            fs::remove_dir_all(self.endpoint_path())?;
         } else {
             self.pg_ctl(&["stop"], &None)?;
         }

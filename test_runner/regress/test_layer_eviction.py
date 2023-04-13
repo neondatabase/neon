@@ -27,13 +27,13 @@ def test_basic_eviction(
 
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     # Create a number of layers in the tenant
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("CREATE TABLE foo (t text)")
         cur.execute(
             """
@@ -172,15 +172,15 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
     env.initial_tenant = tenant_id  # update_and_gc relies on this
     ps_http = env.pageserver.http_client()
 
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     log.info("fill with data, creating delta & image layers, some of which are GC'able after")
     # no particular reason to create the layers like this, but we are sure
     # not to hit the image_creation_threshold here.
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("create table a (id bigserial primary key, some_value bigint not null)")
         cur.execute("insert into a(some_value) select i from generate_series(1, 10000) s(i)")
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
     ps_http.timeline_checkpoint(tenant_id, timeline_id)
 
     # Create delta layers, then turn them into image layers.
@@ -191,19 +191,19 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
         for i in range(0, 2):
             for j in range(0, 3):
                 # create a minimal amount of "delta difficulty" for this table
-                with pg.cursor() as cur:
+                with endpoint.cursor() as cur:
                     cur.execute("update a set some_value = -some_value + %s", (j,))
 
-                with pg.cursor() as cur:
+                with endpoint.cursor() as cur:
                     # vacuuming should aid to reuse keys, though it's not really important
                     # with image_creation_threshold=1 which we will use on the last compaction
                     cur.execute("vacuum")
 
-                wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+                wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
                 if i == 1 and j == 2 and k == 1:
                     # last iteration; stop before checkpoint to avoid leaving an inmemory layer
-                    pg.stop_and_destroy()
+                    endpoint.stop_and_destroy()
 
                 ps_http.timeline_checkpoint(tenant_id, timeline_id)
 

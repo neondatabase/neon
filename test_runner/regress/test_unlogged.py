@@ -9,9 +9,9 @@ from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
 def test_unlogged(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_unlogged", "empty")
-    pg = env.postgres.create_start("test_unlogged")
+    endpoint = env.endpoints.create_start("test_unlogged")
 
-    conn = pg.connect()
+    conn = endpoint.connect()
     cur = conn.cursor()
 
     cur.execute("CREATE UNLOGGED TABLE iut (id int);")
@@ -20,12 +20,10 @@ def test_unlogged(neon_simple_env: NeonEnv):
     cur.execute("INSERT INTO iut values (42);")
 
     # create another compute to fetch inital empty contents from pageserver
-    fork_at_current_lsn(env, pg, "test_unlogged_basebackup", "test_unlogged")
-    pg2 = env.postgres.create_start(
-        "test_unlogged_basebackup",
-    )
+    fork_at_current_lsn(env, endpoint, "test_unlogged_basebackup", "test_unlogged")
+    endpoint2 = env.endpoints.create_start("test_unlogged_basebackup")
 
-    conn2 = pg2.connect()
+    conn2 = endpoint2.connect()
     cur2 = conn2.cursor()
     # after restart table should be empty but valid
     cur2.execute("PREPARE iut_plan (int) AS INSERT INTO iut VALUES ($1)")

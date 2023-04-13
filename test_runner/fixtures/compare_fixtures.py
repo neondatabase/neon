@@ -114,7 +114,7 @@ class NeonCompare(PgCompare):
         self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
 
         # Start pg
-        self._pg = self.env.postgres.create_start(branch_name, "main", self.tenant)
+        self._pg = self.env.endpoints.create_start(branch_name, "main", self.tenant)
 
     @property
     def pg(self) -> PgProtocol:

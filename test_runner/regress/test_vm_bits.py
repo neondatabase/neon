@@ -10,10 +10,10 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
     env.neon_cli.create_branch("test_vm_bit_clear", "empty")
-    pg = env.postgres.create_start("test_vm_bit_clear")
+    endpoint = env.endpoints.create_start("test_vm_bit_clear")
 
     log.info("postgres is running on 'test_vm_bit_clear' branch")
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     # Install extension containing function needed for test
@@ -33,7 +33,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur.execute("UPDATE vmtest_update SET id = 5000 WHERE id = 1")
 
     # Branch at this point, to test that later
-    fork_at_current_lsn(env, pg, "test_vm_bit_clear_new", "test_vm_bit_clear")
+    fork_at_current_lsn(env, endpoint, "test_vm_bit_clear_new", "test_vm_bit_clear")
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server
@@ -63,10 +63,10 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     # a dirty VM page is evicted. If the VM bit was not correctly cleared by the
     # earlier WAL record, the full-page image hides the problem. Starting a new
     # server at the right point-in-time avoids that full-page image.
-    pg_new = env.postgres.create_start("test_vm_bit_clear_new")
+    endpoint_new = env.endpoints.create_start("test_vm_bit_clear_new")
 
     log.info("postgres is running on 'test_vm_bit_clear_new' branch")
-    pg_new_conn = pg_new.connect()
+    pg_new_conn = endpoint_new.connect()
     cur_new = pg_new_conn.cursor()
 
     cur_new.execute(
