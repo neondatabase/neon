@@ -31,12 +31,12 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             # "image_creation_threshold": "2",
         }
     )
-    pg = env.endpoint.create_start("main", tenant_id=tenant_id)
-    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
     n_steps = 10
     n_update_iters = 100
     step_size = 10000
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("SET statement_timeout='1000s'")
         cur.execute(
             "CREATE TABLE t(step bigint, count bigint default 0, payload text default repeat(' ', 100))  with (fillfactor=50)"
