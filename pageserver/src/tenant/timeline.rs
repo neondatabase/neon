@@ -3842,9 +3842,9 @@ impl Timeline {
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     let mut layers = self_clone.layers.write().unwrap();
                     let mut updates = layers.batch_update();
+                    let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     {
                         use crate::tenant::layer_map::Replacement;
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
