@@ -205,6 +205,7 @@ pub mod index;
 mod upload;
 
 use anyhow::Context;
+use chrono::Utc;
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
 
@@ -392,7 +393,7 @@ impl RemoteTimelineClient {
         )
         .await?;
 
-        if index_part.is_deleted {
+        if index_part.deleted_at.is_some() {
             Ok(MaybeDeletedIndexPart::Deleted)
         } else {
             Ok(MaybeDeletedIndexPart::IndexPart(index_part))
@@ -644,10 +645,10 @@ impl RemoteTimelineClient {
             };
 
             assert!(
-                !stopped.last_uploaded_index_part.is_deleted,
-                "deleted flag already set"
+                stopped.last_uploaded_index_part.deleted_at.is_none(),
+                "deleted_at already set"
             );
-            stopped.last_uploaded_index_part.is_deleted = true;
+            stopped.last_uploaded_index_part.deleted_at = Some(Utc::now().naive_utc());
             stopped.last_uploaded_index_part.clone()
         };
 
