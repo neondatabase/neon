@@ -299,7 +299,7 @@ impl ComputeNode {
             }
             Replication::Static { lsn } => {
                 info!("Starting read-only node at static LSN {}", lsn);
-                lsn.clone()
+                *lsn
             }
             Replication::HotStandby => {
                 info!("Initializing standby from latest Pageserver LSN");
