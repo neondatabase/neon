@@ -256,25 +256,35 @@ impl ComputeNode {
         self.create_pgdata()?;
         config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &pspec.spec)?;
 
-        info!("starting safekeepers syncing");
-        let lsn = self
-            .sync_safekeepers(pspec.storage_auth_token.clone())
-            .with_context(|| "failed to sync safekeepers")?;
-        info!("safekeepers synced at LSN {}", lsn);
+        let start_lsn = if let Some(lsn) = pspec.spec.start_lsn {
+            lsn
+        } else {
+            info!("starting safekeepers syncing");
+            let last_lsn = self
+                .sync_safekeepers(pspec.storage_auth_token.clone())
+                .with_context(|| "failed to sync safekeepers")?;
+            info!("safekeepers synced at LSN {}", last_lsn);
+            last_lsn
+        };
 
         info!(
             "getting basebackup@{} from pageserver {}",
-            lsn, &pspec.pageserver_connstr
+            start_lsn, &pspec.pageserver_connstr
         );
-        self.get_basebackup(compute_state, lsn).with_context(|| {
-            format!(
-                "failed to get basebackup@{} from pageserver {}",
-                lsn, &pspec.pageserver_connstr
-            )
-        })?;
+        self.get_basebackup(compute_state, start_lsn)
+            .with_context(|| {
+                format!(
+                    "failed to get basebackup@{} from pageserver {}",
+                    start_lsn, &pspec.pageserver_connstr
+                )
+            })?;
 
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
+
+        if pspec.spec.standby {
+            std::fs::File::create(pgdata_path.join("standby.signal"))?;
+        }
 
         Ok(())
     }
@@ -416,7 +426,9 @@ impl ComputeNode {
 
         let pg = self.start_postgres(spec.storage_auth_token.clone())?;
 
-        self.apply_config(&compute_state)?;
+        if !spec.spec.standby {
+            self.apply_config(&compute_state)?;
+        }
 
         let startup_end_time = Utc::now();
         {

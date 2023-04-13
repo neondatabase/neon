@@ -4,7 +4,9 @@
 //! all the information needed to start up the right version of PostgreSQL,
 //! and connect it to the storage nodes.
 use serde::Deserialize;
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
+use utils::lsn::Lsn;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -12,6 +14,7 @@ pub type PgIdent = String;
 
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
+#[serde_as]
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ComputeSpec {
     pub format_version: f32,
@@ -23,6 +26,17 @@ pub struct ComputeSpec {
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
+
+    // If 'lsn' is set, start the compute at the given LSN.
+    // If 'lsn' is not set, compute_ctl performs "sync safekeepers" step first,
+    // and uses the last LSN on the timeline as the starting point.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub start_lsn: Option<Lsn>,
+
+    // If standy == true, a standby.signal file is created, putting Postgres
+    // into standby mode.
+    #[serde(default)]
+    pub standby: bool,
 
     pub storage_auth_token: Option<String>,
 
