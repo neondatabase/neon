@@ -66,9 +66,16 @@ static void PushKeyValue(JsonbParseState **state, char *key, char *value)
 static char *ConstructDeltaMessage()
 {
     JsonbParseState *state = NULL;
-    pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+    pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
     if(RootTable.db_table)
     {
+        JsonbValue dbs;
+        dbs.type = jbvString;
+        dbs.val.string.val = "dbs";
+        dbs.val.string.len = strlen(dbs.val.string.val);
+        pushJsonbValue(&state, WJB_KEY, &dbs);
+        pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+
         HASH_SEQ_STATUS status;
         DbEntry *entry;
         hash_seq_init(&status, RootTable.db_table);
@@ -77,7 +84,6 @@ static char *ConstructDeltaMessage()
             pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
             PushKeyValue(&state, "op", entry->type == Op_Set ? "set" : "del");
             PushKeyValue(&state, "name", entry->name);
-            PushKeyValue(&state, "type", "db");
             if(entry->owner[0] != '\0')
             {
                 PushKeyValue(&state, "owner", entry->owner);
@@ -88,10 +94,18 @@ static char *ConstructDeltaMessage()
             }
             pushJsonbValue(&state, WJB_END_OBJECT, NULL);
         }
+        pushJsonbValue(&state, WJB_END_ARRAY, NULL);
     }
 
     if(RootTable.role_table)
     {
+        JsonbValue roles;
+        roles.type = jbvString;
+        roles.val.string.val = "roles";
+        roles.val.string.len = strlen(roles.val.string.val);
+        pushJsonbValue(&state, WJB_KEY, &roles);
+        pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
+
         HASH_SEQ_STATUS status;
         RoleEntry *entry;
         hash_seq_init(&status, RootTable.role_table);
@@ -100,7 +114,6 @@ static char *ConstructDeltaMessage()
             pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
             PushKeyValue(&state, "op", entry->type == Op_Set ? "set" : "del");
             PushKeyValue(&state, "name", entry->name);
-            PushKeyValue(&state, "type", "role");
             if(entry->password)
             {
                 PushKeyValue(&state, "password", (char *)entry->password);
@@ -111,8 +124,9 @@ static char *ConstructDeltaMessage()
             }
             pushJsonbValue(&state, WJB_END_OBJECT, NULL);
         }
+        pushJsonbValue(&state, WJB_END_ARRAY, NULL);
     }
-    JsonbValue *result = pushJsonbValue(&state, WJB_END_ARRAY, NULL);
+    JsonbValue *result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
     Jsonb *jsonb = JsonbValueToJsonb(result);
     return JsonbToCString(NULL, &jsonb->root, 0 /*estimated_len*/);
 }

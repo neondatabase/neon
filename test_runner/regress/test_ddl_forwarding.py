@@ -52,13 +52,12 @@ def ddl_forward_handler(request: Request, dbs: Dict[str, str], roles: Dict[str, 
         log.info("Received invalid JSON")
         return Response(status=400)
     json = request.json
-    for operation in json:
-        if operation["type"] == "db":
+    if "dbs" in json:
+        for operation in json["dbs"]:
             handle_db(dbs, operation)
-        elif operation["type"] == "role":
+    if "roles" in json:
+        for operation in json["roles"]:
             handle_role(roles, operation)
-        else:
-            assert False, "JSON does not specify 'db' or 'role'"
     return Response(status=200)
 
 
