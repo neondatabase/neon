@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
 )
-from fixtures.pageserver.utils import assert_tenant_status, wait_for_upload
+from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.types import Lsn
 from fixtures.utils import wait_until
 
@@ -278,7 +278,7 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_tenant_status(http_client, tenant_id, "Active"),
+        func=lambda: assert_tenant_state(http_client, tenant_id, "Active"),
     )
 
     env.neon_cli.config_tenant(tenant_id, {"gc_horizon": "1000000"})

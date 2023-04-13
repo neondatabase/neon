@@ -59,7 +59,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
     tenant_status = client.tenant_status(env.initial_tenant)
     log.info("Tenant status : %s", tenant_status)
-    assert tenant_status["state"] == "Loading"
+    assert tenant_status["state"]["slug"] == "Loading"
 
     # Try to read. This waits until the loading finishes, and then return normally.
     cur.execute("SELECT count(*) FROM foo")

@@ -23,7 +23,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    assert_tenant_status,
+    assert_tenant_state,
     wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
@@ -333,7 +333,7 @@ def test_timeline_physical_size_init(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_tenant_status(client, env.initial_tenant, "Active"),
+        func=lambda: assert_tenant_state(client, env.initial_tenant, "Active"),
     )
 
     assert_physical_size_invariants(

@@ -7,6 +7,7 @@ use std::{
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use strum_macros;
 use utils::{
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
@@ -18,11 +19,23 @@ use anyhow::bail;
 use bytes::{BufMut, Bytes, BytesMut};
 
 /// A state of a tenant in pageserver's memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum_macros::Display,
+    strum_macros::EnumString,
+    strum_macros::EnumVariantNames,
+    strum_macros::AsRefStr,
+    strum_macros::IntoStaticStr,
+)]
+#[serde(tag = "slug", content = "data")]
 pub enum TenantState {
-    // This tenant is being loaded from local disk
+    /// This tenant is being loaded from local disk
     Loading,
-    // This tenant is being downloaded from cloud storage.
+    /// This tenant is being downloaded from cloud storage.
     Attaching,
     /// Tenant is fully operational
     Active,
@@ -31,15 +44,7 @@ pub enum TenantState {
     Stopping,
     /// A tenant is recognized by the pageserver, but can no longer be used for
     /// any operations, because it failed to be activated.
-    Broken,
-}
-
-pub mod state {
-    pub const LOADING: &str = "loading";
-    pub const ATTACHING: &str = "attaching";
-    pub const ACTIVE: &str = "active";
-    pub const STOPPING: &str = "stopping";
-    pub const BROKEN: &str = "broken";
+    Broken { reason: String, backtrace: String },
 }
 
 impl TenantState {
@@ -49,17 +54,26 @@ impl TenantState {
             Self::Attaching => true,
             Self::Active => false,
             Self::Stopping => false,
-            Self::Broken => false,
+            Self::Broken { .. } => false,
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub fn broken_from_reason(reason: String) -> Self {
+        let backtrace_str: String = format!("{}", std::backtrace::Backtrace::force_capture());
+        Self::Broken {
+            reason,
+            backtrace: backtrace_str,
+        }
+    }
+}
+
+impl std::fmt::Debug for TenantState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TenantState::Loading => state::LOADING,
-            TenantState::Attaching => state::ATTACHING,
-            TenantState::Active => state::ACTIVE,
-            TenantState::Stopping => state::STOPPING,
-            TenantState::Broken => state::BROKEN,
+            Self::Broken { reason, backtrace } if !reason.is_empty() => {
+                write!(f, "Broken due to: {reason}. Backtrace:\n{backtrace}")
+            }
+            _ => write!(f, "{self}"),
         }
     }
 }
@@ -615,6 +629,7 @@ impl PagestreamBeMessage {
 #[cfg(test)]
 mod tests {
     use bytes::Buf;
+    use serde_json::json;
 
     use super::*;
 
@@ -664,5 +679,58 @@ mod tests {
             let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
             assert!(msg == reconstructed);
         }
+    }
+
+    #[test]
+    fn test_tenantinfo_serde() {
+        // Test serialization/deserialization of TenantInfo
+        let original_active = TenantInfo {
+            id: TenantId::generate(),
+            state: TenantState::Active,
+            current_physical_size: Some(42),
+            has_in_progress_downloads: Some(false),
+        };
+        let expected_active = json!({
+            "id": original_active.id.to_string(),
+            "state": {
+                "slug": "Active",
+            },
+            "current_physical_size": 42,
+            "has_in_progress_downloads": false,
+        });
+
+        let original_broken = TenantInfo {
+            id: TenantId::generate(),
+            state: TenantState::Broken {
+                reason: "reason".into(),
+                backtrace: "backtrace info".into(),
+            },
+            current_physical_size: Some(42),
+            has_in_progress_downloads: Some(false),
+        };
+        let expected_broken = json!({
+            "id": original_broken.id.to_string(),
+            "state": {
+                "slug": "Broken",
+                "data": {
+                    "backtrace": "backtrace info",
+                    "reason": "reason",
+                }
+            },
+            "current_physical_size": 42,
+            "has_in_progress_downloads": false,
+        });
+
+        assert_eq!(
+            serde_json::to_value(&original_active).unwrap(),
+            expected_active
+        );
+
+        assert_eq!(
+            serde_json::to_value(&original_broken).unwrap(),
+            expected_broken
+        );
+        assert!(format!("{:?}", &original_broken.state).contains("reason"));
+        assert!(format!("{:?}", &original_broken.state).contains("backtrace info"));
     }
 }

@@ -622,7 +622,7 @@ impl Tenant {
                 match tenant_clone.attach(ctx).await {
                     Ok(_) => {}
                     Err(e) => {
-                        tenant_clone.set_broken(&e.to_string());
+                        tenant_clone.set_broken(e.to_string());
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
@@ -830,7 +830,10 @@ impl Tenant {
     pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         Arc::new(Tenant::new(
-            TenantState::Broken,
+            TenantState::Broken {
+                reason: "create_broken_tenant".into(),
+                backtrace: String::new(),
+            },
             conf,
             TenantConfOpt::default(),
             wal_redo_manager,
@@ -891,7 +894,7 @@ impl Tenant {
                 match tenant_clone.load(&ctx).await {
                     Ok(()) => {}
                     Err(err) => {
-                        tenant_clone.set_broken(&err.to_string());
+                        tenant_clone.set_broken(err.to_string());
                         error!("could not load tenant {tenant_id}: {err:?}");
                     }
                 }
@@ -1443,7 +1446,7 @@ impl Tenant {
     }
 
     pub fn current_state(&self) -> TenantState {
-        *self.state.borrow()
+        self.state.borrow().clone()
     }
 
     pub fn is_active(&self) -> bool {
@@ -1454,15 +1457,15 @@ impl Tenant {
     fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut result = Ok(());
         self.state.send_modify(|current_state| {
-            match *current_state {
+            match &*current_state {
                 TenantState::Active => {
                     // activate() was called on an already Active tenant. Shouldn't happen.
                     result = Err(anyhow::anyhow!("Tenant is already active"));
                 }
-                TenantState::Broken => {
+                TenantState::Broken { reason, .. } => {
                     // This shouldn't happen either
                     result = Err(anyhow::anyhow!(
-                        "Could not activate tenant because it is in broken state"
+                        "Could not activate tenant because it is in broken state due to: {reason}",
                     ));
                 }
                 TenantState::Stopping => {
@@ -1496,7 +1499,10 @@ impl Tenant {
                                     timeline.timeline_id, e
                                 );
                                 timeline.set_state(TimelineState::Broken);
-                                *current_state = TenantState::Broken;
+                                *current_state = TenantState::broken_from_reason(format!(
+                                    "failed to activate timeline {}: {}",
+                                    timeline.timeline_id, e
+                                ));
                             }
                         }
                     }
@@ -1509,7 +1515,7 @@ impl Tenant {
     /// Change tenant status to Stopping, to mark that it is being shut down
     pub fn set_stopping(&self) {
         self.state.send_modify(|current_state| {
-            match *current_state {
+            match current_state {
                 TenantState::Active | TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Stopping;
 
@@ -1525,8 +1531,8 @@ impl Tenant {
                         timeline.set_state(TimelineState::Stopping);
                     }
                 }
-                TenantState::Broken => {
-                    info!("Cannot set tenant to Stopping state, it is already in Broken state");
+                TenantState::Broken { reason, .. } => {
+                    info!("Cannot set tenant to Stopping state, it is in Broken state due to: {reason}");
                 }
                 TenantState::Stopping => {
                     // The tenant was detached, or system shutdown was requested, while we were
@@ -1537,7 +1543,7 @@ impl Tenant {
         });
     }
 
-    pub fn set_broken(&self, reason: &str) {
+    pub fn set_broken(&self, reason: String) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Active => {
@@ -1545,24 +1551,24 @@ impl Tenant {
                     // while loading or attaching a tenant. A tenant that has already been
                     // activated should never be marked as broken. We cope with it the best
                     // we can, but it shouldn't happen.
-                    *current_state = TenantState::Broken;
                     warn!("Changing Active tenant to Broken state, reason: {}", reason);
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
-                TenantState::Broken => {
+                TenantState::Broken { .. } => {
                     // This shouldn't happen either
                     warn!("Tenant is already in Broken state");
                 }
                 TenantState::Stopping => {
                     // This shouldn't happen either
-                    *current_state = TenantState::Broken;
                     warn!(
                         "Marking Stopping tenant as Broken state, reason: {}",
                         reason
                     );
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
                 TenantState::Loading | TenantState::Attaching => {
                     info!("Setting tenant as Broken state, reason: {}", reason);
-                    *current_state = TenantState::Broken;
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
             }
         });
@@ -1575,7 +1581,7 @@ impl Tenant {
     pub async fn wait_to_become_active(&self) -> anyhow::Result<()> {
         let mut receiver = self.state.subscribe();
         loop {
-            let current_state = *receiver.borrow_and_update();
+            let current_state = receiver.borrow_and_update().clone();
             match current_state {
                 TenantState::Loading | TenantState::Attaching => {
                     // in these states, there's a chance that we can reach ::Active
@@ -1584,12 +1590,12 @@ impl Tenant {
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
-                TenantState::Broken | TenantState::Stopping => {
+                TenantState::Broken { .. } | TenantState::Stopping => {
                     // There's no chance the tenant can transition back into ::Active
                     anyhow::bail!(
                         "Tenant {} will not become active. Current state: {:?}",
                         self.tenant_id,
-                        current_state,
+                        &current_state,
                     );
                 }
             }
@@ -1770,21 +1776,23 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            let current_state = *rx.borrow_and_update();
+            let mut current_state: &'static str = From::from(&*rx.borrow_and_update());
             let tid = tenant_id.to_string();
             TENANT_STATE_METRIC
-                .with_label_values(&[&tid, current_state.as_str()])
+                .with_label_values(&[&tid, current_state])
                 .inc();
             loop {
                 match rx.changed().await {
                     Ok(()) => {
-                        let new_state = *rx.borrow();
+                        let new_state: &'static str = From::from(&*rx.borrow_and_update());
                         TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, current_state.as_str()])
+                            .with_label_values(&[&tid, current_state])
                             .dec();
                         TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, new_state.as_str()])
+                            .with_label_values(&[&tid, new_state])
                             .inc();
+
+                        current_state = new_state;
                     }
                     Err(_sender_dropped_error) => {
                         info!("Tenant dropped the state updates sender, quitting waiting for tenant state change");

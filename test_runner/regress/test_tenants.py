@@ -332,24 +332,24 @@ def test_pageserver_with_empty_tenants(
 
     [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
     assert (
-        broken_tenant["state"] == "Broken"
+        broken_tenant["state"]["slug"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
     broken_tenant_status = client.tenant_status(tenant_without_timelines_dir)
     assert (
-        broken_tenant_status["state"] == "Broken"
+        broken_tenant_status["state"]["slug"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
     assert env.pageserver.log_contains(".*Setting tenant as Broken state, reason:.*")
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
     assert (
-        loaded_tenant["state"] == "Active"
+        loaded_tenant["state"]["slug"] == "Active"
     ), "Tenant {tenant_with_empty_timelines_dir} with empty timelines dir should be active and ready for timeline creation"
 
     loaded_tenant_status = client.tenant_status(tenant_with_empty_timelines_dir)
     assert (
-        loaded_tenant_status["state"] == "Active"
+        loaded_tenant_status["state"]["slug"] == "Active"
     ), f"Tenant {tenant_with_empty_timelines_dir} without timelines dir should be active"
 
     time.sleep(1)  # to allow metrics propagation
@@ -357,11 +357,11 @@ def test_pageserver_with_empty_tenants(
     ps_metrics = client.get_metrics()
     broken_tenants_metric_filter = {
         "tenant_id": str(tenant_without_timelines_dir),
-        "state": "broken",
+        "state": "Broken",
     }
     active_tenants_metric_filter = {
         "tenant_id": str(tenant_with_empty_timelines_dir),
-        "state": "active",
+        "state": "Active",
     }
 
     tenant_active_count = int(

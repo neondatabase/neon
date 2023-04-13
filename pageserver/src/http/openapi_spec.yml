@@ -829,11 +829,8 @@ components:
       type: object
       required:
         - id
-        - state
       properties:
         id:
-          type: string
-        state:
           type: string
         current_physical_size:
           type: integer

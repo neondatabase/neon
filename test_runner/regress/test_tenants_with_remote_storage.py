@@ -24,7 +24,7 @@ from fixtures.neon_fixtures import (
     wait_for_sk_commit_lsn_to_reach_remote_storage,
 )
 from fixtures.pageserver.utils import (
-    assert_tenant_status,
+    assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -202,7 +202,7 @@ def test_tenants_attached_after_download(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_tenant_status(client, tenant_id, "Active"),
+        func=lambda: assert_tenant_state(client, tenant_id, "Active"),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
@@ -286,7 +286,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_tenant_status(client, tenant_id, "Active"),
+        func=lambda: assert_tenant_state(client, tenant_id, "Active"),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
