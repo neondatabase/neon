@@ -2449,14 +2449,14 @@ class EndpointFactory:
 
         return self
 
-    def new_replica(self, origin: Postgres, name: str, config_lines: Optional[List[str]]):
+    def new_replica(self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]]):
         branch_name = origin.branch_name
         assert origin in self.instances
         assert branch_name is not None
 
         return self.create(
             branch_name=branch_name,
-            node_name=name,
+            endpoint_id=endpoint_id,
             tenant_id=origin.tenant_id,
             lsn=None,
             hot_standby=True,
@@ -2464,7 +2464,7 @@ class EndpointFactory:
         )
 
     def new_replica_start(
-        self, origin: Postgres, name: str, config_lines: Optional[List[str]] = None
+        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]] = None
     ):
         branch_name = origin.branch_name
         assert origin in self.instances
@@ -2472,7 +2472,7 @@ class EndpointFactory:
 
         return self.create_start(
             branch_name=branch_name,
-            node_name=name,
+            endpoint_id=endpoint_id,
             tenant_id=origin.tenant_id,
             lsn=None,
             hot_standby=True,

@@ -8,9 +8,9 @@ def test_hot_standby(neon_simple_env: NeonEnv):
 
     with env.postgres.create_start(
         branch_name="main",
-        node_name="primary",
+        endpoint_id="primary",
     ) as primary:
-        with env.postgres.new_replica_start(origin=primary, name="secondary") as secondary:
+        with env.postgres.new_replica_start(origin=primary, endpoint_id="secondary") as secondary:
             primary_lsn = None
             cought_up = False
             queries = [
