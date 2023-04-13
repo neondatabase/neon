@@ -386,6 +386,7 @@ def test_single_branch_get_tenant_size_grows(
             consistent = current_lsn == after_lsn
             current_lsn = after_lsn
         size_debug_file.write(size_debug)
+        assert size > 0
         return (current_lsn, size)
 
     with env.endpoints.create_start(
@@ -423,17 +424,15 @@ def test_single_branch_get_tenant_size_grows(
             )
 
             prev_size = collected_responses[-1][2]
-            if size == 0:
-                assert prev_size == 0
-            else:
-                # branch start shouldn't be past gc_horizon yet
-                # thus the size should grow as we insert more data
-                # "gc_horizon" is tuned so that it kicks in _after_ the
-                # insert phase, but before the update phase ends.
-                assert (
-                    current_lsn - initdb_lsn <= gc_horizon
-                ), "Tuning of GC window is likely out-of-date"
-                assert size > prev_size
+
+            # branch start shouldn't be past gc_horizon yet
+            # thus the size should grow as we insert more data
+            # "gc_horizon" is tuned so that it kicks in _after_ the
+            # insert phase, but before the update phase ends.
+            assert (
+                current_lsn - initdb_lsn <= gc_horizon
+            ), "Tuning of GC window is likely out-of-date"
+            assert size > prev_size
 
             collected_responses.append(("INSERT", current_lsn, size))
 
@@ -490,6 +489,9 @@ def test_single_branch_get_tenant_size_grows(
         check_size_change(current_lsn, initdb_lsn, gc_horizon, size, prev_size)
 
         collected_responses.append(("DROP", current_lsn, size))
+
+    # Should have gone past gc_horizon, otherwise gc_horizon is too large
+    assert current_lsn - initdb_lsn > gc_horizon
 
     # this isn't too many lines to forget for a while. observed while
     # developing these tests that locally the value is a bit more than what we
