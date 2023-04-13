@@ -32,7 +32,6 @@ use utils::lsn::Lsn;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::ComputeSpec;
 
-use crate::checker::create_writability_check_data;
 use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -342,7 +341,6 @@ impl ComputeNode {
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, self.connstr.as_str(), &mut client)?;
-        create_writability_check_data(&mut client)?;
         handle_extensions(spec, &mut client)?;
 
         // 'Close' connection
