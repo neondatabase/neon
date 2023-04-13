@@ -64,6 +64,7 @@ webpki-roots.workspace = true
 x509-parser.workspace = true
 
 workspace_hack.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

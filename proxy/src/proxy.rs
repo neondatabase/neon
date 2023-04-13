@@ -17,6 +17,7 @@ use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use utils::measured_stream::MeasuredStream;
 
@@ -63,6 +64,7 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
+    cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -72,29 +74,48 @@ pub async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
+    let mut connections = tokio::task::JoinSet::new();
     let cancel_map = Arc::new(CancelMap::default());
+
     loop {
-        let (socket, peer_addr) = listener.accept().await?;
-        info!("accepted postgres client connection from {peer_addr}");
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (socket, peer_addr) = accept_result?;
+                info!("accepted postgres client connection from {peer_addr}");
 
-        let session_id = uuid::Uuid::new_v4();
-        let cancel_map = Arc::clone(&cancel_map);
-        tokio::spawn(
-            async move {
-                info!("spawned a task for {peer_addr}");
+                let session_id = uuid::Uuid::new_v4();
+                let cancel_map = Arc::clone(&cancel_map);
+                connections.spawn(
+                    async move {
+                        info!("spawned a task for {peer_addr}");
 
-                socket
-                    .set_nodelay(true)
-                    .context("failed to set socket option")?;
+                        socket
+                            .set_nodelay(true)
+                            .context("failed to set socket option")?;
 
-                handle_client(config, &cancel_map, session_id, socket).await
+                        handle_client(config, &cancel_map, session_id, socket).await
+                    }
+                    .unwrap_or_else(|e| {
+                        // Acknowledge that the task has finished with an error.
+                        error!("per-client task finished with an error: {e:#}");
+                    }),
+                );
             }
-            .unwrap_or_else(|e| {
-                // Acknowledge that the task has finished with an error.
-                error!("per-client task finished with an error: {e:#}");
-            }),
-        );
+            _ = cancellation_token.cancelled() => {
+                drop(listener);
+                break;
+            }
+        }
     }
+    // Drain connections
+    while let Some(res) = connections.join_next().await {
+        if let Err(e) = res {
+            if !e.is_panic() && !e.is_cancelled() {
+                warn!("unexpected error from joined connection task: {e:?}");
+            }
+        }
+    }
+    Ok(())
 }
 
 // TODO(tech debt): unite this with its twin below.
