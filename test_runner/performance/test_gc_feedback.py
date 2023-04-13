@@ -31,7 +31,7 @@ def test_gc_feedback(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             # "image_creation_threshold": "2",
         }
     )
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    pg = env.endpoint.create_start("main", tenant_id=tenant_id)
     timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
     n_steps = 10
     n_update_iters = 100
