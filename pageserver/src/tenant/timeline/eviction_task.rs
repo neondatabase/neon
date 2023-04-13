@@ -185,9 +185,13 @@ impl Timeline {
                     continue;
                 }
                 let last_activity_ts = match hist_layer.access_stats().latest_activity() {
-                    Ok(ts) => ts,
-                    Err(error) => {
-                        warn!(%error, layer=%hist_layer.filename().file_name(), "latest activity not available, likely implementation error");
+                    Some(ts) => ts,
+                    None => {
+                        // This is an implementation error.
+                        // Give the layer a free ride and hope someone notices the warning.
+                        // If this gets us under disk pressure, disk-usage-based eviction will save us.
+                        // At that point, someone will definitely notice the warning in the logs.
+                        warn!(layer=%hist_layer.filename().file_name(), "latest activity not available, likely implementation error, ignoring layer");
                         stats.errors += 1;
                         continue;
                     }

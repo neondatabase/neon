@@ -13,7 +13,6 @@ use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Result;
 use bytes::Bytes;
-use either::Either;
 use enum_map::EnumMap;
 use enumset::EnumSet;
 use pageserver_api::models::LayerAccessKind;
@@ -36,6 +35,8 @@ pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use remote_layer::RemoteLayer;
+
+use super::layer_map::BatchedUpdates;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -158,41 +159,82 @@ impl LayerAccessStatFullDetails {
 }
 
 impl LayerAccessStats {
-    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
-        let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
-        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
-        new
+    /// Create an empty stats object.
+    ///
+    /// The caller is responsible for recording a residence event
+    /// using [`record_residence_event`] before calling `latest_activity`.
+    /// If they don't, [`latest_activity`] will return `None`.
+    pub(crate) fn empty_will_record_residence_event_later() -> Self {
+        LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()))
     }
 
-    pub(crate) fn for_new_layer_file() -> Self {
+    /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
+    ///
+    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
+    pub(crate) fn for_loading_layer<L>(
+        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
+        status: LayerResidenceStatus,
+    ) -> Self
+    where
+        L: ?Sized + Layer,
+    {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
         new.record_residence_event(
-            LayerResidenceStatus::Resident,
-            LayerResidenceEventReason::LayerCreateFileWritten,
+            layer_map_lock_held_witness,
+            status,
+            LayerResidenceEventReason::LayerLoad,
         );
         new
     }
 
     /// Creates a clone of `self` and records `new_status` in the clone.
-    /// The `new_status` is not recorded in `self`
-    pub(crate) fn clone_for_residence_change(
+    ///
+    /// The `new_status` is not recorded in `self`.
+    ///
+    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
+    pub(crate) fn clone_for_residence_change<L>(
         &self,
+        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
         new_status: LayerResidenceStatus,
-    ) -> LayerAccessStats {
+    ) -> LayerAccessStats
+    where
+        L: ?Sized + Layer,
+    {
         let clone = {
             let inner = self.0.lock().unwrap();
             inner.clone()
         };
         let new = LayerAccessStats(Mutex::new(clone));
-        new.record_residence_event(new_status, LayerResidenceEventReason::ResidenceChange);
+        new.record_residence_event(
+            layer_map_lock_held_witness,
+            new_status,
+            LayerResidenceEventReason::ResidenceChange,
+        );
         new
     }
 
-    fn record_residence_event(
+    /// Record a change in layer residency.
+    ///
+    /// Recording the event must happen while holding the layer map lock to
+    /// ensure that latest-activity-threshold-based layer eviction (eviction_task.rs)
+    /// can do an "imitate access" to this layer, before it observes `now-latest_activity() > threshold`.
+    ///
+    /// If we instead recorded the residence event with a timestamp from before grabbing the layer map lock,
+    /// the following race could happen:
+    ///
+    ///     Compact: Write out an L1 layer from several L0 layers. This records residence event LayerCreate with the current timestamp.
+    ///     Eviction: imitate access logical size calculation. This accesses the L0 layers because the L1 layer is not yet in the layer map.
+    ///     Compact: Grab layer map lock, add the new L1 to layer map and remove the L0s, release layer map lock.
+    ///     Eviction: observes the new L1 layer whose only activity timestamp is the LayerCreate event.
+    ///
+    pub(crate) fn record_residence_event<L>(
         &self,
+        _layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
         status: LayerResidenceStatus,
         reason: LayerResidenceEventReason,
-    ) {
+    ) where
+        L: ?Sized + Layer,
+    {
         let mut locked = self.0.lock().unwrap();
         locked.iter_mut().for_each(|inner| {
             inner
@@ -255,40 +297,17 @@ impl LayerAccessStats {
         ret
     }
 
-    pub(crate) fn record_layer_map_insert_of_created_layer(&self) {
-        self.record_residence_event(
-            LayerResidenceStatus::Resident,
-            LayerResidenceEventReason::LayerCreateMapInserted,
-        );
-    }
-
-    fn most_recent_access_or_residence_event(
-        &self,
-    ) -> anyhow::Result<Either<LayerAccessStatFullDetails, LayerResidenceEvent>> {
+    /// Get the latest access timestamp, with fallback for latest residence event.
+    ///
+    /// To guarantee that this method returns `Some`, make sure to record a residence event first.
+    /// Use the [`record_residence_event`] method for that.
+    pub(crate) fn latest_activity(&self) -> Option<SystemTime> {
         let locked = self.0.lock().unwrap();
         let inner = &locked.for_eviction_policy;
-        let res = match inner.last_accesses.recent() {
-            Some(a) => Either::Left(*a),
-            None => match inner.last_residence_changes.recent() {
-                Some(e) => {
-                    if e.reason == LayerResidenceEventReason::LayerCreateFileWritten {
-                        anyhow::bail!("layer is not part of the layer map, call record_layer_map_insert_of_created_layer first");
-                    }
-                    Either::Right(e.clone())
-                }
-                None => unreachable!("constructors for LayerAccessStats ensure that there's always a residence change event"),
-            }
-        };
-        Ok(res)
-    }
-
-    /// Fails until `record_layer_map_insert` was called on this instance
-    /// or a predecessor from which this instance was `clone_for_residence_change`'d from.
-    pub(crate) fn latest_activity(&self) -> anyhow::Result<SystemTime> {
-        Ok(match self.most_recent_access_or_residence_event()? {
-            Either::Left(mra) => mra.when,
-            Either::Right(re) => re.timestamp,
-        })
+        match inner.last_accesses.recent() {
+            Some(a) => Some(a.when),
+            None => inner.last_residence_changes.recent().map(|e| e.timestamp),
+        }
     }
 }
 

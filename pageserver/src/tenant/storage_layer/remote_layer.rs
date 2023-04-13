@@ -4,6 +4,7 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
+use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
@@ -246,11 +247,15 @@ impl RemoteLayer {
     }
 
     /// Create a Layer struct representing this layer, after it has been downloaded.
-    pub fn create_downloaded_layer(
+    pub fn create_downloaded_layer<L>(
         &self,
+        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
         conf: &'static PageServerConf,
         file_size: u64,
-    ) -> Arc<dyn PersistentLayer> {
+    ) -> Arc<dyn PersistentLayer>
+    where
+        L: ?Sized + Layer,
+    {
         if self.is_delta {
             let fname = DeltaFileName {
                 key_range: self.key_range.clone(),
@@ -262,8 +267,10 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
-                self.access_stats
-                    .clone_for_residence_change(LayerResidenceStatus::Resident),
+                self.access_stats.clone_for_residence_change(
+                    layer_map_lock_held_witness,
+                    LayerResidenceStatus::Resident,
+                ),
             ))
         } else {
             let fname = ImageFileName {
@@ -276,8 +283,10 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
-                self.access_stats
-                    .clone_for_residence_change(LayerResidenceStatus::Resident),
+                self.access_stats.clone_for_residence_change(
+                    layer_map_lock_held_witness,
+                    LayerResidenceStatus::Resident,
+                ),
             ))
         }
     }
