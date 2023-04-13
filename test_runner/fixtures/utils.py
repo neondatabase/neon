@@ -13,6 +13,7 @@ import allure
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
+from fixtures.types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
@@ -186,11 +187,13 @@ def allure_attach_from_dir(dir: Path):
             allure.attach.file(source, name, attachment_type, extension)
 
 
+GRAFANA_URL = "https://neonprod.grafana.net"
 DATASOURCE_ID = "xHHYY0dVz"
 
 
-def allure_add_grafana_links(host: str, start_ms: int, end_ms: int):
+def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, end_ms: int):
     """Add links to server logs in Grafana to Allure report"""
+    links = {}
     # We expect host to be in format like ep-divine-night-159320.us-east-2.aws.neon.build
     endpoint_id, region_id, _ = host.split(".", 2)
 
@@ -220,8 +223,22 @@ def allure_add_grafana_links(host: str, start_ms: int, end_ms: int):
     for name, expr in expressions.items():
         params["queries"][0]["expr"] = expr
         query_string = urlencode({"orgId": 1, "left": json.dumps(params)})
-        link = f"https://neonprod.grafana.net/explore?{query_string}"
+        links[name] = f"{GRAFANA_URL}/explore?{query_string}"
 
+    timeline_qs = urlencode(
+        {
+            "orgId": 1,
+            "var-environment": "victoria-metrics-aws-dev",
+            "var-timeline_id": timeline_id,
+            "var-endpoint_id": endpoint_id,
+            "var-log_datasource": "grafanacloud-neonstaging-logs",
+            "from": start_ms,
+            "to": end_ms,
+        }
+    )
+    links["Timeline Inspector"] = f"{GRAFANA_URL}/d/8G011dlnk/timeline-inspector?{timeline_qs}"
+
+    for name, link in links.items():
         allure.dynamic.link(link, name=name)
         log.info(f"{name}: {link}")
 

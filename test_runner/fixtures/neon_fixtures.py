@@ -1913,15 +1913,26 @@ def remote_pg(
     connstr = os.getenv("BENCHMARK_CONNSTR")
     if connstr is None:
         raise ValueError("no connstr provided, use BENCHMARK_CONNSTR environment variable")
+
+    host = parse_dsn(connstr).get("host", "")
+    is_neon = host.endswith(".neon.build")
+
     start_ms = int(datetime.utcnow().timestamp() * 1000)
     with RemotePostgres(pg_bin, connstr) as remote_pg:
+        if is_neon:
+            timeline_id = TimelineId(remote_pg.safe_psql("SHOW neon.timeline_id")[0][0])
+
         yield remote_pg
 
     end_ms = int(datetime.utcnow().timestamp() * 1000)
-    host = parse_dsn(connstr).get("host", "")
-    if host.endswith(".neon.build"):
+    if is_neon:
         # Add 10s margin to the start and end times
-        allure_add_grafana_links(host, start_ms - 10_000, end_ms + 10_000)
+        allure_add_grafana_links(
+            host,
+            timeline_id,
+            start_ms - 10_000,
+            end_ms + 10_000,
+        )
 
 
 class PSQL:
