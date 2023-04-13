@@ -252,11 +252,12 @@ impl ComputeNode {
         #[derive(Clone)]
         enum Replication {
             Primary,
-            Static { lsn: String },
+            Static { lsn: Lsn },
             HotStandby,
         }
 
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+        let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
 
         let hot_replica = if let Some(option) = spec.cluster.settings.find_ref("hot_standby") {
@@ -273,7 +274,7 @@ impl ComputeNode {
         let replication = if hot_replica {
             Replication::HotStandby
         } else if let Some(lsn) = spec.cluster.settings.find("recovery_target_lsn") {
-            Replication::Static { lsn }
+            Replication::Static { lsn: Lsn::from_str(&lsn)? }
         } else {
             Replication::Primary
         };
@@ -300,7 +301,7 @@ impl ComputeNode {
             }
             Replication::HotStandby => {
                 info!("Initializing standby from latest Pageserver LSN");
-                "0/0".to_string()
+                Lsn(0)
             }
         };
 
