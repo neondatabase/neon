@@ -19,9 +19,9 @@ def test_wal_restore(
 ):
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("test_wal_restore")
-    pg = env.postgres.create_start("test_wal_restore")
-    pg.safe_psql("create table t as select generate_series(1,300000)")
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    endpoint = env.endpoints.create_start("test_wal_restore")
+    endpoint.safe_psql("create table t as select generate_series(1,300000)")
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
     env.neon_cli.pageserver_stop()
     port = port_distributor.get_port()
     data_dir = test_output_dir / "pgsql.restored"

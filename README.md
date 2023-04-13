@@ -147,15 +147,15 @@ Created an initial timeline 'de200bd42b49cc1814412c7e592dd6e9' at Lsn 0/16B5A50 
 Setting tenant 9ef87a5bf0d92544f6fafeeb3239695c as a default one
 
 # start postgres compute node
-> ./target/debug/neon_local pg start main
-Starting new postgres (v14) main on timeline de200bd42b49cc1814412c7e592dd6e9 ...
+> ./target/debug/neon_local endpoint start main
+Starting new endpoint main (PostgreSQL v14) on timeline de200bd42b49cc1814412c7e592dd6e9 ...
 Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/main port=55432
-Starting postgres node at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=postgres'
+Starting postgres at 'host=127.0.0.1 port=55432 user=cloud_admin dbname=postgres'
 
 # check list of running postgres instances
-> ./target/debug/neon_local pg list
- NODE  ADDRESS          TIMELINE                          BRANCH NAME  LSN        STATUS
- main  127.0.0.1:55432  de200bd42b49cc1814412c7e592dd6e9  main         0/16B5BA8  running
+> ./target/debug/neon_local endpoint list
+ ENDPOINT  ADDRESS          TIMELINE                          BRANCH NAME  LSN        STATUS
+ main      127.0.0.1:55432  de200bd42b49cc1814412c7e592dd6e9  main         0/16B5BA8  running
 ```
 
 2. Now, it is possible to connect to postgres and run some queries:
@@ -184,14 +184,14 @@ Created timeline 'b3b863fa45fa9e57e615f9f2d944e601' at Lsn 0/16F9A00 for tenant:
 (L) ┗━ @0/16F9A00: migration_check [b3b863fa45fa9e57e615f9f2d944e601]
 
 # start postgres on that branch
-> ./target/debug/neon_local pg start migration_check --branch-name migration_check
-Starting new postgres migration_check on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
+> ./target/debug/neon_local endpoint start migration_check --branch-name migration_check
+Starting new endpoint migration_check (PostgreSQL v14) on timeline b3b863fa45fa9e57e615f9f2d944e601 ...
 Extracting base backup to create postgres instance: path=.neon/pgdatadirs/tenants/9ef87a5bf0d92544f6fafeeb3239695c/migration_check port=55433
-Starting postgres node at 'host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres'
+Starting postgres at 'host=127.0.0.1 port=55433 user=cloud_admin dbname=postgres'
 
 # check the new list of running postgres instances
-> ./target/debug/neon_local pg list
- NODE             ADDRESS          TIMELINE                          BRANCH NAME      LSN        STATUS
+> ./target/debug/neon_local endpoint list
+ ENDPOINT         ADDRESS          TIMELINE                          BRANCH NAME      LSN        STATUS
  main             127.0.0.1:55432  de200bd42b49cc1814412c7e592dd6e9  main             0/16F9A38  running
  migration_check  127.0.0.1:55433  b3b863fa45fa9e57e615f9f2d944e601  migration_check  0/16F9A70  running
 

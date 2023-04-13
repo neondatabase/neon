@@ -11,10 +11,10 @@ from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
     env = neon_simple_env
     env.neon_cli.create_branch("test_subxacts", "empty")
-    pg = env.postgres.create_start("test_subxacts")
+    endpoint = env.endpoints.create_start("test_subxacts")
 
     log.info("postgres is running on 'test_subxacts' branch")
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     cur.execute(
@@ -37,4 +37,4 @@ def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
     cur.execute("checkpoint")
 
     # Check that we can restore the content of the datadir correctly
-    check_restored_datadir_content(test_output_dir, env, pg)
+    check_restored_datadir_content(test_output_dir, env, endpoint)

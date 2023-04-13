@@ -17,10 +17,10 @@ def test_read_validation(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_read_validation", "empty")
 
-    pg = env.postgres.create_start("test_read_validation")
+    endpoint = env.endpoints.create_start("test_read_validation")
     log.info("postgres is running on 'test_read_validation' branch")
 
-    with closing(pg.connect()) as con:
+    with closing(endpoint.connect()) as con:
         with con.cursor() as c:
             for e in extensions:
                 c.execute("create extension if not exists {};".format(e))
@@ -144,10 +144,10 @@ def test_read_validation_neg(neon_simple_env: NeonEnv):
 
     env.pageserver.allowed_errors.append(".*invalid LSN\\(0\\) in request.*")
 
-    pg = env.postgres.create_start("test_read_validation_neg")
+    endpoint = env.endpoints.create_start("test_read_validation_neg")
     log.info("postgres is running on 'test_read_validation_neg' branch")
 
-    with closing(pg.connect()) as con:
+    with closing(endpoint.connect()) as con:
         with con.cursor() as c:
             for e in extensions:
                 c.execute("create extension if not exists {};".format(e))

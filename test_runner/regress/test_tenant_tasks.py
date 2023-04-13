@@ -29,7 +29,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline(name, tenant_id=tenant)
-    pg = env.postgres.create_start(name, tenant_id=tenant)
+    endpoint = env.endpoints.create_start(name, tenant_id=tenant)
     assert_tenant_state(
         client,
         tenant,
@@ -38,7 +38,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     )
 
     # Stop compute
-    pg.stop()
+    endpoint.stop()
 
     # Delete all timelines on all tenants.
     #

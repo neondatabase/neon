@@ -4,9 +4,9 @@ from typing import List, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     NeonEnvBuilder,
-    Postgres,
     wait_for_last_flush_lsn,
     wait_for_wal_insert_lsn,
 )
@@ -28,12 +28,12 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
     assert branch_name == main_branch_name
 
-    with env.postgres.create_start(
+    with env.endpoints.create_start(
         main_branch_name,
         tenant_id=tenant_id,
         config_lines=["autovacuum=off", "checkpoint_timeout=10min"],
-    ) as pg:
-        with pg.cursor() as cur:
+    ) as endpoint:
+        with endpoint.cursor() as cur:
             cur.execute("SELECT 1")
             row = cur.fetchone()
             assert row is not None
@@ -105,12 +105,12 @@ def test_branched_empty_timeline_size(neon_simple_env: NeonEnv, test_output_dir:
 
     first_branch_timeline_id = env.neon_cli.create_branch("first-branch", tenant_id=tenant_id)
 
-    with env.postgres.create_start("first-branch", tenant_id=tenant_id) as pg:
-        with pg.cursor() as cur:
+    with env.endpoints.create_start("first-branch", tenant_id=tenant_id) as endpoint:
+        with endpoint.cursor() as cur:
             cur.execute(
                 "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
             )
-        wait_for_last_flush_lsn(env, pg, tenant_id, first_branch_timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, first_branch_timeline_id)
 
     size_after_branching = http_client.tenant_size(tenant_id)
     log.info(f"size_after_branching: {size_after_branching}")
@@ -164,12 +164,12 @@ def test_branched_from_many_empty_parents_size(neon_simple_env: NeonEnv, test_ou
 
     assert last_branch is not None
 
-    with env.postgres.create_start(last_branch_name, tenant_id=tenant_id) as pg:
-        with pg.cursor() as cur:
+    with env.endpoints.create_start(last_branch_name, tenant_id=tenant_id) as endpoint:
+        with endpoint.cursor() as cur:
             cur.execute(
                 "CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000000) s(i)"
             )
-        wait_for_last_flush_lsn(env, pg, tenant_id, last_branch)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, last_branch)
 
     size_after_writes = http_client.tenant_size(tenant_id)
     assert size_after_writes > initial_size
@@ -194,11 +194,11 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: 
     (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
     http_client = env.pageserver.http_client()
 
-    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
-        initdb_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
-        with pg.cursor() as cur:
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        initdb_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, main_id)
+        with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000) s(i)")
-        flushed_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+        flushed_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, main_id)
 
     size_before_branching = http_client.tenant_size(tenant_id)
 
@@ -208,10 +208,10 @@ def test_branch_point_within_horizon(neon_simple_env: NeonEnv, test_output_dir: 
         "branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn
     )
 
-    with env.postgres.create_start("branch", tenant_id=tenant_id) as pg:
-        with pg.cursor() as cur:
+    with env.endpoints.create_start("branch", tenant_id=tenant_id) as endpoint:
+        with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 1000) s(i)")
-        wait_for_last_flush_lsn(env, pg, tenant_id, branch_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, branch_id)
 
     size_after = http_client.tenant_size(tenant_id)
 
@@ -237,17 +237,17 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
     (tenant_id, main_id) = env.neon_cli.create_tenant(conf={"gc_horizon": str(gc_horizon)})
     http_client = env.pageserver.http_client()
 
-    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
-        initdb_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
-        with pg.cursor() as cur:
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        initdb_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, main_id)
+        with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, 1000) s(i)")
 
-        flushed_lsn = wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+        flushed_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, main_id)
 
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t00 AS SELECT i::bigint n FROM generate_series(0, 2000) s(i)")
 
-        wait_for_last_flush_lsn(env, pg, tenant_id, main_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, main_id)
 
     size_before_branching = http_client.tenant_size(tenant_id)
 
@@ -257,10 +257,10 @@ def test_parent_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Path):
         "branch", tenant_id=tenant_id, ancestor_start_lsn=flushed_lsn
     )
 
-    with env.postgres.create_start("branch", tenant_id=tenant_id) as pg:
-        with pg.cursor() as cur:
+    with env.endpoints.create_start("branch", tenant_id=tenant_id) as endpoint:
+        with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 10000) s(i)")
-        wait_for_last_flush_lsn(env, pg, tenant_id, branch_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, branch_id)
 
     size_after = http_client.tenant_size(tenant_id)
 
@@ -297,12 +297,12 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     # gc is not expected to change the results
 
     for branch_name, amount in [("main", 2000), ("first", 15000), ("second", 3000)]:
-        with env.postgres.create_start(branch_name, tenant_id=tenant_id) as pg:
-            with pg.cursor() as cur:
+        with env.endpoints.create_start(branch_name, tenant_id=tenant_id) as endpoint:
+            with endpoint.cursor() as cur:
                 cur.execute(
                     f"CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, {amount}) s(i)"
                 )
-            wait_for_last_flush_lsn(env, pg, tenant_id, ids[branch_name])
+            wait_for_last_flush_lsn(env, endpoint, tenant_id, ids[branch_name])
             size_now = http_client.tenant_size(tenant_id)
             if latest_size is not None:
                 assert size_now > latest_size
@@ -359,7 +359,7 @@ def test_single_branch_get_tenant_size_grows(
 
     def get_current_consistent_size(
         env: NeonEnv,
-        pg: Postgres,
+        endpoint: Endpoint,
         size_debug_file,  # apparently there is no public signature for open()...
         http_client: PageserverHttpClient,
         tenant_id: TenantId,
@@ -368,7 +368,7 @@ def test_single_branch_get_tenant_size_grows(
         consistent = False
         size_debug = None
 
-        current_lsn = wait_for_wal_insert_lsn(env, pg, tenant_id, timeline_id)
+        current_lsn = wait_for_wal_insert_lsn(env, endpoint, tenant_id, timeline_id)
         # We want to make sure we have a self-consistent set of values.
         # Size changes with WAL, so only if both before and after getting
         # the size of the tenant reports the same WAL insert LSN, we're OK
@@ -382,35 +382,35 @@ def test_single_branch_get_tenant_size_grows(
             size, sizes = http_client.tenant_size_and_modelinputs(tenant_id)
             size_debug = http_client.tenant_size_debug(tenant_id)
 
-            after_lsn = wait_for_wal_insert_lsn(env, pg, tenant_id, timeline_id)
+            after_lsn = wait_for_wal_insert_lsn(env, endpoint, tenant_id, timeline_id)
             consistent = current_lsn == after_lsn
             current_lsn = after_lsn
         size_debug_file.write(size_debug)
         return (current_lsn, size)
 
-    with env.postgres.create_start(
+    with env.endpoints.create_start(
         branch_name,
         tenant_id=tenant_id,
         ### autovacuum is disabled to limit WAL logging.
         config_lines=["autovacuum=off"],
-    ) as pg:
+    ) as endpoint:
         (initdb_lsn, size) = get_current_consistent_size(
-            env, pg, size_debug_file, http_client, tenant_id, timeline_id
+            env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
         )
         collected_responses.append(("INITDB", initdb_lsn, size))
 
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t0 (i BIGINT NOT NULL) WITH (fillfactor = 40)")
 
         (current_lsn, size) = get_current_consistent_size(
-            env, pg, size_debug_file, http_client, tenant_id, timeline_id
+            env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
         )
         collected_responses.append(("CREATE", current_lsn, size))
 
         batch_size = 100
 
         for i in range(3):
-            with pg.cursor() as cur:
+            with endpoint.cursor() as cur:
                 cur.execute(
                     f"INSERT INTO t0(i) SELECT i FROM generate_series({batch_size} * %s, ({batch_size} * (%s + 1)) - 1) s(i)",
                     (i, i),
@@ -419,7 +419,7 @@ def test_single_branch_get_tenant_size_grows(
             i += 1
 
             (current_lsn, size) = get_current_consistent_size(
-                env, pg, size_debug_file, http_client, tenant_id, timeline_id
+                env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
             )
 
             prev_size = collected_responses[-1][2]
@@ -438,7 +438,7 @@ def test_single_branch_get_tenant_size_grows(
             collected_responses.append(("INSERT", current_lsn, size))
 
         while True:
-            with pg.cursor() as cur:
+            with endpoint.cursor() as cur:
                 cur.execute(
                     f"UPDATE t0 SET i = -i WHERE i IN (SELECT i FROM t0 WHERE i > 0 LIMIT {batch_size})"
                 )
@@ -448,7 +448,7 @@ def test_single_branch_get_tenant_size_grows(
                 break
 
             (current_lsn, size) = get_current_consistent_size(
-                env, pg, size_debug_file, http_client, tenant_id, timeline_id
+                env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
             )
 
             prev_size = collected_responses[-1][2]
@@ -458,7 +458,7 @@ def test_single_branch_get_tenant_size_grows(
             collected_responses.append(("UPDATE", current_lsn, size))
 
         while True:
-            with pg.cursor() as cur:
+            with endpoint.cursor() as cur:
                 cur.execute(f"DELETE FROM t0 WHERE i IN (SELECT i FROM t0 LIMIT {batch_size})")
                 deleted = cur.rowcount
 
@@ -466,7 +466,7 @@ def test_single_branch_get_tenant_size_grows(
                 break
 
             (current_lsn, size) = get_current_consistent_size(
-                env, pg, size_debug_file, http_client, tenant_id, timeline_id
+                env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
             )
 
             prev_size = collected_responses[-1][2]
@@ -475,14 +475,14 @@ def test_single_branch_get_tenant_size_grows(
 
             collected_responses.append(("DELETE", current_lsn, size))
 
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute("DROP TABLE t0")
 
         # The size of the tenant should still be as large as before we dropped
         # the table, because the drop operation can still be undone in the PITR
         # defined by gc_horizon.
         (current_lsn, size) = get_current_consistent_size(
-            env, pg, size_debug_file, http_client, tenant_id, timeline_id
+            env, endpoint, size_debug_file, http_client, tenant_id, timeline_id
         )
 
         prev_size = collected_responses[-1][2]
@@ -532,16 +532,16 @@ def test_get_tenant_size_with_multiple_branches(
 
     http_client = env.pageserver.http_client()
 
-    main_pg = env.postgres.create_start(main_branch_name, tenant_id=tenant_id)
+    main_endpoint = env.endpoints.create_start(main_branch_name, tenant_id=tenant_id)
 
     batch_size = 10000
 
-    with main_pg.cursor() as cur:
+    with main_endpoint.cursor() as cur:
         cur.execute(
             f"CREATE TABLE t0 AS SELECT i::bigint n FROM generate_series(0, {batch_size}) s(i)"
         )
 
-    wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
+    wait_for_last_flush_lsn(env, main_endpoint, tenant_id, main_timeline_id)
     size_at_branch = http_client.tenant_size(tenant_id)
     assert size_at_branch > 0
 
@@ -552,23 +552,23 @@ def test_get_tenant_size_with_multiple_branches(
     size_after_first_branch = http_client.tenant_size(tenant_id)
     assert size_after_first_branch == size_at_branch
 
-    first_branch_pg = env.postgres.create_start("first-branch", tenant_id=tenant_id)
+    first_branch_endpoint = env.endpoints.create_start("first-branch", tenant_id=tenant_id)
 
-    with first_branch_pg.cursor() as cur:
+    with first_branch_endpoint.cursor() as cur:
         cur.execute(
             f"CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, {batch_size}) s(i)"
         )
 
-    wait_for_last_flush_lsn(env, first_branch_pg, tenant_id, first_branch_timeline_id)
+    wait_for_last_flush_lsn(env, first_branch_endpoint, tenant_id, first_branch_timeline_id)
     size_after_growing_first_branch = http_client.tenant_size(tenant_id)
     assert size_after_growing_first_branch > size_after_first_branch
 
-    with main_pg.cursor() as cur:
+    with main_endpoint.cursor() as cur:
         cur.execute(
             f"CREATE TABLE t1 AS SELECT i::bigint n FROM generate_series(0, 2*{batch_size}) s(i)"
         )
 
-    wait_for_last_flush_lsn(env, main_pg, tenant_id, main_timeline_id)
+    wait_for_last_flush_lsn(env, main_endpoint, tenant_id, main_timeline_id)
     size_after_continuing_on_main = http_client.tenant_size(tenant_id)
     assert size_after_continuing_on_main > size_after_growing_first_branch
 
@@ -578,31 +578,31 @@ def test_get_tenant_size_with_multiple_branches(
     size_after_second_branch = http_client.tenant_size(tenant_id)
     assert size_after_second_branch == size_after_continuing_on_main
 
-    second_branch_pg = env.postgres.create_start("second-branch", tenant_id=tenant_id)
+    second_branch_endpoint = env.endpoints.create_start("second-branch", tenant_id=tenant_id)
 
-    with second_branch_pg.cursor() as cur:
+    with second_branch_endpoint.cursor() as cur:
         cur.execute(
             f"CREATE TABLE t2 AS SELECT i::bigint n FROM generate_series(0, 3*{batch_size}) s(i)"
         )
 
-    wait_for_last_flush_lsn(env, second_branch_pg, tenant_id, second_branch_timeline_id)
+    wait_for_last_flush_lsn(env, second_branch_endpoint, tenant_id, second_branch_timeline_id)
     size_after_growing_second_branch = http_client.tenant_size(tenant_id)
     assert size_after_growing_second_branch > size_after_second_branch
 
-    with second_branch_pg.cursor() as cur:
+    with second_branch_endpoint.cursor() as cur:
         cur.execute("DROP TABLE t0")
         cur.execute("DROP TABLE t1")
         cur.execute("VACUUM FULL")
 
-    wait_for_last_flush_lsn(env, second_branch_pg, tenant_id, second_branch_timeline_id)
+    wait_for_last_flush_lsn(env, second_branch_endpoint, tenant_id, second_branch_timeline_id)
     size_after_thinning_branch = http_client.tenant_size(tenant_id)
     assert (
         size_after_thinning_branch > size_after_growing_second_branch
     ), "tenant_size should grow with dropped tables and full vacuum"
 
-    first_branch_pg.stop_and_destroy()
-    second_branch_pg.stop_and_destroy()
-    main_pg.stop()
+    first_branch_endpoint.stop_and_destroy()
+    second_branch_endpoint.stop_and_destroy()
+    main_endpoint.stop()
     env.pageserver.stop()
     env.pageserver.start()
 
