@@ -46,6 +46,7 @@ use url::Url;
 use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
+use compute_tools::configurator::launch_configurator;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -175,6 +176,8 @@ fn main() -> Result<()> {
 
     // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
+    let _configurator_handle =
+        launch_configurator(&compute).expect("cannot launch configurator thread");
 
     // Start Postgres
     let mut delay_exit = false;
