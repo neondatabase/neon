@@ -10,6 +10,7 @@
 <!-- List everything that should be done **before** release, any issues / setting changes / etc -->
 
 ### Checklist after release
+- [ ] Proceed with instructions from PRs labeled `manual_release_instructions` you released
 - [ ] Based on the merged commits write release notes and open a PR into `website` repo ([example](https://github.com/neondatabase/website/pull/219/files))
 - [ ] Check [#dev-production-stream](https://neondb.slack.com/archives/C03F5SM1N02) Slack channel
 - [ ] Check [stuck projects page](https://console.neon.tech/admin/projects?sort=last_active&order=desc&stuck=true)
