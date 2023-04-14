@@ -45,7 +45,8 @@ PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
     *[f"pageserver_remote_timeline_client_calls_started_{x}" for x in ["bucket", "count", "sum"]],
     *[f"pageserver_remote_operation_seconds_{x}" for x in ["bucket", "count", "sum"]],
     "pageserver_remote_physical_size",
-    "pageserver_remote_timeline_client_bytes_unfinished",
+    "pageserver_remote_timeline_client_bytes_started_total",
+    "pageserver_remote_timeline_client_bytes_finished_total",
 )
 
 PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (

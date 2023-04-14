@@ -1296,6 +1296,8 @@ mod tests {
 
     #[test]
     fn bytes_unfinished_gauge_for_layer_file_uploads() -> anyhow::Result<()> {
+        // Setup
+
         let TestSetup {
             runtime,
             harness,
@@ -1315,24 +1317,65 @@ mod tests {
             &content_1,
         )?;
 
+        #[derive(Debug, PartialEq)]
+        struct BytesStartedFinished {
+            started: Option<usize>,
+            finished: Option<usize>,
+        }
+        let get_bytes_started_stopped = || {
+            let started = client
+                .metrics
+                .get_bytes_started_counter_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
+                .map(|v| v.try_into().unwrap());
+            let stopped = client
+                .metrics
+                .get_bytes_finished_counter_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
+                .map(|v| v.try_into().unwrap());
+            BytesStartedFinished {
+                started,
+                finished: stopped,
+            }
+        };
+
+        // Test
+
+        let init = get_bytes_started_stopped();
+
         client.schedule_layer_file_upload(
             &layer_file_name_1,
             &LayerFileMetadata::new(content_1.len() as u64),
         )?;
 
-        let queued = client
-            .metrics
-            .get_bytes_unfinished_gauge_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
-            .expect("scheduling the layer file upload should have added to the gauge");
-        assert_eq!(queued, content_1.len() as i64);
+        let pre = get_bytes_started_stopped();
 
         runtime.block_on(client.wait_completion())?;
 
-        let after_completion = client
-            .metrics
-            .get_bytes_unfinished_gauge_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
-            .unwrap();
-        assert_eq!(after_completion, 0);
+        let post = get_bytes_started_stopped();
+
+        // Validate
+
+        assert_eq!(
+            init,
+            BytesStartedFinished {
+                started: None,
+                finished: None
+            }
+        );
+        assert_eq!(
+            pre,
+            BytesStartedFinished {
+                started: Some(content_1.len()),
+                // assert that the _finished metric is created eagerly so that subtractions work on first sample
+                finished: Some(0),
+            }
+        );
+        assert_eq!(
+            post,
+            BytesStartedFinished {
+                started: Some(content_1.len()),
+                finished: Some(content_1.len())
+            }
+        );
 
         Ok(())
     }
