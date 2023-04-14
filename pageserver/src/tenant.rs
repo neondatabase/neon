@@ -1735,6 +1735,13 @@ impl Tenant {
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         *self.tenant_conf.write().unwrap() = new_tenant_conf;
+        // Don't hold self.timelines.lock() during the notifies.
+        // There's no risk of deadlock right now, but there could be if we consolidate
+        // mutexes in struct Timeline in the future.
+        let timelines = self.list_timelines();
+        for timeline in timelines {
+            timeline.tenant_conf_updated();
+        }
     }
 
     fn create_timeline_data(
@@ -2815,6 +2822,9 @@ pub mod harness {
                 trace_read_requests: Some(tenant_conf.trace_read_requests),
                 eviction_policy: Some(tenant_conf.eviction_policy),
                 min_resident_size_override: tenant_conf.min_resident_size_override,
+                evictions_low_residence_duration_metric_threshold: Some(
+                    tenant_conf.evictions_low_residence_duration_metric_threshold,
+                ),
             }
         }
     }

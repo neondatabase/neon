@@ -519,6 +519,13 @@ class PageserverHttpClient(requests.Session):
 
         assert res.status_code == 200
 
+    def download_all_layers(self, tenant_id: TenantId, timeline_id: TimelineId):
+        info = self.layer_map_info(tenant_id, timeline_id)
+        for layer in info.historic_layers:
+            if not layer.remote:
+                continue
+            self.download_layer(tenant_id, timeline_id, layer.layer_file_name)
+
     def evict_layer(self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: str):
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}",

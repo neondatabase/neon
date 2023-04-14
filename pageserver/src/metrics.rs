@@ -257,6 +257,22 @@ impl EvictionsWithLowResidenceDuration {
         }
     }
 
+    pub fn change_threshold(
+        &mut self,
+        tenant_id: &str,
+        timeline_id: &str,
+        new_threshold: Duration,
+    ) {
+        if new_threshold == self.threshold {
+            return;
+        }
+        let mut with_new =
+            EvictionsWithLowResidenceDurationBuilder::new(self.data_source, new_threshold)
+                .build(tenant_id, timeline_id);
+        std::mem::swap(self, &mut with_new);
+        with_new.remove(tenant_id, timeline_id);
+    }
+
     // This could be a `Drop` impl, but, we need the `tenant_id` and `timeline_id`.
     fn remove(&mut self, tenant_id: &str, timeline_id: &str) {
         let Some(_counter) = self.counter.take() else {
@@ -589,7 +605,7 @@ pub struct TimelineMetrics {
     pub num_persistent_files_created: IntCounter,
     pub persistent_bytes_written: IntCounter,
     pub evictions: IntCounter,
-    pub evictions_with_low_residence_duration: EvictionsWithLowResidenceDuration,
+    pub evictions_with_low_residence_duration: std::sync::RwLock<EvictionsWithLowResidenceDuration>,
 }
 
 impl TimelineMetrics {
@@ -656,7 +672,9 @@ impl TimelineMetrics {
             num_persistent_files_created,
             persistent_bytes_written,
             evictions,
-            evictions_with_low_residence_duration,
+            evictions_with_low_residence_duration: std::sync::RwLock::new(
+                evictions_with_low_residence_duration,
+            ),
         }
     }
 }
@@ -675,6 +693,8 @@ impl Drop for TimelineMetrics {
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
         self.evictions_with_low_residence_duration
+            .write()
+            .unwrap()
             .remove(tenant_id, timeline_id);
         for op in STORAGE_TIME_OPERATIONS {
             let _ =
