@@ -100,9 +100,10 @@ impl CertResolver {
         is_default: bool,
     ) -> anyhow::Result<()> {
         let priv_key = {
-            let key_bytes = std::fs::read(key_path).context("TLS key file")?;
-            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
+            let key_bytes = std::fs::read(key_path)
                 .context(format!("Failed to read TLS keys at '{key_path}'"))?;
+            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
+                .context(format!("Failed to parse TLS keys at '{key_path}'"))?;
 
             ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
             keys.pop().map(rustls::PrivateKey).unwrap()
