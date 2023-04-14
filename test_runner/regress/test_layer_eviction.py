@@ -6,7 +6,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
     wait_for_last_flush_lsn,
-    wait_for_sk_commit_lsn_to_reach_remote_storage,
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -199,7 +198,7 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
                     # with image_creation_threshold=1 which we will use on the last compaction
                     cur.execute("vacuum")
 
-                wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+                last_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
                 if i == 1 and j == 2 and k == 1:
                     # last iteration; stop before checkpoint to avoid leaving an inmemory layer
@@ -222,10 +221,8 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
         tenant_update_config({"image_creation_threshold": "1"})
         ps_http.timeline_compact(tenant_id, timeline_id)
 
-    # wait for all uploads to finish
-    wait_for_sk_commit_lsn_to_reach_remote_storage(
-        tenant_id, timeline_id, env.safekeepers, env.pageserver
-    )
+    # wait for all uploads to finish (checkpoint has been done above)
+    wait_for_upload(ps_http, tenant_id, timeline_id, last_lsn)
 
     # shutdown safekeepers to avoid on-demand downloads from walreceiver
     for sk in env.safekeepers:

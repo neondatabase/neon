@@ -12,8 +12,8 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
     available_remote_storages,
+    last_flush_lsn_upload,
     wait_for_last_flush_lsn,
-    wait_for_sk_commit_lsn_to_reach_remote_storage,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
@@ -207,9 +207,7 @@ def test_ondemand_download_timetravel(
     env.endpoints.stop_all()
 
     # wait until pageserver has successfully uploaded all the data to remote storage
-    wait_for_sk_commit_lsn_to_reach_remote_storage(
-        tenant_id, timeline_id, env.safekeepers, env.pageserver
-    )
+    wait_for_upload(client, tenant_id, timeline_id, current_lsn)
 
     def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
@@ -347,11 +345,8 @@ def test_download_remote_layers_api(
         """
         )
 
+    last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
     env.endpoints.stop_all()
-
-    wait_for_sk_commit_lsn_to_reach_remote_storage(
-        tenant_id, timeline_id, env.safekeepers, env.pageserver
-    )
 
     def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
