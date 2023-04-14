@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use utils::lsn::Lsn;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
     let mut layer_map = LayerMap::<LayerDescriptor>::default();
@@ -114,7 +114,7 @@ fn bench_from_captest_env(c: &mut Criterion) {
     c.bench_function("captest_uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1);
+                black_box(layer_map.search(q.0, q.1));
             }
         });
     });
@@ -122,11 +122,11 @@ fn bench_from_captest_env(c: &mut Criterion) {
     // test with a key that corresponds to the RelDir entry. See pgdatadir_mapping.rs.
     c.bench_function("captest_rel_dir_query", |b| {
         b.iter(|| {
-            let result = layer_map.search(
+            let result = black_box(layer_map.search(
                 Key::from_hex("000000067F00008000000000000000000001").unwrap(),
                 // This LSN is higher than any of the LSNs in the tree
                 Lsn::from_str("D0/80208AE1").unwrap(),
-            );
+            ));
             result.unwrap();
         });
     });
@@ -183,7 +183,7 @@ fn bench_from_real_project(c: &mut Criterion) {
     group.bench_function("uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1);
+                black_box(layer_map.search(q.0, q.1));
             }
         });
     });
@@ -232,7 +232,7 @@ fn bench_sequential(c: &mut Criterion) {
     group.bench_function("uniform_queries", |b| {
         b.iter(|| {
             for q in queries.clone().into_iter() {
-                layer_map.search(q.0, q.1);
+                black_box(layer_map.search(q.0, q.1));
             }
         });
     });
