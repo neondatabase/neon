@@ -152,11 +152,14 @@ components:
       type: object
       description: Compute startup metrics.
       required:
+        - wait_for_spec_ms
         - sync_safekeepers_ms
         - basebackup_ms
         - config_ms
         - total_startup_ms
       properties:
+        wait_for_spec_ms:
+          type: integer
         sync_safekeepers_ms:
           type: integer
         basebackup_ms:
@@ -181,6 +184,13 @@ components:
         - status
         - last_active
       properties:
+        start_time:
+          type: string
+          description: |
+            Time when compute was started. If initially compute was started in the `empty`
+            state and then provided with valid spec, `start_time` will be reset to the
+            moment, when spec was received.
+          example: "2022-10-12T07:20:50.52Z"
         status:
           $ref: '#/components/schemas/ComputeStatus'
         last_active:
