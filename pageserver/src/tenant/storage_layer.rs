@@ -222,10 +222,10 @@ impl LayerAccessStats {
     /// If we instead recorded the residence event with a timestamp from before grabbing the layer map lock,
     /// the following race could happen:
     ///
-    ///     Compact: Write out an L1 layer from several L0 layers. This records residence event LayerCreate with the current timestamp.
-    ///     Eviction: imitate access logical size calculation. This accesses the L0 layers because the L1 layer is not yet in the layer map.
-    ///     Compact: Grab layer map lock, add the new L1 to layer map and remove the L0s, release layer map lock.
-    ///     Eviction: observes the new L1 layer whose only activity timestamp is the LayerCreate event.
+    /// - Compact: Write out an L1 layer from several L0 layers. This records residence event LayerCreate with the current timestamp.
+    /// - Eviction: imitate access logical size calculation. This accesses the L0 layers because the L1 layer is not yet in the layer map.
+    /// - Compact: Grab layer map lock, add the new L1 to layer map and remove the L0s, release layer map lock.
+    /// - Eviction: observes the new L1 layer whose only activity timestamp is the LayerCreate event.
     ///
     pub(crate) fn record_residence_event<L>(
         &self,
