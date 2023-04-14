@@ -913,7 +913,7 @@ impl RemoteTimelineClientMetrics {
 pub(crate) struct RemoteTimelineClientCallMetricGuard {
     /// Decremented on drop.
     calls_unfinished_metric: Option<IntGauge>,
-    /// If Some(), this references the bytes_finished metric, and we increment it by the given `i64` on drop.
+    /// If Some(), this references the bytes_finished metric, and we increment it by the given `u64` on drop.
     bytes_finished: Option<(IntCounter, u64)>,
 }
 
