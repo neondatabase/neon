@@ -168,7 +168,7 @@ impl LayerAccessStats {
     /// using [`record_residence_event`] before calling `latest_activity`.
     /// If they don't, [`latest_activity`] will return `None`.
     pub(crate) fn empty_will_record_residence_event_later() -> Self {
-        LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()))
+        LayerAccessStats(Mutex::default())
     }
 
     /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
