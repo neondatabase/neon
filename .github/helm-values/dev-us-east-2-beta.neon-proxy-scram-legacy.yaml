@@ -1,6 +1,22 @@
 # Helm chart values for neon-proxy-scram.
 # This is a YAML-formatted file.
 
+deploymentStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 100%
+    maxUnavailable: 50%
+
+# Delay the kill signal by 5 minutes (5 * 60)
+# The pod(s) will stay in Terminating, keeps the existing connections
+# but doesn't receive new ones
+containerLifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep 300"]
+terminationGracePeriodSeconds: 604800
+
+
 image:
   repository: neondatabase/neon
 
