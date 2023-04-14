@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use url::form_urlencoded;
 use utils::http::{error::ApiError, json::json_response};
+use percent_encoding::percent_decode;
 
 // TODO: use `std::sync::Exclusive` once it's stabilized.
 // Tracking issue: https://github.com/rust-lang/rust/issues/98407.
@@ -232,7 +233,11 @@ async fn handle_sql(
         .map(|s| s.to_string())
         .ok_or(anyhow::anyhow!("missing host header"))?;
 
-    let params = StartupMessageParams::new([]);
+    let params = StartupMessageParams::new([
+        ("user", username.as_str()),
+        ("database", dbname.as_str()),
+        ("application_name", "proxy_http_sql"),
+    ]);
     let tls = config.tls_config.as_ref();
     let common_names = tls.and_then(|tls| tls.common_names.clone());
     let creds = config
@@ -256,15 +261,19 @@ async fn handle_sql(
         }
     };
 
+    let conn_string = &format!(
+        "host={} port={} user={} password={} dbname={}",
+        host,
+        conf.get_ports().first().expect("no port"),
+        username,
+        password,
+        dbname
+    );
+
+    info!("!!!! connecting to: {}", conn_string);
+
     let (client, connection) = tokio_postgres::connect(
-        &format!(
-            "host={} port={} user={} password={} dbname={}",
-            host,
-            conf.get_ports().first().expect("no port"),
-            username,
-            password,
-            dbname
-        ),
+        conn_string,
         tokio_postgres::NoTls,
     )
     .await?;
@@ -275,14 +284,21 @@ async fn handle_sql(
         }
     });
 
+    let sql = percent_decode(sql.as_bytes()).decode_utf8()?.to_string();
+    info!("!!!! query: '{}'", sql);
+
     let rows: Result<Vec<serde_json::Value>, anyhow::Error> = client
-        .query(sql, &[])
+        .query(&sql, &[])
         .await?
         .into_iter()
         .map(postgres_row_to_json_value)
         .collect();
 
-    Ok(serde_json::to_string(&rows?)?)
+    let rows = rows?;
+
+    info!("!!!! n_rows: {}", rows.len());
+
+    Ok(serde_json::to_string(&rows)?)
 }
 
 pub async fn task_main(

@@ -65,6 +65,7 @@ x509-parser.workspace = true
 
 workspace_hack.workspace = true
 tokio-util.workspace = true
+percent-encoding.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

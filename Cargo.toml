@@ -117,6 +117,7 @@ uuid = { version = "1.2", features = ["v4", "serde"] }
 walkdir = "2.3.2"
 webpki-roots = "0.23"
 x509-parser = "0.15"
+percent-encoding = "1.0"
 
 ## TODO replace this with tracing
 env_logger = "0.10"
