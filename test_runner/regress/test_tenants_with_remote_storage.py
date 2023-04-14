@@ -21,7 +21,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
     available_remote_storages,
-    wait_for_sk_commit_lsn_to_reach_remote_storage,
+    last_flush_lsn_upload,
 )
 from fixtures.pageserver.utils import (
     assert_tenant_state,
@@ -174,11 +174,8 @@ def test_tenants_attached_after_download(
     )
 
     ##### Stop the pageserver, erase its layer file to force it being downloaded from S3
+    last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
     env.endpoints.stop_all()
-
-    wait_for_sk_commit_lsn_to_reach_remote_storage(
-        tenant_id, timeline_id, env.safekeepers, env.pageserver
-    )
 
     env.pageserver.stop()
 
