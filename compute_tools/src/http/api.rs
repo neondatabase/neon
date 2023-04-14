@@ -85,7 +85,10 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let res = crate::checker::check_writability(compute).await;
             match res {
                 Ok(_) => Response::new(Body::from("true")),
-                Err(e) => Response::new(Body::from(e.to_string())),
+                Err(e) => {
+                    error!("check_writability failed: {}", e);
+                    Response::new(Body::from(e.to_string()))
+                }
             }
         }
 
