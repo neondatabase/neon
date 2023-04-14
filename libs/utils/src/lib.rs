@@ -54,6 +54,8 @@ pub mod measured_stream;
 pub mod serde_percent;
 pub mod serde_regex;
 
+pub mod rate_limit_closure;
+
 /// use with fail::cfg("$name", "return(2000)")
 #[macro_export]
 macro_rules! failpoint_sleep_millis_async {

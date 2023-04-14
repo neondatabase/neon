@@ -4131,15 +4131,8 @@ impl Timeline {
                 continue;
             }
 
-            let last_activity_ts = match l.access_stats().latest_activity() {
-                Some(ts) => ts,
-                None => {
-                    // If we're under disk pressure, we should not hide this layer's existence.
-                    // Log a warning and
-                    warn!(layer=%l.filename().file_name(), "latest activity not available, did we forget to add a residence event?");
-                    SystemTime::UNIX_EPOCH
-                }
-            };
+            // Use UNIX_EPOCH as a fallback timestamp in case we have a bug and forget to record a residence event for the layer.
+            let last_activity_ts = l.access_stats().latest_activity(|| SystemTime::UNIX_EPOCH);
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
                 layer: l,

@@ -15,6 +15,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
+use once_cell::sync::Lazy;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
@@ -22,8 +23,10 @@ use pageserver_api::models::{
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::warn;
 use utils::history_buffer::HistoryBufferWithDropCounter;
+use utils::rate_limit_closure::RateLimitClosure;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -297,16 +300,44 @@ impl LayerAccessStats {
         ret
     }
 
-    /// Get the latest access timestamp, with fallback for latest residence event.
+    /// Get the latest access timestamp, falling back to latest residence event, falling back to `fallback`.
     ///
-    /// To guarantee that this method returns `Some`, make sure to record a residence event first.
-    /// Use the [`record_residence_event`] method for that.
-    pub(crate) fn latest_activity(&self) -> Option<SystemTime> {
+    /// The `fallback` must be supplied for the case where there has not yet been a call to the
+    /// [`record_residence_event`] method.
+    /// If `fallback` needs to be used, we log a rate-limited warning in global scope.
+    pub(crate) fn latest_activity<F>(&self, fallback: F) -> SystemTime
+    where
+        F: FnOnce() -> SystemTime,
+    {
         let locked = self.0.lock().unwrap();
         let inner = &locked.for_eviction_policy;
         match inner.last_accesses.recent() {
-            Some(a) => Some(a.when),
-            None => inner.last_residence_changes.recent().map(|e| e.timestamp),
+            Some(a) => a.when,
+            None => match inner.last_residence_changes.recent() {
+                Some(e) => e.timestamp,
+                None => {
+                    // TODO: use type system to avoid the need for `fallback`.
+                    // The approach in https://github.com/neondatabase/neon/pull/3775
+                    // could be used to enforce that a residence event is recorded
+                    // before a layer is added to the layer map. We could also have
+                    // a layer wrapper type that holds the LayerAccessStats, and ensure
+                    // that that type can only be produced by inserting into the layer map.
+                    static WARN_RATE_LIMIT: Lazy<Mutex<(usize, RateLimitClosure)>> =
+                        Lazy::new(|| {
+                            Mutex::new((0, RateLimitClosure::new(Duration::from_secs(10))))
+                        });
+                    let mut guard = WARN_RATE_LIMIT.lock().unwrap();
+                    guard.0 += 1;
+                    let occurences = guard.0;
+                    guard.1.call(move || {
+                        // Spawn a new task to have a new tracing root. It's ok, it only happens every 10 secs.
+                        tokio::spawn(async move {
+                            warn!(occurences, "latest_activity not available, this is an implementation bug, using fallback value");
+                        });
+                    });
+                    fallback()
+                }
+            },
         }
     }
 }

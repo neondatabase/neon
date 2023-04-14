@@ -184,18 +184,14 @@ impl Timeline {
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
-                let last_activity_ts = match hist_layer.access_stats().latest_activity() {
-                    Some(ts) => ts,
-                    None => {
-                        // This is an implementation error.
-                        // Give the layer a free ride and hope someone notices the warning.
-                        // If this gets us under disk pressure, disk-usage-based eviction will save us.
-                        // At that point, someone will definitely notice the warning in the logs.
-                        warn!(layer=%hist_layer.filename().file_name(), "latest activity not available, likely implementation error, ignoring layer");
-                        stats.errors += 1;
-                        continue;
-                    }
-                };
+
+                let last_activity_ts = hist_layer.access_stats().latest_activity(|| {
+                    // We only use this fallback if there's an implementation error.
+                    // `latest_activity` already does rate-limited warn!() log.
+                    debug!(layer=%hist_layer.filename().file_name(), "last_activity giving layer a free ride");
+                    SystemTime::now()
+                });
+
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
                     Err(_e) => {
