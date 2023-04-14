@@ -15,6 +15,7 @@ use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
 use pq_proto::StartupMessageParams;
 
+use percent_encoding::percent_decode;
 use std::{
     convert::Infallible,
     future::ready,
@@ -31,7 +32,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use url::form_urlencoded;
 use utils::http::{error::ApiError, json::json_response};
-use percent_encoding::percent_decode;
 
 // TODO: use `std::sync::Exclusive` once it's stabilized.
 // Tracking issue: https://github.com/rust-lang/rust/issues/98407.
@@ -190,7 +190,13 @@ async fn ws_handler(
         Ok(response)
     } else if request.uri().path() == "/sql" {
         match handle_sql(config, request).await {
-            Ok(resp) => json_response(StatusCode::OK, resp),
+            Ok(resp) => json_response(StatusCode::OK, resp).map(|mut r| {
+                r.headers_mut().insert(
+                    "Access-Control-Allow-Origin",
+                    hyper::http::HeaderValue::from_static("*"),
+                );
+                r
+            }),
             Err(e) => json_response(StatusCode::BAD_REQUEST, format!("error: {e:?}")),
         }
     } else {
@@ -272,11 +278,7 @@ async fn handle_sql(
 
     info!("!!!! connecting to: {}", conn_string);
 
-    let (client, connection) = tokio_postgres::connect(
-        conn_string,
-        tokio_postgres::NoTls,
-    )
-    .await?;
+    let (client, connection) = tokio_postgres::connect(conn_string, tokio_postgres::NoTls).await?;
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {

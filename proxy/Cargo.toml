@@ -23,7 +23,7 @@ hmac.workspace = true
 hostname.workspace = true
 humantime.workspace = true
 hyper-tungstenite.workspace = true
-hyper.workspace = true
+hyper = { workspace = true, features = ["http2", "http1", "tcp", "runtime"] }
 itertools.workspace = true
 md5.workspace = true
 metrics.workspace = true
