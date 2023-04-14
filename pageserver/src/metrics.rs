@@ -918,10 +918,9 @@ pub(crate) struct RemoteTimelineClientCallMetricGuard {
 }
 
 impl RemoteTimelineClientCallMetricGuard {
-    /// Consume this guard object without decrementing the metric.
-    /// The caller vouches to do this manually, so that the prior increment of the gauge will cancel out.
+    /// Consume this guard object without performing the metric updates it would do on `drop()`.
+    /// The caller vouches to do the metric updates manually.
     pub fn will_decrement_manually(mut self) {
-        // prevent drop() from decrementing
         let RemoteTimelineClientCallMetricGuard {
             calls_unfinished_metric,
             bytes_finished,
@@ -958,9 +957,9 @@ pub(crate) enum RemoteTimelineClientMetricsCallTrackSize {
 }
 
 impl RemoteTimelineClientMetrics {
-    /// Increment the metrics that track ongoing calls to the remote timeline client instance.
+    /// Update the metrics that change when a call to the remote timeline client instance starts.
     ///
-    /// Drop the returned guard object once the operation is finished to decrement the values.
+    /// Drop the returned guard object once the operation is finished to updates corresponding metrics that track completions.
     /// Or, use [`RemoteTimelineClientCallMetricGuard::will_decrement_manually`] and [`call_end`] if that
     /// is more suitable.
     /// Never do both.
@@ -992,7 +991,7 @@ impl RemoteTimelineClientMetrics {
         }
     }
 
-    /// Manually decrement the metric instead of using the guard object.
+    /// Manually udpate the metrics that track completions, instead of using the guard object.
     /// Using the guard object is generally preferable.
     /// See [`call_begin`] for more context.
     pub(crate) fn call_end(
