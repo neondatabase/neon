@@ -81,6 +81,12 @@ pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
             log_layer.with_filter(rust_log_env_filter())
         })
         .with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()))
+        .with({
+            // At this time, we only use tracing_error for asserting that
+            // log spans contain tenant and timeline ids.
+            // So, use the same filter that logging uses.
+            tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter())
+        })
         .init();
 
     Ok(())
