@@ -1,8 +1,11 @@
+use crate::http::pg_to_json::postgres_row_to_json_value;
 use crate::{
-    cancellation::CancelMap, config::ProxyConfig, error::io_error, proxy::handle_ws_client,
+    auth, cancellation::CancelMap, config::ProxyConfig, console, error::io_error,
+    proxy::handle_ws_client,
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
+use hashbrown::HashMap;
 use hyper::{
     server::{accept, conn::AddrIncoming},
     upgrade::Upgraded,
@@ -10,6 +13,8 @@ use hyper::{
 };
 use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
+use pq_proto::StartupMessageParams;
+
 use std::{
     convert::Infallible,
     future::ready,
@@ -24,6 +29,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
+use url::form_urlencoded;
 use utils::http::{error::ApiError, json::json_response};
 
 // TODO: use `std::sync::Exclusive` once it's stabilized.
@@ -181,9 +187,102 @@ async fn ws_handler(
 
         // Return the response so the spawned future can continue.
         Ok(response)
+    } else if request.uri().path() == "/sql" {
+        match handle_sql(config, request).await {
+            Ok(resp) => json_response(StatusCode::OK, resp),
+            Err(e) => json_response(StatusCode::BAD_REQUEST, format!("error: {e:?}")),
+        }
     } else {
-        json_response(StatusCode::OK, "Connect with a websocket client")
+        json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }
+}
+
+// XXX: return different error codes
+async fn handle_sql(
+    config: &'static ProxyConfig,
+    request: Request<Body>,
+) -> anyhow::Result<String> {
+    let get_params = request
+        .uri()
+        .query()
+        .ok_or(anyhow::anyhow!("missing query string"))?;
+
+    let parsed_params: HashMap<String, String> = form_urlencoded::parse(get_params.as_bytes())
+        .into_owned()
+        .collect();
+
+    let sql = parsed_params
+        .get("query")
+        .ok_or(anyhow::anyhow!("missing query"))?;
+    let dbname = parsed_params
+        .get("dbname")
+        .ok_or(anyhow::anyhow!("missing dbname"))?;
+    let username = parsed_params
+        .get("username")
+        .ok_or(anyhow::anyhow!("missing username"))?;
+    let password = parsed_params
+        .get("password")
+        .ok_or(anyhow::anyhow!("missing password"))?;
+    // XXX: does URI includes host too? then Url::parse() should work for both host_str and params
+    let hostname = request
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.split(':').next())
+        .map(|s| s.to_string())
+        .ok_or(anyhow::anyhow!("missing host header"))?;
+
+    let params = StartupMessageParams::new([]);
+    let tls = config.tls_config.as_ref();
+    let common_names = tls.and_then(|tls| tls.common_names.clone());
+    let creds = config
+        .auth_backend
+        .as_ref()
+        .map(|_| auth::ClientCredentials::parse(&params, Some(hostname.as_str()), common_names))
+        .transpose()?;
+
+    let extra = console::ConsoleReqExtra {
+        session_id: uuid::Uuid::new_v4(),
+        application_name: Some("proxy_http_sql"),
+    };
+
+    let node = creds.wake_compute(&extra).await?.expect("msg");
+    let conf = node.value.config;
+
+    let host = match conf.get_hosts().first().expect("no host") {
+        tokio_postgres::config::Host::Tcp(host) => host,
+        tokio_postgres::config::Host::Unix(_) => {
+            return Err(anyhow::anyhow!("unix socket is not supported"));
+        }
+    };
+
+    let (client, connection) = tokio_postgres::connect(
+        &format!(
+            "host={} port={} user={} password={} dbname={}",
+            host,
+            conf.get_ports().first().expect("no port"),
+            username,
+            password,
+            dbname
+        ),
+        tokio_postgres::NoTls,
+    )
+    .await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    let rows: Result<Vec<serde_json::Value>, anyhow::Error> = client
+        .query(sql, &[])
+        .await?
+        .into_iter()
+        .map(postgres_row_to_json_value)
+        .collect();
+
+    Ok(serde_json::to_string(&rows?)?)
 }
 
 pub async fn task_main(
