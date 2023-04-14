@@ -905,7 +905,7 @@ impl RemoteTimelineClient {
             UploadOp::UploadLayer(_, m) => (
                 RemoteOpFileKind::Layer,
                 RemoteOpKind::Upload,
-                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size().try_into().unwrap()),
+                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size()),
             ),
             UploadOp::UploadMetadata(_, _) => (
                 RemoteOpFileKind::Index,
