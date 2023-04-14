@@ -1274,7 +1274,7 @@ impl Timeline {
             .unwrap_or(conf.default_tenant_conf.max_lsn_wal_lag);
         let evictions_low_residence_duration_metric_threshold =
             Self::get_evictions_low_residence_duration_metric_threshold(
-                &*tenant_conf_guard,
+                &tenant_conf_guard,
                 &conf.default_tenant_conf,
             );
         drop(tenant_conf_guard);
