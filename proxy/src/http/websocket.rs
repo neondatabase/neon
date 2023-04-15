@@ -9,8 +9,7 @@ use hashbrown::HashMap;
 use hyper::{
     server::{accept, conn::AddrIncoming},
     upgrade::Upgraded,
-    Body, Request, Response, StatusCode,
-    Method
+    Body, Method, Request, Response, StatusCode,
 };
 use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
