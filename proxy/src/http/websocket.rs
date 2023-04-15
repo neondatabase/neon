@@ -9,7 +9,7 @@ use hashbrown::HashMap;
 use hyper::{
     server::{accept, conn::AddrIncoming},
     upgrade::Upgraded,
-    Body, Request, Response, StatusCode,
+    Body, Method, Request, Response, StatusCode,
 };
 use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
@@ -188,7 +188,7 @@ async fn ws_handler(
 
         // Return the response so the spawned future can continue.
         Ok(response)
-    } else if request.uri().path() == "/sql" {
+    } else if request.uri().path() == "/sql" && request.method() == Method::POST {
         match handle_sql(config, request).await {
             Ok(resp) => json_response(StatusCode::OK, resp).map(|mut r| {
                 r.headers_mut().insert(
