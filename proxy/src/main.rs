@@ -32,6 +32,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::{project_git_version, sentry_init::init_sentry};
 
+use crate::http::websocket::ConnectionCache;
+
 project_git_version!(GIT_VERSION);
 
 /// Flattens `Result<Result<T>>` into `Result<T>`.
@@ -52,6 +54,8 @@ async fn main() -> anyhow::Result<()> {
 
     let args = cli().get_matches();
     let config = build_config(&args)?;
+
+    let wsconn_cache = Box::leak(Box::new(ConnectionCache::new()));
 
     info!("Authentication backend: {}", config.auth_backend);
 
@@ -82,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
 
         client_tasks.push(tokio::spawn(http::websocket::task_main(
             config,
+            wsconn_cache,
             wss_listener,
             cancellation_token.clone(),
         )));
