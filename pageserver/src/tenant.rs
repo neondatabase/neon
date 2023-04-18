@@ -1069,7 +1069,12 @@ impl Tenant {
                     let index_part = match index_part {
                         MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
                         MaybeDeletedIndexPart::Deleted => {
-                            info!("is_deleted is set on remote, skipping");
+                            info!("is_deleted is set on remote, proceeding to remove local data");
+                            std::fs::remove_dir_all(
+                                self.conf.timeline_path(&timeline_id, &self.tenant_id),
+                            )
+                            .context("remove_dir_all")?;
+
                             return Ok(());
                         }
                     };
