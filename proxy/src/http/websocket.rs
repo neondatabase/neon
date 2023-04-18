@@ -198,6 +198,10 @@ async fn ws_handler(
             }),
             Err(e) => json_response(StatusCode::BAD_REQUEST, format!("error: {e:?}")),
         }
+    } else if request.uri().path() == "/sleep" {
+        // sleep 15ms
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        json_response(StatusCode::OK, "done")
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }
