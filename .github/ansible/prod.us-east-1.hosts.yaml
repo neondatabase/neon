@@ -34,11 +34,11 @@ storage:
     pageservers:
       hosts:
         pageserver-0.us-east-1.aws.neon.tech:
-          ansible_host: i-0f58137883429f55a
+          ansible_host: i-085222088b0d2e0c7
         pageserver-1.us-east-1.aws.neon.tech:
-          ansible_host: i-08e7ee6190a099019
+          ansible_host: i-0969d4f684d23a21e
         pageserver-2.us-east-1.aws.neon.tech:
-          ansible_host: i-0686a4e5e208e31a1
+          ansible_host: i-05dee87895da58dad
 
     safekeepers:
       hosts:
