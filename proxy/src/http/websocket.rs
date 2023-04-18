@@ -1,11 +1,9 @@
-use crate::http::pg_to_json::postgres_row_to_json_value;
 use crate::{
     auth, cancellation::CancelMap, config::ProxyConfig, console, error::io_error,
     proxy::handle_ws_client,
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
-use hashbrown::HashMap;
 use hyper::{
     server::{accept, conn::AddrIncoming},
     upgrade::Upgraded,
@@ -16,6 +14,7 @@ use pin_project_lite::pin_project;
 use pq_proto::StartupMessageParams;
 
 use percent_encoding::percent_decode;
+use std::collections::HashMap;
 use std::{
     convert::Infallible,
     future::ready,
@@ -287,18 +286,25 @@ async fn handle_sql(
     });
 
     let sql = percent_decode(sql.as_bytes()).decode_utf8()?.to_string();
-    info!("!!!! query: '{}'", sql);
 
-    let rows: Result<Vec<serde_json::Value>, anyhow::Error> = client
-        .query(&sql, &[])
+    let rows: Vec<HashMap<_, _>> = client
+        .simple_query(&sql)
         .await?
         .into_iter()
-        .map(postgres_row_to_json_value)
+        .filter_map(|el| {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = el {
+                let mut serilaized_row: HashMap<String, String> = HashMap::new();
+                for i in 0..row.len() {
+                    let col = row.columns().get(i).map_or("?", |c| c.name());
+                    let val = row.get(i).unwrap_or("?");
+                    serilaized_row.insert(col.into(), val.into());
+                }
+                Some(serilaized_row)
+            } else {
+                None
+            }
+        })
         .collect();
-
-    let rows = rows?;
-
-    info!("!!!! n_rows: {}", rows.len());
 
     Ok(serde_json::to_string(&rows)?)
 }
