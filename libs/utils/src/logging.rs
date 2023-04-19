@@ -24,24 +24,31 @@ impl LogFormat {
 }
 
 pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
-    let default_filter_str = "info";
+    // NB: the order of the with() calls does not matter.
+    // See https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with({
+            let default_filter_str = "info";
 
-    // We fall back to printing all spans at info-level or above if
-    // the RUST_LOG environment variable is not set.
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter_str));
+            // We fall back to printing all spans at info-level or above if
+            // the RUST_LOG environment variable is not set.
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter_str));
 
-    let base_logger = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(false)
-        .with_ansi(atty::is(atty::Stream::Stdout))
-        .with_writer(std::io::stdout);
-
-    match log_format {
-        LogFormat::Json => base_logger.json().init(),
-        LogFormat::Plain => base_logger.init(),
-        LogFormat::Test => base_logger.with_test_writer().init(),
-    }
+            let log_layer = tracing_subscriber::fmt::layer()
+                .with_filter(env_filter)
+                .with_target(false)
+                .with_ansi(atty::is(atty::Stream::Stdout))
+                .with_writer(std::io::stdout);
+            let log_layer = match log_format {
+                LogFormat::Json => log_layer.json().boxed(),
+                LogFormat::Plain => log_layer.boxed(),
+                LogFormat::Test => log_layer.with_test_writer().boxed(),
+            };
+            log_layer
+        })
+        .init();
 
     Ok(())
 }
