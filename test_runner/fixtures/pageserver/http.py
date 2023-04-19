@@ -543,3 +543,13 @@ class PageserverHttpClient(requests.Session):
     def tenant_break(self, tenant_id: TenantId):
         res = self.put(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/break")
         self.verbose_error(res)
+
+    def post_tracing_event(self, level: str, message: str):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tracing/event",
+            json={
+                "level": level,
+                "message": message,
+            },
+        )
+        self.verbose_error(res)

@@ -1175,6 +1175,36 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     )
 }
 
+async fn post_tracing_event_handler(mut r: Request<Body>) -> Result<Response<Body>, ApiError> {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum Level {
+        ERROR,
+        WARN,
+        INFO,
+        DEBUG,
+        TRACE,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    struct Request {
+        level: Level,
+        message: String,
+    }
+    let body: Request = json_request(&mut r)
+        .await
+        .map_err(|_| ApiError::BadRequest(anyhow::anyhow!("invalid JSON body")))?;
+
+    match body.level {
+        Level::ERROR => tracing::error!(?body.message),
+        Level::WARN => tracing::warn!(?body.message),
+        Level::INFO => tracing::info!(?body.message),
+        Level::DEBUG => tracing::debug!(?body.message),
+        Level::TRACE => tracing::trace!(?body.message),
+    }
+
+    json_response(StatusCode::OK, ())
+}
+
 pub fn make_router(
     conf: &'static PageServerConf,
     launch_ts: &'static LaunchTimestamp,
@@ -1315,5 +1345,9 @@ pub fn make_router(
             testing_api!("set tenant state to broken", handle_tenant_break),
         )
         .get("/v1/panic", |r| RequestSpan(always_panic_handler).handle(r))
+        .post(
+            "/v1/tracing/event",
+            testing_api!("emit a tracing event", post_tracing_event_handler),
+        )
         .any(handler_404))
 }
