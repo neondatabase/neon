@@ -48,8 +48,8 @@ def pytest_addoption(parser: Parser):
 def pg_version(request: FixtureRequest) -> Iterator[PgVersion]:
     if v := request.config.getoption("--pg-version"):
         version, source = v, "from --pg-version commad-line argument"
-    elif v := os.environ.get("PG_VERSION"):
-        version, source = PgVersion(v), "from PG_VERSION environment variable"
+    elif v := os.environ.get("DEFAULT_PG_VERSION"):
+        version, source = PgVersion(v), "from DEFAULT_PG_VERSION environment variable"
     else:
         version, source = DEFAULT_VERSION, "default verson"
 
