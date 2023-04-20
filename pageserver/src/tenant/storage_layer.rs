@@ -4,6 +4,7 @@ pub mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
+pub(crate) mod layer_contents;
 mod remote_layer;
 
 use crate::config::PageServerConf;
