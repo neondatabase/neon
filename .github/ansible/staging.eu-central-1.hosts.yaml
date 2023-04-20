@@ -1,0 +1,46 @@
+storage:
+  vars:
+    bucket_name: neon-dev-storage-eu-central-1
+    bucket_region: eu-central-1
+    console_mgmt_base_url: http://neon-internal-api.helium.aws.neon.build
+    broker_endpoint: http://storage-broker-lb.alpha.eu-central-1.internal.aws.neon.build:50051
+    pageserver_config_stub:
+      pg_distrib_dir: /usr/local
+      metric_collection_endpoint: http://neon-internal-api.helium.aws.neon.build/billing/api/v1/usage_events
+      metric_collection_interval: 10min
+      disk_usage_based_eviction:
+        max_usage_pct: 80
+        min_avail_bytes: 0
+        period: "10s"
+      tenant_config:
+        eviction_policy:
+          kind: "LayerAccessThreshold"
+          period: "20m"
+          threshold: &default_eviction_threshold "20m"
+      evictions_low_residence_duration_metric_threshold: *default_eviction_threshold
+      remote_storage:
+        bucket_name: "{{ bucket_name }}"
+        bucket_region: "{{ bucket_region }}"
+        prefix_in_bucket: "pageserver/v1"
+    safekeeper_s3_prefix: safekeeper/v1/wal
+    hostname_suffix: ""
+    remote_user: ssm-user
+    ansible_aws_ssm_region: eu-central-1
+    ansible_aws_ssm_bucket_name: neon-dev-storage-eu-central-1
+    console_region_id: aws-eu-central-1
+    sentry_environment: staging
+
+  children:
+    pageservers:
+      hosts:
+        pageserver-0.eu-central-1.aws.neon.build:
+          ansible_host: i-011f93ec26cfba2d4
+
+    safekeepers:
+      hosts:
+        safekeeper-0.eu-central-1.aws.neon.build:
+          ansible_host: i-0ff026d27babf8ddd
+        safekeeper-1.eu-central-1.aws.neon.build:
+          ansible_host: i-03983a49ee54725d9
+        safekeeper-2.eu-central-1.aws.neon.build:
+          ansible_host: i-0bd025ecdb61b0db3
