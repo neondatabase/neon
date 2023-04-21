@@ -1179,11 +1179,11 @@ async fn post_tracing_event_handler(mut r: Request<Body>) -> Result<Response<Bod
     #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "lowercase")]
     enum Level {
-        ERROR,
-        WARN,
-        INFO,
-        DEBUG,
-        TRACE,
+        Error,
+        Warn,
+        Info,
+        Debug,
+        Trace,
     }
     #[derive(Debug, serde::Deserialize)]
     struct Request {
@@ -1195,11 +1195,11 @@ async fn post_tracing_event_handler(mut r: Request<Body>) -> Result<Response<Bod
         .map_err(|_| ApiError::BadRequest(anyhow::anyhow!("invalid JSON body")))?;
 
     match body.level {
-        Level::ERROR => tracing::error!(?body.message),
-        Level::WARN => tracing::warn!(?body.message),
-        Level::INFO => tracing::info!(?body.message),
-        Level::DEBUG => tracing::debug!(?body.message),
-        Level::TRACE => tracing::trace!(?body.message),
+        Level::Error => tracing::error!(?body.message),
+        Level::Warn => tracing::warn!(?body.message),
+        Level::Info => tracing::info!(?body.message),
+        Level::Debug => tracing::debug!(?body.message),
+        Level::Trace => tracing::trace!(?body.message),
     }
 
     json_response(StatusCode::OK, ())

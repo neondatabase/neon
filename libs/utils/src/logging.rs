@@ -80,7 +80,7 @@ pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
             };
             log_layer.with_filter(rust_log_env_filter())
         })
-        .with(TracingEventCountLayer(&*TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()))
+        .with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()))
         .init();
 
     Ok(())
