@@ -4,7 +4,6 @@
 from pathlib import Path
 
 import pytest
-import subprocess
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
