@@ -18,6 +18,7 @@ use tracing_utils::http::OtelName;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
+        start_time: state.start_time,
         tenant: state
             .pspec
             .as_ref()

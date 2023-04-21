@@ -14,6 +14,7 @@ pub struct GenericAPIError {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeStatusResponse {
+    pub start_time: DateTime<Utc>,
     pub tenant: Option<String>,
     pub timeline: Option<String>,
     pub status: ComputeStatus,
@@ -63,6 +64,7 @@ where
 /// Response of the /metrics.json API
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ComputeMetrics {
+    pub wait_for_spec_ms: u64,
     pub sync_safekeepers_ms: u64,
     pub basebackup_ms: u64,
     pub config_ms: u64,
@@ -75,4 +77,16 @@ pub struct ComputeMetrics {
 #[derive(Deserialize, Debug)]
 pub struct ControlPlaneSpecResponse {
     pub spec: Option<ComputeSpec>,
+    pub status: ControlPlaneComputeStatus,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneComputeStatus {
+    // Compute is known to control-plane, but it's not
+    // yet attached to any timeline / endpoint.
+    Empty,
+    // Compute is attached to some timeline / endpoint and
+    // should be able to start with provided spec.
+    Attached,
 }

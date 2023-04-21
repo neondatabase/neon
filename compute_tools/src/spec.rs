@@ -4,42 +4,117 @@ use std::str::FromStr;
 use anyhow::{anyhow, bail, Result};
 use postgres::config::Config;
 use postgres::{Client, NoTls};
-use tracing::{info, info_span, instrument, span_enabled, warn, Level};
+use reqwest::StatusCode;
+use tracing::{error, info, info_span, instrument, span_enabled, warn, Level};
 
 use crate::config;
 use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
-use compute_api::responses::ControlPlaneSpecResponse;
+use compute_api::responses::{ControlPlaneComputeStatus, ControlPlaneSpecResponse};
 use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
+
+// Do control plane request and return response if any. In case of error it
+// returns a bool flag indicating whether it makes sense to retry the request
+// and a string with error message.
+fn do_control_plane_request(
+    uri: &str,
+    jwt: &str,
+) -> Result<ControlPlaneSpecResponse, (bool, String)> {
+    let resp = reqwest::blocking::Client::new()
+        .get(uri)
+        .header("Authorization", jwt)
+        .send()
+        .map_err(|e| {
+            (
+                true,
+                format!("could not perform spec request to control plane: {}", e),
+            )
+        })?;
+
+    match resp.status() {
+        StatusCode::OK => match resp.json::<ControlPlaneSpecResponse>() {
+            Ok(spec_resp) => Ok(spec_resp),
+            Err(e) => Err((
+                true,
+                format!("could not deserialize control plane response: {}", e),
+            )),
+        },
+        StatusCode::SERVICE_UNAVAILABLE => {
+            Err((true, "control plane is temporarily unavailable".to_string()))
+        }
+        StatusCode::BAD_GATEWAY => {
+            // We have a problem with intermittent 502 errors now
+            // https://github.com/neondatabase/cloud/issues/2353
+            // It's fine to retry GET request in this case.
+            Err((true, "control plane request failed with 502".to_string()))
+        }
+        // Another code, likely 500 or 404, means that compute is unknown to the control plane
+        // or some internal failure happened. Doesn't make much sense to retry in this case.
+        _ => Err((
+            false,
+            format!(
+                "unexpected control plane response status code: {}",
+                resp.status()
+            ),
+        )),
+    }
+}
 
 /// Request spec from the control-plane by compute_id. If `NEON_CONSOLE_JWT`
 /// env variable is set, it will be used for authorization.
-pub fn get_spec_from_control_plane(base_uri: &str, compute_id: &str) -> Result<ComputeSpec> {
+pub fn get_spec_from_control_plane(
+    base_uri: &str,
+    compute_id: &str,
+) -> Result<Option<ComputeSpec>> {
     let cp_uri = format!("{base_uri}/management/api/v2/computes/{compute_id}/spec");
-    let jwt: String = match std::env::var("NEON_CONSOLE_JWT") {
+    let jwt: String = match std::env::var("NEON_CONTROL_PLANE_TOKEN") {
         Ok(v) => v,
         Err(_) => "".to_string(),
     };
+    let mut attempt = 1;
+    let mut spec: Result<Option<ComputeSpec>> = Ok(None);
+
     info!("getting spec from control plane: {}", cp_uri);
 
-    // TODO: check the response. We should distinguish cases when it's
-    // - network error, then retry
-    // - no spec for compute yet, then wait
-    // - compute id is unknown or any other error, then bail out
-    let resp: ControlPlaneSpecResponse = reqwest::blocking::Client::new()
-        .get(cp_uri)
-        .header("Authorization", jwt)
-        .send()
-        .map_err(|e| anyhow!("could not send spec request to control plane: {}", e))?
-        .json()
-        .map_err(|e| anyhow!("could not get compute spec from control plane: {}", e))?;
+    // Do 3 attempts to get spec from the control plane using the following logic:
+    // - network error -> then retry
+    // - compute id is unknown or any other error -> bail out
+    // - no spec for compute yet (Empty state) -> return Ok(None)
+    // - got spec -> return Ok(Some(spec))
+    while attempt < 4 {
+        spec = match do_control_plane_request(&cp_uri, &jwt) {
+            Ok(spec_resp) => match spec_resp.status {
+                ControlPlaneComputeStatus::Empty => Ok(None),
+                ControlPlaneComputeStatus::Attached => {
+                    if let Some(spec) = spec_resp.spec {
+                        Ok(Some(spec))
+                    } else {
+                        bail!("compute is attached, but spec is empty")
+                    }
+                }
+            },
+            Err((retry, msg)) => {
+                if retry {
+                    Err(anyhow!(msg))
+                } else {
+                    bail!(msg);
+                }
+            }
+        };
 
-    if let Some(spec) = resp.spec {
-        Ok(spec)
-    } else {
-        bail!("could not get compute spec from control plane")
+        if let Err(e) = &spec {
+            error!("attempt {} to get spec failed with: {}", attempt, e);
+        } else {
+            return spec;
+        }
+
+        attempt += 1;
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+
+    // All attempts failed, return error.
+    spec
 }
 
 /// It takes cluster specification and does the following:

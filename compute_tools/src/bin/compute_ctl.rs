@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     // Try to use just 'postgres' if no path is provided
     let pgbin = matches.get_one::<String>("pgbin").unwrap();
 
-    let mut spec = None;
+    let spec;
     let mut live_config_allowed = false;
     match spec_json {
         // First, try to get cluster spec from the cli argument
@@ -89,9 +89,13 @@ fn main() -> Result<()> {
             } else if let Some(id) = compute_id {
                 if let Some(cp_base) = control_plane_uri {
                     live_config_allowed = true;
-                    if let Ok(s) = get_spec_from_control_plane(cp_base, id) {
-                        spec = Some(s);
-                    }
+                    spec = match get_spec_from_control_plane(cp_base, id) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!("cannot get response from control plane: {}", e);
+                            panic!("neither spec nor confirmation that compute is in the Empty state was received");
+                        }
+                    };
                 } else {
                     panic!("must specify both --control-plane-uri and --compute-id or none");
                 }
@@ -114,7 +118,6 @@ fn main() -> Result<()> {
         spec_set = false;
     }
     let compute_node = ComputeNode {
-        start_time: Utc::now(),
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
@@ -147,6 +150,17 @@ fn main() -> Result<()> {
     let mut state = compute.state.lock().unwrap();
     let pspec = state.pspec.as_ref().expect("spec must be set");
     let startup_tracing_context = pspec.spec.startup_tracing_context.clone();
+
+    // Record for how long we slept waiting for the spec.
+    state.metrics.wait_for_spec_ms = Utc::now()
+        .signed_duration_since(state.start_time)
+        .to_std()
+        .unwrap()
+        .as_millis() as u64;
+    // Reset start time to the actual start of the configuration, so that
+    // total startup time was properly measured at the end.
+    state.start_time = Utc::now();
+
     state.status = ComputeStatus::Init;
     compute.state_changed.notify_all();
     drop(state);

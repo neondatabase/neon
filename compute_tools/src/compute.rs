@@ -38,7 +38,6 @@ use crate::spec::*;
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
-    pub start_time: DateTime<Utc>,
     // Url type maintains proper escaping
     pub connstr: url::Url,
     pub pgdata: String,
@@ -66,6 +65,7 @@ pub struct ComputeNode {
 
 #[derive(Clone, Debug)]
 pub struct ComputeState {
+    pub start_time: DateTime<Utc>,
     pub status: ComputeStatus,
     /// Timestamp of the last Postgres activity
     pub last_active: DateTime<Utc>,
@@ -77,6 +77,7 @@ pub struct ComputeState {
 impl ComputeState {
     pub fn new() -> Self {
         Self {
+            start_time: Utc::now(),
             status: ComputeStatus::Empty,
             last_active: Utc::now(),
             error: None,
@@ -425,7 +426,7 @@ impl ComputeNode {
                 .unwrap()
                 .as_millis() as u64;
             state.metrics.total_startup_ms = startup_end_time
-                .signed_duration_since(self.start_time)
+                .signed_duration_since(compute_state.start_time)
                 .to_std()
                 .unwrap()
                 .as_millis() as u64;
