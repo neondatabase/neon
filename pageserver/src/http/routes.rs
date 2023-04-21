@@ -1039,17 +1039,22 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
 // Dump the timeline's layermap's layers' contents into stdout
 // Note that this may download all layers of the layermap
 #[cfg(feature = "testing")]
-async fn timeline_dump_layerfile_contents(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_dump_layerfile_contents(
+    request: Request<Body>
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let tenant = mgr::get_tenant(tenant_id, true).await?;
-    let timeline = tenant.get_timeline(timeline_id, true)?;
+    let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
 
-    timeline.dump_layermap(&ctx)?;
+    let res = timeline.dump_layermap(&ctx);
 
-    json_response(StatusCode::OK, ())
+    if res.is_err() {
+        json_response(StatusCode::INTERNAL_SERVER_ERROR, ())
+    } else {
+        json_response(StatusCode::OK, ())
+    }
 }
 
 // Run checkpoint immediately on given timeline.
@@ -1319,9 +1324,10 @@ pub fn make_router(
         .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
             RequestSpan(timeline_gc_handler).handle(r)
         })
-        .put("/v1/tenant/:tenant_id/timeline/:timeline_id/dump_layermap", |r| {
-            RequestSpan(timeline_dump_layerfile_contents).handle(r)
-        })
+        .put(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/dump_layermap",
+            testing_api!("dump the layermap", timeline_dump_layerfile_contents),
+        )
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/compact",
             testing_api!("run timeline compaction", timeline_compact_handler),
