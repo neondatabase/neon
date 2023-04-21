@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import pytest
+import subprocess
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 
 
@@ -66,6 +67,7 @@ def test_pg_regress(
         # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)
 
+    env.pageserver.http_client().dump_layermap()
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #

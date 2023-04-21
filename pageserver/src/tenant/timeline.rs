@@ -554,6 +554,14 @@ impl Timeline {
         size
     }
 
+    /// Dump layers' contents' metadata into stdout
+    #[cfg(feature = "testing")]
+    pub fn dump_layermap(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+        let layer_map = self.layers.read().unwrap();
+        layer_map.dump(true, ctx)?;
+        Ok(())
+    }
+
     pub fn get_resident_physical_size(&self) -> u64 {
         self.metrics.resident_physical_size_gauge.get()
     }
