@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
+from fixtures.types import TenantId, TimelineId
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -66,12 +67,12 @@ def test_pg_regress(
         # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)
 
-    [timeline_id] = endpoint.safe_psql("SHOW neon.timeline_id")
-    [tenant_id] = endpoint.safe_psql("SHOW neon.tenant_id")
+    [timeline_id] = endpoint.safe_psql("SHOW neon.timeline_id")[0]
+    [tenant_id] = endpoint.safe_psql("SHOW neon.tenant_id")[0]
 
     env.pageserver.http_client().dump_layermap(
-        tenant_id=tenant_id,
-        timeline_id=timeline_id,
+        tenant_id=TenantId(tenant_id),
+        timeline_id=TimelineId(timeline_id),
     )
 
 
