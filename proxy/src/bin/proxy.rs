@@ -1,49 +1,22 @@
-//! Postgres protocol proxy/router.
-//!
-//! This service listens psql port and can check auth via external service
-//! (control plane API in our case) and can create new databases and accounts
-//! in somewhat transparent manner (again via communication with control plane API).
+use proxy::auth;
+use proxy::console;
+use proxy::http;
+use proxy::metrics;
 
-mod auth;
-mod cache;
-mod cancellation;
-mod compute;
-mod config;
-mod console;
-mod error;
-mod http;
-mod logging;
-mod metrics;
-mod parse;
-mod proxy;
-mod sasl;
-mod scram;
-mod stream;
-mod url;
-mod waiters;
-
-use anyhow::{bail, Context};
+use anyhow::bail;
 use clap::{self, Arg};
-use config::ProxyConfig;
-use futures::FutureExt;
-use std::{borrow::Cow, future::Future, net::SocketAddr};
-use tokio::{net::TcpListener, task::JoinError};
+use proxy::config::{self, ProxyConfig};
+use std::{borrow::Cow, net::SocketAddr};
+use tokio::{net::TcpListener};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 use utils::{project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
 
-/// Flattens `Result<Result<T>>` into `Result<T>`.
-async fn flatten_err(
-    f: impl Future<Output = Result<anyhow::Result<()>, JoinError>>,
-) -> anyhow::Result<()> {
-    f.map(|r| r.context("join error").and_then(|x| x)).await
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _logging_guard = logging::init().await?;
+    let _logging_guard = proxy::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
@@ -69,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
     let cancellation_token = CancellationToken::new();
 
-    let mut client_tasks = vec![tokio::spawn(proxy::task_main(
+    let mut client_tasks = vec![tokio::spawn(proxy::proxy::task_main(
         config,
         proxy_listener,
         cancellation_token.clone(),
@@ -88,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut tasks = vec![
-        tokio::spawn(handle_signals(cancellation_token)),
+        tokio::spawn(proxy::handle_signals(cancellation_token)),
         tokio::spawn(http::server::task_main(http_listener)),
         tokio::spawn(console::mgmt::task_main(mgmt_listener)),
     ];
@@ -97,41 +70,15 @@ async fn main() -> anyhow::Result<()> {
         tasks.push(tokio::spawn(metrics::task_main(metrics_config)));
     }
 
-    let tasks = futures::future::try_join_all(tasks.into_iter().map(flatten_err));
-    let client_tasks = futures::future::try_join_all(client_tasks.into_iter().map(flatten_err));
+    let tasks = futures::future::try_join_all(tasks.into_iter().map(proxy::flatten_err));
+    let client_tasks =
+        futures::future::try_join_all(client_tasks.into_iter().map(proxy::flatten_err));
     tokio::select! {
         // We are only expecting an error from these forever tasks
         res = tasks => { res?; },
         res = client_tasks => { res?; },
     }
     Ok(())
-}
-
-/// Handle unix signals appropriately.
-async fn handle_signals(token: CancellationToken) -> anyhow::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    let mut hangup = signal(SignalKind::hangup())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-
-    loop {
-        tokio::select! {
-            // Hangup is commonly used for config reload.
-            _ = hangup.recv() => {
-                warn!("received SIGHUP; config reload is not supported");
-            }
-            // Shut down the whole application.
-            _ = interrupt.recv() => {
-                warn!("received SIGINT, exiting immediately");
-                bail!("interrupted");
-            }
-            _ = terminate.recv() => {
-                warn!("received SIGTERM, shutting down once all existing connections have closed");
-                token.cancel();
-            }
-        }
-    }
 }
 
 /// ProxyConfig is created at proxy startup, and lives forever.
