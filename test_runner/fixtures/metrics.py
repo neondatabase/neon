@@ -53,7 +53,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     "pageserver_storage_operations_seconds_global_bucket",
     "libmetrics_launch_timestamp",
     "libmetrics_build_info",
-    "libmetrics_tracing_event_count",
+    "libmetrics_tracing_event_count_total",
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
