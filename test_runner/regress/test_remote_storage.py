@@ -769,10 +769,8 @@ def test_timeline_resurrection_on_attach(
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
 
-    pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
-
-    client = env.pageserver.http_client()
+    ps_http = env.pageserver.http_client()
+    pg = env.endpoints.create_start("main")
 
     tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
@@ -783,39 +781,39 @@ def test_timeline_resurrection_on_attach(
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
-        wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
+        wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, current_lsn)
 
         # run checkpoint manually to be sure that data landed in remote storage
-        pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
+        ps_http.timeline_checkpoint(tenant_id, timeline_id)
 
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         log.info("waiting for checkpoint upload")
-        wait_for_upload(client, tenant_id, timeline_id, current_lsn)
+        wait_for_upload(ps_http, tenant_id, timeline_id, current_lsn)
         log.info("upload of checkpoint is done")
 
     new_timeline_id = env.neon_cli.create_branch("new", "main")
-    new_pg = env.postgres.create_start("new")
+    new_pg = env.endpoints.create_start("new")
 
     with new_pg.cursor() as cur:
         cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
-        wait_for_last_record_lsn(client, tenant_id, new_timeline_id, current_lsn)
+        wait_for_last_record_lsn(ps_http, tenant_id, new_timeline_id, current_lsn)
 
         # run checkpoint manually to be sure that data landed in remote storage
-        pageserver_http.timeline_checkpoint(tenant_id, new_timeline_id)
+        ps_http.timeline_checkpoint(tenant_id, new_timeline_id)
 
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         log.info("waiting for checkpoint upload")
-        wait_for_upload(client, tenant_id, new_timeline_id, current_lsn)
+        wait_for_upload(ps_http, tenant_id, new_timeline_id, current_lsn)
         log.info("upload of checkpoint is done")
 
     # delete new timeline
-    client.timeline_delete(tenant_id=tenant_id, timeline_id=new_timeline_id)
+    ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=new_timeline_id)
 
     ##### Stop the pageserver instance, erase all its data
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     env.pageserver.stop()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
@@ -825,11 +823,11 @@ def test_timeline_resurrection_on_attach(
     ##### Second start, restore the data and ensure that we see only timeline that wasnt deleted
     env.pageserver.start()
 
-    client.tenant_attach(tenant_id=tenant_id)
+    ps_http.tenant_attach(tenant_id=tenant_id)
 
-    wait_until_tenant_active(client, tenant_id=tenant_id, iterations=5)
+    wait_until_tenant_active(ps_http, tenant_id=tenant_id, iterations=5)
 
-    timelines = client.timeline_list(tenant_id=tenant_id)
+    timelines = ps_http.timeline_list(tenant_id=tenant_id)
     assert len(timelines) == 1, f"Expected to see only one non deleted timeline, got {timelines}"
     timeline = timelines.pop()
     loaded_timeline_id = timeline["timeline_id"]
@@ -837,6 +835,50 @@ def test_timeline_resurrection_on_attach(
         TimelineId(loaded_timeline_id) == timeline_id
     ), f"expected to load only {timeline_id} but got {loaded_timeline_id}"
     assert timeline["state"] == "Active"
+
+
+def test_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        test_name="test_fail_before_local_delete",
+    )
+
+    env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.append(".*failpoint: timeline-delete-before-rm")
+    env.pageserver.allowed_errors.append(
+        ".*Ignoring new state, equal to the existing one: Stopping"
+    )
+    env.pageserver.allowed_errors.append(
+        ".*during shutdown: cannot flush frozen layers when flush_loop is not running, state is Exited"
+    )
+
+    ps_http = env.pageserver.http_client()
+    ps_http.configure_failpoints(("timeline-delete-before-rm", "return"))
+
+    # construct pair of branches
+    env.neon_cli.create_branch("test_fail_before_local_delete")
+
+    leaf_timeline_id = env.neon_cli.create_branch(
+        "test_fail_before_local_delete1", "test_fail_before_local_delete"
+    )
+
+    timeline_path = (
+        env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
+    )
+
+    with pytest.raises(
+        PageserverApiException,
+        match="failpoint: timeline-delete-before-rm",
+    ):
+        ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
+
+    assert timeline_path.exists()
+
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    assert not timeline_path.exists()
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.

@@ -43,7 +43,6 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(parent_timeline_id)
     )
 
-    ps_http = env.pageserver.http_client()
     with pytest.raises(
         PageserverApiException, match="Cannot delete timeline which has child timelines"
     ) as exc:

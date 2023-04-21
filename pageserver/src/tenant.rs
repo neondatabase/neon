@@ -1429,6 +1429,11 @@ impl Tenant {
             //     by the caller.
 
             let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+
+            fail::fail_point!("timeline-delete-before-rm", |_| {
+                Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
+            });
+
             // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
             // with some layers missing.
             std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
