@@ -77,9 +77,9 @@ impl VirtualValue {
     pub(crate) fn will_init(&self) -> bool {
         match self {
             VirtualValue::NaturalImage(_) => true,
-            VirtualValue::NaturalWalRecord(rec) => rec.will_init(),
             VirtualValue::ClosedLineage { .. } => true,
             VirtualValue::ClosedRecLineage { .. } => true,
+            VirtualValue::NaturalWalRecord(rec) => rec.will_init(),
             VirtualValue::OpenLineage { .. } => false,
         }
     }
