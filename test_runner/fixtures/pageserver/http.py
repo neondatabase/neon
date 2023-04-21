@@ -501,7 +501,9 @@ class PageserverHttpClient(requests.Session):
         return results[0].value
 
     def dump_layermap(self, tenant_id: TenantId, timeline_id: TimelineId):
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/dump_layermap")
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/dump_layermap"
+        )
         self.verbose_error(res)
 
     def layer_map_info(
