@@ -1040,7 +1040,7 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
 // Note that this may download all layers of the layermap
 #[cfg(feature = "testing")]
 async fn timeline_dump_layerfile_contents(
-    request: Request<Body>
+    request: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
