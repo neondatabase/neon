@@ -65,7 +65,7 @@ def test_pg_regress(
 
         # Check that we restore the content of the datadir correctly
         check_restored_datadir_content(test_output_dir, env, endpoint)
-    
+
     [timeline_id] = endpoint.safe_psql("SHOW neon.timeline_id")
     [tenant_id] = endpoint.safe_psql("SHOW neon.tenant_id")
 
