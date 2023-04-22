@@ -139,6 +139,15 @@ pub static REMOTE_ONDEMAND_DOWNLOADED_BYTES: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static LOAD_LAYER_MAP_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "pageserver_load_layer_map_histogram",
+        "Time spent on loadiing layer map",
+        STORAGE_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric")
+});
+
 static CURRENT_LOGICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "pageserver_current_logical_size",
@@ -552,7 +561,7 @@ impl StorageTimeMetricsTimer {
 pub struct StorageTimeMetrics {
     /// Sum of f64 seconds, per operation, tenant_id and timeline_id
     timeline_sum: Counter,
-    /// Number of oeprations, per operation, tenant_id and timeline_id
+    /// Number of operations, per operation, tenant_id and timeline_id
     timeline_count: IntCounter,
     /// Global histogram having only the "operation" label.
     global_histogram: Histogram,
@@ -595,7 +604,6 @@ pub struct TimelineMetrics {
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
-    pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
@@ -627,8 +635,6 @@ impl TimelineMetrics {
         let create_images_time_histo =
             StorageTimeMetrics::new("create images", &tenant_id, &timeline_id);
         let logical_size_histo = StorageTimeMetrics::new("logical size", &tenant_id, &timeline_id);
-        let load_layer_map_histo =
-            StorageTimeMetrics::new("load layer map", &tenant_id, &timeline_id);
         let garbage_collect_histo = StorageTimeMetrics::new("gc", &tenant_id, &timeline_id);
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
@@ -664,7 +670,6 @@ impl TimelineMetrics {
             create_images_time_histo,
             logical_size_histo,
             garbage_collect_histo,
-            load_layer_map_histo,
             last_record_gauge,
             wait_lsn_time_histo,
             resident_physical_size_gauge,
