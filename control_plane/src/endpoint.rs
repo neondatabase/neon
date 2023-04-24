@@ -43,41 +43,72 @@ pub struct EndpointConf {
 pub struct ComputeControlPlane {
     base_port: u16,
 
-    // endpoint ID is the key
-    pub endpoints: BTreeMap<String, Arc<Endpoint>>,
-
     env: LocalEnv,
     pageserver: Arc<PageServerNode>,
 }
 
 impl ComputeControlPlane {
-    // Load current endpoints from the endpoints/ subdirectories
-    pub fn load(env: LocalEnv) -> Result<ComputeControlPlane> {
+    pub fn new(env: LocalEnv) -> Self {
         let pageserver = Arc::new(PageServerNode::from_env(&env));
+        ComputeControlPlane {
+            base_port: 55431,
+            env,
+            pageserver,
+        }
+    }
+
+    // Load current endpoints from the endpoints/ subdirectories
+    //
+    // endpoint ID is the key in the returned BTreeMap.
+    //
+    // NOTE: This is not concurrency-safe, and can fail if another 'neon_local'
+    // invocation is creating or deleting an endpoint at the same time.
+    pub fn load_endpoints(env: &LocalEnv) -> Result<BTreeMap<String, Arc<Endpoint>>> {
+        let pageserver = Arc::new(PageServerNode::from_env(env));
 
         let mut endpoints = BTreeMap::default();
         for endpoint_dir in fs::read_dir(env.endpoints_path())
             .with_context(|| format!("failed to list {}", env.endpoints_path().display()))?
         {
-            let ep = Endpoint::from_dir_entry(endpoint_dir?, &env, &pageserver)?;
+            let ep = Endpoint::from_dir_entry(endpoint_dir?, env, &pageserver)?;
             endpoints.insert(ep.name.clone(), Arc::new(ep));
         }
 
-        Ok(ComputeControlPlane {
-            base_port: 55431,
-            endpoints,
-            env,
-            pageserver,
-        })
+        Ok(endpoints)
     }
 
-    fn get_port(&mut self) -> u16 {
-        1 + self
-            .endpoints
+    // Load an endpoint from the endpoints/ subdirectories
+    pub fn load_endpoint(name: &str, env: &LocalEnv) -> Result<Option<Endpoint>> {
+        let endpoint_json_path = env.endpoints_path().join(name).join("endpoint.json");
+        if !endpoint_json_path.exists() {
+            return Ok(None);
+        }
+
+        // Read the endpoint.json file
+        let conf: EndpointConf = serde_json::from_slice(&std::fs::read(endpoint_json_path)?)?;
+
+        // ok now
+        let pageserver = Arc::new(PageServerNode::from_env(env));
+        Ok(Some(Endpoint {
+            address: SocketAddr::new("127.0.0.1".parse().unwrap(), conf.port),
+            name: name.to_string(),
+            env: env.clone(),
+            pageserver,
+            timeline_id: conf.timeline_id,
+            lsn: conf.lsn,
+            tenant_id: conf.tenant_id,
+            pg_version: conf.pg_version,
+        }))
+    }
+
+    fn get_port(&self) -> anyhow::Result<u16> {
+        let endpoints = ComputeControlPlane::load_endpoints(&self.env)?;
+        let next_port = 1 + endpoints
             .values()
             .map(|ep| ep.address.port())
             .max()
-            .unwrap_or(self.base_port)
+            .unwrap_or(self.base_port);
+        Ok(next_port)
     }
 
     pub fn new_endpoint(
@@ -89,7 +120,13 @@ impl ComputeControlPlane {
         port: Option<u16>,
         pg_version: u32,
     ) -> Result<Arc<Endpoint>> {
-        let port = port.unwrap_or_else(|| self.get_port());
+        // NOTE: Unlike most of neon_local, 'new_endpoint' is safe to run from
+        // two 'neon_local' invocations at the same time, IF the port is specified
+        // explicitly. (get_port() is racy)
+        let port = match port {
+            Some(port) => port,
+            None => self.get_port()?,
+        };
         let ep = Arc::new(Endpoint {
             name: name.to_owned(),
             address: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
@@ -113,8 +150,6 @@ impl ComputeControlPlane {
             })?,
         )?;
         ep.setup_pg_conf()?;
-
-        self.endpoints.insert(ep.name.clone(), Arc::clone(&ep));
 
         Ok(ep)
     }

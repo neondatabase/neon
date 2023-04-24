@@ -16,7 +16,8 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
-from fixtures.types import Lsn
+from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import query_scalar
 from pytest import FixtureRequest
 
 #
@@ -58,6 +59,10 @@ def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_o
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
 
+    with endpoint.cursor() as cur:
+        tenant_id = TenantId(query_scalar(cur, "SHOW neon.tenant_id"))
+        timeline_id = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
+
     # FIXME: Is this expected?
     env.pageserver.allowed_errors.append(
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
@@ -68,10 +73,6 @@ def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_o
     pg_bin.run(
         ["pg_dumpall", f"--dbname={endpoint.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
     )
-
-    snapshot_config = toml.load(test_output_dir / "repo" / "config")
-    tenant_id = snapshot_config["default_tenant_id"]
-    timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
 
     pageserver_http = env.pageserver.http_client()
     lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
