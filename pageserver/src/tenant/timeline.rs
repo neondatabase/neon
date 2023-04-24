@@ -48,7 +48,7 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::TimelineMetrics;
+use crate::metrics::{TimelineMetrics, LOAD_LAYER_MAP_HISTOGRAM};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
@@ -1444,7 +1444,7 @@ impl Timeline {
         let mut updates = layers.batch_update();
         let mut num_layers = 0;
 
-        let timer = self.metrics.load_layer_map_histo.start_timer();
+        let timer = LOAD_LAYER_MAP_HISTOGRAM.start_timer();
 
         // Scan timeline directory and create ImageFileName and DeltaFilename
         // structs representing all files on disk

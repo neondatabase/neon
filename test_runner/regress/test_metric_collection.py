@@ -51,7 +51,7 @@ metric_kinds_checked = set([])
 
 
 #
-# verify that metrics look minilally sane
+# verify that metrics look minimally sane
 #
 def metrics_handler(request: Request) -> Response:
     if request.json is None:

@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
+file-lock.workspace = true
 git-version.workspace = true
 nix.workspace = true
 once_cell.workspace = true

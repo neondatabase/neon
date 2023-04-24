@@ -1105,6 +1105,7 @@ dependencies = [
  "anyhow",
  "clap 4.2.2",
  "comfy-table",
+ "file-lock",
  "git-version",
  "nix",
  "once_cell",
@@ -1548,6 +1549,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e51093e27b0797c359783294ca4f0a911c270184cb10f85783b118614a1501be"
 dependencies = [
  "instant",
+]
+
+[[package]]
+name = "file-lock"
+version = "2.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f59be9010c5418713a48aac4c1b897d85dafd958055683dc31bdae553536647b"
+dependencies = [
+ "cc",
+ "libc",
 ]
 
 [[package]]

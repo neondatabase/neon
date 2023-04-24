@@ -5,6 +5,7 @@
 
 use anyhow::{bail, ensure, Context};
 
+use file_lock::{FileLock, FileOptions};
 use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -12,11 +13,14 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::Seek;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use utils::{
     auth::{encode_from_key_file, Claims},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -72,14 +76,84 @@ pub struct LocalEnv {
 
     #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
+}
 
-    /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
-    #[serde(default)]
-    // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
-    // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
-    // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
-    #[serde_as(as = "HashMap<_, Vec<(DisplayFromStr, DisplayFromStr)>>")]
-    branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+// Keep human-readable aliases in memory (and persist them to
+// 'branch_name_mappings.json'), to hide ZId hex strings from the user.
+//
+// BranchNameMappingsSerialized corresponds to the actual JSON format of
+// 'branch_name_mappings.json' file.  It's a bit more awkward to work with, so we convert
+// it to/from BranchNameMappings when reading/writing the file.
+type BranchNameMappings = HashMap<(TenantId, String), TimelineId>;
+
+type BranchNameMappingsSerialized = HashMap<String, HashMap<String, String>>;
+
+pub struct BranchNameMappingsLock {
+    mappings: BranchNameMappings,
+    lock: FileLock,
+}
+
+impl Deref for BranchNameMappingsLock {
+    type Target = HashMap<(TenantId, String), TimelineId>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.mappings
+    }
+}
+impl DerefMut for BranchNameMappingsLock {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.mappings
+    }
+}
+
+impl BranchNameMappingsLock {
+    /// Write the modified branch-name mapppings back to 'branch_name_mappings.json',
+    /// and release the lock.
+    fn write_to_file(mut self) -> anyhow::Result<()> {
+        let mut serialized_mappings: BranchNameMappingsSerialized = HashMap::new();
+        for ((tenant_id, branch_name), timeline_id) in self.iter() {
+            serialized_mappings
+                .entry(tenant_id.to_string())
+                .or_default()
+                .insert(branch_name.clone(), timeline_id.to_string());
+        }
+
+        self.lock.file.set_len(0)?;
+        self.lock.file.rewind()?;
+        serde_json::to_writer_pretty(&self.lock.file, &serialized_mappings)?;
+        Ok(())
+    }
+}
+
+/// Get the branch-name mappings.
+///
+/// This returns a guard object that holds a lock on the branch_name_mappings.json
+/// file. That makes it safe for two 'neon_local' invocations to read/manipulate
+/// branch name mappings at the same time.
+pub fn load_branch_name_mappings() -> anyhow::Result<BranchNameMappingsLock> {
+    let path = base_path().join("branch_name_mappings.json");
+    let lock = FileLock::lock(
+        path,
+        true,
+        FileOptions::new().create(true).read(true).write(true),
+    )?;
+
+    let mut mappings = BranchNameMappings::new();
+    if lock.file.metadata()?.len() > 0 {
+        let serialized_mappings: BranchNameMappingsSerialized = serde_json::from_reader(&lock.file)
+            .context("Failed to read branch_name_mappings.json")?;
+
+        for (tenant_str, map) in serialized_mappings.iter() {
+            for (branch_name, timeline_str) in map.iter() {
+                mappings.insert(
+                    (TenantId::from_str(tenant_str)?, branch_name.to_string()),
+                    TimelineId::from_str(timeline_str)?,
+                );
+            }
+        }
+    }
+
+    Ok(BranchNameMappingsLock { mappings, lock })
 }
 
 /// Broker config for cluster internal communication.
@@ -215,27 +289,21 @@ impl LocalEnv {
 
     pub fn register_branch_mapping(
         &mut self,
-        branch_name: String,
+        branch_name: &str,
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
-        let existing_values = self
-            .branch_name_mappings
-            .entry(branch_name.clone())
-            .or_default();
+        let mut mappings = load_branch_name_mappings()?;
 
-        let existing_ids = existing_values
-            .iter()
-            .find(|(existing_tenant_id, _)| existing_tenant_id == &tenant_id);
-
-        if let Some((_, old_timeline_id)) = existing_ids {
+        if let Some(old_timeline_id) = mappings.get(&(tenant_id, branch_name.to_string())) {
             if old_timeline_id == &timeline_id {
                 Ok(())
             } else {
                 bail!("branch '{branch_name}' is already mapped to timeline {old_timeline_id}, cannot map to another timeline {timeline_id}");
             }
         } else {
-            existing_values.push((tenant_id, timeline_id));
+            mappings.insert((tenant_id, branch_name.to_string()), timeline_id);
+            mappings.write_to_file()?;
             Ok(())
         }
     }
@@ -244,24 +312,22 @@ impl LocalEnv {
         &self,
         branch_name: &str,
         tenant_id: TenantId,
-    ) -> Option<TimelineId> {
-        self.branch_name_mappings
-            .get(branch_name)?
-            .iter()
-            .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
-            .map(|&(_, timeline_id)| timeline_id)
-            .map(TimelineId::from)
+    ) -> anyhow::Result<Option<TimelineId>> {
+        let mappings = load_branch_name_mappings()?;
+        Ok(mappings.get(&(tenant_id, branch_name.to_string())).copied())
     }
 
-    pub fn timeline_name_mappings(&self) -> HashMap<TenantTimelineId, String> {
-        self.branch_name_mappings
+    pub fn timeline_name_mappings(&self) -> anyhow::Result<HashMap<TenantTimelineId, String>> {
+        let mappings = load_branch_name_mappings()?;
+        Ok(mappings
             .iter()
-            .flat_map(|(name, tenant_timelines)| {
-                tenant_timelines.iter().map(|&(tenant_id, timeline_id)| {
-                    (TenantTimelineId::new(tenant_id, timeline_id), name.clone())
-                })
+            .map(|((tenant_id, branch_name), timeline_id)| {
+                (
+                    TenantTimelineId::new(*tenant_id, *timeline_id),
+                    branch_name.clone(),
+                )
             })
-            .collect()
+            .collect())
     }
 
     /// Create a LocalEnv from a config file.

@@ -365,11 +365,7 @@ fn handle_tenant(tenant_match: &ArgMatches, env: &mut local_env::LocalEnv) -> an
             let new_timeline_id = timeline_info.timeline_id;
             let last_record_lsn = timeline_info.last_record_lsn;
 
-            env.register_branch_mapping(
-                DEFAULT_BRANCH_NAME.to_string(),
-                new_tenant_id,
-                new_timeline_id,
-            )?;
+            env.register_branch_mapping(DEFAULT_BRANCH_NAME, new_tenant_id, new_timeline_id)?;
 
             println!(
                 "Created an initial timeline '{new_timeline_id}' at Lsn {last_record_lsn} for tenant: {new_tenant_id}",
@@ -411,7 +407,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
         Some(("list", list_match)) => {
             let tenant_id = get_tenant_id(list_match, env)?;
             let timelines = pageserver.timeline_list(&tenant_id)?;
-            print_timelines_tree(timelines, env.timeline_name_mappings())?;
+            print_timelines_tree(timelines, env.timeline_name_mappings()?)?;
         }
         Some(("create", create_match)) => {
             let tenant_id = get_tenant_id(create_match, env)?;
@@ -429,7 +425,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let new_timeline_id = timeline_info.timeline_id;
 
             let last_record_lsn = timeline_info.last_record_lsn;
-            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
+            env.register_branch_mapping(new_branch_name, tenant_id, new_timeline_id)?;
 
             println!(
                 "Created timeline '{}' at Lsn {last_record_lsn} for tenant: {tenant_id}",
@@ -468,10 +464,10 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            let mut cplane = ComputeControlPlane::load(env.clone())?;
+            let mut cplane = ComputeControlPlane::new(env.clone());
             println!("Importing timeline into pageserver ...");
             pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)?;
-            env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
+            env.register_branch_mapping(name, tenant_id, timeline_id)?;
 
             println!("Creating endpoint for imported timeline ...");
             cplane.new_endpoint(tenant_id, name, timeline_id, None, None, pg_version)?;
@@ -487,7 +483,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 .map(|s| s.as_str())
                 .unwrap_or(DEFAULT_BRANCH_NAME);
             let ancestor_timeline_id = env
-                .get_branch_timeline_id(ancestor_branch_name, tenant_id)
+                .get_branch_timeline_id(ancestor_branch_name, tenant_id)?
                 .ok_or_else(|| {
                     anyhow!("Found no timeline id for branch name '{ancestor_branch_name}'")
                 })?;
@@ -508,7 +504,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
 
             let last_record_lsn = timeline_info.last_record_lsn;
 
-            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
+            env.register_branch_mapping(new_branch_name, tenant_id, new_timeline_id)?;
 
             println!(
                 "Created timeline '{}' at Lsn {last_record_lsn} for tenant: {tenant_id}. Ancestor timeline: '{ancestor_branch_name}'",
@@ -528,7 +524,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
         None => bail!("no endpoint subcommand provided"),
     };
 
-    let mut cplane = ComputeControlPlane::load(env.clone())?;
+    let mut cplane = ComputeControlPlane::new(env.clone());
 
     // All subcommands take an optional --tenant-id option
     let tenant_id = get_tenant_id(sub_args, env)?;
@@ -540,7 +536,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 HashMap::new()
             });
 
-            let timeline_name_mappings = env.timeline_name_mappings();
+            let timeline_name_mappings = env.timeline_name_mappings()?;
 
             let mut table = comfy_table::Table::new();
 
@@ -555,8 +551,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 "STATUS",
             ]);
 
-            for (endpoint_id, endpoint) in cplane
-                .endpoints
+            for (endpoint_id, endpoint) in ComputeControlPlane::load_endpoints(env)?
                 .iter()
                 .filter(|(_, endpoint)| endpoint.tenant_id == tenant_id)
             {
@@ -609,7 +604,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .transpose()
                 .context("Failed to parse Lsn from the request")?;
             let timeline_id = env
-                .get_branch_timeline_id(branch_name, tenant_id)
+                .get_branch_timeline_id(branch_name, tenant_id)?
                 .ok_or_else(|| anyhow!("Found no timeline id for branch name '{branch_name}'"))?;
 
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
@@ -627,7 +622,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
 
-            let endpoint = cplane.endpoints.get(endpoint_id.as_str());
+            let endpoint = ComputeControlPlane::load_endpoint(endpoint_id.as_str(), env)?;
 
             let auth_token = if matches!(env.pageserver.pg_auth_type, AuthType::NeonJWT) {
                 let claims = Claims::new(Some(tenant_id), Scope::Tenant);
@@ -646,7 +641,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     .map(|s| s.as_str())
                     .unwrap_or(DEFAULT_BRANCH_NAME);
                 let timeline_id = env
-                    .get_branch_timeline_id(branch_name, tenant_id)
+                    .get_branch_timeline_id(branch_name, tenant_id)?
                     .ok_or_else(|| {
                         anyhow!("Found no timeline id for branch name '{branch_name}'")
                     })?;
@@ -683,9 +678,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to stop"))?;
             let destroy = sub_args.get_flag("destroy");
 
-            let endpoint = cplane
-                .endpoints
-                .get(endpoint_id.as_str())
+            let endpoint = ComputeControlPlane::load_endpoint(endpoint_id.as_str(), env)?
                 .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
             endpoint.stop(destroy)?;
         }
@@ -844,9 +837,9 @@ fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     let pageserver = PageServerNode::from_env(env);
 
     // Stop all endpoints
-    match ComputeControlPlane::load(env.clone()) {
-        Ok(cplane) => {
-            for (_k, node) in cplane.endpoints {
+    match ComputeControlPlane::load_endpoints(env) {
+        Ok(endpoints) => {
+            for (_k, node) in endpoints {
                 if let Err(e) = node.stop(false) {
                     eprintln!("postgres stop failed: {e:#}");
                 }
