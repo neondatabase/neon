@@ -584,8 +584,7 @@ jobs:
   neon-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    # https://github.com/GoogleContainerTools/kaniko/issues/2005
-    container: gcr.io/kaniko-project/executor:v1.7.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -652,7 +651,7 @@ jobs:
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.7.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -672,7 +671,7 @@ jobs:
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.7.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
     needs: [ tag ]
     strategy:
       fail-fast: false
