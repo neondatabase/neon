@@ -122,7 +122,7 @@ pub(super) async fn handle_walreceiver_connection(
         false,
         async move {
             select! {
-                connection_result = connection => match connection_result{
+                connection_result = connection => match connection_result {
                     Ok(()) => info!("Walreceiver db connection closed"),
                     Err(connection_error) => {
                         if let Err(e) = ignore_expected_errors(connection_error) {
