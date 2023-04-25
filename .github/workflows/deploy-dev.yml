@@ -169,7 +169,8 @@ jobs:
           helm repo add neondatabase https://neondatabase.github.io/helm-charts
           aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
   
-      - name: Re-deploy scram proxy
+      - name: Re-deploy preview proxies
+        shell: bash
         run: |
           DOCKER_TAG=${{ inputs.dockerTag }}
           for PREVIEW_NAME in helium argon krypton xenon radon oganesson hydrogen nitrogen oxygen fluorine chlorine; 
