@@ -858,35 +858,19 @@ jobs:
 
     steps:
       - name: Install Crane & ECR helper
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-           github.event_name != 'workflow_dispatch'
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
 
-      - name: Configure ECR and Docker Hub login
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-           github.event_name != 'workflow_dispatch'
+      - name: Configure ECR login
         run: |
-          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
-          echo "::add-mask::${DOCKERHUB_AUTH}"
-
           mkdir /github/home/.docker/
-          cat <<-EOF > /github/home/.docker/config.json
-            {
-              "auths": {
-                "https://index.docker.io/v1/": {
-                  "auth": "${DOCKERHUB_AUTH}"
-                }
-              },
-              "credHelpers": {
-                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login",
-                "093970136003.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
-              }
-            }
-          EOF
+          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
+
+      - name: Copy vm-compute-node images to Docker Hub
+        run: |
+          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
+          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
 
       - name: Add latest tag to images
         if: |
@@ -900,13 +884,6 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
-          crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-
       - name: Push images to production ECR
         if: |
           (github.ref_name == 'main' || github.ref_name == 'release') &&
@@ -918,6 +895,29 @@ jobs:
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
+
+      - name: Configure Docker Hub login
+        run: |
+          # ECR Credential Helper & Docker Hub don't work together in config, hence reset
+          echo "" > /github/home/.docker/config.json
+          crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
+
+      - name: Push vm-compute-node to Docker Hub
+        run: |
+          crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
+          crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
+
+      - name: Push latest tags to Docker Hub
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.event_name != 'workflow_dispatch'
+        run: |
+          crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
