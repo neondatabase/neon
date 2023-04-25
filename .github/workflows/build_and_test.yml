@@ -853,17 +853,22 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     needs: [ tag, test-images, vm-compute-node-image ]
     container: golang:1.19-bullseye
-    if: |
-      (github.ref_name == 'main' || github.ref_name == 'release') &&
-      github.event_name != 'workflow_dispatch'
+    # Don't add if-condition here.
+    # The job should always be run because we have dependant other jobs that shouldn't be skipped
 
     steps:
       - name: Install Crane & ECR helper
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+           github.event_name != 'workflow_dispatch'
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
 
       - name: Configure ECR and Docker Hub login
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+           github.event_name != 'workflow_dispatch'
         run: |
           DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
           echo "::add-mask::${DOCKERHUB_AUTH}"
@@ -884,6 +889,9 @@ jobs:
           EOF
 
       - name: Add latest tag to images
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+           github.event_name != 'workflow_dispatch'
         run: |
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
@@ -900,6 +908,9 @@ jobs:
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
+        if: |
+          (github.ref_name == 'main' || github.ref_name == 'release') &&
+           github.event_name != 'workflow_dispatch'
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
