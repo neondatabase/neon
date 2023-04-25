@@ -9,6 +9,8 @@ runs:
   steps:
     - name: Determine build vars
       shell: bash -euxo pipefail {0}
+      env:
+        VARIANT: ${{ inputs.variant }}
       run: |
         case "$VARIANT" in
           debug)
