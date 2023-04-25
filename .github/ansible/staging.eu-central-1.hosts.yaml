@@ -2,6 +2,7 @@ storage:
   vars:
     bucket_name: neon-dev-storage-eu-central-1
     bucket_region: eu-central-1
+    # We only register/update storage in one preview console and manually copy to other instances
     console_mgmt_base_url: http://neon-internal-api.helium.aws.neon.build
     broker_endpoint: http://storage-broker-lb.alpha.eu-central-1.internal.aws.neon.build:50051
     pageserver_config_stub:
