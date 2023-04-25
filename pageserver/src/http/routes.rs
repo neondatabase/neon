@@ -1201,6 +1201,7 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     )
 }
 
+#[cfg(feature = "testing")]
 async fn post_tracing_event_handler(mut r: Request<Body>) -> Result<Response<Body>, ApiError> {
     #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "lowercase")]
