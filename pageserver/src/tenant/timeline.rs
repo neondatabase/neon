@@ -48,7 +48,7 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::TimelineMetrics;
+use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
@@ -2355,6 +2355,7 @@ impl Timeline {
                             id,
                             ctx.task_kind()
                         );
+                        UNEXPECTED_ONDEMAND_DOWNLOADS.inc();
                         timeline.download_remote_layer(remote_layer).await?;
                         continue 'layer_map_search;
                     }

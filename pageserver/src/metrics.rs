@@ -205,6 +205,15 @@ static EVICTIONS_WITH_LOW_RESIDENCE_DURATION: Lazy<IntCounterVec> = Lazy::new(||
     .expect("failed to define a metric")
 });
 
+pub static UNEXPECTED_ONDEMAND_DOWNLOADS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_unexpected_ondemand_downloads_count",
+        "Number of unexpected on-demand downloads. \
+         We log more context for each increment, so, forgo any labels in this metric.",
+    )
+    .expect("failed to define a metric")
+});
+
 /// Each [`Timeline`]'s  [`EVICTIONS_WITH_LOW_RESIDENCE_DURATION`] metric.
 #[derive(Debug)]
 pub struct EvictionsWithLowResidenceDuration {
@@ -1131,4 +1140,11 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
         }
         poll_result
     }
+}
+
+pub fn preinitialize_metrics() {
+    // We want to alert on this metric increasing.
+    // Initialize it eagerly, so that our alert rule can distinguish absence of the metric from metric value 0.
+    assert_eq!(UNEXPECTED_ONDEMAND_DOWNLOADS.get(), 0);
+    UNEXPECTED_ONDEMAND_DOWNLOADS.reset();
 }
