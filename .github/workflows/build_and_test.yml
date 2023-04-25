@@ -541,7 +541,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
-    needs: [ push-docker-hub, tag ]
+    needs: [ promote-images, tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
@@ -596,11 +596,32 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Configure ECR and Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
 
       - name: Kaniko build neon
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+        run:
+          /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true
+                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --context .
+                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+                           --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
@@ -660,12 +681,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v1 # v3 won't work with kaniko
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Configure ECR and Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
 
       - name: Kaniko build compute tools
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+        run:
+          /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true
+                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --context .
+                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --dockerfile Dockerfile.compute-tools
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+                           --destination neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
 
+      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
@@ -688,12 +732,36 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Configure ECR and Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
 
       - name: Kaniko build compute node with extensions
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --build-arg PG_VERSION=${{ matrix.version }} --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+        run:
+          /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true
+                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --context .
+                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg PG_VERSION=${{ matrix.version }}
+                           --dockerfile Dockerfile.compute-node
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+                           --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
+      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
@@ -785,26 +853,37 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     needs: [ tag, test-images, vm-compute-node-image ]
     container: golang:1.19-bullseye
-    if: github.event_name != 'workflow_dispatch'
+    if: |
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
+      github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Install Crane & ECR helper
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
 
-      - name: Configure ECR login
+      - name: Configure ECR and Docker Hub login
         run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
           mkdir /github/home/.docker/
-          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
+          cat <<-EOF > /github/home/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login",
+                "093970136003.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
 
       - name: Add latest tag to images
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
         run: |
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
@@ -813,50 +892,14 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
-      - name: Cleanup ECR folder
-        run: rm -rf ~/.ecr
-
-  push-docker-hub:
-    runs-on: [ self-hosted, dev, x64 ]
-    needs: [ promote-images, tag ]
-    container: golang:1.19-bullseye
-
-    steps:
-      - name: Install Crane & ECR helper
-        run: |
-          go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
-          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
-
-      - name: Configure ECR login
-        run: |
-          mkdir /github/home/.docker/
-          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
-
-      - name: Pull neon image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} neon
-
-      - name: Pull compute tools image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} compute-tools
-
-      - name: Pull compute node v14 image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} compute-node-v14
-
-      - name: Pull vm compute node v14 image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
-
-      - name: Pull compute node v15 image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} compute-node-v15
-
-      - name: Pull vm compute node v15 image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
-
-      - name: Pull rust image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
+          crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
@@ -864,45 +907,6 @@ jobs:
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
-
-      - name: Configure Docker Hub login
-        run: |
-          # ECR Credential Helper & Docker Hub don't work together in config, hence reset
-          echo "" > /github/home/.docker/config.json
-          crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
-
-      - name: Push neon image to Docker Hub
-        run: crane push neon neondatabase/neon:${{needs.tag.outputs.build-tag}}
-
-      - name: Push compute tools image to Docker Hub
-        run: crane push compute-tools neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
-
-      - name: Push compute node v14 image to Docker Hub
-        run: crane push compute-node-v14 neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
-
-      - name: Push vm compute node v14 image to Docker Hub
-        run: crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
-
-      - name: Push compute node v15 image to Docker Hub
-        run: crane push compute-node-v15 neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}}
-
-      - name: Push vm compute node v15 image to Docker Hub
-        run: crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
-
-      - name: Push rust image to Docker Hub
-        run: crane push rust neondatabase/rust:pinned
-
-      - name: Add latest tag to images in Docker Hub
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
-        run: |
-          crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
@@ -912,7 +916,7 @@ jobs:
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
     # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
     # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, tag, regress-tests ]
+    needs: [ promote-images, tag, regress-tests ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'deploy-test-storage') &&
       github.event_name != 'workflow_dispatch'
@@ -946,7 +950,7 @@ jobs:
   deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ push-docker-hub, tag, regress-tests ]
+    needs: [ promote-images, tag, regress-tests ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
@@ -983,7 +987,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ push-docker-hub, tag, regress-tests ]
+    needs: [ promote-images, tag, regress-tests ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Promote compatibility snapshot for the release
