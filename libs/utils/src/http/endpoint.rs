@@ -76,6 +76,7 @@ where
 
         let log_quietly = method == Method::GET;
         async move {
+            let cancellation_guard = RequestCancelled::warn_when_dropped_without_responding();
             if log_quietly {
                 debug!("Handling request");
             } else {
@@ -87,7 +88,11 @@ where
             // Usage of the error handler also means that we expect only the `ApiError` errors to be raised in this call.
             //
             // Panics are not handled separately, there's a `tracing_panic_hook` from another module to do that globally.
-            match (self.0)(request).await {
+            let res = (self.0)(request).await;
+
+            cancellation_guard.disarm();
+
+            match res {
                 Ok(response) => {
                     let response_status = response.status();
                     if log_quietly && response_status.is_success() {
@@ -102,6 +107,30 @@ where
         }
         .instrument(request_span)
         .await
+    }
+}
+
+/// Drop guard to WARN in case the request was dropped before completion.
+struct RequestCancelled {
+    warn: bool,
+}
+
+impl RequestCancelled {
+    fn warn_when_dropped_without_responding() -> Self {
+        RequestCancelled { warn: true }
+    }
+
+    fn disarm(mut self) {
+        self.warn = false;
+    }
+}
+
+impl Drop for RequestCancelled {
+    fn drop(&mut self) {
+        if self.warn {
+            // the span has all of the info already
+            warn!("request was dropped before completing");
+        }
     }
 }
 
