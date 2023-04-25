@@ -139,7 +139,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [ debug, release ]
+        build_type: [ debug, release, image ]
     env:
       BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.sha }}
@@ -181,18 +181,38 @@ jobs:
       # corresponding Cargo.toml files for their descriptions.
       - name: Set env variables
         run: |
-          CARGO_FEATURES="--features testing"
-          if [[ $BUILD_TYPE == "debug" ]]; then
-            cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-            CARGO_FLAGS="--locked"
-          elif [[ $BUILD_TYPE == "release" ]]; then
-            cov_prefix=""
-            CARGO_FLAGS="--locked --release"
-          fi
+          case "$BUILD_TYPE" in
+            debug)
+              cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+              CARGO_FEATURES="--features testing"
+              CARGO_FLAGS="--locked"
+              TARGET_DIR_NAME="debug"
+              ;;
+            release)
+              cov_prefix=""
+              CARGO_FEATURES="--features testing"
+              CARGO_FLAGS="--locked --release"
+              TARGET_DIR_NAME="release"
+              ;;
+            image)
+              # Like we do in the Dockerfile built by the neon-image stage.
+              # The Dockerfile doesn't do cargo test & clippy, though.
+              # That's why we have it here.
+              cov_prefix=""
+              CARGO_FEATURES=""
+              CARGO_FLAGS="--locked --release"
+              TARGET_DIR_NAME="release"
+              ;;
+            *)
+              echo "Unknown BUILD_TYPE: $BUILD_TYPE"
+              exit 1
+              ;;
+          esac
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
           echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
           echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
+          echo "TARGET_DIR_NAME=${TARGET_DIR_NAME}" >> $GITHUB_ENV
 
       # Disabled for now
       # Don't include the ~/.cargo/registry/src directory. It contains just
@@ -262,7 +282,7 @@ jobs:
             jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
           )
           for bin in $binaries; do
-            SRC=target/$BUILD_TYPE/$bin
+            SRC=target/$TARGET_DIR_NAME/$bin
             DST=/tmp/neon/bin/$bin
             cp "$SRC" "$DST"
           done
@@ -291,6 +311,11 @@ jobs:
             for bin in $binaries; do
               echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
             done
+          else
+            if [ "$cov_prefix" != "" ]; then
+              echo "expecting coverage prefix to be empty for all build types except debug, got BUILD_TYPE=$BUILD_TYPE"
+              exit 1
+            fi
           fi
 
       - name: Install postgres binaries
