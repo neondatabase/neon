@@ -48,7 +48,8 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        target_region: [ eu-west-1, us-east-2, eu-central-1 ]
+        # TODO(sergey): Fix storage deploy in eu-central-1
+        target_region: [ eu-west-1, us-east-2]
     environment:
       name: dev-${{ matrix.target_region }}
     steps:
