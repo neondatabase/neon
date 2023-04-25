@@ -276,7 +276,7 @@ jobs:
           done
 
           # Install test executables and write list of all binaries (for code coverage)
-          if [[ $MATRIX_BUILD_TYPE == "debug" ]]; then
+          if [[ $VARIANT == "debug" ]]; then
             # Keep bloated coverage data files away from the rest of the artifact
             mkdir -p /tmp/coverage/
 
@@ -301,7 +301,7 @@ jobs:
             done
           else
             if [ "$cov_prefix" != "" ]; then
-              echo "expecting coverage prefix to be empty for all gh matrix build types except 'debug', got MATRIX_BUILD_TYPE=$MATRIX_BUILD_TYPE"
+              echo "expecting coverage prefix to be empty for all variants except 'debug', got VARIANT=$VARIANT"
               exit 1
             fi
           fi

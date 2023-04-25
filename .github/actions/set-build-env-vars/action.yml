@@ -48,3 +48,4 @@ runs:
         echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
         echo "TARGET_DIR_NAME=${TARGET_DIR_NAME}" >> $GITHUB_ENV
         echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
+        echo "VARIANT=${VARIANT}" >> $GITHUB_ENV
