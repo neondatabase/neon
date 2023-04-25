@@ -112,23 +112,29 @@ where
 
 /// Drop guard to WARN in case the request was dropped before completion.
 struct RequestCancelled {
-    warn: bool,
+    warn: Option<tracing::Span>,
 }
 
 impl RequestCancelled {
     fn warn_when_dropped_without_responding() -> Self {
-        RequestCancelled { warn: true }
+        RequestCancelled {
+            warn: Some(tracing::Span::current()),
+        }
     }
 
     fn disarm(mut self) {
-        self.warn = false;
+        self.warn = None;
     }
 }
 
 impl Drop for RequestCancelled {
     fn drop(&mut self) {
-        if self.warn {
-            // the span has all of the info already
+        if let Some(span) = self.warn.take() {
+            // the span has all of the info already, but the outer `.instrument(span)` has already
+            // been dropped, so we need to manually re-enter it for this message.
+            //
+            // this is what the instrument would do anyways so it is fine.
+            let _g = span.entered();
             warn!("request was dropped before completing");
         }
     }
