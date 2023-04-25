@@ -48,7 +48,8 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        target_region: [ eu-west-1, us-east-2 ]
+        # TODO(sergey): Fix storage deploy in eu-central-1
+        target_region: [ eu-west-1, us-east-2]
     environment:
       name: dev-${{ matrix.target_region }}
     steps:
@@ -133,6 +134,53 @@ jobs:
   
       - name: Cleanup helm folder
         run: rm -rf ~/.cache
+
+  deploy-preview-proxy-new:
+    runs-on: [ self-hosted, gen3, small ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
+    if: inputs.deployProxy
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - target_region:  eu-central-1
+            target_cluster: dev-eu-central-1-alpha
+    environment:
+      name: dev-${{ matrix.target_region }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+          ref: ${{ inputs.branch }}
+  
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1-node16
+        with:
+          role-to-assume: arn:aws:iam::369495373322:role/github-runner
+          aws-region: eu-central-1
+          role-skip-session-tagging: true
+          role-duration-seconds: 1800
+  
+      - name: Configure environment
+        run: |
+          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+          aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
+  
+      - name: Re-deploy preview proxies
+        run: |
+          DOCKER_TAG=${{ inputs.dockerTag }}
+          for PREVIEW_NAME in helium argon krypton xenon radon oganesson hydrogen nitrogen oxygen fluorine chlorine; do
+            export PREVIEW_NAME
+            envsubst <.github/helm-values/preview-template.neon-proxy-scram.yaml >preview-${PREVIEW_NAME}.neon-proxy-scram.yaml
+            helm upgrade neon-proxy-scram-${PREVIEW_NAME} neondatabase/neon-proxy --namespace neon-proxy-${PREVIEW_NAME} --create-namespace --install --atomic -f preview-${PREVIEW_NAME}.neon-proxy-scram.yaml --set image.tag=${DOCKER_TAG} --set settings.sentryUrl=${{ secrets.SENTRY_URL_PROXY }} --wait --timeout 15m0s
+          done
+
+      - name: Cleanup helm folder
+        run: rm -rf ~/.cache
   
   deploy-storage-broker-new:
     runs-on: [ self-hosted, gen3, small ]
@@ -148,6 +196,8 @@ jobs:
             target_cluster: dev-us-east-2-beta
           - target_region:  eu-west-1
             target_cluster: dev-eu-west-1-zeta
+          - target_region:  eu-central-1
+            target_cluster: dev-central-1-alpha
     environment:
       name: dev-${{ matrix.target_region }}
     steps:
