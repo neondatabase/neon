@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use anyhow::Context;
+use once_cell::sync::Lazy;
 use strum_macros::{EnumString, EnumVariantNames};
 
 #[derive(EnumString, EnumVariantNames, Eq, PartialEq, Debug, Clone, Copy)]
@@ -23,25 +24,64 @@ impl LogFormat {
     }
 }
 
-pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
-    let default_filter_str = "info";
+static TRACING_EVENT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+    metrics::register_int_counter_vec!(
+        "libmetrics_tracing_event_count",
+        "Number of tracing events, by level",
+        &["level"]
+    )
+    .expect("failed to define metric")
+});
 
+struct TracingEventCountLayer(&'static metrics::IntCounterVec);
+
+impl<S> tracing_subscriber::layer::Layer<S> for TracingEventCountLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let level = event.metadata().level();
+        let level = match *level {
+            tracing::Level::ERROR => "error",
+            tracing::Level::WARN => "warn",
+            tracing::Level::INFO => "info",
+            tracing::Level::DEBUG => "debug",
+            tracing::Level::TRACE => "trace",
+        };
+        self.0.with_label_values(&[level]).inc();
+    }
+}
+
+pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
     // We fall back to printing all spans at info-level or above if
     // the RUST_LOG environment variable is not set.
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter_str));
+    let rust_log_env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    };
 
-    let base_logger = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(false)
-        .with_ansi(atty::is(atty::Stream::Stdout))
-        .with_writer(std::io::stdout);
-
-    match log_format {
-        LogFormat::Json => base_logger.json().init(),
-        LogFormat::Plain => base_logger.init(),
-        LogFormat::Test => base_logger.with_test_writer().init(),
-    }
+    // NB: the order of the with() calls does not matter.
+    // See https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with({
+            let log_layer = tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(atty::is(atty::Stream::Stdout))
+                .with_writer(std::io::stdout);
+            let log_layer = match log_format {
+                LogFormat::Json => log_layer.json().boxed(),
+                LogFormat::Plain => log_layer.boxed(),
+                LogFormat::Test => log_layer.with_test_writer().boxed(),
+            };
+            log_layer.with_filter(rust_log_env_filter())
+        })
+        .with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()))
+        .init();
 
     Ok(())
 }
@@ -155,5 +195,35 @@ impl std::fmt::Display for PrettyLocation<'_, '_> {
 impl std::fmt::Debug for PrettyLocation<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         <Self as std::fmt::Display>::fmt(self, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use metrics::{core::Opts, IntCounterVec};
+
+    use super::TracingEventCountLayer;
+
+    #[test]
+    fn tracing_event_count_metric() {
+        let counter_vec =
+            IntCounterVec::new(Opts::new("testmetric", "testhelp"), &["level"]).unwrap();
+        let counter_vec = Box::leak(Box::new(counter_vec)); // make it 'static
+        let layer = TracingEventCountLayer(counter_vec);
+        use tracing_subscriber::prelude::*;
+
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            tracing::trace!("foo");
+            tracing::debug!("foo");
+            tracing::info!("foo");
+            tracing::warn!("foo");
+            tracing::error!("foo");
+        });
+
+        assert_eq!(counter_vec.with_label_values(&["trace"]).get(), 1);
+        assert_eq!(counter_vec.with_label_values(&["debug"]).get(), 1);
+        assert_eq!(counter_vec.with_label_values(&["info"]).get(), 1);
+        assert_eq!(counter_vec.with_label_values(&["warn"]).get(), 1);
+        assert_eq!(counter_vec.with_label_values(&["error"]).get(), 1);
     }
 }
