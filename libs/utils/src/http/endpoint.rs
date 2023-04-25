@@ -116,12 +116,14 @@ struct RequestCancelled {
 }
 
 impl RequestCancelled {
+    /// Create the drop guard using the [`tracing::Span::current`] as the span.
     fn warn_when_dropped_without_responding() -> Self {
         RequestCancelled {
             warn: Some(tracing::Span::current()),
         }
     }
 
+    /// Consume the drop guard without logging anything.
     fn disarm(mut self) {
         self.warn = None;
     }
@@ -133,7 +135,7 @@ impl Drop for RequestCancelled {
             // the span has all of the info already, but the outer `.instrument(span)` has already
             // been dropped, so we need to manually re-enter it for this message.
             //
-            // this is what the instrument would do anyways so it is fine.
+            // this is what the instrument would do before polling so it is fine.
             let _g = span.entered();
             warn!("request was dropped before completing");
         }
