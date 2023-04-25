@@ -11,4 +11,9 @@
 # * `-A unknown_lints` – do not warn about unknown lint suppressions
 #                        that people with newer toolchains might use
 # * `-D warnings`      - fail on any warnings (`cargo` returns non-zero exit status)
+
+# NB: the CI runs the full feature powerset, so, it catches slightly more errors
+# at the expense of longer runtime. This script is used by developers, so, don't
+# do that here.
+# NB: keep the args after the `--` in sync with the CI YAMLs.
 cargo clippy --locked --all --all-targets --all-features -- -A unknown_lints -D warnings
