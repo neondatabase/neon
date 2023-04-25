@@ -700,6 +700,8 @@ impl PageServerHandler {
         full_backup: bool,
         ctx: RequestContext,
     ) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+
         // check that the timeline exists
         let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
         let latest_gc_cutoff_lsn = timeline.get_latest_gc_cutoff_lsn();
@@ -711,6 +713,8 @@ impl PageServerHandler {
                 .check_lsn_is_in_scope(lsn, &latest_gc_cutoff_lsn)
                 .context("invalid basebackup lsn")?;
         }
+
+        let lsn_awaited_after = started.elapsed();
 
         // switch client to COPYOUT
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
@@ -732,7 +736,17 @@ impl PageServerHandler {
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
         pgb.flush().await?;
-        info!("basebackup complete");
+
+        let basebackup_after = started
+            .elapsed()
+            .checked_sub(lsn_awaited_after)
+            .unwrap_or(Duration::ZERO);
+
+        info!(
+            lsn_await_millis = lsn_awaited_after.as_millis(),
+            basebackup_millis = basebackup_after.as_millis(),
+            "basebackup complete"
+        );
 
         Ok(())
     }
