@@ -27,6 +27,8 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
 """
 
     env = neon_env_builder.init_start()
+    # we configure eviction but no remote storage, there might be error lines
+    env.pageserver.allowed_errors.append(".* no remote storage configured, cannot evict layers .*")
     http_client = env.pageserver.http_client()
 
     # Check that we raise on misspelled configs
