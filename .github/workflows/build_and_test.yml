@@ -111,9 +111,6 @@ jobs:
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
 
-      - name: Run cargo clippy
-        run: ./run_clippy.sh
-
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
         if: ${{ !cancelled() }}
@@ -131,6 +128,36 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo deny check
 
+  clippy:
+    runs-on: [ self-hosted, gen3, large ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - debug
+          - release
+          - image
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - uses: ./.github/actions/set-build-env-vars
+        with:
+          variant: ${{ matrix.variant }}
+
+      - name: Get postgres headers
+        run: make postgres-headers -j$(nproc)
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets $CARGO_FLAGS $CARGO_FEATURES -- -A unknown_lints -D warnings
+
   build-neon:
     runs-on: [ self-hosted, gen3, large ]
     container:
@@ -139,13 +166,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type:
+        variant:
           - debug
           - release
           - image
     env:
-      # NB: BUILD_TYPE != MATRIX_BUILD_TYPE; the former is a Makefile variable
-      MATRIX_BUILD_TYPE: ${{ matrix.build_type }}
       GIT_VERSION: ${{ github.sha }}
 
     steps:
@@ -165,6 +190,10 @@ jobs:
           submodules: true
           fetch-depth: 1
 
+      - uses: ./.github/actions/set-build-env-vars
+        with:
+          variant: ${{ matrix.variant }}
+
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
@@ -172,56 +201,6 @@ jobs:
       - name: Set pg 15 revision for caching
         id: pg_v15_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
-
-      # Set some environment variables used by all the steps.
-      #
-      # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
-      #   It also includes --features, if any
-      #
-      # CARGO_FEATURES is passed to "cargo metadata". It is separate from CARGO_FLAGS,
-      #   because "cargo metadata" doesn't accept --release or --debug options
-      #
-      # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
-      # corresponding Cargo.toml files for their descriptions.
-      - name: Set env variables
-        run: |
-          case "$MATRIX_BUILD_TYPE" in
-            debug)
-              cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-              CARGO_FEATURES="--features testing"
-              CARGO_FLAGS="--locked"
-              TARGET_DIR_NAME="debug"
-              BUILD_TYPE="debug"
-              ;;
-            release)
-              cov_prefix=""
-              CARGO_FEATURES="--features testing"
-              CARGO_FLAGS="--locked --release"
-              TARGET_DIR_NAME="release"
-              BUILD_TYPE="release"
-              ;;
-            image)
-              # Like we do in the Dockerfile built by the neon-image stage.
-              # The Dockerfile doesn't do cargo test & clippy, though.
-              # That's why we have it here.
-              cov_prefix=""
-              CARGO_FEATURES=""
-              CARGO_FLAGS="--locked --release"
-              TARGET_DIR_NAME="release"
-              BUILD_TYPE="release"
-              ;;
-            *)
-              echo "Unknown MATRIX_BUILD_TYPE: $MATRIX_BUILD_TYPE"
-              exit 1
-              ;;
-          esac
-          echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
-          echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
-          echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
-          echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
-          echo "TARGET_DIR_NAME=${TARGET_DIR_NAME}" >> $GITHUB_ENV
-          echo "MATRIX_BUILD_TYPE=${MATRIX_BUILD_TYPE}" >> $GITHUB_ENV
-          echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
 
       # Disabled for now
       # Don't include the ~/.cargo/registry/src directory. It contains just

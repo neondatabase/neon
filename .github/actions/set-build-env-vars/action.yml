@@ -1,0 +1,50 @@
+name: "Set build env vars"
+description: "Set various env vars for building neon.git, depending on the build variant"
+inputs:
+  variant:
+    description: "One of debug, release, or image"
+    required: true
+runs:
+  using: "composite"
+  env:
+    VARIANT: ${{ inputs.variant }}
+  steps:
+  - name: Determine build vars
+    id: determine-build-vars
+    run: |
+      case "$VARIANT" in
+        debug)
+          cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+          CARGO_FEATURES="--features testing"
+          CARGO_FLAGS="--locked"
+          TARGET_DIR_NAME="debug"
+          BUILD_TYPE="debug"
+          ;;
+        release)
+          cov_prefix=""
+          CARGO_FEATURES="--features testing"
+          CARGO_FLAGS="--locked --release"
+          TARGET_DIR_NAME="release"
+          BUILD_TYPE="release"
+          ;;
+        image)
+          # Like we do in the Dockerfile built by the neon-image stage.
+          # The Dockerfile doesn't do cargo test & clippy, though.
+          # That's why we have it here.
+          cov_prefix=""
+          CARGO_FEATURES=""
+          CARGO_FLAGS="--locked --release"
+          TARGET_DIR_NAME="release"
+          BUILD_TYPE="release"
+          ;;
+        *)
+          echo "Unknown VARIANT: $VARIANT"
+          exit 1
+          ;;
+      esac
+      echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
+      echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
+      echo "CARGO_FLAGS=${CARGO_FLAGS}" >> $GITHUB_ENV
+      echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
+      echo "TARGET_DIR_NAME=${TARGET_DIR_NAME}" >> $GITHUB_ENV
+      echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
