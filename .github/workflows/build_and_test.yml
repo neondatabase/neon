@@ -118,7 +118,12 @@ jobs:
       # TODO: use cargo hack for build and test as well, but, that's quite expensive.
       # NB: keep clippy args in sync with ./run_clippy.sh
       - run: |
-          echo "CLIPPY_COMMON_ARGS=--locked --workspace --all-targets -- -A unknown_lints -D warning" >> $GITHUB_ENV
+          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
+          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
+            echo "No clippy args found in .neon_clippy_args"
+            exit 1
+          fi
+          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
       - name: Run cargo clippy (debug)
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
       - name: Run cargo clippy (release)
