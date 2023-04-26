@@ -118,9 +118,9 @@ pub struct Tenant {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
-    /// The creation timestamp, used to measure activation delay, see:
+    /// The value creation timestamp, used to measure activation delay, see:
     /// <https://github.com/neondatabase/neon/issues/4025>
-    created_at: Instant,
+    loading_started_at: Instant,
 
     state: watch::Sender<TenantState>,
 
@@ -1518,7 +1518,7 @@ impl Tenant {
                         }
                     }
 
-                    let elapsed = self.created_at.elapsed();
+                    let elapsed = self.loading_started_at.elapsed();
                     let total_timelines = timelines_accessor.len();
 
                     // log a lot of stuff, because some tenants sometimes suffer from user-visible
@@ -1838,7 +1838,9 @@ impl Tenant {
         Tenant {
             tenant_id,
             conf,
-            created_at: Instant::now(),
+            // using now here is good enough approximation to catch tenants with really long
+            // activation times.
+            loading_started_at: Instant::now(),
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
             gc_cs: tokio::sync::Mutex::new(()),
