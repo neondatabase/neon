@@ -1,9 +1,9 @@
 use metrics::core::{AtomicU64, GenericCounter};
 use metrics::{
     register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
-    Counter, CounterVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
-    UIntGauge, UIntGaugeVec,
+    register_int_counter_vec, register_int_gauge_vec, register_uint_gauge_vec, Counter, CounterVec,
+    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge,
+    UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::models::TenantState;
@@ -348,11 +348,6 @@ pub static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
         &["pageserver_connection_kind"]
     )
     .expect("failed to define a metric")
-});
-
-pub static NUM_ONDISK_LAYERS: Lazy<IntGauge> = Lazy::new(|| {
-    register_int_gauge!("pageserver_ondisk_layers", "Number of layers on-disk")
-        .expect("failed to define a metric")
 });
 
 // remote storage metrics
