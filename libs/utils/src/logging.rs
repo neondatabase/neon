@@ -56,7 +56,20 @@ where
     }
 }
 
-pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
+/// Whether to add the `tracing_error` crate's `ErrorLayer`
+/// to the global tracing subscriber.
+///
+pub enum TracingErrorLayerEnablement {
+    /// Do not add the `ErrorLayer`.
+    Disabled,
+    /// Add the `ErrorLayer` with the filter specified by RUST_LOG, defaulting to `info` if `RUST_LOG` is unset.
+    EnableWithRustLogFilter,
+}
+
+pub fn init(
+    log_format: LogFormat,
+    tracing_error_layer_enablement: TracingErrorLayerEnablement,
+) -> anyhow::Result<()> {
     // We fall back to printing all spans at info-level or above if
     // the RUST_LOG environment variable is not set.
     let rust_log_env_filter = || {
@@ -67,27 +80,26 @@ pub fn init(log_format: LogFormat) -> anyhow::Result<()> {
     // NB: the order of the with() calls does not matter.
     // See https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
     use tracing_subscriber::prelude::*;
-    tracing_subscriber::registry()
-        .with({
-            let log_layer = tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_ansi(atty::is(atty::Stream::Stdout))
-                .with_writer(std::io::stdout);
-            let log_layer = match log_format {
-                LogFormat::Json => log_layer.json().boxed(),
-                LogFormat::Plain => log_layer.boxed(),
-                LogFormat::Test => log_layer.with_test_writer().boxed(),
-            };
-            log_layer.with_filter(rust_log_env_filter())
-        })
-        .with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()))
-        .with({
-            // At this time, we only use tracing_error for asserting that
-            // log spans contain tenant and timeline ids.
-            // So, use the same filter that logging uses.
-            tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter())
-        })
-        .init();
+    let r = tracing_subscriber::registry();
+    let r = r.with({
+        let log_layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(atty::is(atty::Stream::Stdout))
+            .with_writer(std::io::stdout);
+        let log_layer = match log_format {
+            LogFormat::Json => log_layer.json().boxed(),
+            LogFormat::Plain => log_layer.boxed(),
+            LogFormat::Test => log_layer.with_test_writer().boxed(),
+        };
+        log_layer.with_filter(rust_log_env_filter())
+    });
+    let r = r.with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()));
+    match tracing_error_layer_enablement {
+        TracingErrorLayerEnablement::EnableWithRustLogFilter => r
+            .with(tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter()))
+            .init(),
+        TracingErrorLayerEnablement::Disabled => r.init(),
+    }
 
     Ok(())
 }

@@ -134,7 +134,10 @@ fn main() -> anyhow::Result<()> {
     // 1. init logging
     // 2. tracing panic hook
     // 3. sentry
-    logging::init(LogFormat::from_config(&args.log_format)?)?;
+    logging::init(
+        LogFormat::from_config(&args.log_format)?,
+        logging::TracingErrorLayerEnablement::Disabled,
+    )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     info!("version: {GIT_VERSION}");
 
