@@ -86,9 +86,7 @@ jobs:
   check-codestyle-rust:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      # test with image from https://github.com/neondatabase/build/actions/runs/4809401522/jobs/8560593772
-      #image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:4809401522-amd64
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
     steps:
