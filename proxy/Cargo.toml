@@ -53,6 +53,7 @@ sync_wrapper.workspace = true
 thiserror.workspace = true
 tls-listener.workspace = true
 tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 tokio-rustls.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing-opentelemetry.workspace = true
@@ -71,4 +72,3 @@ tokio-util.workspace = true
 [dev-dependencies]
 rcgen.workspace = true
 rstest.workspace = true
-tokio-postgres-rustls.workspace = true
