@@ -127,7 +127,7 @@ jobs:
       - name: Run cargo clippy (debug)
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
       - name: Run cargo clippy (release)
-        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS --release
+        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
