@@ -86,7 +86,9 @@ jobs:
   check-codestyle-rust:
     runs-on: [ self-hosted, gen3, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      # test with image from https://github.com/neondatabase/build/actions/runs/4809401522/jobs/8560593772
+      #image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:4809401522-amd64
       options: --init
 
     steps:
@@ -110,8 +112,6 @@ jobs:
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
-
-      - uses: taiki-e/install-action@cargo-hack
 
       # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
       # This will catch compiler & clippy warnings in all feature combinations.
