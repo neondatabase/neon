@@ -413,7 +413,10 @@ lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 
 		for (int i = 0; i < (BLOCKS_PER_CHUNK / 32); i++) {
 			if (entry->bitmap[i] != 0)
+			{
 				has_remaining_pages = true;
+				break;
+			}
 		}
 
 		/*

@@ -2641,9 +2641,20 @@ smgr_init_neon(void)
  * 
  * The conditions for skipping the IO are:
  *
- * - The block is not in the shared buffers
- * - The block is not in the file cache (or is evicted from that cache)
- * 
+ * - The block is not in the shared buffers, and
+ * - The block is not in the local file cache
+ *
+ * ... because any subsequent read of the page requires us to read
+ * the new version of the page from the PageServer. We do not
+ * check the local file cache; we instead evict the page from LFC: it
+ * is cheaper than going through the FS calls to read the page, and
+ * limits the number of lock operations used in the REDO process.
+ *
+ * We have one exception to the rules for skipping IO: We always apply
+ * changes to shared catalogs' pages. Although this is mostly out of caution,
+ * catalog updates usually result in backends rebuilding their catalog snapshot,
+ * which means it's quite likely the modified page is going to be used soon.
+ *
  * It is important to note that skipping WAL redo for a page also means
  * the page isn't locked by the redo process, as there is no Buffer
  * being returned, nor is there a buffer descriptor to lock.
@@ -2686,8 +2697,9 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 #endif
 
 	/*
-	 * Always run redo on shared catalogs, regardless of whether the block is
-	 * stored in shared buffers. Just for safety.
+	 * Out of an abundance of caution, we always run redo on shared catalogs,
+	 * regardless of whether the block is stored in shared buffers.
+	 * See also this function's top comment.
 	 */
 	if (!OidIsValid(rnode.dbNode))
 		return false;
