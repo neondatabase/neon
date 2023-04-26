@@ -588,15 +588,25 @@ impl Timeline {
 
         let _timer = self.metrics.wait_lsn_time_histo.start_timer();
 
-        self.last_record_lsn.wait_for_timeout(lsn, self.conf.wait_lsn_timeout).await
-            .with_context(||
-                format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
-                    lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
-                )
-            )?;
-
-        Ok(())
+        match self
+            .last_record_lsn
+            .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
+            .await
+        {
+            Ok(()) => Ok(()),
+            seqwait_error => {
+                drop(_timer);
+                let walreceiver_status = self.walreceiver.status();
+                seqwait_error.with_context(|| format!(
+                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, walreceiver status: {}",
+                    lsn,
+                    self.get_last_record_lsn(),
+                    self.get_disk_consistent_lsn(),
+                    walreceiver_status.map(|status| status.to_string())
+                            .unwrap_or_else(|| "Not active".to_string()),
+                ))
+            }
+        }
     }
 
     /// Check that it is valid to request operations with that lsn.

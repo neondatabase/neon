@@ -44,6 +44,8 @@ use tracing::*;
 
 use utils::id::TenantTimelineId;
 
+use self::connection_manager::ConnectionManagerStatus;
+
 use super::Timeline;
 
 #[derive(Clone)]
@@ -63,6 +65,8 @@ pub struct WalReceiver {
     timeline_ref: Weak<Timeline>,
     conf: WalReceiverConf,
     started: AtomicBool,
+    manager_status_sender: Arc<watch::Sender<Option<ConnectionManagerStatus>>>,
+    manager_status_receiver: watch::Receiver<Option<ConnectionManagerStatus>>,
 }
 
 impl WalReceiver {
@@ -71,11 +75,14 @@ impl WalReceiver {
         timeline_ref: Weak<Timeline>,
         conf: WalReceiverConf,
     ) -> Self {
+        let (manager_status_sender, manager_status_receiver) = watch::channel(None);
         Self {
             timeline,
             timeline_ref,
             conf,
             started: AtomicBool::new(false),
+            manager_status_sender: Arc::new(manager_status_sender),
+            manager_status_receiver,
         }
     }
 
@@ -96,8 +103,8 @@ impl WalReceiver {
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-
         let wal_receiver_conf = self.conf.clone();
+        let loop_status_sender = Arc::clone(&self.manager_status_sender);
         task_mgr::spawn(
             WALRECEIVER_RUNTIME.handle(),
             TaskKind::WalReceiverManager,
@@ -115,24 +122,28 @@ impl WalReceiver {
                     select! {
                         _ = task_mgr::shutdown_watcher() => {
                             info!("WAL receiver shutdown requested, shutting down");
-                            connection_manager_state.shutdown().await;
-                            return Ok(());
+                            break;
                         },
                         loop_step_result = connection_manager_loop_step(
                             &mut broker_client,
                             &mut connection_manager_state,
                             &walreceiver_ctx,
+                            &loop_status_sender,
                         ) => match loop_step_result {
                             ControlFlow::Continue(()) => continue,
                             ControlFlow::Break(()) => {
                                 info!("Connection manager loop ended, shutting down");
-                                connection_manager_state.shutdown().await;
-                                return Ok(());
+                                break;
                             }
                         },
                     }
                 }
-            }.instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
+
+                connection_manager_state.shutdown().await;
+                loop_status_sender.send(None).expect("Should never fail due to receiver end stored in WalReceiver");
+                Ok(())
+            }
+            .instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
         );
 
         self.started.store(true, atomic::Ordering::Release);
@@ -148,6 +159,10 @@ impl WalReceiver {
         )
         .await;
         self.started.store(false, atomic::Ordering::Release);
+    }
+
+    pub(super) fn status(&self) -> Option<ConnectionManagerStatus> {
+        self.manager_status_receiver.borrow().clone()
     }
 }
 

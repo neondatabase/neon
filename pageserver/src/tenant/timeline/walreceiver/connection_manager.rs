@@ -43,6 +43,7 @@ pub(super) async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     connection_manager_state: &mut ConnectionManagerState,
     ctx: &RequestContext,
+    manager_status_sender: &watch::Sender<Option<ConnectionManagerStatus>>,
 ) -> ControlFlow<(), ()> {
     let mut timeline_state_updates = connection_manager_state
         .timeline
@@ -180,6 +181,9 @@ pub(super) async fn connection_manager_loop_step(
                 .change_connection(new_candidate, ctx)
                 .await
         }
+        manager_status_sender
+            .send(Some(connection_manager_state.manager_status()))
+            .ok();
     }
 }
 
@@ -267,6 +271,21 @@ pub(super) struct ConnectionManagerState {
     wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
 }
 
+// TODO kb docs
+#[derive(Debug, Clone)]
+pub struct ConnectionManagerStatus {
+    existing_connection: Option<WalConnectionStatus>,
+    wal_connection_retries: HashMap<NodeId, RetryInfo>,
+    wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
+}
+
+impl std::fmt::Display for ConnectionManagerStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // TODO kb human-readable
+        write!(f, "{self:?}")
+    }
+}
+
 /// Current connection data.
 #[derive(Debug)]
 struct WalConnection {
@@ -293,14 +312,14 @@ struct NewCommittedWAL {
     discovered_at: NaiveDateTime,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct RetryInfo {
     next_retry_at: Option<NaiveDateTime>,
     retry_duration_seconds: f64,
 }
 
 /// Data about the timeline to connect to, received from the broker.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BrokerSkTimeline {
     timeline: SafekeeperTimelineInfo,
     /// Time at which the data was fetched from the broker last time, to track the stale data.
@@ -723,6 +742,14 @@ impl ConnectionManagerState {
     pub(super) async fn shutdown(mut self) {
         if let Some(wal_connection) = self.wal_connection.take() {
             wal_connection.connection_task.shutdown().await;
+        }
+    }
+
+    fn manager_status(&self) -> ConnectionManagerStatus {
+        ConnectionManagerStatus {
+            existing_connection: self.wal_connection.as_ref().map(|conn| conn.status),
+            wal_connection_retries: self.wal_connection_retries.clone(),
+            wal_stream_candidates: self.wal_stream_candidates.clone(),
         }
     }
 }
