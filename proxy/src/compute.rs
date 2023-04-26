@@ -2,10 +2,11 @@ use crate::{cancellation::CancelClosure, error::UserFacingError};
 use futures::TryFutureExt;
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
+use tokio_postgres_rustls::MakeRustlsConnect;
 use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio_postgres::NoTls;
+use tokio_postgres::{NoTls, config::SslMode, tls::MakeTlsConnect};
 use tracing::{error, info, warn};
 
 const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
@@ -19,6 +20,9 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
+
+    #[error("{COULD_NOT_CONNECT}: {0}")]
+    TlsError(#[from] native_tls::Error),
 }
 
 impl UserFacingError for ConnectionError {
@@ -198,7 +202,10 @@ impl ConnCfg {
     async fn do_connect(&self) -> Result<PostgresConnection, ConnectionError> {
         // TODO: establish a secure connection to the DB.
         let (socket_addr, mut stream) = self.connect_raw().await?;
-        let (client, connection) = self.0.connect_raw(&mut stream, NoTls).await?;
+        let a = native_tls::TlsConnector::new().unwrap();
+        let mut mk = postgres_native_tls::MakeTlsConnector::new(a);
+        let tls = mk.make_tls_connect("asdf")?;
+        let (client, connection) = self.0.connect_raw(&mut stream, tls).await?;
         info!("connected to compute node at {socket_addr}");
 
         // This is very ugly but as of now there's no better way to
