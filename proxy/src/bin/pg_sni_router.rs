@@ -63,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
     let args = cli().get_matches();
+    let destination: String = args.get_one::<String>("dest").unwrap().parse()?;
 
     // Configure TLS
     let tls_config: Arc<rustls::ServerConfig> = match (
@@ -102,8 +103,6 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => bail!("tls-key and tls-cert must be specified"),
     };
-
-    let destination: String = args.get_one::<String>("dest").unwrap().parse()?;
 
     // Start listening for incoming client connections
     let proxy_address: SocketAddr = args.get_one::<String>("listen").unwrap().parse()?;
@@ -225,7 +224,6 @@ async fn handle_client(
     let port = dest[2].parse::<u16>().context("invalid port")?;
 
     info!("destination: {:?}:{}", destination, port);
-
     conn_cfg.host(destination.as_str());
     conn_cfg.port(port);
 
