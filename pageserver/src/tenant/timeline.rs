@@ -603,7 +603,7 @@ impl Timeline {
                     self.get_last_record_lsn(),
                     self.get_disk_consistent_lsn(),
                     walreceiver_status.map(|status| status.to_human_readable_string())
-                            .unwrap_or_else(|| "walreceiver status: Not active".to_string()),
+                            .unwrap_or_else(|| "WalReceiver status: Not active".to_string()),
                 ))
             }
         }

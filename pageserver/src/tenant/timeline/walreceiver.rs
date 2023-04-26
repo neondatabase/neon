@@ -65,7 +65,11 @@ pub struct WalReceiver {
     timeline_ref: Weak<Timeline>,
     conf: WalReceiverConf,
     started: AtomicBool,
+    // Keep the status sender wrapped in `Arc`, so we can (re)send it into the walreceiver manager loop,
+    // every time walreceiver is started.
+    // We do not allow more than one walreceiver manager loop, but can stop and start it periodically.
     manager_status_sender: Arc<watch::Sender<Option<ConnectionManagerStatus>>>,
+    // Status sender needs a receiver end to send without errors, keep it to access the latest data sent.
     manager_status_receiver: watch::Receiver<Option<ConnectionManagerStatus>>,
 }
 

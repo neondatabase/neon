@@ -3,8 +3,10 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.types import Lsn, TenantId
 
 
-# TODO kb scenario docs + comments/logs
+# Checks that pageserver's walreceiver state is printed in the logs during WAL wait timeout.
+# Ensures that walreceiver does not run without any data inserted and only starts after the insertion.
 def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
+    # Trigger WAL wait timeout faster
     neon_env_builder.pageserver_config_override = "wait_lsn_timeout = '1s'"
     env = neon_env_builder.init_start()
     env.pageserver.http_client()
@@ -14,24 +16,32 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(f".*{expected_timeout_error}.*")
 
     try:
-        basebackup_with_huge_lsn(env, tenant_id)
+        trigger_wait_lsn_timeout(env, tenant_id)
     except Exception as e:
         exception_string = str(e)
-        assert expected_timeout_error in exception_string
-        assert "walreceiver status: Not active" in exception_string
+        assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
+        assert (
+            "WalReceiver status: Not active" in exception_string
+        ), "Walreceiver should not be active before any data writes"
 
     insert_test_elements(env, tenant_id, start=0, count=1_000)
     try:
-        basebackup_with_huge_lsn(env, tenant_id)
+        trigger_wait_lsn_timeout(env, tenant_id)
     except Exception as e:
         exception_string = str(e)
-        assert expected_timeout_error in exception_string
-        assert "walreceiver status: Not active" not in exception_string
-        assert "walreceiver status" in exception_string
+        assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
+        assert (
+            "WalReceiver status: Not active" not in exception_string
+        ), "Should not be inactive anymore after INSERTs are made"
+        assert "WalReceiver status" in exception_string, "But still should have some other status"
 
 
+# Checks that all active safekeepers are shown in pageserver's walreceiver state printed on WAL wait timeout.
+# Kills one of the safekeepers and ensures that only the active ones are printed in the state.
 def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuilder):
+    # Trigger WAL wait timeout faster
     neon_env_builder.pageserver_config_override = "wait_lsn_timeout = '1s'"
+    # Have notable SK ids to ensure we check logs for their presence, not some other random numbers
     neon_env_builder.safekeepers_id_start = 12345
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
@@ -46,32 +56,39 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
     insert_test_elements(env, tenant_id, start=0, count=elements_to_insert)
 
     try:
-        basebackup_with_huge_lsn(env, tenant_id)
+        trigger_wait_lsn_timeout(env, tenant_id)
     except Exception as e:
         exception_string = str(e)
-        assert expected_timeout_error in exception_string
+        assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
 
         for safekeeper in env.safekeepers:
-            assert str(safekeeper.id) in exception_string
+            assert (
+                str(safekeeper.id) in exception_string
+            ), f"Should have safekeeper {safekeeper.id} printed in walreceiver state after WAL wait timeout"
 
     stopped_safekeeper = env.safekeepers[-1]
     stopped_safekeeper_id = stopped_safekeeper.id
     log.info(f"Stopping safekeeper {stopped_safekeeper.id}")
     stopped_safekeeper.stop()
 
+    # Spend some more time inserting, to ensure SKs report updated statuses and walreceiver in PS have time to update its connection stats.
     insert_test_elements(env, tenant_id, start=elements_to_insert + 1, count=elements_to_insert)
 
     try:
-        basebackup_with_huge_lsn(env, tenant_id)
+        trigger_wait_lsn_timeout(env, tenant_id)
     except Exception as e:
         exception_string = str(e)
-        assert expected_timeout_error in exception_string
+        assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
 
         for safekeeper in env.safekeepers:
             if safekeeper.id == stopped_safekeeper_id:
-                assert str(safekeeper.id) not in exception_string
+                assert (
+                    str(safekeeper.id) not in exception_string
+                ), f"Should not have stopped safekeeper {safekeeper.id} printed in walreceiver state after 2nd WAL wait timeout"
             else:
-                assert str(safekeeper.id) in exception_string
+                assert (
+                    str(safekeeper.id) in exception_string
+                ), f"Should have safekeeper {safekeeper.id} printed in walreceiver state after 2nd WAL wait timeout"
 
 
 def insert_test_elements(env: NeonEnv, tenant_id: TenantId, start: int, count: int):
@@ -88,7 +105,7 @@ def insert_test_elements(env: NeonEnv, tenant_id: TenantId, start: int, count: i
 future_lsn = Lsn("0/FFFFFFFF")
 
 
-def basebackup_with_huge_lsn(env: NeonEnv, tenant_id: TenantId):
+def trigger_wait_lsn_timeout(env: NeonEnv, tenant_id: TenantId):
     with env.endpoints.create_start(
         "main",
         tenant_id=tenant_id,

@@ -271,7 +271,7 @@ pub(super) struct ConnectionManagerState {
     wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
 }
 
-// TODO kb docs
+/// An information about connection manager's current connection and connection candidates.
 #[derive(Debug, Clone)]
 pub struct ConnectionManagerStatus {
     existing_connection: Option<WalConnectionStatus>,
@@ -279,6 +279,7 @@ pub struct ConnectionManagerStatus {
 }
 
 impl ConnectionManagerStatus {
+    /// Generates a string, describing current connection status in a form, suitable for logging.
     pub fn to_human_readable_string(&self) -> String {
         let mut resulting_string = "WalReceiver status".to_string();
         match &self.existing_connection {
