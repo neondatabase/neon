@@ -95,7 +95,7 @@ fn gather_proxy_io_bytes_per_client() -> Vec<(Ids, (u64, DateTime<Utc>))> {
                     current_metrics.push((
                         Ids {
                             endpoint_id: endpoint_id.to_string(),
-                            branch_id: "".to_string(),
+                            branch_id: branch_id.to_string(),
                         },
                         (value, Utc::now()),
                     ));
