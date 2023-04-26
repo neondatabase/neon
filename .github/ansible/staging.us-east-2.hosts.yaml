@@ -48,8 +48,6 @@ storage:
       hosts:
         safekeeper-0.us-east-2.aws.neon.build:
           ansible_host: i-027662bd552bf5db0
-        safekeeper-1.us-east-2.aws.neon.build:
-          ansible_host: i-0171efc3604a7b907
         safekeeper-2.us-east-2.aws.neon.build:
           ansible_host: i-0de0b03a51676a6ce
         safekeeper-99.us-east-2.aws.neon.build:
