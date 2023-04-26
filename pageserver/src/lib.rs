@@ -44,6 +44,8 @@ pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
+pub use crate::metrics::preinitialize_metrics;
+
 pub async fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.

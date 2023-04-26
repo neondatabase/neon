@@ -53,6 +53,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     "pageserver_storage_operations_seconds_global_count",
     "pageserver_storage_operations_seconds_global_sum",
     "pageserver_storage_operations_seconds_global_bucket",
+    "pageserver_unexpected_ondemand_downloads_count_total",
     "libmetrics_launch_timestamp",
     "libmetrics_build_info",
     "libmetrics_tracing_event_count_total",

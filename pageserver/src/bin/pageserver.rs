@@ -226,6 +226,7 @@ fn start_pageserver(
     );
     set_build_info_metric(GIT_VERSION);
     set_launch_timestamp_metric(launch_ts);
+    pageserver::preinitialize_metrics();
 
     // If any failpoints were set from FAILPOINTS environment variable,
     // print them to the log for debugging purposes
