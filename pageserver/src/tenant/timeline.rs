@@ -598,12 +598,12 @@ impl Timeline {
                 drop(_timer);
                 let walreceiver_status = self.walreceiver.status();
                 seqwait_error.with_context(|| format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, walreceiver status: {}",
+                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, {}",
                     lsn,
                     self.get_last_record_lsn(),
                     self.get_disk_consistent_lsn(),
-                    walreceiver_status.map(|status| status.to_string())
-                            .unwrap_or_else(|| "Not active".to_string()),
+                    walreceiver_status.map(|status| status.to_human_readable_string())
+                            .unwrap_or_else(|| "walreceiver status: Not active".to_string()),
                 ))
             }
         }

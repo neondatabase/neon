@@ -37,8 +37,8 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
+use utils::{id::NodeId, lsn::Lsn};
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +56,8 @@ pub(super) struct WalConnectionStatus {
     pub streaming_lsn: Option<Lsn>,
     /// Latest commit_lsn received from the safekeeper. Can be zero if no message has been received yet.
     pub commit_lsn: Option<Lsn>,
+    /// The node it is connected to
+    pub node: NodeId,
 }
 
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
@@ -67,6 +69,7 @@ pub(super) async fn handle_walreceiver_connection(
     cancellation: CancellationToken,
     connect_timeout: Duration,
     ctx: RequestContext,
+    node: NodeId,
 ) -> anyhow::Result<()> {
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
@@ -100,6 +103,7 @@ pub(super) async fn handle_walreceiver_connection(
         latest_wal_update: Utc::now().naive_utc(),
         streaming_lsn: None,
         commit_lsn: None,
+        node,
     };
     if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");

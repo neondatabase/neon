@@ -275,14 +275,70 @@ pub(super) struct ConnectionManagerState {
 #[derive(Debug, Clone)]
 pub struct ConnectionManagerStatus {
     existing_connection: Option<WalConnectionStatus>,
-    wal_connection_retries: HashMap<NodeId, RetryInfo>,
     wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
 }
 
-impl std::fmt::Display for ConnectionManagerStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // TODO kb human-readable
-        write!(f, "{self:?}")
+impl ConnectionManagerStatus {
+    pub fn to_human_readable_string(&self) -> String {
+        let mut resulting_string = "WalReceiver status".to_string();
+        match &self.existing_connection {
+            Some(connection) => {
+                if connection.has_processed_wal {
+                    resulting_string.push_str(&format!(
+                        " (update {}): streaming WAL from node {}, ",
+                        connection.latest_wal_update.format("%Y-%m-%d %H:%M:%S"),
+                        connection.node,
+                    ));
+
+                    match (connection.streaming_lsn, connection.commit_lsn) {
+                        (None, None) => resulting_string.push_str("no streaming data"),
+                        (None, Some(commit_lsn)) => {
+                            resulting_string.push_str(&format!("commit Lsn: {commit_lsn}"))
+                        }
+                        (Some(streaming_lsn), None) => {
+                            resulting_string.push_str(&format!("streaming Lsn: {streaming_lsn}"))
+                        }
+                        (Some(streaming_lsn), Some(commit_lsn)) => resulting_string.push_str(
+                            &format!("commit|streaming Lsn: {commit_lsn}|{streaming_lsn}"),
+                        ),
+                    }
+                } else if connection.is_connected {
+                    resulting_string.push_str(&format!(
+                        " (update {}): connecting to node {}",
+                        connection
+                            .latest_connection_update
+                            .format("%Y-%m-%d %H:%M:%S"),
+                        connection.node,
+                    ));
+                } else {
+                    resulting_string.push_str(&format!(
+                        " (update {}): initializing node {} connection",
+                        connection
+                            .latest_connection_update
+                            .format("%Y-%m-%d %H:%M:%S"),
+                        connection.node,
+                    ));
+                }
+            }
+            None => resulting_string.push_str(": disconnected"),
+        }
+
+        resulting_string.push_str(", safekeeper candidates (id|update_time|commit_lsn): [");
+        let mut candidates = self.wal_stream_candidates.iter().peekable();
+        while let Some((node_id, candidate_info)) = candidates.next() {
+            resulting_string.push_str(&format!(
+                "({}|{}|{})",
+                node_id,
+                candidate_info.latest_update.format("%H:%M:%S"),
+                Lsn(candidate_info.timeline.commit_lsn)
+            ));
+            if candidates.peek().is_some() {
+                resulting_string.push_str(", ");
+            }
+        }
+        resulting_string.push(']');
+
+        resulting_string
     }
 }
 
@@ -347,6 +403,7 @@ impl ConnectionManagerState {
         self.drop_old_connection(true).await;
 
         let id = self.id;
+        let node_id = new_sk.safekeeper_id;
         let connect_timeout = self.conf.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
         let ctx = ctx.detached_child(
@@ -362,12 +419,13 @@ impl ConnectionManagerState {
                     cancellation,
                     connect_timeout,
                     ctx,
+                    node_id,
                 )
                 .await
                 .context("walreceiver connection handling failure")
             }
             .instrument(
-                info_span!("walreceiver_connection", tenant_id = %id.tenant_id, timeline_id = %id.timeline_id, node_id = %new_sk.safekeeper_id),
+                info_span!("walreceiver_connection", tenant_id = %id.tenant_id, timeline_id = %id.timeline_id, %node_id),
             )
         });
 
@@ -383,6 +441,7 @@ impl ConnectionManagerState {
                 latest_wal_update: now,
                 streaming_lsn: None,
                 commit_lsn: None,
+                node: node_id,
             },
             connection_task: connection_handle,
             discovered_new_wal: None,
@@ -748,7 +807,6 @@ impl ConnectionManagerState {
     fn manager_status(&self) -> ConnectionManagerStatus {
         ConnectionManagerStatus {
             existing_connection: self.wal_connection.as_ref().map(|conn| conn.status),
-            wal_connection_retries: self.wal_connection_retries.clone(),
             wal_stream_candidates: self.wal_stream_candidates.clone(),
         }
     }
@@ -894,6 +952,7 @@ mod tests {
             latest_wal_update: now,
             commit_lsn: Some(Lsn(current_lsn)),
             streaming_lsn: Some(Lsn(current_lsn)),
+            node: NodeId(1),
         };
 
         state.conf.max_lsn_wal_lag = NonZeroU64::new(100).unwrap();
@@ -1062,6 +1121,7 @@ mod tests {
             latest_wal_update: now,
             commit_lsn: Some(current_lsn),
             streaming_lsn: Some(current_lsn),
+            node: connected_sk_id,
         };
 
         state.wal_connection = Some(WalConnection {
@@ -1128,6 +1188,7 @@ mod tests {
             latest_wal_update: time_over_threshold,
             commit_lsn: Some(current_lsn),
             streaming_lsn: Some(current_lsn),
+            node: NodeId(1),
         };
 
         state.wal_connection = Some(WalConnection {
@@ -1191,6 +1252,7 @@ mod tests {
             latest_wal_update: time_over_threshold,
             commit_lsn: Some(current_lsn),
             streaming_lsn: Some(current_lsn),
+            node: NodeId(1),
         };
 
         state.wal_connection = Some(WalConnection {
@@ -1288,6 +1350,7 @@ mod tests {
             latest_wal_update: now,
             commit_lsn: Some(current_lsn),
             streaming_lsn: Some(current_lsn),
+            node: connected_sk_id,
         };
 
         state.wal_connection = Some(WalConnection {
