@@ -1,3 +1,8 @@
+/// A stand-alone program that routes connections, e.g. from
+/// `aaa--bbb--123.external.domain` to `aaa.bbb.123.internal.domain`.
+///
+/// This allows connecting to pods/services running in the same Kubernetes cluster from
+/// the outside. Similar to an ingress controller for HTTPS.
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{net::TcpListener, io::AsyncWriteExt};
 
@@ -15,7 +20,6 @@ project_git_version!(GIT_VERSION);
 
 fn cli() -> clap::Command {
     clap::Command::new("Neon proxy/router")
-        .disable_help_flag(true)
         .version(GIT_VERSION)
         .arg(
             Arg::new("listen")
@@ -28,19 +32,22 @@ fn cli() -> clap::Command {
             Arg::new("tls-key")
                 .short('k')
                 .long("tls-key")
-                .help("path to TLS key for client postgres connections"),
+                .help("path to TLS key for client postgres connections")
+                .required(true),
         )
         .arg(
             Arg::new("tls-cert")
                 .short('c')
                 .long("tls-cert")
-                .help("path to TLS cert for client postgres connections"),
+                .help("path to TLS cert for client postgres connections")
+                .required(true),
         )
         .arg(
             Arg::new("dest")
                 .short('d')
                 .long("destination")
-                .help("append this domain zone to the SNI hostname to get the destination address"),
+                .help("append this domain zone to the SNI hostname to get the destination address")
+                .required(true),
         )
 }
 
