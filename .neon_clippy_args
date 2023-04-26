@@ -1,0 +1,4 @@
+# * `-A unknown_lints` – do not warn about unknown lint suppressions
+#                        that people with newer toolchains might use
+# * `-D warnings`      - fail on any warnings (`cargo` returns non-zero exit status)
+export CLIPPY_COMMON_ARGS="--locked --workspace --all-targets -- -A unknown_lints -D warnings"
