@@ -197,7 +197,7 @@ jobs:
           - target_region:  eu-west-1
             target_cluster: dev-eu-west-1-zeta
           - target_region:  eu-central-1
-            target_cluster: dev-central-1-alpha
+            target_cluster: dev-eu-central-1-alpha
     environment:
       name: dev-${{ matrix.target_region }}
     steps:
