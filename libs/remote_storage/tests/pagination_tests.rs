@@ -99,7 +99,11 @@ struct S3WithTestBlobs {
 #[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledS3 {
     async fn setup() -> Self {
-        utils::logging::init(utils::logging::LogFormat::Test).expect("logging init failed");
+        utils::logging::init(
+            utils::logging::LogFormat::Test,
+            utils::logging::TracingErrorLayerEnablement::Disabled,
+        )
+        .expect("logging init failed");
         if env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_err() {
             info!(
                 "`{}` env variable is not set, skipping the test",
