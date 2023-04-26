@@ -1521,7 +1521,7 @@ impl Tenant {
 
                     // log a lot of stuff, because some tenants sometimes suffer from user-visible
                     // times to activate. see https://github.com/neondatabase/neon/issues/4025
-                    info!(since_creation_millis = elapsed.as_millis(), tenant_id = %self.tenant_id, activated_timelines, timelines_broken_during_activation, total_timelines, "Tenant activated");
+                    info!(since_creation_millis = elapsed.as_millis(), tenant_id = %self.tenant_id, activated_timelines, timelines_broken_during_activation, total_timelines, post_state = <&'static str>::from(&*current_state), "activation attempt finished");
                 }
             }
         });
