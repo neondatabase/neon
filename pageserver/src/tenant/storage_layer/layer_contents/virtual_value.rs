@@ -4,20 +4,53 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use utils::lsn::Lsn;
 
+/// VirtualValue is stored in some Layers instead of the normal repository::Value.
+///
+/// It describes one or more Values that are associated to one
+/// repostiory::Key, containing zero or one base image with all WAL records
+/// that need to apply to this preceding page image. In balanced tree-based
+/// indexes this reduces the number of full Keys we need to store, thus
+/// reducing the size of the layer's index and increasing cache efficiency.
+///
+/// Additionally, the abstraction paves the way to implement compression in the
+/// layer file themselves, as we'd just need to add a new variant to the
+/// VirtualValue type for compressed types. Examples of such optimizations
+/// are bitpacked and delta-encoded LSNs in the Lineage variants of this enum.
+///
+/// NOTE: Once committed into a hosted branch, these variants _must_ remain
+/// in this order, and cannot be removed - they are part of the specification
+/// of the physical layout of the DeltaLayer file. Any reordering is going to
+/// change the meaning of bytes in existing files and break the compatibility
+/// with old layers; so make sure you don't reorder these, nor should you
+/// update the layout of existing variants. You can update new variants as long
+/// as no user data is written using these variants.
+///
+/// NOTE: The first two variants are cloned over from repository::Value, which
+/// was the definition of the stored data in DeltaLayer before VirtualValue.
+/// These variants have the same layout and index, so they should (de)serialize
+/// into the same binary format, guaranteeing backwards compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VirtualValue {
+    /// NaturalImage: A natural WAL image, picked from PostgreSQL WAL.
     NaturalImage(Bytes),
+    /// NaturalWalRecord: A natural WAL record, picked from PostgreSQL WAL.
     NaturalWalRecord(NeonWalRecord),
+    /// ClosedLineage: A page image, followed by a set of WAL records that are
+    /// applied to that page image.
     ClosedLineage {
         image: Bytes,
         lsns: Vec<Lsn>,
         records: Vec<NeonWalRecord>,
     },
+    /// ClosedRecLineage: A will-init WAL record, followed by a set of WAL
+    /// records that are applied to the page image of the WAL record.
     ClosedRecLineage {
         image_rec: NeonWalRecord,
         lsns: Vec<Lsn>,
         records: Vec<NeonWalRecord>,
     },
+    /// OpenLineage: A set of WAL records that are applied to the same page,
+    /// but that do not have a known page image in this Layer.
     OpenLineage {
         lsns: Vec<Lsn>,
         records: Vec<NeonWalRecord>,
@@ -94,6 +127,7 @@ impl From<Value> for VirtualValue {
     }
 }
 
+#[must_use = "deconstruct the value using ::finish to make sure you don't lose intermediate values"]
 pub struct VirtualValueBuilder {
     state: Option<(Lsn, VirtualValue)>,
 }
@@ -103,6 +137,7 @@ impl VirtualValueBuilder {
         Self { state: None }
     }
 
+    #[must_use = "intermediate emitted values should be stored"]
     pub fn push(&mut self, new_lsn: Lsn, value: Value) -> Option<(Lsn, VirtualValue)> {
         if let Some((lsn, _)) = &self.state {
             assert!(new_lsn > *lsn);
@@ -195,13 +230,8 @@ impl VirtualValueBuilder {
         }
     }
 
+    #[must_use]
     pub fn finish(mut self) -> Option<(Lsn, VirtualValue)> {
         self.state.take()
-    }
-}
-
-impl Drop for VirtualValueBuilder {
-    fn drop(&mut self) {
-        assert!(self.state.is_none());
     }
 }
