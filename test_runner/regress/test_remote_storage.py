@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pytest
+import requests
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     LocalFsStorage,
@@ -985,6 +986,50 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
         log.info("joining first call thread")
         # in any case, make sure the lifetime of the thread is bounded to this test
         first_call_thread.join()
+
+
+def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
+    """
+    If the client hangs up before we start the index part upload but after we mark it
+    deleted in local memory, a subsequent delete_timeline call should be able to do
+    another delete timeline operation.
+
+    This tests cancel safety up to the given failpoint.
+    """
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        test_name="test_delete_timeline_client_hangup",
+    )
+
+    env = neon_env_builder.init_start()
+
+    child_timeline_id = env.neon_cli.create_branch("child", "main")
+
+    ps_http = env.pageserver.http_client()
+
+    failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+    ps_http.configure_failpoints((failpoint_name, "pause"))
+
+    with pytest.raises(requests.exceptions.Timeout):
+        ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
+
+    # make sure the timeout was due to the failpoint
+    at_failpoint_log_message = f".*{child_timeline_id}.*at failpoint {failpoint_name}.*"
+
+    def hit_failpoint():
+        assert env.pageserver.log_contains(at_failpoint_log_message)
+
+    wait_until(50, 0.1, hit_failpoint)
+
+    # ok, retry without failpoint, it should succeed
+    ps_http.configure_failpoints((failpoint_name, "off"))
+
+    # this should succeed
+    ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
+    # the second call will try to transition the timeline into Stopping state, but it's already in that state
+    env.pageserver.allowed_errors.append(
+        f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+    )
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
