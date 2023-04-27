@@ -201,15 +201,15 @@ async fn handle_client(
 
     // cut off first part of the sni domain
     let sni = stream.get_ref().sni_hostname().unwrap();
-    let dest = sni
+    let dest: Vec<&str> = sni
         .split_once('.').context("invalid sni")?.0
-        .replace("--", ".");
-
-    let destination = format!("{}.{}", dest, dest_suffix);
+        .splitn(3, "--").collect();
+    let destination = format!("{}.{}.{}", dest[0], dest[1], dest_suffix);
 
     info!("destination: {:?}", destination);
 
     conn_cfg.host(destination.as_str());
+    conn_cfg.port(6432); // TODO: it's a pooler and should be passed externally
 
     let mut conn = conn_cfg.connect()
         .or_else(|e| stream.throw_error(e))
