@@ -629,9 +629,7 @@ impl RemoteTimelineClient {
     }
 
     // NOTE: if there were no tasks to call stop we need to call stop by ourselves first
-    pub(crate) async fn persist_index_part_with_deleted_flag(
-        self: &Arc<Self>,
-    ) -> anyhow::Result<()> {
+    pub(crate) async fn persist_index_part_with_deleted_flag(&self) -> anyhow::Result<()> {
         let index_part = {
             let mut locked = self.upload_queue.lock().unwrap();
 
