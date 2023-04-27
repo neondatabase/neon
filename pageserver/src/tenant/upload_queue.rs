@@ -7,6 +7,7 @@ use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
+use chrono::NaiveDateTime;
 use std::sync::Arc;
 use tracing::info;
 
@@ -18,7 +19,7 @@ use utils::lsn::Lsn;
 // that many upload queues in a running pageserver, and most of them are initialized
 // anyway.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum UploadQueue {
+pub(super) enum UploadQueue {
     Uninitialized,
     Initialized(UploadQueueInitialized),
     Stopped(UploadQueueStopped),
@@ -75,9 +76,12 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) queued_operations: VecDeque<UploadOp>,
 }
 
-pub(crate) struct UploadQueueStopped {
-    /// Index part is needed here so timeline_delete can access it
-    pub(super) last_uploaded_index_part: IndexPart,
+pub(super) struct UploadQueueStopped {
+    pub(super) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
+    pub(super) last_uploaded_consistent_lsn: Lsn,
+    pub(super) latest_metadata: TimelineMetadata,
+    /// If Some(), a call to `persist_index_part_with_deleted_flag` is ongoing or finished.
+    pub(super) deleted_at: Option<NaiveDateTime>,
 }
 
 impl UploadQueue {
