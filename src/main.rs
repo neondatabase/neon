@@ -136,7 +136,6 @@ async fn main() -> anyhow::Result<()> {
 
         // TODO kb real stats for validation + better stats for every place: add and print `min`, `max`, `mean` values at least
         let validation_stats = checks::validate_pageserver_active_tenant_and_timelines(
-            dry_run,
             s3_client,
             s3_root,
             cloud_admin_api_client,

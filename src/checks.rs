@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use aws_sdk_s3::types::ObjectIdentifier;
 use aws_sdk_s3::Client;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
@@ -15,11 +14,9 @@ use crate::copied_definitions::id::TenantTimelineId;
 use crate::copied_definitions::index::IndexPart;
 use crate::copied_definitions::metadata::TimelineMetadata;
 use crate::delete_batch_producer::DeleteProducerStats;
-use crate::s3_deletion::send_delete_request;
 use crate::{list_objects_with_retries, RootTarget, MAX_RETRIES};
 
 pub async fn validate_pageserver_active_tenant_and_timelines(
-    dry_run: bool,
     s3_client: Arc<Client>,
     s3_root: RootTarget,
     admin_client: Arc<CloudAdminApiClient>,
@@ -93,13 +90,10 @@ pub async fn validate_pageserver_active_tenant_and_timelines(
             let id = TenantTimelineId::new(tenant_id, timeline_id);
             let s3_data = s3_blob_data.remove(&id);
             let s3_root = s3_root.clone();
-            let timeline_cleanup_client = Arc::clone(&s3_client);
             branch_checks.spawn(
                 async move {
                     let check_errors = branch_cleanup_and_check_errors(
-                        dry_run,
                         id,
-                        &timeline_cleanup_client,
                         &s3_root,
                         &s3_active_branch,
                         console_branch,
@@ -168,9 +162,7 @@ impl BranchCheckStats {
 }
 
 async fn branch_cleanup_and_check_errors(
-    dry_run: bool,
     id: TenantTimelineId,
-    s3_client: &Client,
     s3_root: &RootTarget,
     s3_active_branch: &BranchData,
     console_branch: Option<BranchData>,
@@ -290,39 +282,11 @@ async fn branch_cleanup_and_check_errors(
         warn!("Found check errors: {branch_check_errors:?}");
     }
 
-    if let Err(e) = remove_keys(s3_client, s3_root.bucket_name(), dry_run, keys_to_remove).await {
-        error!("Failed to clean up keys: {e:?}")
-    };
-
-    branch_check_errors
-}
-
-async fn remove_keys(
-    s3_client: &Client,
-    bucket_name: &str,
-    dry_run: bool,
-    keys_to_remove: Vec<String>,
-) -> anyhow::Result<()> {
-    info!(
-        "Cleaning up {} keys in batches: {:?}",
-        keys_to_remove.len(),
-        keys_to_remove
-    );
-
-    for keys_batch in keys_to_remove.chunks(900) {
-        send_delete_request(
-            s3_client,
-            bucket_name,
-            keys_batch
-                .iter()
-                .map(|key| ObjectIdentifier::builder().key(key).build())
-                .collect(),
-            dry_run,
-        )
-        .await?;
+    if !keys_to_remove.is_empty() {
+        error!("The following keys should be removed from S3: {keys_to_remove:?}")
     }
 
-    Ok(())
+    branch_check_errors
 }
 
 #[derive(Debug)]
