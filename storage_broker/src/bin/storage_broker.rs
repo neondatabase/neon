@@ -430,7 +430,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. init logging
     // 2. tracing panic hook
     // 3. sentry
-    logging::init(LogFormat::from_config(&args.log_format)?)?;
+    logging::init(
+        LogFormat::from_config(&args.log_format)?,
+        logging::TracingErrorLayerEnablement::Disabled,
+    )?;
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);

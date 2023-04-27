@@ -2886,7 +2886,13 @@ pub mod harness {
             };
 
             LOG_HANDLE.get_or_init(|| {
-                logging::init(logging::LogFormat::Test).expect("Failed to init test logging")
+                logging::init(
+                    logging::LogFormat::Test,
+                    // enable it in case in case the tests exercise code paths that use
+                    // debug_assert_current_span_has_tenant_and_timeline_id
+                    logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+                )
+                .expect("Failed to init test logging")
             });
 
             let repo_dir = PageServerConf::test_repo_dir(test_name);

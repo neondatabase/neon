@@ -25,6 +25,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_backend::AuthType;
+use utils::logging::TracingErrorLayerEnablement;
 use utils::signals::ShutdownSignals;
 use utils::{
     auth::JwtAuth, logging, project_git_version, sentry_init::init_sentry, signals::Signal,
@@ -86,8 +87,19 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Initialize logging, which must be initialized before the custom panic hook is installed.
-    logging::init(conf.log_format)?;
+    // Initialize logging.
+    //
+    // It must be initialized before the custom panic hook is installed below.
+    //
+    // Regarding tracing_error enablement: at this time, we only use the
+    // tracing_error crate to debug_assert that log spans contain tenant and timeline ids.
+    // See `debug_assert_current_span_has_tenant_and_timeline_id` in the timeline module
+    let tracing_error_layer_enablement = if cfg!(debug_assertions) {
+        TracingErrorLayerEnablement::EnableWithRustLogFilter
+    } else {
+        TracingErrorLayerEnablement::Disabled
+    };
+    logging::init(conf.log_format, tracing_error_layer_enablement)?;
 
     // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
     // disarming this hook on pageserver, because we never tear down tracing.
