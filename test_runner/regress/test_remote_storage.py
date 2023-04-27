@@ -758,12 +758,14 @@ def test_timeline_resurrection_on_attach(
     remote_storage_kind: RemoteStorageKind,
 ):
     """
-    See https://github.com/neondatabase/neon/issues/3560
+    After deleting a timeline it should never appear again.
+    This test ensures that this invariant holds for detach+attach.
+    Original issue: https://github.com/neondatabase/neon/issues/3560
     """
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_timeline_resurrection",
+        test_name="test_timeline_resurrection_on_attach",
     )
 
     ##### First start, insert data and upload it to the remote storage
