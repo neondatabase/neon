@@ -346,7 +346,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
     let first_page_only = seg_off < XLOG_BLCKSZ;
     let (shdr_rem_len, infoflags) = if first_page_only {
-        (seg_off, pg_constants::XLP_FIRST_IS_CONTRECORD) 
+        (seg_off, pg_constants::XLP_FIRST_IS_CONTRECORD)
     } else {
         (0, 0)
     };
@@ -372,7 +372,7 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
     //zero out the rest of the file
     seg_buf.resize(WAL_SEGMENT_SIZE, 0);
-    
+
     if !first_page_only {
         let block_offset = lsn.page_offset_in_segment(WAL_SEGMENT_SIZE) as usize;
         let header = XLogPageHeaderData {
@@ -401,7 +401,6 @@ pub fn generate_wal_segment(segno: u64, system_id: u64, lsn: Lsn) -> Result<Byte
 
     Ok(seg_buf.freeze())
 }
-
 
 #[repr(C)]
 #[derive(Serialize)]
