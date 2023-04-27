@@ -159,7 +159,7 @@ impl Conf {
                 let mut c = postgres::Config::new();
                 c.host_path(&unix_socket_dir_path);
                 c.user("postgres");
-                c.connect_timeout(Duration::from_millis(1000));
+                c.connect_timeout(Duration::from_secs(10));
                 c
             },
         };
