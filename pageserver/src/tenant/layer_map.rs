@@ -55,8 +55,8 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
-use utils::lsn::Lsn;
 use tracing::*;
+use utils::lsn::Lsn;
 
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::Replacement;
@@ -282,12 +282,12 @@ where
                 layer.short_id()
             );
         } else {
-			self.historic.insert(key, Arc::clone(&layer));
+            self.historic.insert(key, Arc::clone(&layer));
 
-			if Self::is_l0(&layer) {
-				self.l0_delta_layers.push(layer);
-			}
-		}
+            if Self::is_l0(&layer) {
+                self.l0_delta_layers.push(layer);
+            }
+        }
         Ok(())
     }
 
