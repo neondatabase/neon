@@ -78,7 +78,7 @@ impl Conf {
         let output = self
             .new_pg_command("initdb")?
             .arg("-D")
-            .arg(self.datadir.as_os_str())
+            .arg(&self.datadir)
             .args(["-U", "postgres", "--no-instructions", "--no-sync"])
             .output()?;
         debug!("initdb output: {:?}", output);
@@ -99,9 +99,10 @@ impl Conf {
             .new_pg_command("postgres")?
             .args(["-c", "listen_addresses="])
             .arg("-k")
-            .arg(unix_socket_dir_path.as_os_str())
+            .arg(&unix_socket_dir_path)
             .arg("-D")
-            .arg(self.datadir.as_os_str())
+            .arg(&self.datadir)
+            .args(["-c", "logging_collector=on"]) // stderr will mess up with tests output
             .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
             .spawn()?;
         let server = PostgresServer {
@@ -132,10 +133,7 @@ impl Conf {
         );
         let output = self
             .new_pg_command("pg_waldump")?
-            .args([
-                &first_segment_file.as_os_str(),
-                &last_segment_file.as_os_str(),
-            ])
+            .args([&first_segment_file, &last_segment_file])
             .output()?;
         debug!("waldump output: {:?}", output);
         Ok(output)
