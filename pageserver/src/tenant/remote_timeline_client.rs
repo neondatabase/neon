@@ -655,8 +655,8 @@ impl RemoteTimelineClient {
                 UploadQueue::Stopped(stopped) => stopped,
             };
 
-            if let Some(delete_dat) = stopped.last_uploaded_index_part.deleted_at.as_ref() {
-                anyhow::bail!("timeline is deleting, deleted_at: {:?}", delete_dat);
+            if let Some(deleted_at) = stopped.last_uploaded_index_part.deleted_at.as_ref() {
+                anyhow::bail!("timeline is deleting, deleted_at: {:?}", deleted_at);
             }
             stopped.last_uploaded_index_part.deleted_at = Some(Utc::now().naive_utc());
             stopped.last_uploaded_index_part.clone()
