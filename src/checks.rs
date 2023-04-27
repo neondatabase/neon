@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use aws_sdk_s3::model::ObjectIdentifier;
+use aws_sdk_s3::types::ObjectIdentifier;
 use aws_sdk_s3::Client;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;

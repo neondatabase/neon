@@ -11,7 +11,7 @@ use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
 use aws_config::sso::SsoCredentialsProvider;
-use aws_sdk_s3::Region;
+use aws_sdk_s3::config::Region;
 use aws_sdk_s3::{Client, Config};
 
 pub use copied_definitions::id::TenantId;
@@ -21,7 +21,7 @@ use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-const MAX_RETRIES: usize = 10;
+const MAX_RETRIES: usize = 20;
 const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
 
 #[derive(Debug, Clone)]
@@ -164,7 +164,7 @@ async fn list_objects_with_retries(
     s3_client: &Client,
     s3_target: &S3Target,
     continuation_token: Option<String>,
-) -> anyhow::Result<aws_sdk_s3::output::ListObjectsV2Output> {
+) -> anyhow::Result<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output> {
     for _ in 0..MAX_RETRIES {
         match s3_client
             .list_objects_v2()

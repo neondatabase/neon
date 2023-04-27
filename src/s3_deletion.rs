@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use aws_sdk_s3::model::{Delete, ObjectIdentifier};
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -169,8 +169,27 @@ async fn delete_tenants_batch(
     .await?;
 
     if !dry_run {
-        ensure_tenant_batch_deleted(s3_client, s3_target, batched_tenants).await?;
+        let mut last_err = None;
+        for _ in 0..MAX_RETRIES {
+            match ensure_tenant_batch_deleted(s3_client, s3_target, &batched_tenants).await {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    error!("Failed to ensure the tenant batch is deleted: {e}");
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        if let Some(e) = last_err {
+            anyhow::bail!(
+                "Failed to ensure that tenant batch is deleted {MAX_RETRIES} times: {e:?}"
+            );
+        }
     }
+
     Ok(deleted_keys)
 }
 
@@ -201,7 +220,25 @@ async fn delete_timelines_batch(
     .await?;
 
     if !dry_run {
-        ensure_timeline_batch_deleted(s3_client, s3_target, batched_timelines).await?;
+        let mut last_err = None;
+        for _ in 0..MAX_RETRIES {
+            match ensure_timeline_batch_deleted(s3_client, s3_target, &batched_timelines).await {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    error!("Failed to ensure the timelines batch is deleted: {e}");
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        if let Some(e) = last_err {
+            anyhow::bail!(
+                "Failed to ensure that timeline batch is deleted {MAX_RETRIES} times: {e:?}"
+            );
+        }
     }
     Ok(deleted_keys)
 }
@@ -344,11 +381,11 @@ pub async fn send_delete_request(
 async fn ensure_tenant_batch_deleted(
     s3_client: &Client,
     s3_target: &RootTarget,
-    batch: Vec<TenantId>,
+    batch: &[TenantId],
 ) -> anyhow::Result<()> {
     let mut not_deleted_tenants = Vec::with_capacity(batch.len());
 
-    for tenant_id in batch {
+    for &tenant_id in batch {
         let fetch_response =
             list_objects_with_retries(s3_client, &s3_target.tenant_root(tenant_id), None).await?;
 
@@ -365,7 +402,7 @@ async fn ensure_tenant_batch_deleted(
 
     anyhow::ensure!(
         not_deleted_tenants.is_empty(),
-        "Failed to delete all tenants in a batch"
+        "Failed to delete all tenants in a batch. Tenants {not_deleted_tenants:?} should be deleted."
     );
     Ok(())
 }
@@ -373,23 +410,20 @@ async fn ensure_tenant_batch_deleted(
 async fn ensure_timeline_batch_deleted(
     s3_client: &Client,
     s3_target: &RootTarget,
-    batch: Vec<TenantTimelineId>,
+    batch: &[TenantTimelineId],
 ) -> anyhow::Result<()> {
     let mut not_deleted_timelines = Vec::with_capacity(batch.len());
 
-    for timeline_id in batch {
+    for &id in batch {
         let fetch_response =
-            list_objects_with_retries(s3_client, &s3_target.timeline_root(timeline_id), None)
-                .await?;
+            list_objects_with_retries(s3_client, &s3_target.timeline_root(id), None).await?;
 
         if fetch_response.is_truncated()
             || fetch_response.contents().is_some()
             || fetch_response.common_prefixes().is_some()
         {
-            error!(
-                "Timeline {timeline_id} should be deleted, but its list response is {fetch_response:?}"
-            );
-            not_deleted_timelines.push(timeline_id);
+            error!("Timeline {id} should be deleted, but its list response is {fetch_response:?}");
+            not_deleted_timelines.push(id);
         }
     }
 

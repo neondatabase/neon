@@ -4,17 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-aws-config = { version = "0.54", default-features = false, features=["rustls"] }
-aws-sdk-s3 = "0.24"
+aws-config = { version = "0.55", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "0.26"
 aws-smithy-http = "0.55"
-aws-types = "0.54"
+aws-types = "0.55"
 
 reqwest = { version = "0.11", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
 either = "1.8"
 
 tokio = { version = "1.17", features = ["macros", "sync", "fs", "io-util", "rt-multi-thread"] }
-tokio-rustls = "0.23"
+tokio-rustls = "0.24"
 
 anyhow = { version = "1.0", features = ["backtrace"] }
 

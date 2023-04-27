@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use anyhow::Context;
-use aws_sdk_s3::Region;
+use aws_sdk_s3::config::Region;
 use reqwest::Url;
 use s3_deleter::cloud_admin_api::CloudAdminApiClient;
 use s3_deleter::delete_batch_producer::DeleteBatchProducer;
