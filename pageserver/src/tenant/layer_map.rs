@@ -48,7 +48,6 @@ mod layer_coverage;
 
 use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
-use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
@@ -288,7 +287,6 @@ where
             self.l0_delta_layers.push(layer);
         }
 
-        NUM_ONDISK_LAYERS.inc();
         Ok(())
     }
 
@@ -314,8 +312,6 @@ where
                 "failed to locate removed historic layer from l0_delta_layers"
             );
         }
-
-        NUM_ONDISK_LAYERS.dec();
     }
 
     pub(self) fn replace_historic_noflush(

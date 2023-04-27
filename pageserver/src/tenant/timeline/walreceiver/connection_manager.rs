@@ -348,7 +348,7 @@ impl ConnectionManagerState {
                 .context("walreceiver connection handling failure")
             }
             .instrument(
-                info_span!("walreceiver_connection", id = %id, node_id = %new_sk.safekeeper_id),
+                info_span!("walreceiver_connection", tenant_id = %id.tenant_id, timeline_id = %id.timeline_id, node_id = %new_sk.safekeeper_id),
             )
         });
 

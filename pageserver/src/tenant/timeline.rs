@@ -48,7 +48,7 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::TimelineMetrics;
+use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
@@ -936,6 +936,7 @@ impl Timeline {
         }
     }
 
+    #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
@@ -2355,6 +2356,7 @@ impl Timeline {
                             id,
                             ctx.task_kind()
                         );
+                        UNEXPECTED_ONDEMAND_DOWNLOADS.inc();
                         timeline.download_remote_layer(remote_layer).await?;
                         continue 'layer_map_search;
                     }
@@ -3818,11 +3820,13 @@ impl Timeline {
     /// If the caller has a deadline or needs a timeout, they can simply stop polling:
     /// we're **cancellation-safe** because the download happens in a separate task_mgr task.
     /// So, the current download attempt will run to completion even if we stop polling.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%remote_layer.short_id()))]
+    #[instrument(skip_all, fields(layer=%remote_layer.short_id()))]
     pub async fn download_remote_layer(
         &self,
         remote_layer: Arc<RemoteLayer>,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         use std::sync::atomic::Ordering::Relaxed;
 
         let permit = match Arc::clone(&remote_layer.ongoing_download)
@@ -3866,6 +3870,8 @@ impl Timeline {
                     .await;
 
                 if let Ok(size) = &result {
+                    info!("layer file download finished");
+
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
                     self_clone.metrics.resident_physical_size_gauge.add(*size);
@@ -3937,6 +3943,8 @@ impl Timeline {
                     updates.flush();
                     drop(layers);
 
+                    info!("on-demand download successful");
+
                     // Now that we've inserted the download into the layer map,
                     // close the semaphore. This will make other waiters for
                     // this download return Ok(()).
@@ -3944,7 +3952,7 @@ impl Timeline {
                     remote_layer.ongoing_download.close();
                 } else {
                     // Keep semaphore open. We'll drop the permit at the end of the function.
-                    error!("on-demand download failed: {:?}", result.as_ref().unwrap_err());
+                    error!("layer file download failed: {:?}", result.as_ref().unwrap_err());
                 }
 
                 // Don't treat it as an error if the task that triggered the download
@@ -4254,4 +4262,37 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {}
+
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
+    use utils::tracing_span_assert;
+
+    pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
+        tracing_span_assert::MultiNameExtractor<2>,
+    > = once_cell::sync::Lazy::new(|| {
+        tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
+    });
+
+    pub static TIMELINE_ID_EXTRACTOR: once_cell::sync::Lazy<
+        tracing_span_assert::MultiNameExtractor<2>,
+    > = once_cell::sync::Lazy::new(|| {
+        tracing_span_assert::MultiNameExtractor::new("TimelineId", ["timeline_id", "timeline"])
+    });
+
+    match tracing_span_assert::check_fields_present([
+        &*TENANT_ID_EXTRACTOR,
+        &*TIMELINE_ID_EXTRACTOR,
+    ]) {
+        Ok(()) => (),
+        Err(missing) => panic!(
+            "missing extractors: {:?}",
+            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
+        ),
+    }
 }

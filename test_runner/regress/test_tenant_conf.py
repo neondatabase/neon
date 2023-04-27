@@ -1,3 +1,4 @@
+import json
 from contextlib import closing
 
 import psycopg2.extras
@@ -22,9 +23,12 @@ wait_lsn_timeout='111 s';
 checkpoint_distance = 10000
 compaction_target_size = 1048576
 evictions_low_residence_duration_metric_threshold = "2 days"
+eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold = "23 hours" }
 """
 
     env = neon_env_builder.init_start()
+    # we configure eviction but no remote storage, there might be error lines
+    env.pageserver.allowed_errors.append(".* no remote storage configured, cannot evict layers .*")
     http_client = env.pageserver.http_client()
 
     # Check that we raise on misspelled configs
@@ -44,6 +48,7 @@ evictions_low_residence_duration_metric_threshold = "2 days"
         "checkpoint_distance": "20000",
         "gc_period": "30sec",
         "evictions_low_residence_duration_metric_threshold": "42s",
+        "eviction_policy": json.dumps({"kind": "NoEviction"}),
     }
     tenant, _ = env.neon_cli.create_tenant(conf=new_conf)
 
@@ -84,6 +89,11 @@ evictions_low_residence_duration_metric_threshold = "2 days"
     assert effective_config["image_creation_threshold"] == 3
     assert effective_config["pitr_interval"] == "7days"
     assert effective_config["evictions_low_residence_duration_metric_threshold"] == "2days"
+    assert effective_config["eviction_policy"] == {
+        "kind": "LayerAccessThreshold",
+        "period": "20s",
+        "threshold": "23h",
+    }
 
     # check the configuration of the new tenant
     with closing(env.pageserver.connect()) as psconn:
@@ -121,6 +131,9 @@ evictions_low_residence_duration_metric_threshold = "2 days"
     assert (
         new_effective_config["evictions_low_residence_duration_metric_threshold"] == "42s"
     ), "Should override default value"
+    assert new_effective_config["eviction_policy"] == {
+        "kind": "NoEviction"
+    }, "Specific 'eviction_policy' config should override the default value"
     assert new_effective_config["compaction_target_size"] == 1048576
     assert new_effective_config["compaction_period"] == "20s"
     assert new_effective_config["compaction_threshold"] == 10
@@ -135,6 +148,9 @@ evictions_low_residence_duration_metric_threshold = "2 days"
         "compaction_period": "80sec",
         "image_creation_threshold": "2",
         "evictions_low_residence_duration_metric_threshold": "23h",
+        "eviction_policy": json.dumps(
+            {"kind": "LayerAccessThreshold", "period": "80s", "threshold": "42h"}
+        ),
     }
     env.neon_cli.config_tenant(
         tenant_id=tenant,
@@ -180,6 +196,11 @@ evictions_low_residence_duration_metric_threshold = "2 days"
     assert (
         updated_effective_config["evictions_low_residence_duration_metric_threshold"] == "23h"
     ), "Should override default value"
+    assert updated_effective_config["eviction_policy"] == {
+        "kind": "LayerAccessThreshold",
+        "period": "1m 20s",
+        "threshold": "1day 18h",
+    }, "Specific 'eviction_policy' config should override the default value"
     assert updated_effective_config["compaction_target_size"] == 1048576
     assert updated_effective_config["compaction_threshold"] == 10
     assert updated_effective_config["gc_horizon"] == 67108864
@@ -239,6 +260,11 @@ evictions_low_residence_duration_metric_threshold = "2 days"
     assert final_effective_config["gc_period"] == "1h"
     assert final_effective_config["image_creation_threshold"] == 3
     assert final_effective_config["evictions_low_residence_duration_metric_threshold"] == "2days"
+    assert final_effective_config["eviction_policy"] == {
+        "kind": "LayerAccessThreshold",
+        "period": "20s",
+        "threshold": "23h",
+    }
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()

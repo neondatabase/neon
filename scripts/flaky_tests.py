@@ -42,12 +42,16 @@ def main(args: argparse.Namespace):
     res: DefaultDict[str, DefaultDict[str, Dict[str, bool]]]
     res = defaultdict(lambda: defaultdict(dict))
 
-    logging.info("connecting to the database...")
-    with psycopg2.connect(connstr, connect_timeout=10) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            logging.info("fetching flaky tests...")
-            cur.execute(FLAKY_TESTS_QUERY, (interval_days,))
-            rows = cur.fetchall()
+    try:
+        logging.info("connecting to the database...")
+        with psycopg2.connect(connstr, connect_timeout=30) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                logging.info("fetching flaky tests...")
+                cur.execute(FLAKY_TESTS_QUERY, (interval_days,))
+                rows = cur.fetchall()
+    except psycopg2.OperationalError as exc:
+        logging.error("cannot fetch flaky tests from the DB due to an error", exc)
+        rows = []
 
     for row in rows:
         logging.info(f"\t{row['parent_suite'].replace('.', '/')}/{row['suite']}.py::{row['test']}")
