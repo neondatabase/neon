@@ -114,7 +114,7 @@ async fn import_rel(
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
-    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
+    reader: &mut (impl AsyncRead + Unpin),
     len: usize,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
