@@ -200,7 +200,7 @@ async fn import_slru(
     modification: &mut DatadirModification<'_>,
     slru: SlruKind,
     path: &Path,
-    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
+    reader: &mut (impl AsyncRead + Unpin),
     len: usize,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
