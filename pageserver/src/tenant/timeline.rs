@@ -596,7 +596,7 @@ impl Timeline {
             Ok(()) => Ok(()),
             seqwait_error => {
                 drop(_timer);
-                let walreceiver_status = self.walreceiver.status();
+                let walreceiver_status = self.walreceiver.status().await;
                 seqwait_error.with_context(|| format!(
                     "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, {}",
                     lsn,

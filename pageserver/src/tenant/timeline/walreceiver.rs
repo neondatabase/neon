@@ -38,7 +38,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use storage_broker::BrokerClientChannel;
 use tokio::select;
-use tokio::sync::watch;
+use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
@@ -65,12 +65,7 @@ pub struct WalReceiver {
     timeline_ref: Weak<Timeline>,
     conf: WalReceiverConf,
     started: AtomicBool,
-    // Keep the status sender wrapped in `Arc`, so we can (re)send it into the walreceiver manager loop,
-    // every time walreceiver is started.
-    // We do not allow more than one walreceiver manager loop, but can stop and start it periodically.
-    manager_status_sender: Arc<watch::Sender<Option<ConnectionManagerStatus>>>,
-    // Status sender needs a receiver end to send without errors, keep it to access the latest data sent.
-    manager_status_receiver: watch::Receiver<Option<ConnectionManagerStatus>>,
+    manager_status: Arc<RwLock<Option<ConnectionManagerStatus>>>,
 }
 
 impl WalReceiver {
@@ -79,14 +74,12 @@ impl WalReceiver {
         timeline_ref: Weak<Timeline>,
         conf: WalReceiverConf,
     ) -> Self {
-        let (manager_status_sender, manager_status_receiver) = watch::channel(None);
         Self {
             timeline,
             timeline_ref,
             conf,
             started: AtomicBool::new(false),
-            manager_status_sender: Arc::new(manager_status_sender),
-            manager_status_receiver,
+            manager_status: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -108,7 +101,7 @@ impl WalReceiver {
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
         let wal_receiver_conf = self.conf.clone();
-        let loop_status_sender = Arc::clone(&self.manager_status_sender);
+        let loop_status = Arc::clone(&self.manager_status);
         task_mgr::spawn(
             WALRECEIVER_RUNTIME.handle(),
             TaskKind::WalReceiverManager,
@@ -132,7 +125,7 @@ impl WalReceiver {
                             &mut broker_client,
                             &mut connection_manager_state,
                             &walreceiver_ctx,
-                            &loop_status_sender,
+                            &loop_status,
                         ) => match loop_step_result {
                             ControlFlow::Continue(()) => continue,
                             ControlFlow::Break(()) => {
@@ -144,7 +137,7 @@ impl WalReceiver {
                 }
 
                 connection_manager_state.shutdown().await;
-                loop_status_sender.send(None).expect("Should never fail due to receiver end stored in WalReceiver");
+                *loop_status.write().await = None;
                 Ok(())
             }
             .instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
@@ -165,8 +158,8 @@ impl WalReceiver {
         self.started.store(false, atomic::Ordering::Release);
     }
 
-    pub(super) fn status(&self) -> Option<ConnectionManagerStatus> {
-        self.manager_status_receiver.borrow().clone()
+    pub(super) async fn status(&self) -> Option<ConnectionManagerStatus> {
+        self.manager_status.read().await.clone()
     }
 }
 

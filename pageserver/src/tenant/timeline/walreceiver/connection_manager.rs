@@ -24,6 +24,7 @@ use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use storage_broker::BrokerClientChannel;
 use storage_broker::Streaming;
+use tokio::sync::RwLock;
 use tokio::{select, sync::watch};
 use tracing::*;
 
@@ -43,7 +44,7 @@ pub(super) async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     connection_manager_state: &mut ConnectionManagerState,
     ctx: &RequestContext,
-    manager_status_sender: &watch::Sender<Option<ConnectionManagerStatus>>,
+    manager_status: &RwLock<Option<ConnectionManagerStatus>>,
 ) -> ControlFlow<(), ()> {
     let mut timeline_state_updates = connection_manager_state
         .timeline
@@ -181,9 +182,7 @@ pub(super) async fn connection_manager_loop_step(
                 .change_connection(new_candidate, ctx)
                 .await
         }
-        manager_status_sender
-            .send(Some(connection_manager_state.manager_status()))
-            .ok();
+        *manager_status.write().await = Some(connection_manager_state.manager_status());
     }
 }
 
