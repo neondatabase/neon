@@ -106,21 +106,22 @@ pub fn get_cloud_admin_api_token_or_exit() -> String {
     }
 }
 
-pub fn init_logging(dry_run: bool, node_kind: &str) -> WorkerGuard {
+pub fn init_logging(binary_name: &str, dry_run: bool, node_kind: &str) -> WorkerGuard {
     let file_name = if dry_run {
         format!(
-            "s3_deleter_{}_{}__dry.log",
+            "{}_{}_{}__dry.log",
+            binary_name,
             node_kind,
             chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
         )
     } else {
         format!(
-            "s3_deleter_{}_{}.log",
+            "{}_{}_{}.log",
+            binary_name,
             node_kind,
             chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
         )
-    }
-    .to_string();
+    };
 
     let (file_writer, guard) =
         tracing_appender::non_blocking(tracing_appender::rolling::never("./logs/", file_name));

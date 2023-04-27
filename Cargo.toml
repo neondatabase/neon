@@ -1,5 +1,5 @@
 [package]
-name = "s3-deleter"
+name = "s3-scrubber"
 version = "0.1.0"
 edition = "2021"
 
