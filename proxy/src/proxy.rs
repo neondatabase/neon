@@ -5,7 +5,7 @@ use crate::{
     auth::{self, backend::AuthSuccess},
     cancellation::{self, CancelMap},
     compute::{self, PostgresConnection},
-    config::ProxyConfig,
+    config::{ProxyConfig, TlsConfig},
     console::{self, messages::MetricsAuxInfo},
     error::io_error,
     stream::{PqStream, Stream},
@@ -174,7 +174,7 @@ async fn handle_client(
         NUM_CONNECTIONS_CLOSED_COUNTER.inc();
     }
 
-    let tls = config.tls_config.as_ref().map(|t| t.to_server_config());
+    let tls = config.tls_config.as_ref();
     let do_handshake = handshake(stream, tls, cancel_map);
     let (mut stream, params) = match do_handshake.await? {
         Some(x) => x,
@@ -184,10 +184,7 @@ async fn handle_client(
     // Extract credentials which we're going to use for auth.
     let creds = {
         let sni = stream.get_ref().sni_hostname();
-        let common_names = config
-            .tls_config
-            .as_ref()
-            .and_then(|tls| tls.common_names.clone());
+        let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
@@ -208,14 +205,13 @@ async fn handle_client(
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
-pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
-    tls: Option<Arc<rustls::ServerConfig>>,
+    mut tls: Option<&TlsConfig>,
     cancel_map: &CancelMap,
 ) -> anyhow::Result<Option<(PqStream<Stream<S>>, StartupMessageParams)>> {
     // Client may try upgrading to each protocol only once
     let (mut tried_ssl, mut tried_gss) = (false, false);
-    let mut tls_upgraded = false;
 
     let mut stream = PqStream::new(Stream::from_raw(stream));
     loop {
@@ -230,9 +226,8 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
                     // We can't perform TLS handshake without a config
                     let enc = tls.is_some();
-
                     stream.write_message(&Be::EncryptionResponse(enc)).await?;
-                    if let Some(tls) = tls.clone() {
+                    if let Some(tls) = tls.take() {
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.
 
@@ -246,8 +241,7 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                         if !read_buf.is_empty() {
                             bail!("data is sent before server replied with EncryptionResponse");
                         }
-                        stream = PqStream::new(raw.upgrade(tls).await?);
-                        tls_upgraded = true;
+                        stream = PqStream::new(raw.upgrade(tls.to_server_config()).await?);
                     }
                 }
                 _ => bail!(ERR_PROTO_VIOLATION),
@@ -262,8 +256,9 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 _ => bail!(ERR_PROTO_VIOLATION),
             },
             StartupMessage { params, .. } => {
-                // Check that tls was actually upgraded
-                if !tls_upgraded {
+                // Check that the config has been consumed during upgrade
+                // OR we didn't provide it at all (for dev purposes).
+                if tls.is_some() {
                     stream.throw_error_str(ERR_INSECURE_CONNECTION).await?;
                 }
 
@@ -345,7 +340,7 @@ async fn connect_to_compute(
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 #[tracing::instrument(skip_all)]
-pub async fn prepare_client_connection(
+async fn prepare_client_connection(
     node: &compute::PostgresConnection,
     reported_auth_ok: bool,
     session: cancellation::Session<'_>,
