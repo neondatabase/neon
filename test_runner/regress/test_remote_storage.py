@@ -837,10 +837,17 @@ def test_timeline_resurrection_on_attach(
     assert timeline["state"] == "Active"
 
 
-def test_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):
+def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):
+    """
+    When deleting a timeline, if we succeed in setting the deleted flag remotely
+    but fail to delete the local state, restarting the pageserver should resume
+    the deletion of the local state.
+    (Deletion of the state in S3 is not implemented yet.)
+    """
+
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_fail_before_local_delete",
+        test_name="test_timeline_delete_fail_before_local_delete",
     )
 
     env = neon_env_builder.init_start()
@@ -857,13 +864,16 @@ def test_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):
     ps_http.configure_failpoints(("timeline-delete-before-rm", "return"))
 
     # construct pair of branches
-    env.neon_cli.create_branch("test_fail_before_local_delete")
-
-    leaf_timeline_id = env.neon_cli.create_branch(
-        "test_fail_before_local_delete1", "test_fail_before_local_delete"
+    intermediate_timeline_id = env.neon_cli.create_branch(
+        "test_timeline_delete_fail_before_local_delete"
     )
 
-    timeline_path = (
+    leaf_timeline_id = env.neon_cli.create_branch(
+        "test_timeline_delete_fail_before_local_delete1",
+        "test_timeline_delete_fail_before_local_delete",
+    )
+
+    leaf_timeline_path = (
         env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
     )
 
@@ -873,12 +883,23 @@ def test_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):
     ):
         ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
 
-    assert timeline_path.exists()
+    assert leaf_timeline_path.exists(), "the failpoint didn't work"
 
     env.pageserver.stop()
     env.pageserver.start()
 
-    assert not timeline_path.exists()
+    # Wait for tenant to finish loading.
+    wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=5, period=0.5)
+
+    assert (
+        not leaf_timeline_path.exists()
+    ), "timeline load procedure should have resumed the deletion interrupted by the failpoint"
+    timelines = ps_http.timeline_list(env.initial_tenant)
+    assert {TimelineId(tl["timeline_id"]) for tl in timelines} == {
+        intermediate_timeline_id,
+        env.initial_timeline,
+    }, "other timelines should not have been affected"
+    assert all([tl["state"] == "Active" for tl in timelines])
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
