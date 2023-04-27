@@ -7,7 +7,7 @@ use anyhow::bail;
 use clap::{self, Arg};
 use proxy::config::{self, ProxyConfig};
 use std::{borrow::Cow, net::SocketAddr};
-use tokio::{net::TcpListener};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use utils::{project_git_version, sentry_init::init_sentry};
