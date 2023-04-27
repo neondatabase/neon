@@ -65,8 +65,8 @@ fn copyin_stream(pgb: &mut PostgresBackendTCP) -> impl Stream<Item = io::Result<
 
                 _ = task_mgr::shutdown_watcher() => {
                     // We were requested to shut down.
-                    let msg = "pageserver is shutting down".to_string();
-                    let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(&msg, None));
+                    let msg = "pageserver is shutting down";
+                    let _ = pgb.write_message_noflush(&BeMessage::ErrorResponse(msg, None));
                     Err(QueryError::Other(anyhow::anyhow!(msg)))
                 }
 
