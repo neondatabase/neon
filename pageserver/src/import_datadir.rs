@@ -615,5 +615,5 @@ async fn import_file(
 async fn read_all_bytes(reader: &mut (impl AsyncRead + Send + Sync + Unpin)) -> Result<Bytes> {
     let mut buf: Vec<u8> = vec![];
     reader.read_to_end(&mut buf).await?;
-    Ok(Bytes::copy_from_slice(&buf[..]))
+    Ok(Bytes::from(buf))
 }
