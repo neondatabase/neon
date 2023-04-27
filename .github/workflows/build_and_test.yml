@@ -111,8 +111,21 @@ jobs:
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
 
-      - name: Run cargo clippy
-        run: ./run_clippy.sh
+      # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
+      # This will catch compiler & clippy warnings in all feature combinations.
+      # TODO: use cargo hack for build and test as well, but, that's quite expensive.
+      # NB: keep clippy args in sync with ./run_clippy.sh
+      - run: |
+          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
+          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
+            echo "No clippy args found in .neon_clippy_args"
+            exit 1
+          fi
+          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
+      - name: Run cargo clippy (debug)
+        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
+      - name: Run cargo clippy (release)
+        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
