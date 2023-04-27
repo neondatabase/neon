@@ -215,7 +215,7 @@ use std::sync::{Arc, Mutex};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use std::ops::DerefMut;
 use tokio::runtime::Runtime;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Span};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
@@ -649,6 +649,22 @@ impl RemoteTimelineClient {
             stopped.last_uploaded_index_part.deleted_at = Some(Utc::now().naive_utc());
             stopped.last_uploaded_index_part.clone()
         };
+
+        #[cfg(feature = "testing")]
+        tokio::task::spawn_blocking({
+            let current = Span::current();
+            move || {
+                let _entered = current.entered();
+                tracing::info!(
+                    "at failpoint persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+                );
+                fail::fail_point!(
+                    "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+                );
+            }
+        })
+        .await
+        .expect("spawn_blocking");
 
         upload::upload_index_part(
             self.conf,

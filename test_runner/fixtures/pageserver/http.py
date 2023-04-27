@@ -311,9 +311,9 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId):
+    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId, **kwargs):
         res = self.delete(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}", **kwargs
         )
         self.verbose_error(res)
         res_json = res.json()

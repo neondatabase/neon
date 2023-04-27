@@ -2,6 +2,7 @@
 # env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import os
+import queue
 import shutil
 import threading
 import time
@@ -904,6 +905,86 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         env.initial_timeline,
     }, "other timelines should not have been affected"
     assert all([tl["state"] == "Active" for tl in timelines])
+
+
+def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    If we're stuck uploading the index file with the is_delete flag,
+    eventually console will hand up and retry.
+    If we're still stuck at the retry time, ensure that the retry
+    fails with status 500, signalling to console that it should retry
+    later.
+    Ideally, timeline_delete should return 202 Accepted and require
+    console to poll for completion, but, that would require changing
+    the API contract.
+    """
+
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        test_name="test_concurrent_timeline_delete_if_first_stuck_at_index_upload",
+    )
+
+    env = neon_env_builder.init_start()
+
+    child_timeline_id = env.neon_cli.create_branch("child", "main")
+
+    ps_http = env.pageserver.http_client()
+
+    # make the first call sleep practically forever
+    failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+    ps_http.configure_failpoints((failpoint_name, "pause"))
+
+    def first_call(result_queue):
+        try:
+            log.info("first call start")
+            ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=10)
+            log.info("first call success")
+            result_queue.put("success")
+        except Exception:
+            log.exception("first call failed")
+            result_queue.put("failure, see log for stack trace")
+
+    first_call_result: queue.Queue[str] = queue.Queue()
+    first_call_thread = threading.Thread(target=first_call, args=(first_call_result,))
+    first_call_thread.start()
+
+    try:
+
+        def first_call_hit_failpoint():
+            assert env.pageserver.log_contains(
+                f".*{child_timeline_id}.*at failpoint {failpoint_name}"
+            )
+
+        wait_until(50, 0.1, first_call_hit_failpoint)
+
+        # make the second call and assert behavior
+        log.info("second call start")
+        with pytest.raises(
+            PageserverApiException, match="timeline is deleting, deleted_at"
+        ) as second_call_err:
+            ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
+        assert second_call_err.value.status_code == 500
+        env.pageserver.allowed_errors.append(
+            f".*{child_timeline_id}.*timeline is deleting, deleted_at: .*"
+        )
+        # the second call will try to transition the timeline into Stopping state as well
+        env.pageserver.allowed_errors.append(
+            f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+        )
+        log.info("second call failed as expected")
+
+        # by now we know that the second call failed, let's ensure the first call will finish
+        ps_http.configure_failpoints((failpoint_name, "off"))
+
+        result = first_call_result.get()
+        assert result == "success"
+
+    finally:
+        log.info("joining first call thread")
+        # in any case, make sure the lifetime of the thread is bounded to this test
+        first_call_thread.join()
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
