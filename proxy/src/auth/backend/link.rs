@@ -9,6 +9,7 @@ use crate::{
 use pq_proto::BeMessage as Be;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
@@ -85,7 +86,8 @@ pub(super) async fn authenticate(
         .host(&db_info.host)
         .port(db_info.port)
         .dbname(&db_info.dbname)
-        .user(&db_info.user);
+        .user(&db_info.user)
+        .ssl_mode(SslMode::Require); // we need TLS connection with SNI to properly route it
 
     if let Some(password) = db_info.password {
         config.password(password.as_ref());
