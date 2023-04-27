@@ -447,6 +447,8 @@ pub enum DeleteTimelineError {
     NotFound,
     #[error("HasChildren")]
     HasChildren,
+    #[error("stop upload queue: {0:#}")]
+    StopUploadQueue(#[from] remote_timeline_client::StopError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

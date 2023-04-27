@@ -143,6 +143,7 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
             HasChildren => ApiError::BadRequest(anyhow::anyhow!(
                 "Cannot delete timeline which has child timelines"
             )),
+            StopUploadQueue(e) => ApiError::InternalServerError(e.into()),
             Other(e) => ApiError::InternalServerError(e),
         }
     }

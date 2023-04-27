@@ -204,11 +204,11 @@ mod download;
 pub mod index;
 mod upload;
 
-use anyhow::Context;
 use chrono::Utc;
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
 use scopeguard::ScopeGuard;
+use utils::bin_ser::SerializeError;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -258,6 +258,16 @@ const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted,
+}
+
+/// Errors that can arise when calling [`RemoteTimelineClient::stop`].
+#[derive(Debug, thiserror::Error)]
+pub enum StopError {
+    /// Callers are responsible for checking this before calling `stop()`.
+    #[error("queue is not initialized")]
+    QueueUninitialized,
+    #[error("serialize metadata: {0:#}")]
+    SerializeMetadata(SerializeError),
 }
 
 /// A client for accessing a timeline's data in remote storage.
@@ -998,15 +1008,17 @@ impl RemoteTimelineClient {
         self.metrics.call_end(&file_kind, &op_kind);
     }
 
-    pub fn stop(&self) -> anyhow::Result<()> {
+    /// Close the upload queue for new operations and cancel queued operations.
+    /// In-progress operations will still be running after this function returns.
+    /// Use `task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id))`
+    /// to wait for them to complete, after calling this function.
+    pub fn stop(&self) -> Result<(), StopError> {
         // Whichever *task* for this RemoteTimelineClient grabs the mutex first will transition the queue
         // into stopped state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
         // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
         let mut guard = self.upload_queue.lock().unwrap();
         match &*guard {
-            UploadQueue::Uninitialized => anyhow::bail!(
-                "callers are responsible for ensuring this is only called on initialized queue"
-            ),
+            UploadQueue::Uninitialized => Err(StopError::QueueUninitialized),
             UploadQueue::Stopped(_) => {
                 // nothing to do
                 info!("another concurrent task already shut down the queue");
@@ -1021,7 +1033,7 @@ impl RemoteTimelineClient {
                     qi.last_uploaded_consistent_lsn,
                     qi.latest_metadata
                         .to_bytes()
-                        .context("should be able to serialize metadata")?,
+                        .map_err(StopError::SerializeMetadata)?,
                 );
 
                 // Replace the queue with the Stopped state, taking ownership of the old
