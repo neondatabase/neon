@@ -612,7 +612,7 @@ async fn import_file(
     Ok(None)
 }
 
-async fn read_all_bytes(reader: &mut (impl AsyncRead + Send + Sync + Unpin)) -> Result<Bytes> {
+async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> {
     let mut buf: Vec<u8> = vec![];
     reader.read_to_end(&mut buf).await?;
     Ok(Bytes::from(buf))
