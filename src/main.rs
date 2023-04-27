@@ -21,7 +21,11 @@ async fn main() -> anyhow::Result<()> {
         .next()
         .context("binary name in not the first argument")?;
     let dry_run = !args.any(|arg| arg == "--delete");
-    let _guard = init_logging(dry_run);
+
+    let mut node_kind = env::var("NODE_KIND").context("'NODE_KIND' param retrieval")?;
+    node_kind.make_ascii_lowercase();
+
+    let _guard = init_logging(dry_run, &node_kind);
 
     let _main_span = info_span!("main", binary = %binary_name, %dry_run).entered();
     if dry_run {
@@ -38,9 +42,6 @@ async fn main() -> anyhow::Result<()> {
         .context("'CLOUD_ADMIN_API_URL' param retrieval")?
         .parse()
         .context("'CLOUD_ADMIN_API_URL' param parsing")?;
-
-    let mut node_kind = env::var("NODE_KIND").context("'NODE_KIND' param retrieval")?;
-    node_kind.make_ascii_lowercase();
 
     let traversing_depth = match env::var("TRAVERSING_DEPTH").ok() {
         Some(traversing_depth) => match traversing_depth.as_str() {

@@ -106,11 +106,19 @@ pub fn get_cloud_admin_api_token_or_exit() -> String {
     }
 }
 
-pub fn init_logging(dry_run: bool) -> WorkerGuard {
+pub fn init_logging(dry_run: bool, node_kind: &str) -> WorkerGuard {
     let file_name = if dry_run {
-        chrono::Utc::now().format("s3_deleter__%Y_%m_%d__%H_%M_%S__dry.log")
+        format!(
+            "s3_deleter_{}_{}__dry.log",
+            node_kind,
+            chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
+        )
     } else {
-        chrono::Utc::now().format("s3_deleter__%Y_%m_%d__%H_%M_%S.log")
+        format!(
+            "s3_deleter_{}_{}.log",
+            node_kind,
+            chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
+        )
     }
     .to_string();
 
