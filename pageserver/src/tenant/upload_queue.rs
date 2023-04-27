@@ -25,7 +25,7 @@ pub(crate) enum UploadQueue {
 }
 
 impl UploadQueue {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             UploadQueue::Uninitialized => "Uninitialized",
             UploadQueue::Initialized(_) => "Initialized",
