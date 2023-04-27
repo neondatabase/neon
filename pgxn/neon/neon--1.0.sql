@@ -32,3 +32,11 @@ CREATE VIEW local_cache AS
 	SELECT P.* FROM local_cache_pages() AS P
 	(pageoffs int8, relfilenode oid, reltablespace oid, reldatabase oid,
 	 relforknumber int2, relblocknumber int8, accesscount int4);
+
+create table neon_prepared_statements(
+    client_id text not null,
+	stmt_name text not null,
+	stmt_body text not null,
+	from_sql boolean not null,
+	primary key(client_id, stmt_name)
+);
