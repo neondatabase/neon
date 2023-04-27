@@ -62,6 +62,7 @@ jsonwebtoken = "8"
 libc = "0.2"
 md5 = "0.7.0"
 memoffset = "0.8"
+native-tls = "0.2"
 nix = "0.26"
 notify = "5.0.0"
 num_cpus = "1.15"
@@ -124,10 +125,11 @@ env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
+postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
 tokio-tar = { git = "https://github.com/neondatabase/tokio-tar.git", rev="404df61437de0feef49ba2ccdbdd94eb8ad6e142" }
 
 ## Other git libraries
@@ -162,7 +164,7 @@ tonic-build = "0.9"
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
 [patch.crates-io]
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="43e6db254a97fdecbce33d8bc0890accfd74495e" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
 
 ################# Binary contents sections
 

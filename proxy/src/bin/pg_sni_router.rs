@@ -1,18 +1,16 @@
 /// A stand-alone program that routes connections, e.g. from
-/// `aaa--bbb--123.external.domain` to `aaa.bbb.123.internal.domain`.
+/// `aaa--bbb--1234.external.domain` to `aaa.bbb.internal.domain:1234`.
 ///
 /// This allows connecting to pods/services running in the same Kubernetes cluster from
 /// the outside. Similar to an ingress controller for HTTPS.
 use std::{net::SocketAddr, sync::Arc};
 
 use tokio::net::TcpListener;
-// use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
 use clap::{self, Arg};
 use futures::TryFutureExt;
 use proxy::console::messages::MetricsAuxInfo;
-// use proxy::console::messages::MetricsAuxInfo;
 use proxy::stream::{PqStream, Stream};
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -106,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start listening for incoming client connections
     let proxy_address: SocketAddr = args.get_one::<String>("listen").unwrap().parse()?;
-    info!("Starting proxy on {proxy_address}");
+    info!("Starting sni router on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
     let cancellation_token = CancellationToken::new();
@@ -240,7 +238,7 @@ async fn handle_client(
         .splitn(3, "--")
         .collect();
     let port = dest[2].parse::<u16>().context("invalid port")?;
-    let destination = format!("{}.{}.{}:{}",  dest[0], dest[1], dest_suffix, port);
+    let destination = format!("{}.{}.{}:{}", dest[0], dest[1], dest_suffix, port);
 
     info!("destination: {}", destination);
 

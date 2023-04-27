@@ -5,7 +5,7 @@ use pq_proto::StartupMessageParams;
 use std::{io, net::SocketAddr, time::Duration};
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio_postgres::NoTls;
+use tokio_postgres::tls::MakeTlsConnect;
 use tracing::{error, info, warn};
 
 const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
@@ -19,6 +19,9 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
+
+    #[error("{COULD_NOT_CONNECT}: {0}")]
+    TlsError(#[from] native_tls::Error),
 }
 
 impl UserFacingError for ConnectionError {
@@ -133,7 +136,7 @@ impl Default for ConnCfg {
 
 impl ConnCfg {
     /// Establish a raw TCP connection to the compute node.
-    async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream)> {
+    async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream, &str)> {
         use tokio_postgres::config::Host;
 
         // wrap TcpStream::connect with timeout
@@ -186,7 +189,7 @@ impl ConnCfg {
             };
 
             match connect_once(host, *port).await {
-                Ok(socket) => return Ok(socket),
+                Ok((sockaddr, stream)) => return Ok((sockaddr, stream, host)),
                 Err(err) => {
                     // We can't throw an error here, as there might be more hosts to try.
                     warn!("couldn't connect to compute node at {host}:{port}: {err}");
@@ -206,7 +209,10 @@ impl ConnCfg {
 
 pub struct PostgresConnection {
     /// Socket connected to a compute node.
-    pub stream: TcpStream,
+    pub stream: tokio_postgres::maybe_tls_stream::MaybeTlsStream<
+        tokio::net::TcpStream,
+        postgres_native_tls::TlsStream<tokio::net::TcpStream>,
+    >,
     /// PostgreSQL connection parameters.
     pub params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
@@ -215,10 +221,22 @@ pub struct PostgresConnection {
 
 impl ConnCfg {
     async fn do_connect(&self) -> Result<PostgresConnection, ConnectionError> {
-        // TODO: establish a secure connection to the DB.
-        let (socket_addr, mut stream) = self.connect_raw().await?;
-        let (client, connection) = self.0.connect_raw(&mut stream, NoTls).await?;
-        info!("connected to compute node at {socket_addr}");
+        let (socket_addr, stream, host) = self.connect_raw().await?;
+
+        let tls_connector = native_tls::TlsConnector::builder()
+            .build()
+            .unwrap();
+        let mut mk_tls = postgres_native_tls::MakeTlsConnector::new(tls_connector);
+        let tls = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut mk_tls, host)?;
+
+        // connect_raw() will not use TLS if sslmode is "disable"
+        let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        let stream = connection.stream.into_inner();
+
+        info!(
+            "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
+            self.0.get_ssl_mode()
+        );
 
         // This is very ugly but as of now there's no better way to
         // extract the connection parameters from tokio-postgres' connection.

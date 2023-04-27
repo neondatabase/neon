@@ -8,6 +8,7 @@ use crate::{auth::ClientCredentials, compute, error::io_error, scram, url::ApiUr
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
+use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Debug, Error)]
@@ -86,7 +87,8 @@ impl Api {
         let mut config = compute::ConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
-            .port(self.endpoint.port().unwrap_or(5432));
+            .port(self.endpoint.port().unwrap_or(5432))
+            .ssl_mode(SslMode::Disable);
 
         let node = NodeInfo {
             config,
