@@ -199,16 +199,11 @@ pub struct PostgresConnection {
 
 impl ConnCfg {
     async fn do_connect(&self) -> Result<PostgresConnection, ConnectionError> {
-
-        let a = native_tls::TlsConnector::new().unwrap();
-        let mut mk: postgres_native_tls::MakeTlsConnector = postgres_native_tls::MakeTlsConnector::new(a);
-        let tls: postgres_native_tls::TlsConnector = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut mk, "asdf")?;
-
         // TODO: establish a secure connection to the DB.
         let (socket_addr, mut stream) = self.connect_raw().await?;
 
 
-        let (client, connection) = self.0.connect_raw(&mut stream, tls).await?;
+        let (client, connection) = self.0.connect_raw(&mut stream, NoTls).await?;
         info!("connected to compute node at {socket_addr}");
 
         // This is very ugly but as of now there's no better way to
