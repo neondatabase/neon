@@ -51,11 +51,12 @@ use crate::keyspace::KeyPartitioning;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 use utils::lsn::Lsn;
+use tracing::*;
 
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::Replacement;
@@ -276,17 +277,17 @@ where
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) -> anyhow::Result<()> {
         let key = historic_layer_coverage::LayerKey::from(&*layer);
         if self.historic.contains(&key) {
-            bail!(
+            error!(
                 "Attempt to insert duplicate layer {} in layer map",
                 layer.short_id()
             );
-        }
-        self.historic.insert(key, Arc::clone(&layer));
+        } else {
+			self.historic.insert(key, Arc::clone(&layer));
 
-        if Self::is_l0(&layer) {
-            self.l0_delta_layers.push(layer);
-        }
-
+			if Self::is_l0(&layer) {
+				self.l0_delta_layers.push(layer);
+			}
+		}
         Ok(())
     }
 
