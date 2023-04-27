@@ -87,6 +87,20 @@ pub(super) async fn authenticate(
         .dbname(&db_info.dbname)
         .user(&db_info.user);
 
+    // That is a hack to support new way of accessing compute without using a
+    // NodePort. Now to access compute in cross-k8s setup (console->compute
+    // and link-proxy->compute) we need to connect to the pg_sni_router service
+    // using a TLS. Destination compute address is encoded in domain/SNI.
+    //
+    // However, for link-proxy it is hard add support for outgoing TLS connections
+    // as our trick with stealing stream from tokio-postgres doesn't work with TLS.
+    // So set sni_host option and use unencrupted connection instead. Once we add
+    // encryption support for outgoing connections to the proxy, we can remove
+    // this hack.
+    if db_info.host.contains("cluster.local") {
+        config.options(format!("sni_host={}", db_info.host).as_str());
+    }
+
     if let Some(password) = db_info.password {
         config.password(password.as_ref());
     }
