@@ -1,5 +1,4 @@
-use anyhow::*;
-use core::time::Duration;
+use anyhow::{bail, ensure};
 use log::*;
 use postgres::types::PgLsn;
 use postgres::Client;
@@ -8,7 +7,7 @@ use postgres_ffi::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +54,7 @@ impl Conf {
         self.datadir.join("pg_wal")
     }
 
-    fn new_pg_command(&self, command: impl AsRef<Path>) -> Result<Command> {
+    fn new_pg_command(&self, command: impl AsRef<Path>) -> anyhow::Result<Command> {
         let path = self.pg_bin_dir()?.join(command);
         ensure!(path.exists(), "Command {:?} does not exist", path);
         let mut cmd = Command::new(path);
@@ -65,7 +64,7 @@ impl Conf {
         Ok(cmd)
     }
 
-    pub fn initdb(&self) -> Result<()> {
+    pub fn initdb(&self) -> anyhow::Result<()> {
         if let Some(parent) = self.datadir.parent() {
             info!("Pre-creating parent directory {:?}", parent);
             // Tests may be run concurrently and there may be a race to create `test_output/`.
@@ -92,7 +91,7 @@ impl Conf {
         Ok(())
     }
 
-    pub fn start_server(&self) -> Result<PostgresServer> {
+    pub fn start_server(&self) -> anyhow::Result<PostgresServer> {
         info!("Starting Postgres server in {:?}", self.datadir);
         let unix_socket_dir = tempdir()?; // We need a directory with a short name for Unix socket (up to 108 symbols)
         let unix_socket_dir_path = unix_socket_dir.path().to_owned();
@@ -123,7 +122,7 @@ impl Conf {
         &self,
         first_segment_name: &str,
         last_segment_name: &str,
-    ) -> Result<std::process::Output> {
+    ) -> anyhow::Result<std::process::Output> {
         let first_segment_file = self.datadir.join(first_segment_name);
         let last_segment_file = self.datadir.join(last_segment_name);
         info!(
@@ -144,10 +143,9 @@ impl Conf {
 }
 
 impl PostgresServer {
-    pub fn connect_with_timeout(&self) -> Result<Client> {
+    pub fn connect_with_timeout(&self) -> anyhow::Result<Client> {
         let retry_until = Instant::now() + *self.client_config.get_connect_timeout().unwrap();
         while Instant::now() < retry_until {
-            use std::result::Result::Ok;
             if let Ok(client) = self.client_config.connect(postgres::NoTls) {
                 return Ok(client);
             }
@@ -164,7 +162,6 @@ impl PostgresServer {
 
 impl Drop for PostgresServer {
     fn drop(&mut self) {
-        use std::result::Result::Ok;
         match self.process.try_wait() {
             Ok(Some(_)) => return,
             Ok(None) => {
@@ -179,12 +176,12 @@ impl Drop for PostgresServer {
 }
 
 pub trait PostgresClientExt: postgres::GenericClient {
-    fn pg_current_wal_insert_lsn(&mut self) -> Result<PgLsn> {
+    fn pg_current_wal_insert_lsn(&mut self) -> anyhow::Result<PgLsn> {
         Ok(self
             .query_one("SELECT pg_current_wal_insert_lsn()", &[])?
             .get(0))
     }
-    fn pg_current_wal_flush_lsn(&mut self) -> Result<PgLsn> {
+    fn pg_current_wal_flush_lsn(&mut self) -> anyhow::Result<PgLsn> {
         Ok(self
             .query_one("SELECT pg_current_wal_flush_lsn()", &[])?
             .get(0))
@@ -193,7 +190,7 @@ pub trait PostgresClientExt: postgres::GenericClient {
 
 impl<C: postgres::GenericClient> PostgresClientExt for C {}
 
-pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> Result<()> {
+pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> anyhow::Result<()> {
     client.execute("create extension if not exists neon_test_utils", &[])?;
 
     let wal_keep_size: String = client.query_one("SHOW wal_keep_size", &[])?.get(0);
@@ -227,13 +224,13 @@ pub trait Crafter {
     /// * A vector of some valid "interesting" intermediate LSNs which one may start reading from.
     ///   May include or exclude Lsn(0) and the end-of-wal.
     /// * The expected end-of-wal LSN.
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)>;
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)>;
 }
 
 fn craft_internal<C: postgres::GenericClient>(
     client: &mut C,
-    f: impl Fn(&mut C, PgLsn) -> Result<(Vec<PgLsn>, Option<PgLsn>)>,
-) -> Result<(Vec<PgLsn>, PgLsn)> {
+    f: impl Fn(&mut C, PgLsn) -> anyhow::Result<(Vec<PgLsn>, Option<PgLsn>)>,
+) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
     ensure_server_config(client)?;
 
     let initial_lsn = client.pg_current_wal_insert_lsn()?;
@@ -265,7 +262,7 @@ fn craft_internal<C: postgres::GenericClient>(
 pub struct Simple;
 impl Crafter for Simple {
     const NAME: &'static str = "simple";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
         craft_internal(client, |client, _| {
             client.execute("CREATE table t(x int)", &[])?;
             Ok((Vec::new(), None))
@@ -276,7 +273,7 @@ impl Crafter for Simple {
 pub struct LastWalRecordXlogSwitch;
 impl Crafter for LastWalRecordXlogSwitch {
     const NAME: &'static str = "last_wal_record_xlog_switch";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
         // Do not use generate_internal because here we end up with flush_lsn exactly on
         // the segment boundary and insert_lsn after the initial page header, which is unusual.
         ensure_server_config(client)?;
@@ -298,7 +295,7 @@ impl Crafter for LastWalRecordXlogSwitch {
 pub struct LastWalRecordXlogSwitchEndsOnPageBoundary;
 impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
     const NAME: &'static str = "last_wal_record_xlog_switch_ends_on_page_boundary";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
         // Do not use generate_internal because here we end up with flush_lsn exactly on
         // the segment boundary and insert_lsn after the initial page header, which is unusual.
         ensure_server_config(client)?;
@@ -365,7 +362,7 @@ impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
 fn craft_single_logical_message(
     client: &mut impl postgres::GenericClient,
     transactional: bool,
-) -> Result<(Vec<PgLsn>, PgLsn)> {
+) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
     craft_internal(client, |client, initial_lsn| {
         ensure!(
             initial_lsn < PgLsn::from(0x0200_0000 - 1024 * 1024),
@@ -407,7 +404,7 @@ fn craft_single_logical_message(
 pub struct WalRecordCrossingSegmentFollowedBySmallOne;
 impl Crafter for WalRecordCrossingSegmentFollowedBySmallOne {
     const NAME: &'static str = "wal_record_crossing_segment_followed_by_small_one";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
         craft_single_logical_message(client, true)
     }
 }
@@ -415,7 +412,7 @@ impl Crafter for WalRecordCrossingSegmentFollowedBySmallOne {
 pub struct LastWalRecordCrossingSegment;
 impl Crafter for LastWalRecordCrossingSegment {
     const NAME: &'static str = "last_wal_record_crossing_segment";
-    fn craft(client: &mut impl postgres::GenericClient) -> Result<(Vec<PgLsn>, PgLsn)> {
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
         craft_single_logical_message(client, false)
     }
 }
