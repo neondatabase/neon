@@ -250,6 +250,11 @@ async fn page_service_conn_main(
 
     let peer_addr = socket.peer_addr().context("get peer address")?;
 
+    let mut socket = tokio_io_timeout::TimeoutReader::new(socket);
+    socket.set_timeout(Some(std::time::Duration::from_secs(60 * 10)));
+
+    let socket = std::pin::pin!(socket);
+
     // XXX: pgbackend.run() should take the connection_ctx,
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler

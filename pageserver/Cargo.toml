@@ -52,6 +52,7 @@ sync_wrapper.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
+tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
