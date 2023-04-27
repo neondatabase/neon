@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -142,6 +143,21 @@ pub fn update_pg_hba(pgdata_path: &Path) -> Result<()> {
         info!("pg_hba.conf is up-to-date");
     }
 
+    Ok(())
+}
+
+/// Create a standby.signal file
+pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
+    // XXX: consider making it a part of spec.json
+    info!("adding standby.signal");
+    let signalfile = pgdata_path.join("standby.signal");
+
+    if !signalfile.exists() {
+        info!("created standby.signal");
+        File::create(signalfile)?;
+    } else {
+        info!("reused pre-existing standby.signal");
+    }
     Ok(())
 }
 

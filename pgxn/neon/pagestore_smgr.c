@@ -189,6 +189,7 @@ typedef struct PrfHashEntry {
 #define SH_DEFINE
 #define SH_DECLARE
 #include "lib/simplehash.h"
+#include "neon.h"
 
 /*
  * PrefetchState maintains the state of (prefetch) getPage@LSN requests.
@@ -1209,6 +1210,9 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, ch
 
 	if (ShutdownRequestPending)
 		return;
+	/* Don't log any pages if we're not allowed to do so. */
+	if (!XLogInsertAllowed())
+		return;
 
 	/*
 	 * Whenever a VM or FSM page is evicted, WAL-log it. FSM and (some) VM
@@ -1375,8 +1379,18 @@ neon_get_request_lsn(bool *latest, RelFileNode rnode, ForkNumber forknum, BlockN
 
 	if (RecoveryInProgress())
 	{
+		/*
+		 * We don't know if WAL has been generated but not yet replayed, so
+		 * we're conservative in our estimates about latest pages.
+		 */
 		*latest = false;
-		lsn = GetXLogReplayRecPtr(NULL);
+
+		/*
+		 * Get the last written LSN of this page.
+		 */
+		lsn = GetLastWrittenLSN(rnode, forknum, blkno);
+		lsn = nm_adjust_lsn(lsn);
+
 		elog(DEBUG1, "neon_get_request_lsn GetXLogReplayRecPtr %X/%X request lsn 0 ",
 			 (uint32) ((lsn) >> 32), (uint32) (lsn));
 	}
@@ -1559,6 +1573,15 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	/*
 	 * Newly created relation is empty, remember that in the relsize cache.
 	 *
+	 * Note that in REDO, this is called to make sure the relation fork exists,
+	 * but it does not truncate the relation. So, we can only update the
+	 * relsize if it didn't exist before.
+	 * 
+	 * Also, in redo, we must make sure to update the cached size of the
+	 * relation, as that is the primary source of truth for REDO's
+	 * file length considerations, and as file extension isn't (perfectly)
+	 * logged, we need to take care of that before we hit file size checks.
+	 *
 	 * FIXME: This is currently not just an optimization, but required for
 	 * correctness. Postgres can call smgrnblocks() on the newly-created
 	 * relation. Currently, we don't call SetLastWrittenLSN() when a new
@@ -1566,7 +1589,14 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 	 * cache, we might call smgrnblocks() on the newly-created relation before
 	 * the creation WAL record hass been received by the page server.
 	 */
-	set_cached_relsize(reln->smgr_rnode.node, forkNum, 0);
+	if (isRedo)
+	{
+		update_cached_relsize(reln->smgr_rnode.node, forkNum, 0);
+		get_cached_relsize(reln->smgr_rnode.node, forkNum,
+						   &reln->smgr_cached_nblocks[forkNum]);
+	}
+	else
+		set_cached_relsize(reln->smgr_rnode.node, forkNum, 0);
 
 #ifdef DEBUG_COMPARE_LOCAL
 	if (IS_LOCAL_REL(reln))
@@ -1830,6 +1860,26 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 		.forkNum = forkNum,
 		.blockNum = blkno,
 	};
+
+	/*
+	 * The redo process does not lock pages that it needs to replay but are
+	 * not in the shared buffers, so a concurrent process may request the
+	 * page after redo has decided it won't redo that page and updated the
+	 * LwLSN for that page.
+	 * If we're in hot standby we need to take care that we don't return
+	 * until after REDO has finished replaying up to that LwLSN, as the page
+	 * should have been locked up to that point.
+	 *
+	 * See also the description on neon_redo_read_buffer_filter below.
+	 *
+	 * NOTE: It is possible that the WAL redo process will still do IO due to
+	 * concurrent failed read IOs. Those IOs should never have a request_lsn
+	 * that is as large as the WAL record we're currently replaying, if it
+	 * weren't for the behaviour of the LwLsn cache that uses the highest
+	 * value of the LwLsn cache when the entry is not found. 
+	 */
+	if (RecoveryInProgress() && !(MyBackendType == B_STARTUP))
+		XLogWaitForReplayOf(request_lsn);
 
 	/*
 	 * Try to find prefetched page in the list of received pages.
@@ -2583,4 +2633,144 @@ smgr_init_neon(void)
 
 	smgr_init_standard();
 	neon_init();
+}
+
+
+/*
+ * Return whether we can skip the redo for this block.
+ * 
+ * The conditions for skipping the IO are:
+ *
+ * - The block is not in the shared buffers, and
+ * - The block is not in the local file cache
+ *
+ * ... because any subsequent read of the page requires us to read
+ * the new version of the page from the PageServer. We do not
+ * check the local file cache; we instead evict the page from LFC: it
+ * is cheaper than going through the FS calls to read the page, and
+ * limits the number of lock operations used in the REDO process.
+ *
+ * We have one exception to the rules for skipping IO: We always apply
+ * changes to shared catalogs' pages. Although this is mostly out of caution,
+ * catalog updates usually result in backends rebuilding their catalog snapshot,
+ * which means it's quite likely the modified page is going to be used soon.
+ *
+ * It is important to note that skipping WAL redo for a page also means
+ * the page isn't locked by the redo process, as there is no Buffer
+ * being returned, nor is there a buffer descriptor to lock.
+ * This means that any IO that wants to read this block needs to wait
+ * for the WAL REDO process to finish processing the WAL record before
+ * it allows the system to start reading the block, as releasing the
+ * block early could lead to phantom reads.
+ *
+ * For example, REDO for a WAL record that modifies 3 blocks could skip
+ * the first block, wait for a lock on the second, and then modify the
+ * third block. Without skipping, all blocks would be locked and phantom
+ * reads would not occur, but with skipping, a concurrent process could
+ * read block 1 with post-REDO contents and read block 3 with pre-REDO
+ * contents, where with REDO locking it would wait on block 1 and see
+ * block 3 with post-REDO contents only.
+ */
+bool
+neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
+{
+	XLogRecPtr	end_recptr = record->EndRecPtr;
+	XLogRecPtr	prev_end_recptr = record->ReadRecPtr - 1;
+	RelFileNode	rnode;
+	ForkNumber	forknum;
+	BlockNumber	blkno;
+	BufferTag	tag;
+	uint32		hash;
+	LWLock	   *partitionLock;
+	Buffer		buffer;
+	bool		no_redo_needed;
+	BlockNumber relsize;
+
+	if (old_redo_read_buffer_filter && old_redo_read_buffer_filter(record, block_id))
+		return true;
+
+#if PG_VERSION_NUM < 150000
+	if (!XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blkno))
+		elog(PANIC, "failed to locate backup block with ID %d", block_id);
+#else
+	XLogRecGetBlockTag(record, block_id, &rnode, &forknum, &blkno);
+#endif
+
+	/*
+	 * Out of an abundance of caution, we always run redo on shared catalogs,
+	 * regardless of whether the block is stored in shared buffers.
+	 * See also this function's top comment.
+	 */
+	if (!OidIsValid(rnode.dbNode))
+		return false;
+
+	INIT_BUFFERTAG(tag, rnode, forknum, blkno);
+	hash = BufTableHashCode(&tag);
+	partitionLock = BufMappingPartitionLock(hash);
+
+	/*
+	 * Lock the partition of shared_buffers so that it can't be updated
+	 * concurrently.
+	 */
+	LWLockAcquire(partitionLock, LW_SHARED);
+
+	/* Try to find the relevant buffer */
+	buffer = BufTableLookup(&tag, hash);
+
+	no_redo_needed = buffer < 0;
+
+	/* we don't have the buffer in memory, update lwLsn past this record */
+	if (no_redo_needed)
+	{
+		SetLastWrittenLSNForBlock(end_recptr, rnode, forknum, blkno);
+		lfc_evict(rnode, forknum, blkno);
+	}
+	else
+	{
+		SetLastWrittenLSNForBlock(prev_end_recptr, rnode, forknum, blkno);
+	}
+
+	LWLockRelease(partitionLock);
+
+	/* Extend the relation if we know its size */
+	if (get_cached_relsize(rnode, forknum, &relsize))
+	{
+		if (relsize < blkno + 1)
+			update_cached_relsize(rnode, forknum, blkno + 1);
+	}
+	else
+	{
+		/*
+		 * Size was not cached. We populate the cache now, with the size of the
+		 * relation measured after this WAL record is applied.
+		 *
+		 * This length is later reused when we open the smgr to read the block,
+		 * which is fine and expected.
+		 */
+
+		NeonResponse *response;
+		NeonNblocksResponse *nbresponse;
+		NeonNblocksRequest request = {
+			.req = (NeonRequest) {
+				.lsn = end_recptr,
+				.latest = false,
+				.tag = T_NeonNblocksRequest,
+			},
+			.rnode = rnode,
+			.forknum = forknum,
+		};
+
+		response = page_server_request(&request);
+
+		Assert(response->tag == T_NeonNblocksResponse);
+		nbresponse = (NeonNblocksResponse *) response;
+
+		Assert(nbresponse->n_blocks > blkno);
+
+		set_cached_relsize(rnode, forknum, nbresponse->n_blocks);
+
+		elog(SmgrTrace, "Set length to %d", nbresponse->n_blocks);
+	}
+
+	return no_redo_needed;
 }

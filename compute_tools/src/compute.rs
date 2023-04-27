@@ -249,18 +249,63 @@ impl ComputeNode {
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip(self, compute_state))]
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
+        #[derive(Clone)]
+        enum Replication {
+            Primary,
+            Static { lsn: Lsn },
+            HotStandby,
+        }
+
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+        let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
+
+        let hot_replica = if let Some(option) = spec.cluster.settings.find_ref("hot_standby") {
+            if let Some(value) = &option.value {
+                anyhow::ensure!(option.vartype == "bool");
+                matches!(value.as_str(), "on" | "yes" | "true")
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let replication = if hot_replica {
+            Replication::HotStandby
+        } else if let Some(lsn) = spec.cluster.settings.find("recovery_target_lsn") {
+            Replication::Static {
+                lsn: Lsn::from_str(&lsn)?,
+            }
+        } else {
+            Replication::Primary
+        };
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &pspec.spec)?;
 
-        info!("starting safekeepers syncing");
-        let lsn = self
-            .sync_safekeepers(pspec.storage_auth_token.clone())
-            .with_context(|| "failed to sync safekeepers")?;
-        info!("safekeepers synced at LSN {}", lsn);
+        // Syncing safekeepers is only safe with primary nodes: if a primary
+        // is already connected it will be kicked out, so a secondary (standby)
+        // cannot sync safekeepers.
+        let lsn = match &replication {
+            Replication::Primary => {
+                info!("starting safekeepers syncing");
+                let lsn = self
+                    .sync_safekeepers(pspec.storage_auth_token.clone())
+                    .with_context(|| "failed to sync safekeepers")?;
+                info!("safekeepers synced at LSN {}", lsn);
+                lsn
+            }
+            Replication::Static { lsn } => {
+                info!("Starting read-only node at static LSN {}", lsn);
+                *lsn
+            }
+            Replication::HotStandby => {
+                info!("Initializing standby from latest Pageserver LSN");
+                Lsn(0)
+            }
+        };
 
         info!(
             "getting basebackup@{} from pageserver {}",
@@ -275,6 +320,13 @@ impl ComputeNode {
 
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
+
+        match &replication {
+            Replication::Primary | Replication::Static { .. } => {}
+            Replication::HotStandby => {
+                add_standby_signal(pgdata_path)?;
+            }
+        }
 
         Ok(())
     }
