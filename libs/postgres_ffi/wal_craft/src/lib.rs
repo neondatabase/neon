@@ -102,7 +102,12 @@ impl Conf {
         })?;
         let unix_socket_dir = tempdir()?; // We need a directory with a short name for Unix socket (up to 108 symbols)
         let unix_socket_dir_path = unix_socket_dir.path().to_owned();
-        let server_process = self
+        let pidfile = self.datadir.join("postmaster.pid");
+
+        // the datadir is re-created for each test
+        assert!(!pidfile.exists());
+
+        let mut server_process = self
             .new_pg_command("postgres")?
             .args(["-c", "listen_addresses="])
             .arg("-k")
@@ -113,6 +118,40 @@ impl Conf {
             .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
             .stderr(Stdio::from(log_file))
             .spawn()?;
+
+        // wait for the pidfile to appear before attempting to connect; this is 100 * 100ms or 10s
+        let pid = (0..100)
+            .inspect(|attempt| debug!("polling for postmaster.pid, attempt {attempt}"))
+            .find_map({
+                let mut buffer = String::with_capacity(16);
+                move |attempt| {
+                    if attempt > 0 {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+
+                    parse_postmaster_pid(&pidfile, &mut buffer).transpose()
+                }
+            });
+
+        let pid = match pid {
+            Some(Ok(pid)) if pid == server_process.id() => Ok(()),
+            Some(Ok(other)) => Err(anyhow::anyhow!(
+                "read unexpected pid {other}, expected {}",
+                server_process.id()
+            )),
+            Some(Err(e)) => Err(e).context("read postmaster.pid to confirm server startup"),
+            None => Err(anyhow::anyhow!(
+                "failed to parse any pid from postmaster.pid before timeout"
+            )),
+        };
+
+        if let Err(e) = pid {
+            if let Err(e) = server_process.kill().and_then(|_| server_process.wait()) {
+                warn!("killing and waiting the spawned server process failed: {e}");
+            }
+            return Err(e);
+        }
+
         let server = PostgresServer {
             process: server_process,
             _unix_socket_dir: unix_socket_dir,
@@ -146,6 +185,41 @@ impl Conf {
         debug!("waldump output: {:?}", output);
         Ok(output)
     }
+}
+
+/// Reads the postmaster.pid, expected to contain the pid number on first line.
+///
+/// Will return Ok(None) if the file was not found, or had less than one line of content.
+fn parse_postmaster_pid(pidfile: &Path, buffer: &mut String) -> anyhow::Result<Option<u32>> {
+    use std::io::BufRead;
+    let pidfile = match std::fs::OpenOptions::new().read(true).open(pidfile) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(e).context("unexpected failure to open postmaster.pid");
+        }
+    };
+
+    let mut pidfile = std::io::BufReader::new(pidfile);
+    buffer.clear();
+    match pidfile.read_line(buffer) {
+        Ok(_) if buffer.ends_with('\n') => { /* good */ }
+        Ok(_) => {
+            // empty file or partial first line, latter is quite unlikely
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(e).context("unexpected failure to read postmaster.pid");
+        }
+    }
+
+    buffer
+        .trim()
+        .parse::<u32>()
+        .context("invalid pid on first line of postmaster.pid")
+        .map(Some)
 }
 
 impl PostgresServer {
