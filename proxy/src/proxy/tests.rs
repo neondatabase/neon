@@ -1,9 +1,6 @@
 ///! A group of high-level tests for connection establishing logic and auth.
 use super::*;
-
-use crate::config::TlsConfig;
 use crate::{auth, sasl, scram};
-
 use async_trait::async_trait;
 use rstest::rstest;
 use tokio_postgres::config::SslMode;
@@ -136,11 +133,7 @@ async fn dummy_proxy(
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
     let cancel_map = CancelMap::default();
-    let server_config = match tls {
-        Some(tls) => Some(tls.config),
-        None => None,
-    };
-    let (mut stream, _params) = handshake(client, server_config, &cancel_map)
+    let (mut stream, _params) = handshake(client, tls.as_ref(), &cancel_map)
         .await?
         .context("handshake failed")?;
 
