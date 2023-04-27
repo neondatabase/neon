@@ -753,9 +753,11 @@ def get_queued_count(
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+@pytest.mark.parametrize("fill_branch", [True, False])
 def test_timeline_resurrection_on_attach(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
+    fill_branch: bool,
 ):
     """
     After deleting a timeline it should never appear again.
@@ -796,20 +798,23 @@ def test_timeline_resurrection_on_attach(
     branch_timeline_id = env.neon_cli.create_branch("new", "main")
     new_pg = env.endpoints.create_start("new")
 
-    with new_pg.cursor() as cur:
-        cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
-        current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+    if fill_branch:
+        with new_pg.cursor() as cur:
+            cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
+            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
-        # wait until pageserver receives that data
-        wait_for_last_record_lsn(ps_http, tenant_id, branch_timeline_id, current_lsn)
+            # wait until pageserver receives that data
+            wait_for_last_record_lsn(ps_http, tenant_id, branch_timeline_id, current_lsn)
 
-        # run checkpoint manually to be sure that data landed in remote storage
-        ps_http.timeline_checkpoint(tenant_id, branch_timeline_id)
+            # run checkpoint manually to be sure that data landed in remote storage
+            ps_http.timeline_checkpoint(tenant_id, branch_timeline_id)
 
-        # wait until pageserver successfully uploaded a checkpoint to remote storage
-        log.info("waiting for checkpoint upload")
-        wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
-        log.info("upload of checkpoint is done")
+            # wait until pageserver successfully uploaded a checkpoint to remote storage
+            log.info("waiting for checkpoint upload")
+            wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
+            log.info("upload of checkpoint is done")
+    else:
+        pass
 
     # delete new timeline
     ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=branch_timeline_id)
