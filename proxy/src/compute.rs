@@ -125,6 +125,12 @@ impl std::ops::DerefMut for ConnCfg {
     }
 }
 
+impl Default for ConnCfg {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnCfg {
     /// Establish a raw TCP connection to the compute node.
     async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream)> {

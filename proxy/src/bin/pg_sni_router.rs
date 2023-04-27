@@ -1,10 +1,15 @@
 use std::{net::SocketAddr, sync::Arc};
-use tokio::{net::TcpListener, io::AsyncWriteExt};
+use tokio::{io::AsyncWriteExt, net::TcpListener};
 
 use anyhow::{bail, ensure, Context};
 use clap::{self, Arg};
 use futures::TryFutureExt;
-use proxy::{cancellation::CancelMap, auth::{AuthFlow, self}, compute::ConnCfg, console::messages::MetricsAuxInfo};
+use proxy::{
+    auth::{self, AuthFlow},
+    cancellation::CancelMap,
+    compute::ConnCfg,
+    console::messages::MetricsAuxInfo,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use utils::{project_git_version, sentry_init::init_sentry};
@@ -199,28 +204,36 @@ async fn handle_client(
     conn_cfg.set_startup_params(&params);
     conn_cfg.password(password);
 
-    // cut off first part of the sni domain
+    // Cut off first part of the SNI domain
+    // We receive required destination details in the format of
+    //   `{k8s_service_name}--{k8s_namespace}--{port}.non-sni-domain`
     let sni = stream.get_ref().sni_hostname().unwrap();
     let dest: Vec<&str> = sni
-        .split_once('.').context("invalid sni")?.0
-        .splitn(3, "--").collect();
+        .split_once('.')
+        .context("invalid SNI")?
+        .0
+        .splitn(3, "--")
+        .collect();
     let destination = format!("{}.{}.{}", dest[0], dest[1], dest_suffix);
+    let port = dest[2].parse::<u16>().context("invalid port")?;
 
-    info!("destination: {:?}", destination);
+    info!("destination: {:?}:{}", destination, port);
 
     conn_cfg.host(destination.as_str());
-    conn_cfg.port(6432); // TODO: it's a pooler and should be passed externally
+    conn_cfg.port(port);
 
-    let mut conn = conn_cfg.connect()
+    let mut conn = conn_cfg
+        .connect()
         .or_else(|e| stream.throw_error(e))
         .await?;
 
-    cancel_map.with_session(|session| async {
-        proxy::proxy::prepare_client_connection(&conn, false, session, &mut stream).await?;
-        let (stream, read_buf) = stream.into_inner();
-        conn.stream.write_all(&read_buf).await?;
-        let metrics_aux: MetricsAuxInfo = Default::default();
-        proxy::proxy::proxy_pass(stream, conn.stream, &metrics_aux).await
-    })
-    .await
+    cancel_map
+        .with_session(|session| async {
+            proxy::proxy::prepare_client_connection(&conn, false, session, &mut stream).await?;
+            let (stream, read_buf) = stream.into_inner();
+            conn.stream.write_all(&read_buf).await?;
+            let metrics_aux: MetricsAuxInfo = Default::default();
+            proxy::proxy::proxy_pass(stream, conn.stream, &metrics_aux).await
+        })
+        .await
 }
