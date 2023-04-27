@@ -775,7 +775,7 @@ def test_timeline_resurrection_on_attach(
     pg = env.endpoints.create_start("main")
 
     tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    main_timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
 
     with pg.cursor() as cur:
         cur.execute("CREATE TABLE f (i integer);")
@@ -783,17 +783,17 @@ def test_timeline_resurrection_on_attach(
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
-        wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, current_lsn)
+        wait_for_last_record_lsn(ps_http, tenant_id, main_timeline_id, current_lsn)
 
         # run checkpoint manually to be sure that data landed in remote storage
-        ps_http.timeline_checkpoint(tenant_id, timeline_id)
+        ps_http.timeline_checkpoint(tenant_id, main_timeline_id)
 
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         log.info("waiting for checkpoint upload")
-        wait_for_upload(ps_http, tenant_id, timeline_id, current_lsn)
+        wait_for_upload(ps_http, tenant_id, main_timeline_id, current_lsn)
         log.info("upload of checkpoint is done")
 
-    new_timeline_id = env.neon_cli.create_branch("new", "main")
+    branch_timeline_id = env.neon_cli.create_branch("new", "main")
     new_pg = env.endpoints.create_start("new")
 
     with new_pg.cursor() as cur:
@@ -801,18 +801,18 @@ def test_timeline_resurrection_on_attach(
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
         # wait until pageserver receives that data
-        wait_for_last_record_lsn(ps_http, tenant_id, new_timeline_id, current_lsn)
+        wait_for_last_record_lsn(ps_http, tenant_id, branch_timeline_id, current_lsn)
 
         # run checkpoint manually to be sure that data landed in remote storage
-        ps_http.timeline_checkpoint(tenant_id, new_timeline_id)
+        ps_http.timeline_checkpoint(tenant_id, branch_timeline_id)
 
         # wait until pageserver successfully uploaded a checkpoint to remote storage
         log.info("waiting for checkpoint upload")
-        wait_for_upload(ps_http, tenant_id, new_timeline_id, current_lsn)
+        wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
         log.info("upload of checkpoint is done")
 
     # delete new timeline
-    ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=new_timeline_id)
+    ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=branch_timeline_id)
 
     ##### Stop the pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -827,16 +827,13 @@ def test_timeline_resurrection_on_attach(
 
     ps_http.tenant_attach(tenant_id=tenant_id)
 
-    wait_until_tenant_active(ps_http, tenant_id=tenant_id, iterations=5)
+    wait_until_tenant_active(ps_http, tenant_id=tenant_id, iterations=5, period=0.5)
 
     timelines = ps_http.timeline_list(tenant_id=tenant_id)
-    assert len(timelines) == 1, f"Expected to see only one non deleted timeline, got {timelines}"
-    timeline = timelines.pop()
-    loaded_timeline_id = timeline["timeline_id"]
-    assert (
-        TimelineId(loaded_timeline_id) == timeline_id
-    ), f"expected to load only {timeline_id} but got {loaded_timeline_id}"
-    assert timeline["state"] == "Active"
+    assert {TimelineId(tl["timeline_id"]) for tl in timelines} == {
+        main_timeline_id
+    }, "the deleted timeline should not have been resurrected"
+    assert all([tl["state"] == "Active" for tl in timelines])
 
 
 def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):
