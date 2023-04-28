@@ -125,11 +125,11 @@ env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
-postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
+postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
 tokio-tar = { git = "https://github.com/neondatabase/tokio-tar.git", rev="404df61437de0feef49ba2ccdbdd94eb8ad6e142" }
 
 ## Other git libraries
@@ -164,7 +164,7 @@ tonic-build = "0.9"
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
 [patch.crates-io]
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="27fc5729cc71a042e48eb980c8e736762138efe6" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
 
 ################# Binary contents sections
 
