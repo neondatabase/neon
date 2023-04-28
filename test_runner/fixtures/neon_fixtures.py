@@ -2619,6 +2619,13 @@ class SafekeeperHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def timeline_create(
         self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
     ):
