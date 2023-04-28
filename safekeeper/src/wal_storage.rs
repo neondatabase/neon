@@ -8,54 +8,47 @@
 //! Note that last file has `.partial` suffix, that's different from postgres.
 
 use anyhow::{bail, Context, Result};
-use remote_storage::RemotePath;
-
-use std::io::{self, Seek, SeekFrom};
-use std::pin::Pin;
-use tokio::io::AsyncRead;
-
+use bytes::Bytes;
+use futures::future::BoxFuture;
 use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogFromFileName};
 use postgres_ffi::{XLogSegNo, PG_TLI};
+use remote_storage::RemotePath;
 use std::cmp::{max, min};
-
-use bytes::Bytes;
-use std::fs::{self, remove_file, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
-
+use std::pin::Pin;
+use tokio::fs::{self, remove_file, File, OpenOptions};
+use tokio::io::{AsyncRead, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::*;
-
-use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::metrics::{time_io_closure, WalStorageMetrics};
 use crate::safekeeper::SafeKeeperState;
-
 use crate::wal_backup::read_object;
 use crate::SafeKeeperConf;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::XLOG_BLCKSZ;
-
-use postgres_ffi::waldecoder::WalStreamDecoder;
-
 use pq_proto::SystemId;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use utils::{id::TenantTimelineId, lsn::Lsn};
 
+#[async_trait::async_trait]
 pub trait Storage {
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn;
 
     /// Write piece of WAL from buf to disk, but not necessarily sync it.
-    fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()>;
+    async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()>;
 
     /// Truncate WAL at specified LSN, which must be the end of WAL record.
-    fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()>;
+    async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()>;
 
     /// Durably store WAL on disk, up to the last written WAL record.
-    fn flush_wal(&mut self) -> Result<()>;
+    async fn flush_wal(&mut self) -> Result<()>;
 
-    /// Remove all segments <= given segno. Returns closure as we want to do
-    /// that without timeline lock.
-    fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>>;
+    /// Remove all segments <= given segno. Returns function doing that as we
+    /// want to perform it without timeline lock.
+    fn remove_up_to(&self, segno_up_to: XLogSegNo) -> BoxFuture<'static, anyhow::Result<()>>;
 
     /// Release resources associated with the storage -- technically, close FDs.
     /// Currently we don't remove timelines until restart (#3146), so need to
@@ -178,33 +171,37 @@ impl PhysicalStorage {
     }
 
     /// Call fdatasync if config requires so.
-    fn fdatasync_file(&mut self, file: &mut File) -> Result<()> {
+    async fn fdatasync_file(&mut self, file: &mut File) -> Result<()> {
         if !self.conf.no_sync {
             self.metrics
-                .observe_flush_seconds(time_io_closure(|| Ok(file.sync_data()?))?);
+                .observe_flush_seconds(time_io_closure(file.sync_data()).await?);
         }
         Ok(())
     }
 
     /// Call fsync if config requires so.
-    fn fsync_file(&mut self, file: &mut File) -> Result<()> {
+    async fn fsync_file(&mut self, file: &mut File) -> Result<()> {
         if !self.conf.no_sync {
             self.metrics
-                .observe_flush_seconds(time_io_closure(|| Ok(file.sync_all()?))?);
+                .observe_flush_seconds(time_io_closure(file.sync_all()).await?);
         }
         Ok(())
     }
 
     /// Open or create WAL segment file. Caller must call seek to the wanted position.
     /// Returns `file` and `is_partial`.
-    fn open_or_create(&mut self, segno: XLogSegNo) -> Result<(File, bool)> {
+    async fn open_or_create(&mut self, segno: XLogSegNo) -> Result<(File, bool)> {
         let (wal_file_path, wal_file_partial_path) =
             wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
 
         // Try to open already completed segment
-        if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_path) {
+        if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_path).await {
             Ok((file, false))
-        } else if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_partial_path) {
+        } else if let Ok(file) = OpenOptions::new()
+            .write(true)
+            .open(&wal_file_partial_path)
+            .await
+        {
             // Try to open existing partial file
             Ok((file, true))
         } else {
@@ -213,35 +210,36 @@ impl PhysicalStorage {
                 .create(true)
                 .write(true)
                 .open(&wal_file_partial_path)
+                .await
                 .with_context(|| format!("Failed to open log file {:?}", &wal_file_path))?;
 
-            write_zeroes(&mut file, self.wal_seg_size)?;
-            self.fsync_file(&mut file)?;
+            write_zeroes(&mut file, self.wal_seg_size).await?;
+            self.fsync_file(&mut file).await?;
             Ok((file, true))
         }
     }
 
     /// Write WAL bytes, which are known to be located in a single WAL segment.
-    fn write_in_segment(&mut self, segno: u64, xlogoff: usize, buf: &[u8]) -> Result<()> {
+    async fn write_in_segment(&mut self, segno: u64, xlogoff: usize, buf: &[u8]) -> Result<()> {
         let mut file = if let Some(file) = self.file.take() {
             file
         } else {
-            let (mut file, is_partial) = self.open_or_create(segno)?;
+            let (mut file, is_partial) = self.open_or_create(segno).await?;
             assert!(is_partial, "unexpected write into non-partial segment file");
-            file.seek(SeekFrom::Start(xlogoff as u64))?;
+            file.seek(SeekFrom::Start(xlogoff as u64)).await?;
             file
         };
 
-        file.write_all(buf)?;
+        file.write_all(buf).await?;
 
         if xlogoff + buf.len() == self.wal_seg_size {
             // If we reached the end of a WAL segment, flush and close it.
-            self.fdatasync_file(&mut file)?;
+            self.fdatasync_file(&mut file).await?;
 
             // Rename partial file to completed file
             let (wal_file_path, wal_file_partial_path) =
                 wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
-            fs::rename(wal_file_partial_path, wal_file_path)?;
+            fs::rename(wal_file_partial_path, wal_file_path).await?;
         } else {
             // otherwise, file can be reused later
             self.file = Some(file);
@@ -255,11 +253,11 @@ impl PhysicalStorage {
     /// be flushed separately later.
     ///
     /// Updates `write_lsn`.
-    fn write_exact(&mut self, pos: Lsn, mut buf: &[u8]) -> Result<()> {
+    async fn write_exact(&mut self, pos: Lsn, mut buf: &[u8]) -> Result<()> {
         if self.write_lsn != pos {
             // need to flush the file before discarding it
             if let Some(mut file) = self.file.take() {
-                self.fdatasync_file(&mut file)?;
+                self.fdatasync_file(&mut file).await?;
             }
 
             self.write_lsn = pos;
@@ -277,7 +275,8 @@ impl PhysicalStorage {
                 buf.len()
             };
 
-            self.write_in_segment(segno, xlogoff, &buf[..bytes_write])?;
+            self.write_in_segment(segno, xlogoff, &buf[..bytes_write])
+                .await?;
             self.write_lsn += bytes_write as u64;
             buf = &buf[bytes_write..];
         }
@@ -286,6 +285,7 @@ impl PhysicalStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl Storage for PhysicalStorage {
     /// flush_lsn returns LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
@@ -293,7 +293,7 @@ impl Storage for PhysicalStorage {
     }
 
     /// Write WAL to disk.
-    fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
+    async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
         // Disallow any non-sequential writes, which can result in gaps or overwrites.
         // If we need to move the pointer, use truncate_wal() instead.
         if self.write_lsn > startpos {
@@ -311,7 +311,7 @@ impl Storage for PhysicalStorage {
             );
         }
 
-        let write_seconds = time_io_closure(|| self.write_exact(startpos, buf))?;
+        let write_seconds = time_io_closure(self.write_exact(startpos, buf)).await?;
         // WAL is written, updating write metrics
         self.metrics.observe_write_seconds(write_seconds);
         self.metrics.observe_write_bytes(buf.len());
@@ -340,14 +340,14 @@ impl Storage for PhysicalStorage {
         Ok(())
     }
 
-    fn flush_wal(&mut self) -> Result<()> {
+    async fn flush_wal(&mut self) -> Result<()> {
         if self.flush_record_lsn == self.write_record_lsn {
             // no need to do extra flush
             return Ok(());
         }
 
         if let Some(mut unflushed_file) = self.file.take() {
-            self.fdatasync_file(&mut unflushed_file)?;
+            self.fdatasync_file(&mut unflushed_file).await?;
             self.file = Some(unflushed_file);
         } else {
             // We have unflushed data (write_lsn != flush_lsn), but no file.
@@ -369,7 +369,7 @@ impl Storage for PhysicalStorage {
 
     /// Truncate written WAL by removing all WAL segments after the given LSN.
     /// end_pos must point to the end of the WAL record.
-    fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
+    async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
         // Streaming must not create a hole, so truncate cannot be called on non-written lsn
         if self.write_lsn != Lsn(0) && end_pos > self.write_lsn {
             bail!(
@@ -381,27 +381,27 @@ impl Storage for PhysicalStorage {
 
         // Close previously opened file, if any
         if let Some(mut unflushed_file) = self.file.take() {
-            self.fdatasync_file(&mut unflushed_file)?;
+            self.fdatasync_file(&mut unflushed_file).await?;
         }
 
         let xlogoff = end_pos.segment_offset(self.wal_seg_size);
         let segno = end_pos.segment_number(self.wal_seg_size);
 
         // Remove all segments after the given LSN.
-        remove_segments_from_disk(&self.timeline_dir, self.wal_seg_size, |x| x > segno)?;
+        remove_segments_from_disk(&self.timeline_dir, self.wal_seg_size, |x| x > segno).await?;
 
-        let (mut file, is_partial) = self.open_or_create(segno)?;
+        let (mut file, is_partial) = self.open_or_create(segno).await?;
 
         // Fill end with zeroes
-        file.seek(SeekFrom::Start(xlogoff as u64))?;
-        write_zeroes(&mut file, self.wal_seg_size - xlogoff)?;
-        self.fdatasync_file(&mut file)?;
+        file.seek(SeekFrom::Start(xlogoff as u64)).await?;
+        write_zeroes(&mut file, self.wal_seg_size - xlogoff).await?;
+        self.fdatasync_file(&mut file).await?;
 
         if !is_partial {
             // Make segment partial once again
             let (wal_file_path, wal_file_partial_path) =
                 wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
-            fs::rename(wal_file_path, wal_file_partial_path)?;
+            fs::rename(wal_file_path, wal_file_partial_path).await?;
         }
 
         // Update LSNs
@@ -411,11 +411,11 @@ impl Storage for PhysicalStorage {
         Ok(())
     }
 
-    fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
+    fn remove_up_to(&self, segno_up_to: XLogSegNo) -> BoxFuture<'static, anyhow::Result<()>> {
         let timeline_dir = self.timeline_dir.clone();
         let wal_seg_size = self.wal_seg_size;
-        Box::new(move |segno_up_to: XLogSegNo| {
-            remove_segments_from_disk(&timeline_dir, wal_seg_size, |x| x <= segno_up_to)
+        Box::pin(async move {
+            remove_segments_from_disk(&timeline_dir, wal_seg_size, |x| x <= segno_up_to).await
         })
     }
 
@@ -430,7 +430,7 @@ impl Storage for PhysicalStorage {
 }
 
 /// Remove all WAL segments in timeline_dir that match the given predicate.
-fn remove_segments_from_disk(
+async fn remove_segments_from_disk(
     timeline_dir: &Path,
     wal_seg_size: usize,
     remove_predicate: impl Fn(XLogSegNo) -> bool,
@@ -439,8 +439,8 @@ fn remove_segments_from_disk(
     let mut min_removed = u64::MAX;
     let mut max_removed = u64::MIN;
 
-    for entry in fs::read_dir(timeline_dir)? {
-        let entry = entry?;
+    let mut entries = fs::read_dir(timeline_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
         let entry_path = entry.path();
         let fname = entry_path.file_name().unwrap();
 
@@ -451,7 +451,7 @@ fn remove_segments_from_disk(
             }
             let (segno, _) = XLogFromFileName(fname_str, wal_seg_size);
             if remove_predicate(segno) {
-                remove_file(entry_path)?;
+                remove_file(entry_path).await?;
                 n_removed += 1;
                 min_removed = min(min_removed, segno);
                 max_removed = max(max_removed, segno);
@@ -682,12 +682,12 @@ impl WalReader {
 const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 
 /// Helper for filling file with zeroes.
-fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
+async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
     while count >= XLOG_BLCKSZ {
-        file.write_all(ZERO_BLOCK)?;
+        file.write_all(ZERO_BLOCK).await?;
         count -= XLOG_BLCKSZ;
     }
-    file.write_all(&ZERO_BLOCK[0..count])?;
+    file.write_all(&ZERO_BLOCK[0..count]).await?;
     Ok(())
 }
 

@@ -15,7 +15,6 @@ use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::fs::File;
-use tokio::runtime::Builder;
 
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -33,30 +32,16 @@ use once_cell::sync::OnceCell;
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
 
-pub fn wal_backup_launcher_thread_main(
-    conf: SafeKeeperConf,
-    wal_backup_launcher_rx: Receiver<TenantTimelineId>,
-) {
-    let mut builder = Builder::new_multi_thread();
-    if let Some(num_threads) = conf.backup_runtime_threads {
-        builder.worker_threads(num_threads);
-    }
-    let rt = builder
-        .enable_all()
-        .build()
-        .expect("failed to create wal backup runtime");
-
-    rt.block_on(async {
-        wal_backup_launcher_main_loop(conf, wal_backup_launcher_rx).await;
-    });
-}
-
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
-fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
-    GlobalTimelines::get(ttid)
-        .ok()
-        .filter(|tli| tli.wal_backup_attend())
+async fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
+    match GlobalTimelines::get(ttid).ok() {
+        Some(tli) => {
+            tli.wal_backup_attend().await;
+            Some(tli)
+        }
+        None => None,
+    }
 }
 
 struct WalBackupTaskHandle {
@@ -140,8 +125,8 @@ async fn update_task(
     ttid: TenantTimelineId,
     entry: &mut WalBackupTimelineEntry,
 ) {
-    let alive_peers = entry.timeline.get_peers(conf);
-    let wal_backup_lsn = entry.timeline.get_wal_backup_lsn();
+    let alive_peers = entry.timeline.get_peers(conf).await;
+    let wal_backup_lsn = entry.timeline.get_wal_backup_lsn().await;
     let (offloader, election_dbg_str) =
         determine_offloader(&alive_peers, wal_backup_lsn, ttid, conf);
     let elected_me = Some(conf.my_id) == offloader;
@@ -174,10 +159,10 @@ const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 /// Sits on wal_backup_launcher_rx and starts/stops per timeline wal backup
 /// tasks. Having this in separate task simplifies locking, allows to reap
 /// panics and separate elections from offloading itself.
-async fn wal_backup_launcher_main_loop(
+pub async fn wal_backup_launcher_task_main(
     conf: SafeKeeperConf,
     mut wal_backup_launcher_rx: Receiver<TenantTimelineId>,
-) {
+) -> anyhow::Result<()> {
     info!(
         "WAL backup launcher started, remote config {:?}",
         conf.remote_storage
@@ -205,7 +190,7 @@ async fn wal_backup_launcher_main_loop(
                 if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
                     continue; /* just drain the channel and do nothing */
                 }
-                let timeline = is_wal_backup_required(ttid);
+                let timeline = is_wal_backup_required(ttid).await;
                 // do we need to do anything at all?
                 if timeline.is_some() != tasks.contains_key(&ttid) {
                     if let Some(timeline) = timeline {
@@ -258,7 +243,7 @@ async fn backup_task_main(
     let tli = res.unwrap();
 
     let mut wb = WalBackupTask {
-        wal_seg_size: tli.get_wal_seg_size(),
+        wal_seg_size: tli.get_wal_seg_size().await,
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
         timeline: tli,
         timeline_dir,
@@ -314,7 +299,7 @@ impl WalBackupTask {
                 continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
             }
             // Perhaps peers advanced the position, check shmem value.
-            backup_lsn = self.timeline.get_wal_backup_lsn();
+            backup_lsn = self.timeline.get_wal_backup_lsn().await;
             if backup_lsn.segment_number(self.wal_seg_size)
                 >= commit_lsn.segment_number(self.wal_seg_size)
             {
@@ -366,6 +351,7 @@ pub async fn backup_lsn_range(
         let new_backup_lsn = s.end_lsn;
         timeline
             .set_wal_backup_lsn(new_backup_lsn)
+            .await
             .context("setting wal_backup_lsn")?;
         *backup_lsn = new_backup_lsn;
     }

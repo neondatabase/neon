@@ -394,7 +394,7 @@ impl SafekeeperPostgresHandler {
         // on this safekeeper itself. That's ok as (old) proposer will never be
         // able to commit such WAL.
         let stop_pos: Option<Lsn> = if self.is_walproposer_recovery() {
-            let wal_end = tli.get_flush_lsn();
+            let wal_end = tli.get_flush_lsn().await;
             Some(wal_end)
         } else {
             None
@@ -409,7 +409,7 @@ impl SafekeeperPostgresHandler {
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
-        let (_, persisted_state) = tli.get_state();
+        let (_, persisted_state) = tli.get_state().await;
         let wal_reader = WalReader::new(
             self.conf.workdir.clone(),
             self.conf.timeline_dir(&tli.ttid),
@@ -540,7 +540,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 .walsenders
                 .get_ws_remote_consistent_lsn(self.ws_guard.id)
             {
-                if self.tli.should_walsender_stop(remote_consistent_lsn) {
+                if self.tli.should_walsender_stop(remote_consistent_lsn).await {
                     // Terminate if there is nothing more to send.
                     return Err(CopyStreamHandlerEnd::ServerInitiated(format!(
                         "ending streaming to {:?} at {}, receiver is caughtup and there is no computes",

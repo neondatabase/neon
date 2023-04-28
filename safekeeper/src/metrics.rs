@@ -2,11 +2,12 @@
 
 use std::{
     sync::{Arc, RwLock},
-    time::{Instant, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_WRITE_SECONDS_BUCKETS};
 use anyhow::Result;
+use futures::Future;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
@@ -15,6 +16,7 @@ use metrics::{
 use once_cell::sync::Lazy;
 
 use postgres_ffi::XLogSegNo;
+use tokio::time::interval;
 use utils::pageserver_feedback::PageserverFeedback;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
@@ -221,14 +223,17 @@ impl WalStorageMetrics {
     }
 }
 
-/// Accepts a closure that returns a result, and returns the duration of the closure.
-pub fn time_io_closure(closure: impl FnOnce() -> Result<()>) -> Result<f64> {
+/// Accepts async function that returns empty anyhow result, and returns the duration of its execution.
+pub async fn time_io_closure<E: Into<anyhow::Error>>(
+    closure: impl Future<Output = Result<(), E>>,
+) -> Result<f64> {
     let start = std::time::Instant::now();
-    closure()?;
+    closure.await.map_err(|e| e.into())?;
     Ok(start.elapsed().as_secs_f64())
 }
 
 /// Metrics for a single timeline.
+#[derive(Clone)]
 pub struct FullTimelineInfo {
     pub ttid: TenantTimelineId,
     pub ps_feedback: PageserverFeedback,
@@ -609,5 +614,20 @@ impl Collector for TimelineCollector {
         mfs.extend(self.timelines_count.collect());
 
         mfs
+    }
+}
+
+/// Prometheus crate Collector interface is sync, and all safekeeper code is
+/// async. To bridge the gap, this function wakes once in scrape interval and
+/// copies metrics from under async lock to sync where collection can take it.
+pub async fn metrics_shifter() -> anyhow::Result<()> {
+    let scrape_interval = Duration::from_secs(30);
+    let mut interval = interval(scrape_interval);
+    loop {
+        interval.tick().await;
+        let timelines = GlobalTimelines::get_all();
+        for tli in timelines {
+            tli.set_info_for_metrics().await;
+        }
     }
 }

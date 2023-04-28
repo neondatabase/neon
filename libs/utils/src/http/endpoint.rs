@@ -1,19 +1,18 @@
 use crate::auth::{Claims, JwtAuth};
 use crate::http::error;
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use hyper::header::{HeaderName, AUTHORIZATION};
 use hyper::http::HeaderValue;
 use hyper::Method;
-use hyper::{header::CONTENT_TYPE, Body, Request, Response, Server};
+use hyper::{header::CONTENT_TYPE, Body, Request, Response};
 use metrics::{register_int_counter, Encoder, IntCounter, TextEncoder};
 use once_cell::sync::Lazy;
 use routerify::ext::RequestExt;
-use routerify::{Middleware, RequestInfo, Router, RouterBuilder, RouterService};
+use routerify::{Middleware, RequestInfo, Router, RouterBuilder};
 use tokio::task::JoinError;
 use tracing::{self, debug, info, info_span, warn, Instrument};
 
 use std::future::Future;
-use std::net::TcpListener;
 use std::str::FromStr;
 
 use super::error::ApiError;
@@ -341,40 +340,6 @@ pub fn check_permission_with(
     }
 }
 
-///
-/// Start listening for HTTP requests on given socket.
-///
-/// 'shutdown_future' can be used to stop. If the Future becomes
-/// ready, we stop listening for new requests, and the function returns.
-///
-pub fn serve_thread_main<S>(
-    router_builder: RouterBuilder<hyper::Body, ApiError>,
-    listener: TcpListener,
-    shutdown_future: S,
-) -> anyhow::Result<()>
-where
-    S: Future<Output = ()> + Send + Sync,
-{
-    info!("Starting an HTTP endpoint at {}", listener.local_addr()?);
-
-    // Create a Service from the router above to handle incoming requests.
-    let service = RouterService::new(router_builder.build().map_err(|err| anyhow!(err))?).unwrap();
-
-    // Enter a single-threaded tokio runtime bound to the current thread
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
-    let _guard = runtime.enter();
-
-    let server = Server::from_tcp(listener)?
-        .serve(service)
-        .with_graceful_shutdown(shutdown_future);
-
-    runtime.block_on(server)?;
-
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     use super::*;

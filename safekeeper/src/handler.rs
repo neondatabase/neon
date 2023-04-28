@@ -241,14 +241,14 @@ impl SafekeeperPostgresHandler {
 
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn
-            tli.get_flush_lsn()
+            tli.get_flush_lsn().await
         } else {
             // other clients shouldn't get any uncommitted WAL
-            tli.get_state().0.commit_lsn
+            tli.get_state().await.0.commit_lsn
         }
         .to_string();
 
-        let sysid = tli.get_state().1.server.system_id.to_string();
+        let sysid = tli.get_state().await.1.server.system_id.to_string();
         let lsn_bytes = lsn.as_bytes();
         let tli = PG_TLI.to_string();
         let tli_bytes = tli.as_bytes();

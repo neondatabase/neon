@@ -3,15 +3,18 @@
 //
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use remote_storage::RemoteStorageConfig;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::task::JoinError;
 use toml_edit::Document;
-use utils::signals::ShutdownSignals;
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use storage_broker::Uri;
 use tokio::sync::mpsc;
@@ -20,22 +23,21 @@ use tracing::*;
 use utils::pid_file;
 
 use metrics::set_build_info_metric;
-use safekeeper::broker;
-use safekeeper::control_file;
 use safekeeper::defaults::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
     DEFAULT_PG_LISTEN_ADDR,
 };
-use safekeeper::http;
-use safekeeper::remove_wal;
-use safekeeper::wal_backup;
-use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
+use safekeeper::{broker, WAL_SERVICE_RUNTIME};
+use safekeeper::{control_file, BROKER_RUNTIME};
+use safekeeper::{http, WAL_REMOVER_RUNTIME};
+use safekeeper::{remove_wal, WAL_BACKUP_RUNTIME};
+use safekeeper::{wal_backup, HTTP_RUNTIME};
+use safekeeper::{wal_service, METRICS_SHIFTER_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::JwtAuth;
 use utils::{
-    http::endpoint,
     id::NodeId,
     logging::{self, LogFormat},
     project_git_version,
@@ -120,7 +122,8 @@ struct Args {
     log_format: String,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     if let Some(addr) = args.dump_control_file {
@@ -180,7 +183,6 @@ fn main() -> anyhow::Result<()> {
         heartbeat_timeout: args.heartbeat_timeout,
         remote_storage: args.remote_storage,
         max_offloader_lag_bytes: args.max_offloader_lag,
-        backup_runtime_threads: args.wal_backup_threads,
         wal_backup_enabled: !args.disable_wal_backup,
         auth,
     };
@@ -190,10 +192,14 @@ fn main() -> anyhow::Result<()> {
         Some(GIT_VERSION.into()),
         &[("node_id", &conf.my_id.to_string())],
     );
-    start_safekeeper(conf)
+    start_safekeeper(conf).await
 }
 
-fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
+/// Result of joining any of main tasks: upper error means task failed to
+/// complete, e.g. panicked, inner is error produced by task itself.
+type JoinTaskRes = Result<anyhow::Result<()>, JoinError>;
+
+async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     // Prevent running multiple safekeepers on the same directory
     let lock_file_path = conf.workdir.join(PID_FILE_NAME);
     let lock_file =
@@ -204,14 +210,18 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     // we need to release the lock file only when the current process is gone
     std::mem::forget(lock_file);
 
-    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
-        error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
+    info!("starting safekeeper WAL service on {}", conf.listen_pg_addr);
+    let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
+        error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
         e
     })?;
 
-    info!("starting safekeeper on {}", conf.listen_pg_addr);
-    let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
-        error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
+    info!(
+        "starting safekeeper HTTP service on {}",
+        conf.listen_http_addr
+    );
+    let http_listener = tcp_listener::bind(conf.listen_http_addr.clone()).map_err(|e| {
+        error!("failed to bind to address {}: {}", conf.listen_http_addr, e);
         e
     })?;
 
@@ -220,71 +230,77 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
     metrics::register_internal(Box::new(timeline_collector))?;
 
-    let mut threads = vec![];
     let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
 
     // Load all timelines from disk to memory.
     GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx)?;
 
-    let conf_ = conf.clone();
-    threads.push(
-        thread::Builder::new()
-            .name("http_endpoint_thread".into())
-            .spawn(|| {
-                let router = http::make_router(conf_);
-                endpoint::serve_thread_main(
-                    router,
-                    http_listener,
-                    std::future::pending(), // never shut down
-                )
-                .unwrap();
-            })?,
-    );
-
-    let conf_cloned = conf.clone();
-    let safekeeper_thread = thread::Builder::new()
-        .name("WAL service thread".into())
-        .spawn(|| wal_service::thread_main(conf_cloned, pg_listener))
-        .unwrap();
-
-    threads.push(safekeeper_thread);
+    // Keep handles to main tasks to die if any of them disappears. Probably
+    // replace it with JoinSet once we update tokio.
+    let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =
+        FuturesUnordered::new();
 
     let conf_ = conf.clone();
-    threads.push(
-        thread::Builder::new()
-            .name("broker thread".into())
-            .spawn(|| {
-                broker::thread_main(conf_);
-            })?,
-    );
+    let wal_service_handle = WAL_SERVICE_RUNTIME
+        .spawn(wal_service::task_main(conf_, pg_listener))
+        // wrap with task name for error reporting
+        .map(|res| ("WAL service main".to_owned(), res));
+    tasks_handles.push(Box::pin(wal_service_handle));
 
     let conf_ = conf.clone();
-    threads.push(
-        thread::Builder::new()
-            .name("WAL removal thread".into())
-            .spawn(|| {
-                remove_wal::thread_main(conf_);
-            })?,
-    );
+    let http_handle = HTTP_RUNTIME
+        .spawn(http::task_main(conf_, http_listener))
+        .map(|res| ("HTTP service main".to_owned(), res));
+    tasks_handles.push(Box::pin(http_handle));
 
-    threads.push(
-        thread::Builder::new()
-            .name("WAL backup launcher thread".into())
-            .spawn(move || {
-                wal_backup::wal_backup_launcher_thread_main(conf, wal_backup_launcher_rx);
-            })?,
-    );
+    let conf_ = conf.clone();
+    let broker_task_handle = BROKER_RUNTIME
+        .spawn(broker::task_main(conf_).instrument(info_span!("broker")))
+        .map(|res| ("broker main".to_owned(), res));
+    tasks_handles.push(Box::pin(broker_task_handle));
+
+    let conf_ = conf.clone();
+    let wal_remover_handle = WAL_REMOVER_RUNTIME
+        .spawn(remove_wal::task_main(conf_))
+        .map(|res| ("WAL remover".to_owned(), res));
+    tasks_handles.push(Box::pin(wal_remover_handle));
+
+    let conf_ = conf.clone();
+    let wal_backup_handle = WAL_BACKUP_RUNTIME
+        .spawn(wal_backup::wal_backup_launcher_task_main(
+            conf_,
+            wal_backup_launcher_rx,
+        ))
+        .map(|res| ("WAL backup launcher".to_owned(), res));
+    tasks_handles.push(Box::pin(wal_backup_handle));
+
+    let metrics_shifter_handle = METRICS_SHIFTER_RUNTIME
+        .spawn(safekeeper::metrics::metrics_shifter())
+        .map(|res| ("metrics shifter".to_owned(), res));
+    tasks_handles.push(Box::pin(metrics_shifter_handle));
 
     set_build_info_metric(GIT_VERSION);
-    // TODO: put more thoughts into handling of failed threads
-    // We should catch & die if they are in trouble.
 
-    // On any shutdown signal, log receival and exit. Additionally, handling
-    // SIGQUIT prevents coredump.
-    ShutdownSignals::handle(|signal| {
-        info!("received {}, terminating", signal.name());
-        std::process::exit(0);
-    })
+    // TODO: update tokio-stream, convert to real async Stream with
+    // SignalStream, map it to obtain missing signal name, combine streams into
+    // single stream we can easily sit on.
+    let mut sigquit_stream = signal(SignalKind::quit())?;
+    let mut sigint_stream = signal(SignalKind::interrupt())?;
+    let mut sigterm_stream = signal(SignalKind::terminate())?;
+
+    tokio::select! {
+        Some((task_name, res)) = tasks_handles.next()=> {
+            error!("{} task failed: {:?}, exiting", task_name, res);
+            std::process::exit(1);
+        }
+        // On any shutdown signal, log receival and exit. Additionally, handling
+        // SIGQUIT prevents coredump.
+        _ = sigquit_stream.recv() => info!("received SIGQUIT, terminating"),
+        _ = sigint_stream.recv() => info!("received SIGINT, terminating"),
+        _ = sigterm_stream.recv() => info!("received SIGTERM, terminating")
+
+    };
+    std::process::exit(0);
 }
 
 /// Determine safekeeper id.

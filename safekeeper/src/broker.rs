@@ -15,7 +15,7 @@ use storage_broker::Request;
 
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio::{runtime, time::sleep};
+use tokio::time::sleep;
 use tracing::*;
 
 use crate::GlobalTimelines;
@@ -23,20 +23,6 @@ use crate::SafeKeeperConf;
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
-
-pub fn thread_main(conf: SafeKeeperConf) {
-    let runtime = runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let _enter = info_span!("broker").entered();
-    info!("started, broker endpoint {:?}", conf.broker_endpoint);
-
-    runtime.block_on(async {
-        main_loop(conf).await;
-    });
-}
 
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
@@ -49,10 +35,15 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
             // is under plain mutex. That's ok, all this code is not performance
             // sensitive and there is no risk of deadlock as we don't await while
             // lock is held.
-            let mut active_tlis = GlobalTimelines::get_all();
-            active_tlis.retain(|tli| tli.is_active());
-            for tli in &active_tlis {
-                let sk_info = tli.get_safekeeper_info(&conf);
+            let all_tlis = GlobalTimelines::get_all();
+            for tli in &all_tlis {
+                // filtering alternative futures::stream::iter(all_tlis)
+                //   .filter(|tli| {let tli = tli.clone(); async move { tli.is_active().await}}).collect::<Vec<_>>().await;
+                // doesn't look better, and I'm not sure how to do that without collect.
+                if !tli.is_active().await {
+                    continue;
+                }
+                let sk_info = tli.get_safekeeper_info(&conf).await;
                 yield sk_info;
             }
             sleep(push_interval).await;
@@ -97,10 +88,13 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
     bail!("end of stream");
 }
 
-async fn main_loop(conf: SafeKeeperConf) {
+pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
+    info!("started, broker endpoint {:?}", conf.broker_endpoint);
+
     let mut ticker = tokio::time::interval(Duration::from_millis(RETRY_INTERVAL_MSEC));
     let mut push_handle: Option<JoinHandle<Result<(), Error>>> = None;
     let mut pull_handle: Option<JoinHandle<Result<(), Error>>> = None;
+
     // Selecting on JoinHandles requires some squats; is there a better way to
     // reap tasks individually?
 
