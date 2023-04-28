@@ -282,8 +282,6 @@ where
         if Self::is_l0(&layer) {
             self.l0_delta_layers.push(layer);
         }
-
-        Ok(())
     }
 
     ///
