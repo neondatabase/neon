@@ -73,12 +73,12 @@ pub async fn handle_json_ctrl<IO: AsyncRead + AsyncWrite + Unpin>(
 
     // if send_proposer_elected is true, we need to update local history
     if append_request.send_proposer_elected {
-        send_proposer_elected(&tli, append_request.term, append_request.epoch_start_lsn)?;
+        send_proposer_elected(&tli, append_request.term, append_request.epoch_start_lsn).await?;
     }
 
-    let inserted_wal = append_logical_message(&tli, append_request)?;
+    let inserted_wal = append_logical_message(&tli, append_request).await?;
     let response = AppendResult {
-        state: tli.get_state().1,
+        state: tli.get_state().await.1,
         inserted_wal,
     };
     let response_data = serde_json::to_vec(&response)
@@ -114,9 +114,9 @@ async fn prepare_safekeeper(
     .await
 }
 
-fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> anyhow::Result<()> {
+async fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> anyhow::Result<()> {
     // add new term to existing history
-    let history = tli.get_state().1.acceptor_state.term_history;
+    let history = tli.get_state().await.1.acceptor_state.term_history;
     let history = history.up_to(lsn.checked_sub(1u64).unwrap());
     let mut history_entries = history.0;
     history_entries.push(TermSwitchEntry { term, lsn });
@@ -129,7 +129,7 @@ fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> anyhow::R
         timeline_start_lsn: lsn,
     });
 
-    tli.process_msg(&proposer_elected_request)?;
+    tli.process_msg(&proposer_elected_request).await?;
     Ok(())
 }
 
@@ -142,12 +142,12 @@ pub struct InsertedWAL {
 
 /// Extend local WAL with new LogicalMessage record. To do that,
 /// create AppendRequest with new WAL and pass it to safekeeper.
-pub fn append_logical_message(
+pub async fn append_logical_message(
     tli: &Arc<Timeline>,
     msg: &AppendLogicalMessage,
 ) -> anyhow::Result<InsertedWAL> {
     let wal_data = encode_logical_message(&msg.lm_prefix, &msg.lm_message);
-    let sk_state = tli.get_state().1;
+    let sk_state = tli.get_state().await.1;
 
     let begin_lsn = msg.begin_lsn;
     let end_lsn = begin_lsn + wal_data.len() as u64;
@@ -171,7 +171,7 @@ pub fn append_logical_message(
         wal_data: Bytes::from(wal_data),
     });
 
-    let response = tli.process_msg(&append_request)?;
+    let response = tli.process_msg(&append_request).await?;
 
     let append_response = match response {
         Some(AcceptorProposerMessage::AppendResponse(resp)) => resp,
