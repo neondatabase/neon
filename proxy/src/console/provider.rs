@@ -170,6 +170,9 @@ pub struct NodeInfo {
 
     /// Labels for proxy's metrics.
     pub aux: Arc<MetricsAuxInfo>,
+
+    /// Whether we should accept self-signed certificates (for testing)
+    pub allow_self_signed_compute: bool,
 }
 
 pub type NodeInfoCache = TimedLru<Arc<str>, NodeInfo>;

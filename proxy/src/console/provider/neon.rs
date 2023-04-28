@@ -106,6 +106,7 @@ impl Api {
             let node = NodeInfo {
                 config,
                 aux: body.aux.into(),
+                allow_self_signed_compute: false,
             };
 
             Ok(node)

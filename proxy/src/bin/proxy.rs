@@ -10,6 +10,7 @@ use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use tracing::warn;
 use utils::{project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
@@ -96,6 +97,14 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
 
+    let allow_self_signed_compute: bool = args
+        .get_one::<String>("allow-self-signed-compute")
+        .unwrap()
+        .parse()?;
+    if allow_self_signed_compute {
+        warn!("allowing self-signed compute certificates");
+    }
+
     let metric_collection = match (
         args.get_one::<String>("metric-collection-endpoint"),
         args.get_one::<String>("metric-collection-interval"),
@@ -145,6 +154,7 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         tls_config,
         auth_backend,
         metric_collection,
+        allow_self_signed_compute,
     }));
 
     Ok(config)
@@ -234,6 +244,12 @@ fn cli() -> clap::Command {
                 .long("wake-compute-cache")
                 .help("cache for `wake_compute` api method (use `size=0` to disable)")
                 .default_value(config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO),
+        )
+        .arg(
+            Arg::new("allow-self-signed-compute")
+                .long("allow-self-signed-compute")
+                .help("Allow self-signed certificates for compute nodes (for testing)")
+                .default_value("false"),
         )
 }
 

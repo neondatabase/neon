@@ -201,7 +201,8 @@ def proxy_metrics_handler(request: Request) -> Response:
 
 @pytest.fixture(scope="session")
 def proxy_with_metric_collector(
-    port_distributor: PortDistributor, neon_binpath: Path, httpserver_listen_address
+    port_distributor: PortDistributor, neon_binpath: Path, httpserver_listen_address,
+    test_output_dir: Path
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth and has metric collection enabled."""
 
@@ -215,6 +216,7 @@ def proxy_with_metric_collector(
 
     with NeonProxy(
         neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,

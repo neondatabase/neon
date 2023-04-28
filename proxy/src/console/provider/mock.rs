@@ -93,6 +93,7 @@ impl Api {
         let node = NodeInfo {
             config,
             aux: Default::default(),
+            allow_self_signed_compute: false,
         };
 
         Ok(node)
