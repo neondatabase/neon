@@ -199,7 +199,7 @@ def proxy_metrics_handler(request: Request) -> Response:
     return Response(status=200)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def proxy_with_metric_collector(
     port_distributor: PortDistributor,
     neon_binpath: Path,

@@ -2142,7 +2142,7 @@ class NeonProxy(PgProtocol):
             try:
                 self._popen.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                log.warn("failed to gracefully terminate proxy; killing")
+                log.warning("failed to gracefully terminate proxy; killing")
                 self._popen.kill()
 
     @staticmethod

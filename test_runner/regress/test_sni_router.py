@@ -93,7 +93,7 @@ class PgSniRouter(PgProtocol):
             try:
                 self._popen.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                log.warn("failed to gracefully terminate pg_sni_router; killing")
+                log.warning("failed to gracefully terminate pg_sni_router; killing")
                 self._popen.kill()
 
 
