@@ -1,21 +1,12 @@
 use std::time::{Duration, SystemTime};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use chrono::{DateTime, Utc};
 use pq_proto::{read_cstr, PG_EPOCH};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use tracing::{trace, warn};
 
-use crate::{http::json::display_serialize, lsn::Lsn};
-
-// serialize SystemTime as ISO string in UTC.
-fn serialize_system_time_iso<S>(ts: &SystemTime, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let chrono_dt: DateTime<Utc> = (*ts).into();
-    s.serialize_str(&chrono_dt.to_rfc3339())
-}
+use crate::lsn::Lsn;
 
 /// Feedback pageserver sends to safekeeper and safekeeper resends to compute.
 /// Serialized in custom flexible key/value format. In replication protocol, it
@@ -24,22 +15,24 @@ where
 ///
 /// serde Serialize is used only for human readable dump to json (e.g. in
 /// safekeepers debug_dump).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde_as]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageserverFeedback {
     /// Last known size of the timeline. Used to enforce timeline size limit.
     pub current_timeline_size: u64,
     /// LSN last received and ingested by the pageserver. Controls backpressure.
-    #[serde(serialize_with = "display_serialize")]
+    #[serde_as(as = "DisplayFromStr")]
     pub last_received_lsn: Lsn,
     /// LSN up to which data is persisted by the pageserver to its local disc.
     /// Controls backpressure.
-    #[serde(serialize_with = "display_serialize")]
+    #[serde_as(as = "DisplayFromStr")]
     pub disk_consistent_lsn: Lsn,
     /// LSN up to which data is persisted by the pageserver on s3; safekeepers
     /// consider WAL before it can be removed.
-    #[serde(serialize_with = "display_serialize")]
+    #[serde_as(as = "DisplayFromStr")]
     pub remote_consistent_lsn: Lsn,
-    #[serde(serialize_with = "serialize_system_time_iso")]
+    // Serialize with RFC3339 format.
+    #[serde(with = "serde_systemtime")]
     pub replytime: SystemTime,
 }
 
@@ -147,6 +140,31 @@ impl PageserverFeedback {
         }
         trace!("PageserverFeedback parsed is {:?}", rf);
         rf
+    }
+}
+
+mod serde_systemtime {
+    use std::time::SystemTime;
+
+    use chrono::{DateTime, Utc};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(ts: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let chrono_dt: DateTime<Utc> = (*ts).into();
+        serializer.serialize_str(&chrono_dt.to_rfc3339())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let time: String = Deserialize::deserialize(deserializer)?;
+        Ok(DateTime::parse_from_rfc3339(&time)
+            .map_err(serde::de::Error::custom)?
+            .into())
     }
 }
 
