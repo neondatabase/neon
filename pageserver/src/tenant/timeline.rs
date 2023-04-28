@@ -1484,7 +1484,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(Arc::new(layer))?;
+                updates.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1516,7 +1516,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(Arc::new(layer))?;
+                updates.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1590,7 +1590,7 @@ impl Timeline {
             // remote index file?
             // If so, rename_to_backup those files & replace their local layer with
             // a RemoteLayer in the layer map so that we re-download them on-demand.
-            if let Some(local_layer) = &local_layer {
+            if let Some(local_layer) = local_layer {
                 let local_layer_path = local_layer
                     .local_path()
                     .expect("caller must ensure that local_layers only contains local layers");
@@ -1615,6 +1615,7 @@ impl Timeline {
                         anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                     } else {
                         self.metrics.resident_physical_size_gauge.sub(local_size);
+                        updates.remove_historic(local_layer);
                         // fall-through to adding the remote layer
                     }
                 } else {
@@ -1650,11 +1651,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    if let Some(local_layer) = &local_layer {
-                        updates.replace_historic(local_layer, remote_layer)?;
-                    } else {
-                        updates.insert_historic(remote_layer)?;
-                    }
+                    updates.insert_historic(remote_layer);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1678,11 +1675,7 @@ impl Timeline {
                         LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted),
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    if let Some(local_layer) = &local_layer {
-                        updates.replace_historic(local_layer, remote_layer)?;
-                    } else {
-                        updates.insert_historic(remote_layer)?;
-                    }
+                    updates.insert_historic(remote_layer);
                 }
             }
         }
@@ -2730,7 +2723,7 @@ impl Timeline {
             .write()
             .unwrap()
             .batch_update()
-            .insert_historic(Arc::new(new_delta))?;
+            .insert_historic(Arc::new(new_delta));
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
@@ -2935,7 +2928,7 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            updates.insert_historic(Arc::new(l))?;
+            updates.insert_historic(Arc::new(l));
         }
         updates.flush();
         drop(layers);
@@ -3368,7 +3361,7 @@ impl Timeline {
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            updates.insert_historic(x)?;
+            updates.insert_historic(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can

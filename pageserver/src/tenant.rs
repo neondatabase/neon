@@ -271,10 +271,7 @@ impl UninitializedTimeline<'_> {
             .await
             .context("Failed to flush after basebackup import")?;
 
-        // Initialize without loading the layer map. We started with an empty layer map, and already
-        // updated it for the layers that we created during the import.
-        let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(ctx, &mut timelines, false, true)
+        self.initialize(ctx)
     }
 
     fn raw_timeline(&self) -> anyhow::Result<&Arc<Timeline>> {
@@ -2355,8 +2352,6 @@ impl Tenant {
                 )
             })?;
 
-        // Initialize the timeline without loading the layer map, because we already updated the layer
-        // map above, when we imported the datadir.
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
             raw_timeline.initialize_with_lock(ctx, &mut timelines, false, true)?
