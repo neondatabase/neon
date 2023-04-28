@@ -1824,10 +1824,22 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         # generate self-signed certificate
         subprocess.run(
-            ["openssl", "req", "-new", "-x509", "-days", "365", "-nodes", "-text",
-             "-out", self.pgdatadir / "server.crt",
-             "-keyout", self.pgdatadir / "server.key",
-             "-subj", "/CN=localhost"]
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-x509",
+                "-days",
+                "365",
+                "-nodes",
+                "-text",
+                "-out",
+                self.pgdatadir / "server.crt",
+                "-keyout",
+                self.pgdatadir / "server.key",
+                "-subj",
+                "/CN=localhost",
+            ]
         )
         # configure postgresql.conf
         self.configure(
@@ -2175,7 +2187,9 @@ class NeonProxy(PgProtocol):
 
 
 @pytest.fixture(scope="function")
-def link_proxy(port_distributor: PortDistributor, neon_binpath: Path, test_output_dir: Path) -> Iterator[NeonProxy]:
+def link_proxy(
+    port_distributor: PortDistributor, neon_binpath: Path, test_output_dir: Path
+) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
 
     http_port = port_distributor.get_port()
@@ -2196,8 +2210,10 @@ def link_proxy(port_distributor: PortDistributor, neon_binpath: Path, test_outpu
 
 @pytest.fixture(scope="function")
 def static_proxy(
-    vanilla_pg: VanillaPostgres, port_distributor: PortDistributor, neon_binpath: Path,
-    test_output_dir: Path
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 

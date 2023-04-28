@@ -2,11 +2,9 @@ import socket
 import subprocess
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import Optional, Type
 
 import backoff  # type: ignore
-import psycopg2
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import PgProtocol, PortDistributor, VanillaPostgres
 
@@ -57,8 +55,8 @@ class PgSniRouter(PgProtocol):
         args = [
             str(self.neon_binpath / "pg_sni_router"),
             *["--listen", f"127.0.0.1:{self.port}"],
-            *["--tls-cert", self.tls_cert],
-            *["--tls-key", self.tls_key],
+            *["--tls-cert", str(self.tls_cert)],
+            *["--tls-key", str(self.tls_key)],
             *["--destination", self.destination],
         ]
 
@@ -105,9 +103,10 @@ def test_pg_sni_router(
     neon_binpath: Path,
     test_output_dir: Path,
 ):
-
     generate_tls_cert(
-        "endpoint.namespace.localtest.me", test_output_dir / "router.crt", test_output_dir / "router.key"
+        "endpoint.namespace.localtest.me",
+        test_output_dir / "router.crt",
+        test_output_dir / "router.key",
     )
 
     # Start a stand-alone Postgres to test with
