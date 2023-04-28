@@ -960,15 +960,19 @@ where
     /// Get oldest segno we still need to keep. We hold WAL till it is consumed
     /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
     /// offloading.
-    /// While it is safe to use inmem values for determining horizon,
-    /// we use persistent to make possible normal states less surprising.
-    pub fn get_horizon_segno(&self, wal_backup_enabled: bool) -> XLogSegNo {
-        let mut horizon_lsn = min(
-            self.state.remote_consistent_lsn,
-            self.state.peer_horizon_lsn,
-        );
+    ///
+    /// Use inmem values. It rarely might create situation when we try accessing
+    /// removed WAL segment (e.g. offload already offloaded and removed locally
+    /// WAL segment), but this avoids out of space deadlock when removing WAL
+    /// requires control file update on disc.
+    pub fn get_horizon_segno(
+        &self,
+        wal_backup_enabled: bool,
+        remote_consistent_lsn: Lsn,
+    ) -> XLogSegNo {
+        let mut horizon_lsn = min(remote_consistent_lsn, self.inmem.peer_horizon_lsn);
         if wal_backup_enabled {
-            horizon_lsn = min(horizon_lsn, self.state.backup_lsn);
+            horizon_lsn = min(horizon_lsn, self.inmem.backup_lsn);
         }
         horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
     }

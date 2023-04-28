@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use tokio::task::JoinHandle;
 use utils::id::NodeId;
 
 use std::cmp::min;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -452,15 +453,31 @@ async fn backup_object(source_file: &Path, target_file: &RemotePath, size: usize
         .as_ref()
         .unwrap();
 
-    let file = tokio::io::BufReader::new(File::open(&source_file).await.with_context(|| {
-        format!(
-            "Failed to open file {} for wal backup",
-            source_file.display()
-        )
-    })?);
+    let local_file = match File::open(&source_file).await {
+        Ok(file) => file,
+        // If segment is not found locally, check whether it is already in s3.
+        Err(error) => {
+            match error.kind() {
+                ErrorKind::NotFound => match storage.download(target_file).await {
+                    Ok(_) => {
+                        info!("segment {:?} found in remote storage", target_file);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        bail!("segment {:?} doesn't exist locally and could not be found remotely: {:#}", source_file, e);
+                    }
+                },
+                _ => {
+                    return Err(error.into());
+                }
+            }
+        }
+    };
+
+    let local_file = tokio::io::BufReader::new(local_file);
 
     storage
-        .upload_storage_object(Box::new(file), size, target_file)
+        .upload_storage_object(Box::new(local_file), size, target_file)
         .await
 }
 
