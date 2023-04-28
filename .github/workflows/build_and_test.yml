@@ -629,7 +629,7 @@ jobs:
 
       - name: Kaniko build neon
         run:
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
+          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true --use-new-run
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
@@ -714,7 +714,7 @@ jobs:
 
       - name: Kaniko build compute tools
         run:
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
+          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true --use-new-run
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
@@ -765,7 +765,7 @@ jobs:
 
       - name: Kaniko build compute node with extensions
         run:
-          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
+          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true --use-new-run
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
