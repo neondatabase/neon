@@ -274,6 +274,7 @@ where
     /// Helper function for BatchedUpdates::insert_historic
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
+        // TODO: See #3869, resulting #4088, attempted fix and repro #4094
         self.historic.insert(
             historic_layer_coverage::LayerKey::from(&*layer),
             Arc::clone(&layer),
