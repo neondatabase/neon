@@ -417,14 +417,6 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         }
     }
 
-    pub fn contains(&self, layer_key: &LayerKey) -> bool {
-        match self.buffer.get(layer_key) {
-            Some(None) => false,                         // layer remove was buffered
-            Some(_) => true,                             // layer insert was buffered
-            None => self.layers.contains_key(layer_key), // no buffered ops for this layer
-        }
-    }
-
     pub fn insert(&mut self, layer_key: LayerKey, value: Value) {
         self.buffer.insert(layer_key, Some(value));
     }

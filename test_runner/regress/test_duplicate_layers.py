@@ -16,7 +16,7 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # These warnings are expected, when the pageserver is restarted abruptly
     env.pageserver.allowed_errors.append(".*found future image layer.*")
     env.pageserver.allowed_errors.append(".*found future delta layer.*")
-    env.pageserver.allowed_errors.append(".*Attempt to insert duplicate layer.*")
+    env.pageserver.allowed_errors.append(".*duplicate layer.*")
 
     pageserver_http = env.pageserver.http_client()
 

@@ -51,7 +51,7 @@ use crate::keyspace::KeyPartitioning;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
@@ -276,16 +276,22 @@ where
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) -> anyhow::Result<()> {
         let key = historic_layer_coverage::LayerKey::from(&*layer);
-        if self.historic.contains(&key) {
-            error!(
-                "Attempt to insert duplicate layer {} in layer map",
-                layer.short_id()
-            );
-        } else {
-            self.historic.insert(key, Arc::clone(&layer));
+        match self.historic.replace(&key, Arc::clone(&layer), |existing| {
+            !Self::compare_arced_layers(existing, &layer)
+        }) {
+            Replacement::Replaced { .. } => {
+                if Self::is_l0(&layer) {
+                    bail!("Duplicate L0 layer {}", layer.short_id());
+                }
+                warn!("Replace duplicate layer {} in layer map", layer.short_id());
+            }
+            Replacement::Unexpected(_) => bail!("Replace layer with itslef is prohibited"),
+            Replacement::NotFound | Replacement::RemovalBuffered => {
+                self.historic.insert(key, Arc::clone(&layer));
 
-            if Self::is_l0(&layer) {
-                self.l0_delta_layers.push(layer);
+                if Self::is_l0(&layer) {
+                    self.l0_delta_layers.push(layer);
+                }
             }
         }
         Ok(())
