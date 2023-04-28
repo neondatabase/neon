@@ -206,7 +206,7 @@ pub struct SafeKeeperState {
     pub peers: PersistedPeers,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 // In memory safekeeper state. Fields mirror ones in `SafeKeeperState`; values
 // are not flushed yet.
 pub struct SafekeeperMemState {

@@ -15,8 +15,8 @@ use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
-use utils::http::json::display_serialize;
 use utils::id::TenantTimelineId;
 use utils::lsn::AtomicLsn;
 use utils::pageserver_feedback::PageserverFeedback;
@@ -81,7 +81,7 @@ impl StandbyReply {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StandbyFeedback {
     reply: StandbyReply,
     hs_feedback: HotStandbyFeedback,
@@ -312,9 +312,10 @@ impl WalSendersShared {
 }
 
 // Serialized is used only for pretty printing in json.
-#[derive(Debug, Clone, Serialize)]
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalSenderState {
-    #[serde(serialize_with = "display_serialize")]
+    #[serde_as(as = "DisplayFromStr")]
     ttid: TenantTimelineId,
     addr: SocketAddr,
     conn_id: ConnectionId,
@@ -325,7 +326,7 @@ pub struct WalSenderState {
 
 // Receiver is either pageserver or regular standby, which have different
 // feedbacks.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum ReplicationFeedback {
     Pageserver(PageserverFeedback),
     Standby(StandbyFeedback),

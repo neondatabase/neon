@@ -3,7 +3,8 @@ use hyper::{Body, Request, Response, StatusCode, Uri};
 use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::SkTimelineInfo;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
@@ -11,7 +12,6 @@ use std::sync::Arc;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::task::JoinError;
-use utils::http::json::display_serialize;
 
 use crate::debug_dump;
 use crate::safekeeper::ServerInfo;
@@ -57,44 +57,46 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
 
 /// Same as TermSwitchEntry, but serializes LSN using display serializer
 /// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[derive(Debug, Serialize)]
-struct TermSwitchApiEntry {
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TermSwitchApiEntry {
     pub term: Term,
-    #[serde(serialize_with = "display_serialize")]
+    #[serde_as(as = "DisplayFromStr")]
     pub lsn: Lsn,
 }
 
 /// Augment AcceptorState with epoch for convenience
-#[derive(Debug, Serialize)]
-struct AcceptorStateStatus {
-    term: Term,
-    epoch: Term,
-    term_history: Vec<TermSwitchApiEntry>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AcceptorStateStatus {
+    pub term: Term,
+    pub epoch: Term,
+    pub term_history: Vec<TermSwitchApiEntry>,
 }
 
 /// Info about timeline on safekeeper ready for reporting.
-#[derive(Debug, Serialize)]
-struct TimelineStatus {
-    #[serde(serialize_with = "display_serialize")]
-    tenant_id: TenantId,
-    #[serde(serialize_with = "display_serialize")]
-    timeline_id: TimelineId,
-    acceptor_state: AcceptorStateStatus,
-    pg_info: ServerInfo,
-    #[serde(serialize_with = "display_serialize")]
-    flush_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    timeline_start_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    local_start_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    commit_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    backup_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    peer_horizon_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    remote_consistent_lsn: Lsn,
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimelineStatus {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: TenantId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub timeline_id: TimelineId,
+    pub acceptor_state: AcceptorStateStatus,
+    pub pg_info: ServerInfo,
+    #[serde_as(as = "DisplayFromStr")]
+    pub flush_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub timeline_start_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub local_start_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub commit_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub backup_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_horizon_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
 }
 
 fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
