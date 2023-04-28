@@ -16,7 +16,7 @@ use storage_broker::Request;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::task::JoinHandle;
-use tokio::{runtime, time::sleep};
+use tokio::time::sleep;
 use tracing::*;
 
 use crate::metrics::BROKER_ITERATION_TIMELINES;
@@ -28,20 +28,6 @@ use crate::SafeKeeperConf;
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;
-
-pub fn thread_main(conf: SafeKeeperConf) {
-    let runtime = runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let _enter = info_span!("broker").entered();
-    info!("started, broker endpoint {:?}", conf.broker_endpoint);
-
-    runtime.block_on(async {
-        main_loop(conf).await;
-    });
-}
 
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
@@ -56,20 +42,27 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
             // sensitive and there is no risk of deadlock as we don't await while
             // lock is held.
             let now = Instant::now();
-            let mut active_tlis = GlobalTimelines::get_all();
-            active_tlis.retain(|tli| tli.is_active());
-            for tli in &active_tlis {
-                let sk_info = tli.get_safekeeper_info(&conf);
+            let all_tlis = GlobalTimelines::get_all();
+            let mut n_pushed_tlis = 0;
+            for tli in &all_tlis {
+                // filtering alternative futures::stream::iter(all_tlis)
+                //   .filter(|tli| {let tli = tli.clone(); async move { tli.is_active().await}}).collect::<Vec<_>>().await;
+                // doesn't look better, and I'm not sure how to do that without collect.
+                if !tli.is_active().await {
+                    continue;
+                }
+                let sk_info = tli.get_safekeeper_info(&conf).await;
                 yield sk_info;
                 BROKER_PUSHED_UPDATES.inc();
+                n_pushed_tlis += 1;
             }
             let elapsed = now.elapsed();
 
             BROKER_PUSH_ALL_UPDATES_SECONDS.observe(elapsed.as_secs_f64());
-            BROKER_ITERATION_TIMELINES.observe(active_tlis.len() as f64);
+            BROKER_ITERATION_TIMELINES.observe(n_pushed_tlis as f64);
 
             if elapsed > push_interval / 2 {
-                info!("broker push is too long, pushed {} timeline updates to broker in {:?}", active_tlis.len(), elapsed);
+                info!("broker push is too long, pushed {} timeline updates to broker in {:?}", n_pushed_tlis, elapsed);
             }
 
             sleep(push_interval).await;
@@ -126,10 +119,13 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
     bail!("end of stream");
 }
 
-async fn main_loop(conf: SafeKeeperConf) {
+pub async fn task_main(conf: SafeKeeperConf) -> anyhow::Result<()> {
+    info!("started, broker endpoint {:?}", conf.broker_endpoint);
+
     let mut ticker = tokio::time::interval(Duration::from_millis(RETRY_INTERVAL_MSEC));
     let mut push_handle: Option<JoinHandle<Result<(), Error>>> = None;
     let mut pull_handle: Option<JoinHandle<Result<(), Error>>> = None;
+
     // Selecting on JoinHandles requires some squats; is there a better way to
     // reap tasks individually?
 
