@@ -6,9 +6,8 @@ use postgres::Client;
 use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 use postgres_ffi::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
 use std::cmp::Ordering;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Instant;
 use tempfile::{tempdir, TempDir};
 
@@ -95,12 +94,6 @@ impl Conf {
 
     pub fn start_server(&self) -> Result<PostgresServer> {
         info!("Starting Postgres server in {:?}", self.datadir);
-        let log_file = fs::File::create(self.datadir.join("pg.log")).with_context(|| {
-            format!(
-                "Failed to create pg.log file in directory {}",
-                self.datadir.display()
-            )
-        })?;
         let unix_socket_dir = tempdir()?; // We need a directory with a short name for Unix socket (up to 108 symbols)
         let unix_socket_dir_path = unix_socket_dir.path().to_owned();
         let server_process = self
@@ -110,9 +103,7 @@ impl Conf {
             .arg(unix_socket_dir_path.as_os_str())
             .arg("-D")
             .arg(self.datadir.as_os_str())
-            .args(["-c", "logging_collector=on"]) // stderr will mess up with tests output
             .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
-            .stderr(Stdio::from(log_file))
             .spawn()?;
         let server = PostgresServer {
             process: server_process,
@@ -121,7 +112,7 @@ impl Conf {
                 let mut c = postgres::Config::new();
                 c.host_path(&unix_socket_dir_path);
                 c.user("postgres");
-                c.connect_timeout(Duration::from_millis(1000));
+                c.connect_timeout(Duration::from_millis(10000));
                 c
             },
         };
