@@ -3375,7 +3375,31 @@ impl Timeline {
                         || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
-                        new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
+
+                        let end_key = prev_key.unwrap().next();
+
+                        let w = writer.take().unwrap();
+
+                        // If an identical L1 layer already exists, no need to create a new one.
+                        //
+                        // This can happen if compaction is interrupted after it has already
+                        // created some or all of the L1 layers, but has not deleted the L0 layers
+                        // yet, so that on next compaction, we do the same work again.
+                        //
+                        // NOTE: this is racy, if there can be any other task that concurrently
+                        // creates L1 layers. Currently, there can be only one compaction task
+                        // running at any time, so this is fine.
+                        if self.layers.read().unwrap().contains(
+                            &(w.key_start()..end_key),
+                            &w.lsn_range(),
+                            false, // not an image layer
+                        ) {
+                            drop(w);
+                        } else {
+                            let new_layer = w.finish(end_key)?;
+
+                            new_layers.push(new_layer);
+                        }
                         writer = None;
 
                         if contains_hole {
@@ -3431,6 +3455,10 @@ impl Timeline {
         }
 
         drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
+
+        fail_point!("compact-level0-phase1-finish", |_| {
+            Err(anyhow::anyhow!("failpoint compact-level0-phase1-finish").into())
+        });
 
         Ok(CompactLevel0Phase1Result {
             new_layers,

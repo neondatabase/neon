@@ -53,6 +53,20 @@ impl<'a, L: crate::tenant::storage_layer::Layer + ?Sized> From<&'a L> for LayerK
     }
 }
 
+impl LayerKey {
+    pub fn from_ranges(
+        kr: &Range<crate::tenant::layer_map::Key>,
+        lr: &Range<utils::lsn::Lsn>,
+        is_image: bool,
+    ) -> Self {
+        LayerKey {
+            key: kr.start.to_i128()..kr.end.to_i128(),
+            lsn: lr.start.0..lr.end.0,
+            is_image,
+        }
+    }
+}
+
 /// Efficiently queryable layer coverage for each LSN.
 ///
 /// Allows answering layer map queries very efficiently,

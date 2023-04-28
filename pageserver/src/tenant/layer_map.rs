@@ -285,6 +285,11 @@ where
         }
     }
 
+    pub fn contains(&self, key_range: &Range<Key>, lsn_range: &Range<Lsn>, is_image: bool) -> bool {
+        let key = historic_layer_coverage::LayerKey::from_ranges(key_range, lsn_range, is_image);
+        self.historic.contains(&key)
+    }
+
     ///
     /// Remove an on-disk layer from the map.
     ///
