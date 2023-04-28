@@ -108,17 +108,19 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = TcpListener::bind(proxy_address).await?;
 
     let cancellation_token = CancellationToken::new();
-    let tasks = vec![
-        tokio::spawn(proxy::handle_signals(cancellation_token.clone())),
-        tokio::spawn(task_main(
-            Arc::new(destination),
-            tls_config,
-            proxy_listener,
-            cancellation_token.clone(),
-        )),
-    ];
 
-    let _tasks = futures::future::try_join_all(tasks.into_iter().map(proxy::flatten_err)).await?;
+    let main = proxy::flatten_err(tokio::spawn(task_main(
+        Arc::new(destination),
+        tls_config,
+        proxy_listener,
+        cancellation_token.clone(),
+    )));
+    let signals_task = proxy::flatten_err(tokio::spawn(proxy::handle_signals(cancellation_token)));
+
+    tokio::select! {
+        res = main => { res?; },
+        res = signals_task => { res?; },
+    }
 
     Ok(())
 }
@@ -129,10 +131,6 @@ async fn task_main(
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    scopeguard::defer! {
-        info!("proxy has shut down");
-    }
-
     // When set for the server socket, the keepalive setting
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
@@ -171,7 +169,9 @@ async fn task_main(
             }
         }
     }
+
     // Drain connections
+    info!("waiting for all client connections to finish");
     while let Some(res) = connections.join_next().await {
         if let Err(e) = res {
             if !e.is_panic() && !e.is_cancelled() {
@@ -179,6 +179,7 @@ async fn task_main(
             }
         }
     }
+    info!("all client connections have finished");
     Ok(())
 }
 
