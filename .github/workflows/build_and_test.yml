@@ -575,10 +575,17 @@ jobs:
               }
             }"
 
-  neon-image:
-    runs-on: [ self-hosted, gen3, large ]
+  neon-image-arch:
     needs: [ tag ]
     container: gcr.io/kaniko-project/executor:v1.9.2-debug
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ amd64, arm64 ]
+
+    runs-on: ${{ fromJson((matrix.arch == 'arm64' && '["self-hosted", "dev", "arm64"]') || '["self-hosted", "gen3", "large"]') }}
+
     defaults:
       run:
         shell: sh -eu {0}
@@ -615,13 +622,50 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
-                           --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
+                           --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
+  neon-image:
+    runs-on: [ self-hosted, gen3, small ]
+    needs: [ tag, neon-image-arch ]
+
+    steps:
+      - name: Configure ECR and Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
+
+      - name: Create multi-arch manifest
+        run: |
+          docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}-arm64 \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}-amd64
+
+          docker manifest create neondatabase/neon:${{needs.tag.outputs.build-tag}} \
+                         --amend neondatabase/neon:${{needs.tag.outputs.build-tag}}-arm64 \
+                         --amend neondatabase/neon:${{needs.tag.outputs.build-tag}}-amd64
+
+      - name: Push manifests
+        run: |
+          docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+          docker manifest push neondatabase/neon:${{needs.tag.outputs.build-tag}}
 
   neon-image-depot:
     # For testing this will run side-by-side for a few merges.
@@ -864,7 +908,7 @@ jobs:
           mkdir /github/home/.docker/
           echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
 
-      - name: Copy vm-compute-node images to Docker Hub
+      - name: Pull vm-compute-node images
         run: |
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
           crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
@@ -907,7 +951,7 @@ jobs:
       - name: Push latest tags to Docker Hub
         if: |
           (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
+           github.event_name != 'workflow_dispatch'
         run: |
           crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
