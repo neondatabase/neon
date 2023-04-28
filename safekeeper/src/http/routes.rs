@@ -13,7 +13,6 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tokio::task::JoinError;
 
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
@@ -116,8 +115,8 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     check_permission(&request, Some(ttid.tenant_id))?;
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
-    let (inmem, state) = tli.get_state();
-    let flush_lsn = tli.get_flush_lsn();
+    let (inmem, state) = tli.get_state().await;
+    let flush_lsn = tli.get_flush_lsn().await;
 
     let epoch = state.acceptor_state.get_epoch(flush_lsn);
     let term_history = state
@@ -232,13 +231,11 @@ async fn timeline_delete_force_handler(
     );
     check_permission(&request, Some(ttid.tenant_id))?;
     ensure_no_body(&mut request).await?;
-    let resp = tokio::task::spawn_blocking(move || {
-        // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
-        // error handling here when we're able to.
-        GlobalTimelines::delete_force(&ttid).map_err(ApiError::InternalServerError)
-    })
-    .await
-    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+    // FIXME: `delete_force` can fail from both internal errors and bad requests. Add better
+    // error handling here when we're able to.
+    let resp = GlobalTimelines::delete_force(&ttid)
+        .await
+        .map_err(ApiError::InternalServerError)?;
     json_response(StatusCode::OK, resp)
 }
 
@@ -250,14 +247,11 @@ async fn tenant_delete_force_handler(
     let tenant_id = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     ensure_no_body(&mut request).await?;
-    let delete_info = tokio::task::spawn_blocking(move || {
-        // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
-        // Using an `InternalServerError` should be fixed when the types support it
-        GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
-            .map_err(ApiError::InternalServerError)
-    })
-    .await
-    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+    // FIXME: `delete_force_all_for_tenant` can return an error for multiple different reasons;
+    // Using an `InternalServerError` should be fixed when the types support it
+    let delete_info = GlobalTimelines::delete_force_all_for_tenant(&tenant_id)
+        .await
+        .map_err(ApiError::InternalServerError)?;
     json_response(
         StatusCode::OK,
         delete_info
@@ -353,11 +347,9 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         timeline_id,
     };
 
-    let resp = tokio::task::spawn_blocking(move || {
-        debug_dump::build(args).map_err(ApiError::InternalServerError)
-    })
-    .await
-    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+    let resp = debug_dump::build(args)
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     // TODO: use streaming response
     json_response(StatusCode::OK, resp)

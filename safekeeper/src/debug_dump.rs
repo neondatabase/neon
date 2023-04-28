@@ -121,7 +121,7 @@ pub struct FileInfo {
 }
 
 /// Build debug dump response, using the provided [`Args`] filters.
-pub fn build(args: Args) -> Result<Response> {
+pub async fn build(args: Args) -> Result<Response> {
     let start_time = Utc::now();
     let timelines_count = GlobalTimelines::timelines_count();
 
@@ -155,7 +155,7 @@ pub fn build(args: Args) -> Result<Response> {
         }
 
         let control_file = if args.dump_control_file {
-            let mut state = tli.get_state().1;
+            let mut state = tli.get_state().await.1;
             if !args.dump_term_history {
                 state.acceptor_state.term_history = TermHistory(vec![]);
             }
@@ -165,7 +165,7 @@ pub fn build(args: Args) -> Result<Response> {
         };
 
         let memory = if args.dump_memory {
-            Some(tli.memory_dump())
+            Some(tli.memory_dump().await)
         } else {
             None
         };
