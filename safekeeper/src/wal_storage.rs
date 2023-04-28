@@ -112,10 +112,10 @@ impl PhysicalStorage {
     /// the disk. Otherwise, all LSNs are set to zero.
     pub fn new(
         ttid: &TenantTimelineId,
+        timeline_dir: PathBuf,
         conf: &SafeKeeperConf,
         state: &SafeKeeperState,
     ) -> Result<PhysicalStorage> {
-        let timeline_dir = conf.timeline_dir(ttid);
         let wal_seg_size = state.server.wal_seg_size as usize;
 
         // Find out where stored WAL ends, starting at commit_lsn which is a
