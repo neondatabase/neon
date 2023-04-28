@@ -4,6 +4,7 @@
 //!
 pub mod checker;
 pub mod config;
+pub mod configurator;
 pub mod http;
 #[macro_use]
 pub mod logger;

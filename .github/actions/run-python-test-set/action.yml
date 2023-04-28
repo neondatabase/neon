@@ -202,7 +202,7 @@ runs:
         prefix: latest
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: store

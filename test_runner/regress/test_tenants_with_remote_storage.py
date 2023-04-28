@@ -15,16 +15,16 @@ from typing import List, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    Endpoint,
     LocalFsStorage,
     NeonEnv,
     NeonEnvBuilder,
-    Postgres,
     RemoteStorageKind,
     available_remote_storages,
-    wait_for_sk_commit_lsn_to_reach_remote_storage,
+    last_flush_lsn_upload,
 )
 from fixtures.pageserver.utils import (
-    assert_tenant_status,
+    assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
 )
@@ -32,10 +32,10 @@ from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
 
 
-async def tenant_workload(env: NeonEnv, pg: Postgres):
+async def tenant_workload(env: NeonEnv, endpoint: Endpoint):
     await env.pageserver.connect_async()
 
-    pg_conn = await pg.connect_async()
+    pg_conn = await endpoint.connect_async()
 
     await pg_conn.execute("CREATE TABLE t(key int primary key, value text)")
     for i in range(1, 100):
@@ -49,10 +49,10 @@ async def tenant_workload(env: NeonEnv, pg: Postgres):
         assert res == i * 1000
 
 
-async def all_tenants_workload(env: NeonEnv, tenants_pgs):
+async def all_tenants_workload(env: NeonEnv, tenants_endpoints):
     workers = []
-    for _, pg in tenants_pgs:
-        worker = tenant_workload(env, pg)
+    for _, endpoint in tenants_endpoints:
+        worker = tenant_workload(env, endpoint)
         workers.append(asyncio.create_task(worker))
 
     # await all workers
@@ -73,7 +73,7 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
 
-    tenants_pgs: List[Tuple[TenantId, Postgres]] = []
+    tenants_endpoints: List[Tuple[TenantId, Endpoint]] = []
 
     for _ in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly
@@ -84,18 +84,18 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Rem
         )
         env.neon_cli.create_timeline("test_tenants_many", tenant_id=tenant)
 
-        pg = env.postgres.create_start(
+        endpoint = env.endpoints.create_start(
             "test_tenants_many",
             tenant_id=tenant,
         )
-        tenants_pgs.append((tenant, pg))
+        tenants_endpoints.append((tenant, endpoint))
 
-    asyncio.run(all_tenants_workload(env, tenants_pgs))
+    asyncio.run(all_tenants_workload(env, tenants_endpoints))
 
     # Wait for the remote storage uploads to finish
     pageserver_http = env.pageserver.http_client()
-    for tenant, pg in tenants_pgs:
-        res = pg.safe_psql_many(
+    for tenant, endpoint in tenants_endpoints:
+        res = endpoint.safe_psql_many(
             ["SHOW neon.tenant_id", "SHOW neon.timeline_id", "SELECT pg_current_wal_flush_lsn()"]
         )
         tenant_id = TenantId(res[0][0][0])
@@ -137,15 +137,15 @@ def test_tenants_attached_after_download(
     )
 
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     for checkpoint_number in range(1, 3):
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute(
                 f"""
                 CREATE TABLE t{checkpoint_number}(id int primary key, secret text);
@@ -174,11 +174,8 @@ def test_tenants_attached_after_download(
     )
 
     ##### Stop the pageserver, erase its layer file to force it being downloaded from S3
-    env.postgres.stop_all()
-
-    wait_for_sk_commit_lsn_to_reach_remote_storage(
-        tenant_id, timeline_id, env.safekeepers, env.pageserver
-    )
+    last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+    env.endpoints.stop_all()
 
     env.pageserver.stop()
 
@@ -202,7 +199,7 @@ def test_tenants_attached_after_download(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_tenant_status(client, tenant_id, "Active"),
+        func=lambda: assert_tenant_state(client, tenant_id, "Active"),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
@@ -244,12 +241,12 @@ def test_tenant_redownloads_truncated_file_on_startup(
     env.pageserver.allowed_errors.append(".*No timelines to attach received.*")
 
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("CREATE TABLE t1 AS VALUES (123, 'foobar');")
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
@@ -257,7 +254,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
 
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     env.pageserver.stop()
 
     timeline_dir = Path(env.repo_dir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
@@ -286,7 +283,7 @@ def test_tenant_redownloads_truncated_file_on_startup(
     wait_until(
         number_of_iterations=5,
         interval=1,
-        func=lambda: assert_tenant_status(client, tenant_id, "Active"),
+        func=lambda: assert_tenant_state(client, tenant_id, "Active"),
     )
 
     restored_timelines = client.timeline_list(tenant_id)
@@ -313,9 +310,9 @@ def test_tenant_redownloads_truncated_file_on_startup(
         os.stat(remote_layer_path).st_size == expected_size
     ), "truncated file should not had been uploaded around re-download"
 
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("INSERT INTO t1 VALUES (234, 'test data');")
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 

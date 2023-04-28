@@ -91,7 +91,7 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
             // connection to the broker.
 
             // note: there are blocking operations below, but it's considered fine for now
-            tli.record_safekeeper_info(&msg).await?
+            tli.record_safekeeper_info(msg).await?
         }
     }
     bail!("end of stream");

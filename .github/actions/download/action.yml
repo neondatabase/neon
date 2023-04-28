@@ -37,7 +37,7 @@ runs:
             echo 'SKIPPED=true' >> $GITHUB_OUTPUT
             exit 0
           else
-            echo 2>&1 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
+            echo >&2 "Neither s3://${BUCKET}/${PREFIX}/${FILENAME} nor its version from previous attempts exist"
             exit 1
           fi
         fi

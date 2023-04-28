@@ -17,7 +17,7 @@ storage:
           kind: "LayerAccessThreshold"
           period: "20m"
           threshold: &default_eviction_threshold "20m"
-      evictions_low_residence_duration_metric_threshold: *default_eviction_threshold
+        evictions_low_residence_duration_metric_threshold: *default_eviction_threshold
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"

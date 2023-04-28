@@ -30,7 +30,7 @@ defaults:
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: "neon-staging"
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -92,7 +92,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
@@ -174,7 +174,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -226,7 +226,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-freetier', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-freetier', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -282,7 +282,7 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
@@ -305,7 +305,7 @@ jobs:
     #
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
-    if: success() || failure()
+    if: ${{ !cancelled() }}
     needs: [ generate-matrices, pgbench-compare ]
 
     strategy:
@@ -317,7 +317,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -356,7 +356,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CLICKBENCH_10M_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -379,7 +379,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
@@ -401,7 +401,7 @@ jobs:
     # We might change it after https://github.com/neondatabase/neon/issues/2900.
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
-    if: success() || failure()
+    if: ${{ !cancelled() }}
     needs: [ generate-matrices, clickbench-compare ]
 
     strategy:
@@ -413,7 +413,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -452,7 +452,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_TPCH_S10_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -475,7 +475,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate
@@ -491,7 +491,7 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   user-examples-compare:
-    if: success() || failure()
+    if: ${{ !cancelled() }}
     needs: [ generate-matrices, tpch-compare ]
 
     strategy:
@@ -503,7 +503,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -542,7 +542,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -565,7 +565,7 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
+      if: ${{ !cancelled() }}
       uses: ./.github/actions/allure-report
       with:
         action: generate

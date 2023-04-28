@@ -6,15 +6,10 @@ pub mod framed;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use postgres_protocol::PG_EPOCH;
-use serde::{Deserialize, Serialize};
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    fmt, io, str,
-    time::{Duration, SystemTime},
-};
-use tracing::{trace, warn};
+use std::{borrow::Cow, collections::HashMap, fmt, io, str};
+
+// re-export for use in utils pageserver_feedback.rs
+pub use postgres_protocol::PG_EPOCH;
 
 pub type Oid = u32;
 pub type SystemId = u64;
@@ -664,7 +659,7 @@ fn write_cstr(s: impl AsRef<[u8]>, buf: &mut BytesMut) -> Result<(), ProtocolErr
 }
 
 /// Read cstring from buf, advancing it.
-fn read_cstr(buf: &mut Bytes) -> Result<Bytes, ProtocolError> {
+pub fn read_cstr(buf: &mut Bytes) -> Result<Bytes, ProtocolError> {
     let pos = buf
         .iter()
         .position(|x| *x == 0)
@@ -939,174 +934,9 @@ impl<'a> BeMessage<'a> {
     }
 }
 
-/// Feedback pageserver sends to safekeeper and safekeeper resends to compute.
-/// Serialized in custom flexible key/value format. In replication protocol, it
-/// is marked with NEON_STATUS_UPDATE_TAG_BYTE to differentiate from postgres
-/// Standby status update / Hot standby feedback messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PageserverFeedback {
-    /// Last known size of the timeline. Used to enforce timeline size limit.
-    pub current_timeline_size: u64,
-    /// LSN last received and ingested by the pageserver.
-    pub last_received_lsn: u64,
-    /// LSN up to which data is persisted by the pageserver to its local disc.
-    pub disk_consistent_lsn: u64,
-    /// LSN up to which data is persisted by the pageserver on s3; safekeepers
-    /// consider WAL before it can be removed.
-    pub remote_consistent_lsn: u64,
-    pub replytime: SystemTime,
-}
-
-// NOTE: Do not forget to increment this number when adding new fields to PageserverFeedback.
-// Do not remove previously available fields because this might be backwards incompatible.
-pub const PAGESERVER_FEEDBACK_FIELDS_NUMBER: u8 = 5;
-
-impl PageserverFeedback {
-    pub fn empty() -> PageserverFeedback {
-        PageserverFeedback {
-            current_timeline_size: 0,
-            last_received_lsn: 0,
-            remote_consistent_lsn: 0,
-            disk_consistent_lsn: 0,
-            replytime: SystemTime::now(),
-        }
-    }
-
-    // Serialize PageserverFeedback using custom format
-    // to support protocol extensibility.
-    //
-    // Following layout is used:
-    // char - number of key-value pairs that follow.
-    //
-    // key-value pairs:
-    // null-terminated string - key,
-    // uint32 - value length in bytes
-    // value itself
-    //
-    // TODO: change serialized fields names once all computes migrate to rename.
-    pub fn serialize(&self, buf: &mut BytesMut) {
-        buf.put_u8(PAGESERVER_FEEDBACK_FIELDS_NUMBER); // # of keys
-        buf.put_slice(b"current_timeline_size\0");
-        buf.put_i32(8);
-        buf.put_u64(self.current_timeline_size);
-
-        buf.put_slice(b"ps_writelsn\0");
-        buf.put_i32(8);
-        buf.put_u64(self.last_received_lsn);
-        buf.put_slice(b"ps_flushlsn\0");
-        buf.put_i32(8);
-        buf.put_u64(self.disk_consistent_lsn);
-        buf.put_slice(b"ps_applylsn\0");
-        buf.put_i32(8);
-        buf.put_u64(self.remote_consistent_lsn);
-
-        let timestamp = self
-            .replytime
-            .duration_since(*PG_EPOCH)
-            .expect("failed to serialize pg_replytime earlier than PG_EPOCH")
-            .as_micros() as i64;
-
-        buf.put_slice(b"ps_replytime\0");
-        buf.put_i32(8);
-        buf.put_i64(timestamp);
-    }
-
-    // Deserialize PageserverFeedback message
-    // TODO: change serialized fields names once all computes migrate to rename.
-    pub fn parse(mut buf: Bytes) -> PageserverFeedback {
-        let mut rf = PageserverFeedback::empty();
-        let nfields = buf.get_u8();
-        for _ in 0..nfields {
-            let key = read_cstr(&mut buf).unwrap();
-            match key.as_ref() {
-                b"current_timeline_size" => {
-                    let len = buf.get_i32();
-                    assert_eq!(len, 8);
-                    rf.current_timeline_size = buf.get_u64();
-                }
-                b"ps_writelsn" => {
-                    let len = buf.get_i32();
-                    assert_eq!(len, 8);
-                    rf.last_received_lsn = buf.get_u64();
-                }
-                b"ps_flushlsn" => {
-                    let len = buf.get_i32();
-                    assert_eq!(len, 8);
-                    rf.disk_consistent_lsn = buf.get_u64();
-                }
-                b"ps_applylsn" => {
-                    let len = buf.get_i32();
-                    assert_eq!(len, 8);
-                    rf.remote_consistent_lsn = buf.get_u64();
-                }
-                b"ps_replytime" => {
-                    let len = buf.get_i32();
-                    assert_eq!(len, 8);
-                    let raw_time = buf.get_i64();
-                    if raw_time > 0 {
-                        rf.replytime = *PG_EPOCH + Duration::from_micros(raw_time as u64);
-                    } else {
-                        rf.replytime = *PG_EPOCH - Duration::from_micros(-raw_time as u64);
-                    }
-                }
-                _ => {
-                    let len = buf.get_i32();
-                    warn!(
-                        "PageserverFeedback parse. unknown key {} of len {len}. Skip it.",
-                        String::from_utf8_lossy(key.as_ref())
-                    );
-                    buf.advance(len as usize);
-                }
-            }
-        }
-        trace!("PageserverFeedback parsed is {:?}", rf);
-        rf
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_replication_feedback_serialization() {
-        let mut rf = PageserverFeedback::empty();
-        // Fill rf with some values
-        rf.current_timeline_size = 12345678;
-        // Set rounded time to be able to compare it with deserialized value,
-        // because it is rounded up to microseconds during serialization.
-        rf.replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
-        let mut data = BytesMut::new();
-        rf.serialize(&mut data);
-
-        let rf_parsed = PageserverFeedback::parse(data.freeze());
-        assert_eq!(rf, rf_parsed);
-    }
-
-    #[test]
-    fn test_replication_feedback_unknown_key() {
-        let mut rf = PageserverFeedback::empty();
-        // Fill rf with some values
-        rf.current_timeline_size = 12345678;
-        // Set rounded time to be able to compare it with deserialized value,
-        // because it is rounded up to microseconds during serialization.
-        rf.replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
-        let mut data = BytesMut::new();
-        rf.serialize(&mut data);
-
-        // Add an extra field to the buffer and adjust number of keys
-        if let Some(first) = data.first_mut() {
-            *first = PAGESERVER_FEEDBACK_FIELDS_NUMBER + 1;
-        }
-
-        data.put_slice(b"new_field_one\0");
-        data.put_i32(8);
-        data.put_u64(42);
-
-        // Parse serialized data and check that new field is not parsed
-        let rf_parsed = PageserverFeedback::parse(data.freeze());
-        assert_eq!(rf, rf_parsed);
-    }
 
     #[test]
     fn test_startup_message_params_options_escaped() {

@@ -12,12 +12,12 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
     available_remote_storages,
+    last_flush_lsn_upload,
     wait_for_last_flush_lsn,
-    wait_for_sk_commit_lsn_to_reach_remote_storage,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    assert_tenant_status,
+    assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_state,
@@ -73,17 +73,17 @@ def test_ondemand_download_large_rel(
     )
     env.initial_tenant = tenant
 
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
+    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
 
     # We want to make sure that the data is large enough that the keyspace is partitioned.
     num_rows = 1000000
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         # data loading may take a while, so increase statement timeout
         cur.execute("SET statement_timeout='300s'")
         cur.execute(
@@ -106,7 +106,7 @@ def test_ondemand_download_large_rel(
     log.info("uploads have finished")
 
     ##### Stop the first pageserver instance, erase all its data
-    pg.stop()
+    endpoint.stop()
     env.pageserver.stop()
 
     # remove all the layer files
@@ -117,7 +117,7 @@ def test_ondemand_download_large_rel(
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    pg.start()
+    endpoint.start()
     before_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
 
     # Probe in the middle of the table. There's a high chance that the beginning
@@ -125,7 +125,7 @@ def test_ondemand_download_large_rel(
     # from other tables, and with the entry that stores the size of the
     # relation, so they are likely already downloaded. But the middle of the
     # table should not have been needed by anything yet.
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         assert query_scalar(cur, "select count(*) from tbl where id = 500000") == 1
 
     after_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
@@ -167,17 +167,17 @@ def test_ondemand_download_timetravel(
     )
     env.initial_tenant = tenant
 
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
+    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
 
     lsns = []
 
     table_len = 10000
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute(
             f"""
         CREATE TABLE testtab(id serial primary key, checkpoint_number int, data text);
@@ -192,7 +192,7 @@ def test_ondemand_download_timetravel(
     lsns.append((0, current_lsn))
 
     for checkpoint_number in range(1, 20):
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute(f"UPDATE testtab SET checkpoint_number = {checkpoint_number}")
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
         lsns.append((checkpoint_number, current_lsn))
@@ -204,12 +204,10 @@ def test_ondemand_download_timetravel(
         client.timeline_checkpoint(tenant_id, timeline_id)
 
     ##### Stop the first pageserver instance, erase all its data
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
 
     # wait until pageserver has successfully uploaded all the data to remote storage
-    wait_for_sk_commit_lsn_to_reach_remote_storage(
-        tenant_id, timeline_id, env.safekeepers, env.pageserver
-    )
+    wait_for_upload(client, tenant_id, timeline_id, current_lsn)
 
     def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
@@ -239,7 +237,7 @@ def test_ondemand_download_timetravel(
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
+    wait_until(10, 0.2, lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     # The current_physical_size reports the sum of layers loaded in the layer
     # map, regardless of where the layer files are located. So even though we
@@ -251,10 +249,10 @@ def test_ondemand_download_timetravel(
     num_layers_downloaded = [0]
     resident_size = [get_resident_physical_size()]
     for checkpoint_number, lsn in lsns:
-        pg_old = env.postgres.create_start(
-            branch_name="main", node_name=f"test_old_lsn_{checkpoint_number}", lsn=lsn
+        endpoint_old = env.endpoints.create_start(
+            branch_name="main", endpoint_id=f"ep-old_lsn_{checkpoint_number}", lsn=lsn
         )
-        with pg_old.cursor() as cur:
+        with endpoint_old.cursor() as cur:
             # assert query_scalar(cur, f"select count(*) from testtab where checkpoint_number={checkpoint_number}") == 100000
             assert (
                 query_scalar(
@@ -331,15 +329,15 @@ def test_download_remote_layers_api(
     )
     env.initial_tenant = tenant
 
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
+    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
 
     table_len = 10000
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute(
             f"""
         CREATE TABLE testtab(id serial primary key, checkpoint_number int, data text);
@@ -347,11 +345,8 @@ def test_download_remote_layers_api(
         """
         )
 
-    env.postgres.stop_all()
-
-    wait_for_sk_commit_lsn_to_reach_remote_storage(
-        tenant_id, timeline_id, env.safekeepers, env.pageserver
-    )
+    last_flush_lsn_upload(env, endpoint, tenant_id, timeline_id)
+    env.endpoints.stop_all()
 
     def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
@@ -392,7 +387,7 @@ def test_download_remote_layers_api(
         ]
     )
 
-    wait_until(10, 0.2, lambda: assert_tenant_status(client, tenant_id, "Active"))
+    wait_until(10, 0.2, lambda: assert_tenant_state(client, tenant_id, "Active"))
 
     ###### Phase 1: exercise download error code path
     assert (
@@ -463,8 +458,8 @@ def test_download_remote_layers_api(
         sk.start()
 
     # ensure that all the data is back
-    pg_old = env.postgres.create_start(branch_name="main")
-    with pg_old.cursor() as cur:
+    endpoint_old = env.endpoints.create_start(branch_name="main")
+    with endpoint_old.cursor() as cur:
         assert query_scalar(cur, "select count(*) from testtab") == table_len
 
 
@@ -513,17 +508,17 @@ def test_compaction_downloads_on_demand_without_image_creation(
     env.initial_tenant = tenant_id
     pageserver_http = env.pageserver.http_client()
 
-    with env.postgres.create_start("main") as pg:
+    with env.endpoints.create_start("main") as endpoint:
         # no particular reason to create the layers like this, but we are sure
         # not to hit the image_creation_threshold here.
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute("create table a as select id::bigint from generate_series(1, 204800) s(id)")
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute("update a set id = -id")
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
@@ -589,32 +584,32 @@ def test_compaction_downloads_on_demand_with_image_creation(
     env.initial_tenant = tenant_id
     pageserver_http = env.pageserver.http_client()
 
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     # no particular reason to create the layers like this, but we are sure
     # not to hit the image_creation_threshold here.
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("create table a (id bigserial primary key, some_value bigint not null)")
         cur.execute("insert into a(some_value) select i from generate_series(1, 10000) s(i)")
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
     pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
     for i in range(0, 2):
         for j in range(0, 3):
             # create a minimal amount of "delta difficulty" for this table
-            with pg.cursor() as cur:
+            with endpoint.cursor() as cur:
                 cur.execute("update a set some_value = -some_value + %s", (j,))
 
-            with pg.cursor() as cur:
+            with endpoint.cursor() as cur:
                 # vacuuming should aid to reuse keys, though it's not really important
                 # with image_creation_threshold=1 which we will use on the last compaction
                 cur.execute("vacuum")
 
-            wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+            wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
             if i == 1 and j == 2:
                 # last iteration; stop before checkpoint to avoid leaving an inmemory layer
-                pg.stop_and_destroy()
+                endpoint.stop_and_destroy()
 
             pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 

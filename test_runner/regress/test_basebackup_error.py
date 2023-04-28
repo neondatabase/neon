@@ -15,4 +15,4 @@ def test_basebackup_error(neon_simple_env: NeonEnv):
     pageserver_http.configure_failpoints(("basebackup-before-control-file", "return"))
 
     with pytest.raises(Exception, match="basebackup-before-control-file"):
-        env.postgres.create_start("test_basebackup_error")
+        env.endpoints.create_start("test_basebackup_error")

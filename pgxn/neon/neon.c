@@ -24,6 +24,7 @@
 
 #include "neon.h"
 #include "walproposer.h"
+#include "pagestore_client.h"
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);

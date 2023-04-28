@@ -34,7 +34,7 @@ use std::fs::File;
 use std::panic;
 use std::path::Path;
 use std::process::exit;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -45,12 +45,12 @@ use url::Url;
 
 use compute_api::responses::ComputeStatus;
 
-use compute_tools::compute::{ComputeNode, ComputeState};
+use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
+use compute_tools::configurator::launch_configurator;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
-use compute_tools::pg_helpers::*;
 use compute_tools::spec::*;
 
 fn main() -> Result<()> {
@@ -73,29 +73,29 @@ fn main() -> Result<()> {
     // Try to use just 'postgres' if no path is provided
     let pgbin = matches.get_one::<String>("pgbin").unwrap();
 
-    let mut spec = Default::default();
-    let mut spec_set = false;
+    let spec;
     let mut live_config_allowed = false;
     match spec_json {
         // First, try to get cluster spec from the cli argument
         Some(json) => {
-            spec = serde_json::from_str(json)?;
-            spec_set = true;
+            spec = Some(serde_json::from_str(json)?);
         }
         None => {
             // Second, try to read it from the file if path is provided
             if let Some(sp) = spec_path {
                 let path = Path::new(sp);
                 let file = File::open(path)?;
-                spec = serde_json::from_reader(file)?;
-                spec_set = true;
+                spec = Some(serde_json::from_reader(file)?);
             } else if let Some(id) = compute_id {
                 if let Some(cp_base) = control_plane_uri {
                     live_config_allowed = true;
-                    if let Ok(s) = get_spec_from_control_plane(cp_base, id) {
-                        spec = s;
-                        spec_set = true;
-                    }
+                    spec = match get_spec_from_control_plane(cp_base, id) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!("cannot get response from control plane: {}", e);
+                            panic!("neither spec nor confirmation that compute is in the Empty state was received");
+                        }
+                    };
                 } else {
                     panic!("must specify both --control-plane-uri and --compute-id or none");
                 }
@@ -109,11 +109,15 @@ fn main() -> Result<()> {
     };
 
     let mut new_state = ComputeState::new();
-    if spec_set {
-        new_state.spec = spec;
+    let spec_set;
+    if let Some(spec) = spec {
+        let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
+        new_state.pspec = Some(pspec);
+        spec_set = true;
+    } else {
+        spec_set = false;
     }
     let compute_node = ComputeNode {
-        start_time: Utc::now(),
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
@@ -142,33 +146,21 @@ fn main() -> Result<()> {
         }
     }
 
-    // We got all we need, fill in the state.
+    // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
-    let pageserver_connstr = state
-        .spec
-        .cluster
-        .settings
-        .find("neon.pageserver_connstring")
-        .expect("pageserver connstr should be provided");
-    let storage_auth_token = state.spec.storage_auth_token.clone();
-    let tenant = state
-        .spec
-        .cluster
-        .settings
-        .find("neon.tenant_id")
-        .expect("tenant id should be provided");
-    let timeline = state
-        .spec
-        .cluster
-        .settings
-        .find("neon.timeline_id")
-        .expect("tenant id should be provided");
-    let startup_tracing_context = state.spec.startup_tracing_context.clone();
+    let pspec = state.pspec.as_ref().expect("spec must be set");
+    let startup_tracing_context = pspec.spec.startup_tracing_context.clone();
 
-    state.pageserver_connstr = pageserver_connstr;
-    state.storage_auth_token = storage_auth_token;
-    state.tenant = tenant;
-    state.timeline = timeline;
+    // Record for how long we slept waiting for the spec.
+    state.metrics.wait_for_spec_ms = Utc::now()
+        .signed_duration_since(state.start_time)
+        .to_std()
+        .unwrap()
+        .as_millis() as u64;
+    // Reset start time to the actual start of the configuration, so that
+    // total startup time was properly measured at the end.
+    state.start_time = Utc::now();
+
     state.status = ComputeStatus::Init;
     compute.state_changed.notify_all();
     drop(state);
@@ -198,6 +190,8 @@ fn main() -> Result<()> {
 
     // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
+    let _configurator_handle =
+        launch_configurator(&compute).expect("cannot launch configurator thread");
 
     // Start Postgres
     let mut delay_exit = false;
@@ -239,10 +233,25 @@ fn main() -> Result<()> {
         thread::sleep(Duration::from_secs(30));
     }
 
-    info!("shutting down tracing");
     // Shutdown trace pipeline gracefully, so that it has a chance to send any
-    // pending traces before we exit.
-    tracing_utils::shutdown_tracing();
+    // pending traces before we exit. Shutting down OTEL tracing provider may
+    // hang for quite some time, see, for example:
+    // - https://github.com/open-telemetry/opentelemetry-rust/issues/868
+    // - and our problems with staging https://github.com/neondatabase/cloud/issues/3707#issuecomment-1493983636
+    //
+    // Yet, we want computes to shut down fast enough, as we may need a new one
+    // for the same timeline ASAP. So wait no longer than 2s for the shutdown to
+    // complete, then just error out and exit the main thread.
+    info!("shutting down tracing");
+    let (sender, receiver) = mpsc::channel();
+    let _ = thread::spawn(move || {
+        tracing_utils::shutdown_tracing();
+        sender.send(()).ok()
+    });
+    let shutdown_res = receiver.recv_timeout(Duration::from_millis(2000));
+    if shutdown_res.is_err() {
+        error!("timed out while shutting down tracing, exiting anyway");
+    }
 
     info!("shutting down");
     exit(exit_code.unwrap_or(1))

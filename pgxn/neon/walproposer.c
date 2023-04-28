@@ -1964,18 +1964,26 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback * hs)
 	{
 		if (safekeeper[i].appendResponse.hs.ts != 0)
 		{
-			if (FullTransactionIdPrecedes(safekeeper[i].appendResponse.hs.xmin, hs->xmin))
+			HotStandbyFeedback *skhs = &safekeeper[i].appendResponse.hs;
+			if (FullTransactionIdIsNormal(skhs->xmin)
+				&& FullTransactionIdPrecedes(skhs->xmin, hs->xmin))
 			{
-				hs->xmin = safekeeper[i].appendResponse.hs.xmin;
-				hs->ts = safekeeper[i].appendResponse.hs.ts;
+				hs->xmin = skhs->xmin;
+				hs->ts = skhs->ts;
 			}
-			if (FullTransactionIdPrecedes(safekeeper[i].appendResponse.hs.catalog_xmin, hs->catalog_xmin))
+			if (FullTransactionIdIsNormal(skhs->catalog_xmin)
+				&& FullTransactionIdPrecedes(skhs->catalog_xmin, hs->xmin))
 			{
-				hs->catalog_xmin = safekeeper[i].appendResponse.hs.catalog_xmin;
-				hs->ts = safekeeper[i].appendResponse.hs.ts;
+				hs->catalog_xmin = skhs->catalog_xmin;
+				hs->ts = skhs->ts;
 			}
 		}
 	}
+
+	if (hs->xmin.value == ~0)
+		hs->xmin = InvalidFullTransactionId;
+	if (hs->catalog_xmin.value == ~0)
+		hs->catalog_xmin = InvalidFullTransactionId;
 }
 
 /*

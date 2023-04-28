@@ -49,7 +49,7 @@ jobs:
         shell: bash
     strategy:
       matrix:
-        target_region: [ us-east-2, us-west-2, eu-central-1, ap-southeast-1 ]
+        target_region: [ us-east-2, us-west-2, eu-central-1, ap-southeast-1, us-east-1 ]
     environment:
       name: prod-${{ matrix.target_region }}
     steps:
@@ -95,6 +95,10 @@ jobs:
             deploy_legacy_scram_proxy: false
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+            deploy_link_proxy: false
+            deploy_legacy_scram_proxy: false
+          - target_region: us-east-1
+            target_cluster: prod-us-east-1-theta
             deploy_link_proxy: false
             deploy_legacy_scram_proxy: false
     environment:
@@ -147,6 +151,8 @@ jobs:
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
+          - target_region: us-east-1
+            target_cluster: prod-us-east-1-theta
     environment:
       name: prod-${{ matrix.target_region }}
     steps:

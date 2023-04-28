@@ -12,10 +12,10 @@ from fixtures.utils import query_scalar
 def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     env = neon_simple_env
     env.neon_cli.create_branch("test_multixact", "empty")
-    pg = env.postgres.create_start("test_multixact")
+    endpoint = env.endpoints.create_start("test_multixact")
 
     log.info("postgres is running on 'test_multixact' branch")
-    cur = pg.connect().cursor()
+    cur = endpoint.connect().cursor()
     cur.execute(
         """
         CREATE TABLE t1(i int primary key);
@@ -32,7 +32,7 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     connections = []
     for i in range(nclients):
         # Do not turn on autocommit. We want to hold the key-share locks.
-        conn = pg.connect(autocommit=False)
+        conn = endpoint.connect(autocommit=False)
         connections.append(conn)
 
     # On each iteration, we commit the previous transaction on a connection,
@@ -65,10 +65,10 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
 
     # Branch at this point
     env.neon_cli.create_branch("test_multixact_new", "test_multixact", ancestor_start_lsn=lsn)
-    pg_new = env.postgres.create_start("test_multixact_new")
+    endpoint_new = env.endpoints.create_start("test_multixact_new")
 
     log.info("postgres is running on 'test_multixact_new' branch")
-    next_multixact_id_new = pg_new.safe_psql(
+    next_multixact_id_new = endpoint_new.safe_psql(
         "SELECT next_multixact_id FROM pg_control_checkpoint()"
     )[0][0]
 
@@ -76,4 +76,4 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     assert next_multixact_id_new == next_multixact_id
 
     # Check that we can restore the content of the datadir correctly
-    check_restored_datadir_content(test_output_dir, env, pg)
+    check_restored_datadir_content(test_output_dir, env, endpoint)

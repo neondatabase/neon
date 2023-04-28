@@ -28,6 +28,7 @@ use config::ProxyConfig;
 use futures::FutureExt;
 use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tokio::{net::TcpListener, task::JoinError};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use utils::{project_git_version, sentry_init::init_sentry};
 
@@ -66,39 +67,48 @@ async fn main() -> anyhow::Result<()> {
     let proxy_address: SocketAddr = args.get_one::<String>("proxy").unwrap().parse()?;
     info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
+    let cancellation_token = CancellationToken::new();
 
-    let mut tasks = vec![
-        tokio::spawn(handle_signals()),
-        tokio::spawn(http::server::task_main(http_listener)),
-        tokio::spawn(proxy::task_main(config, proxy_listener)),
-        tokio::spawn(console::mgmt::task_main(mgmt_listener)),
-    ];
+    let mut client_tasks = vec![tokio::spawn(proxy::task_main(
+        config,
+        proxy_listener,
+        cancellation_token.clone(),
+    ))];
 
     if let Some(wss_address) = args.get_one::<String>("wss") {
         let wss_address: SocketAddr = wss_address.parse()?;
         info!("Starting wss on {wss_address}");
         let wss_listener = TcpListener::bind(wss_address).await?;
 
-        tasks.push(tokio::spawn(http::websocket::task_main(
+        client_tasks.push(tokio::spawn(http::websocket::task_main(
             config,
             wss_listener,
+            cancellation_token.clone(),
         )));
     }
+
+    let mut tasks = vec![
+        tokio::spawn(handle_signals(cancellation_token)),
+        tokio::spawn(http::server::task_main(http_listener)),
+        tokio::spawn(console::mgmt::task_main(mgmt_listener)),
+    ];
 
     if let Some(metrics_config) = &config.metric_collection {
         tasks.push(tokio::spawn(metrics::task_main(metrics_config)));
     }
 
-    // This combinator will block until either all tasks complete or
-    // one of them finishes with an error (others will be cancelled).
-    let tasks = tasks.into_iter().map(flatten_err);
-    let _: Vec<()> = futures::future::try_join_all(tasks).await?;
-
+    let tasks = futures::future::try_join_all(tasks.into_iter().map(flatten_err));
+    let client_tasks = futures::future::try_join_all(client_tasks.into_iter().map(flatten_err));
+    tokio::select! {
+        // We are only expecting an error from these forever tasks
+        res = tasks => { res?; },
+        res = client_tasks => { res?; },
+    }
     Ok(())
 }
 
 /// Handle unix signals appropriately.
-async fn handle_signals() -> anyhow::Result<()> {
+async fn handle_signals(token: CancellationToken) -> anyhow::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut hangup = signal(SignalKind::hangup())?;
@@ -116,11 +126,9 @@ async fn handle_signals() -> anyhow::Result<()> {
                 warn!("received SIGINT, exiting immediately");
                 bail!("interrupted");
             }
-            // TODO: Don't accept new proxy connections.
-            // TODO: Shut down once all exisiting connections have been closed.
             _ = terminate.recv() => {
-                warn!("received SIGTERM, exiting immediately");
-                bail!("terminated");
+                warn!("received SIGTERM, shutting down once all existing connections have closed");
+                token.cancel();
             }
         }
     }

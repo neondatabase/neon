@@ -13,10 +13,10 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     ctl = ComputeCtl(env)
 
     env.neon_cli.create_branch("test_compute_ctl", "main")
-    pg = env.postgres.create_start("test_compute_ctl")
-    pg.safe_psql("CREATE TABLE t(key int primary key, value text)")
+    endpoint = env.endpoints.create_start("test_compute_ctl")
+    endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
 
-    with open(pg.config_file_path(), "r") as f:
+    with open(endpoint.config_file_path(), "r") as f:
         cfg_lines = f.readlines()
     cfg_map = {}
     for line in cfg_lines:
@@ -24,10 +24,13 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             k, v = line.split("=")
             cfg_map[k] = v.strip("\n '\"")
     log.info(f"postgres config: {cfg_map}")
-    pgdata = pg.pg_data_dir_path()
+    pgdata = endpoint.pg_data_dir_path()
     pg_bin_path = os.path.join(pg_bin.pg_bin_path, "postgres")
 
-    pg.stop_and_destroy()
+    endpoint.stop_and_destroy()
+
+    # stop_and_destroy removes the whole endpoint directory. Recreate it.
+    Path(pgdata).mkdir(parents=True)
 
     spec = (
         """
@@ -55,11 +58,6 @@ def test_sync_safekeepers_logs(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
                 "name": "wal_level",
                 "value": "replica",
                 "vartype": "enum"
-            },
-            {
-                "name": "hot_standby",
-                "value": "on",
-                "vartype": "bool"
             },
             {
                 "name": "neon.safekeepers",

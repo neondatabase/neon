@@ -1,16 +1,20 @@
 import time
+from typing import Optional
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
-def assert_tenant_status(
-    pageserver_http: PageserverHttpClient, tenant: TenantId, expected_status: str
+def assert_tenant_state(
+    pageserver_http: PageserverHttpClient,
+    tenant: TenantId,
+    expected_state: str,
+    message: Optional[str] = None,
 ):
     tenant_status = pageserver_http.tenant_status(tenant)
     log.info(f"tenant_status: {tenant_status}")
-    assert tenant_status["state"] == expected_status, tenant_status
+    assert tenant_status["state"]["slug"] == expected_state, message or tenant_status
 
 
 def tenant_exists(pageserver_http: PageserverHttpClient, tenant_id: TenantId):
@@ -50,10 +54,9 @@ def wait_for_upload(
         if current_lsn >= lsn:
             log.info("wait finished")
             return
+        lr_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         log.info(
-            "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
-                lsn, current_lsn, i + 1
-            )
+            f"waiting for remote_consistent_lsn to reach {lsn}, now {current_lsn}, last_record_lsn={lr_lsn}, iteration {i + 1}"
         )
         time.sleep(1)
     raise Exception(
@@ -68,6 +71,7 @@ def wait_until_tenant_state(
     tenant_id: TenantId,
     expected_state: str,
     iterations: int,
+    period: float = 1.0,
 ) -> bool:
     """
     Does not use `wait_until` for debugging purposes
@@ -76,21 +80,28 @@ def wait_until_tenant_state(
         try:
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
             log.debug(f"Tenant {tenant_id} data: {tenant}")
-            if tenant["state"] == expected_state:
+            if tenant["state"]["slug"] == expected_state:
                 return True
         except Exception as e:
             log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
 
-        time.sleep(1)
+        time.sleep(period)
 
     raise Exception(f"Tenant {tenant_id} did not become {expected_state} in {iterations} seconds")
 
 
 def wait_until_tenant_active(
-    pageserver_http: PageserverHttpClient, tenant_id: TenantId, iterations: int = 30
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    iterations: int = 30,
+    period: float = 1.0,
 ):
     wait_until_tenant_state(
-        pageserver_http, tenant_id, expected_state="Active", iterations=iterations
+        pageserver_http,
+        tenant_id,
+        expected_state="Active",
+        iterations=iterations,
+        period=period,
     )
 
 

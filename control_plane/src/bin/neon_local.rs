@@ -7,7 +7,8 @@
 //!
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
-use control_plane::compute::ComputeControlPlane;
+use control_plane::endpoint::ComputeControlPlane;
+use control_plane::endpoint::Replication;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -106,8 +107,9 @@ fn main() -> Result<()> {
             "start" => handle_start_all(sub_args, &env),
             "stop" => handle_stop_all(sub_args, &env),
             "pageserver" => handle_pageserver(sub_args, &env),
-            "pg" => handle_pg(sub_args, &env),
             "safekeeper" => handle_safekeeper(sub_args, &env),
+            "endpoint" => handle_endpoint(sub_args, &env),
+            "pg" => bail!("'pg' subcommand has been renamed to 'endpoint'"),
             _ => bail!("unexpected subcommand {sub_name}"),
         };
 
@@ -470,10 +472,17 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             let mut cplane = ComputeControlPlane::load(env.clone())?;
             println!("Importing timeline into pageserver ...");
             pageserver.timeline_import(tenant_id, timeline_id, base, pg_wal, pg_version)?;
-            println!("Creating node for imported timeline ...");
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
-            cplane.new_node(tenant_id, name, timeline_id, None, None, pg_version)?;
+            println!("Creating endpoint for imported timeline ...");
+            cplane.new_endpoint(
+                tenant_id,
+                name,
+                timeline_id,
+                None,
+                pg_version,
+                Replication::Primary,
+            )?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -521,10 +530,10 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
     Ok(())
 }
 
-fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
-    let (sub_name, sub_args) = match pg_match.subcommand() {
-        Some(pg_subcommand_data) => pg_subcommand_data,
-        None => bail!("no pg subcommand provided"),
+fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+    let (sub_name, sub_args) = match ep_match.subcommand() {
+        Some(ep_subcommand_data) => ep_subcommand_data,
+        None => bail!("no endpoint subcommand provided"),
     };
 
     let mut cplane = ComputeControlPlane::load(env.clone())?;
@@ -546,7 +555,7 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
             table.load_preset(comfy_table::presets::NOTHING);
 
             table.set_header([
-                "NODE",
+                "ENDPOINT",
                 "ADDRESS",
                 "TIMELINE",
                 "BRANCH NAME",
@@ -554,39 +563,39 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 "STATUS",
             ]);
 
-            for ((_, node_name), node) in cplane
-                .nodes
+            for (endpoint_id, endpoint) in cplane
+                .endpoints
                 .iter()
-                .filter(|((node_tenant_id, _), _)| node_tenant_id == &tenant_id)
+                .filter(|(_, endpoint)| endpoint.tenant_id == tenant_id)
             {
-                let lsn_str = match node.lsn {
-                    None => {
-                        // -> primary node
-                        // Use the LSN at the end of the timeline.
-                        timeline_infos
-                            .get(&node.timeline_id)
-                            .map(|bi| bi.last_record_lsn.to_string())
-                            .unwrap_or_else(|| "?".to_string())
-                    }
-                    Some(lsn) => {
-                        // -> read-only node
+                let lsn_str = match endpoint.replication {
+                    Replication::Static(lsn) => {
+                        // -> read-only endpoint
                         // Use the node's LSN.
                         lsn.to_string()
+                    }
+                    _ => {
+                        // -> primary endpoint or hot replica
+                        // Use the LSN at the end of the timeline.
+                        timeline_infos
+                            .get(&endpoint.timeline_id)
+                            .map(|bi| bi.last_record_lsn.to_string())
+                            .unwrap_or_else(|| "?".to_string())
                     }
                 };
 
                 let branch_name = timeline_name_mappings
-                    .get(&TenantTimelineId::new(tenant_id, node.timeline_id))
+                    .get(&TenantTimelineId::new(tenant_id, endpoint.timeline_id))
                     .map(|name| name.as_str())
                     .unwrap_or("?");
 
                 table.add_row([
-                    node_name.as_str(),
-                    &node.address.to_string(),
-                    &node.timeline_id.to_string(),
+                    endpoint_id.as_str(),
+                    &endpoint.address.to_string(),
+                    &endpoint.timeline_id.to_string(),
                     branch_name,
                     lsn_str.as_str(),
-                    node.status(),
+                    endpoint.status(),
                 ]);
             }
 
@@ -597,10 +606,10 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .get_one::<String>("branch-name")
                 .map(|s| s.as_str())
                 .unwrap_or(DEFAULT_BRANCH_NAME);
-            let node_name = sub_args
-                .get_one::<String>("node")
-                .map(|node_name| node_name.to_string())
-                .unwrap_or_else(|| format!("{branch_name}_node"));
+            let endpoint_id = sub_args
+                .get_one::<String>("endpoint_id")
+                .map(String::to_string)
+                .unwrap_or_else(|| format!("ep-{branch_name}"));
 
             let lsn = sub_args
                 .get_one::<String>("lsn")
@@ -618,15 +627,34 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            cplane.new_node(tenant_id, &node_name, timeline_id, lsn, port, pg_version)?;
+            let hot_standby = sub_args
+                .get_one::<bool>("hot-standby")
+                .copied()
+                .unwrap_or(false);
+
+            let replication = match (lsn, hot_standby) {
+                (Some(lsn), false) => Replication::Static(lsn),
+                (None, true) => Replication::Replica,
+                (None, false) => Replication::Primary,
+                (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+            };
+
+            cplane.new_endpoint(
+                tenant_id,
+                &endpoint_id,
+                timeline_id,
+                port,
+                pg_version,
+                replication,
+            )?;
         }
         "start" => {
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
-            let node_name = sub_args
-                .get_one::<String>("node")
-                .ok_or_else(|| anyhow!("No node name was provided to start"))?;
+            let endpoint_id = sub_args
+                .get_one::<String>("endpoint_id")
+                .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
 
-            let node = cplane.nodes.get(&(tenant_id, node_name.to_string()));
+            let endpoint = cplane.endpoints.get(endpoint_id.as_str());
 
             let auth_token = if matches!(env.pageserver.pg_auth_type, AuthType::NeonJWT) {
                 let claims = Claims::new(Some(tenant_id), Scope::Tenant);
@@ -636,9 +664,23 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                 None
             };
 
-            if let Some(node) = node {
-                println!("Starting existing postgres {node_name}...");
-                node.start(&auth_token)?;
+            let hot_standby = sub_args
+                .get_one::<bool>("hot-standby")
+                .copied()
+                .unwrap_or(false);
+
+            if let Some(endpoint) = endpoint {
+                match (&endpoint.replication, hot_standby) {
+                    (Replication::Static(_), true) => {
+                        bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                    }
+                    (Replication::Primary, true) => {
+                        bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                    }
+                    _ => {}
+                }
+                println!("Starting existing endpoint {endpoint_id}...");
+                endpoint.start(&auth_token)?;
             } else {
                 let branch_name = sub_args
                     .get_one::<String>("branch-name")
@@ -658,32 +700,46 @@ fn handle_pg(pg_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
                     .get_one::<u32>("pg-version")
                     .copied()
                     .context("Failed to `pg-version` from the argument string")?;
+
+                let replication = match (lsn, hot_standby) {
+                    (Some(lsn), false) => Replication::Static(lsn),
+                    (None, true) => Replication::Replica,
+                    (None, false) => Replication::Primary,
+                    (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+                };
+
                 // when used with custom port this results in non obvious behaviour
                 // port is remembered from first start command, i e
                 // start --port X
                 // stop
                 // start <-- will also use port X even without explicit port argument
-                println!("Starting new postgres (v{pg_version}) {node_name} on timeline {timeline_id} ...");
+                println!("Starting new endpoint {endpoint_id} (PostgreSQL v{pg_version}) on timeline {timeline_id} ...");
 
-                let node =
-                    cplane.new_node(tenant_id, node_name, timeline_id, lsn, port, pg_version)?;
-                node.start(&auth_token)?;
+                let ep = cplane.new_endpoint(
+                    tenant_id,
+                    endpoint_id,
+                    timeline_id,
+                    port,
+                    pg_version,
+                    replication,
+                )?;
+                ep.start(&auth_token)?;
             }
         }
         "stop" => {
-            let node_name = sub_args
-                .get_one::<String>("node")
-                .ok_or_else(|| anyhow!("No node name was provided to stop"))?;
+            let endpoint_id = sub_args
+                .get_one::<String>("endpoint_id")
+                .ok_or_else(|| anyhow!("No endpoint ID was provided to stop"))?;
             let destroy = sub_args.get_flag("destroy");
 
-            let node = cplane
-                .nodes
-                .get(&(tenant_id, node_name.to_string()))
-                .with_context(|| format!("postgres {node_name} is not found"))?;
-            node.stop(destroy)?;
+            let endpoint = cplane
+                .endpoints
+                .get(endpoint_id.as_str())
+                .with_context(|| format!("postgres endpoint {endpoint_id} is not found"))?;
+            endpoint.stop(destroy)?;
         }
 
-        _ => bail!("Unexpected pg subcommand '{sub_name}'"),
+        _ => bail!("Unexpected endpoint subcommand '{sub_name}'"),
     }
 
     Ok(())
@@ -802,7 +858,7 @@ fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Resul
 }
 
 fn handle_start_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<()> {
-    // Postgres nodes are not started automatically
+    // Endpoints are not started automatically
 
     broker::start_broker_process(env)?;
 
@@ -836,10 +892,10 @@ fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<
 fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     let pageserver = PageServerNode::from_env(env);
 
-    // Stop all compute nodes
+    // Stop all endpoints
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
-            for (_k, node) in cplane.nodes {
+            for (_k, node) in cplane.endpoints {
                 if let Err(e) = node.stop(false) {
                     eprintln!("postgres stop failed: {e:#}");
                 }
@@ -872,7 +928,9 @@ fn cli() -> Command {
         .help("Name of the branch to be created or used as an alias for other services")
         .required(false);
 
-    let pg_node_arg = Arg::new("node").help("Postgres node name").required(false);
+    let endpoint_id_arg = Arg::new("endpoint_id")
+        .help("Postgres endpoint id")
+        .required(false);
 
     let safekeeper_id_arg = Arg::new("id").help("safekeeper id").required(false);
 
@@ -917,6 +975,12 @@ fn cli() -> Command {
     let lsn_arg = Arg::new("lsn")
         .long("lsn")
         .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
+        .required(false);
+
+    let hot_standby_arg = Arg::new("hot-standby")
+        .value_parser(value_parser!(bool))
+        .long("hot-standby")
+        .help("If set, the node will be a hot replica on the specified timeline")
         .required(false);
 
     Command::new("Neon CLI")
@@ -1026,37 +1090,39 @@ fn cli() -> Command {
                 )
         )
         .subcommand(
-            Command::new("pg")
+            Command::new("endpoint")
                 .arg_required_else_help(true)
                 .about("Manage postgres instances")
                 .subcommand(Command::new("list").arg(tenant_id_arg.clone()))
                 .subcommand(Command::new("create")
-                    .about("Create a postgres compute node")
-                    .arg(pg_node_arg.clone())
+                    .about("Create a compute endpoint")
+                    .arg(endpoint_id_arg.clone())
                     .arg(branch_name_arg.clone())
                     .arg(tenant_id_arg.clone())
                     .arg(lsn_arg.clone())
                     .arg(port_arg.clone())
                     .arg(
                         Arg::new("config-only")
-                            .help("Don't do basebackup, create compute node with only config files")
+                            .help("Don't do basebackup, create endpoint directory with only config files")
                             .long("config-only")
                             .required(false))
                     .arg(pg_version_arg.clone())
+                    .arg(hot_standby_arg.clone())
                 )
                 .subcommand(Command::new("start")
-                    .about("Start a postgres compute node.\n This command actually creates new node from scratch, but preserves existing config files")
-                    .arg(pg_node_arg.clone())
+                    .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
+                    .arg(endpoint_id_arg.clone())
                     .arg(tenant_id_arg.clone())
                     .arg(branch_name_arg)
                     .arg(timeline_id_arg)
                     .arg(lsn_arg)
                     .arg(port_arg)
                     .arg(pg_version_arg)
+                    .arg(hot_standby_arg)
                 )
                 .subcommand(
                     Command::new("stop")
-                    .arg(pg_node_arg)
+                    .arg(endpoint_id_arg)
                     .arg(tenant_id_arg)
                     .arg(
                         Arg::new("destroy")
@@ -1067,6 +1133,13 @@ fn cli() -> Command {
                         )
                 )
 
+        )
+        // Obsolete old name for 'endpoint'. We now just print an error if it's used.
+        .subcommand(
+            Command::new("pg")
+                .hide(true)
+                .arg(Arg::new("ignore-rest").allow_hyphen_values(true).num_args(0..).required(false))
+                .trailing_var_arg(true)
         )
         .subcommand(
             Command::new("start")

@@ -54,7 +54,7 @@ RUN set -e \
 
 RUN set -e \
 	&& echo "::sysinit:cgconfigparser -l /etc/cgconfig.conf -s 1664" >> /etc/inittab \
-	&& CONNSTR="dbname=neondb user=cloud_admin sslmode=disable" \
+	&& CONNSTR="dbname=postgres user=cloud_admin sslmode=disable" \
 	&& ARGS="--auto-restart --cgroup=neon-postgres --pgconnstr=\"$CONNSTR\"" \
 	&& echo "::respawn:su vm-informant -c '/usr/local/bin/vm-informant $ARGS'" >> /etc/inittab
 

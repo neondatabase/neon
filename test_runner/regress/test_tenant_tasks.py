@@ -1,5 +1,6 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.pageserver.utils import assert_tenant_state, wait_until_tenant_active
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 
@@ -25,19 +26,19 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
         for t in timelines:
             client.timeline_delete(tenant, t)
 
-    def assert_active(tenant):
-        assert get_state(tenant) == "Active"
-
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline(name, tenant_id=tenant)
-    pg = env.postgres.create_start(name, tenant_id=tenant)
-    assert (
-        get_state(tenant) == "Active"
-    ), "Pageserver should activate a tenant and start background jobs if timelines are loaded"
+    endpoint = env.endpoints.create_start(name, tenant_id=tenant)
+    assert_tenant_state(
+        client,
+        tenant,
+        expected_state="Active",
+        message="Pageserver should activate a tenant and start background jobs if timelines are loaded",
+    )
 
     # Stop compute
-    pg.stop()
+    endpoint.stop()
 
     # Delete all timelines on all tenants.
     #
@@ -47,7 +48,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     for tenant_info in client.tenant_list():
         tenant_id = TenantId(tenant_info["id"])
         delete_all_timelines(tenant_id)
-        wait_until(10, 0.2, lambda: assert_active(tenant_id))
+        wait_until_tenant_active(client, tenant_id, iterations=10, period=0.2)
 
     # Assert that all tasks finish quickly after tenant is detached
     task_starts = client.get_metric_value("pageserver_tenant_task_events_total", {"event": "start"})

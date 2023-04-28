@@ -94,6 +94,7 @@ impl PgOptionsSerialize for GenericOptions {
 
 pub trait GenericOptionsSearch {
     fn find(&self, name: &str) -> Option<String>;
+    fn find_ref(&self, name: &str) -> Option<&GenericOption>;
 }
 
 impl GenericOptionsSearch for GenericOptions {
@@ -102,6 +103,12 @@ impl GenericOptionsSearch for GenericOptions {
         let ops = self.as_ref()?;
         let op = ops.iter().find(|s| s.name == name)?;
         op.value.clone()
+    }
+
+    /// Lookup option by name, returning ref
+    fn find_ref(&self, name: &str) -> Option<&GenericOption> {
+        let ops = self.as_ref()?;
+        ops.iter().find(|s| s.name == name)
     }
 }
 

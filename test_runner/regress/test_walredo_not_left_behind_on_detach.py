@@ -45,9 +45,9 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
     # assert tenant exists on disk
     assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in

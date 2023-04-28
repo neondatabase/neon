@@ -359,8 +359,8 @@ impl PageServerNode {
                 .transpose()
                 .context("Failed to parse 'trace_read_requests' as bool")?,
             eviction_policy: settings
-                .get("eviction_policy")
-                .map(|x| serde_json::from_str(x))
+                .remove("eviction_policy")
+                .map(serde_json::from_str)
                 .transpose()
                 .context("Failed to parse 'eviction_policy' json")?,
             min_resident_size_override: settings
@@ -368,6 +368,9 @@ impl PageServerNode {
                 .map(|x| x.parse::<u64>())
                 .transpose()
                 .context("Failed to parse 'min_resident_size_override' as integer")?,
+            evictions_low_residence_duration_metric_threshold: settings
+                .remove("evictions_low_residence_duration_metric_threshold")
+                .map(|x| x.to_string()),
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -445,6 +448,9 @@ impl PageServerNode {
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'min_resident_size_override' as an integer")?,
+                evictions_low_residence_duration_metric_threshold: settings
+                    .get("evictions_low_residence_duration_metric_threshold")
+                    .map(|x| x.to_string()),
             })
             .send()?
             .error_from_body()?;

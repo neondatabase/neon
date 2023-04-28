@@ -118,6 +118,10 @@ pub struct Tenant {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
+    /// The value creation timestamp, used to measure activation delay, see:
+    /// <https://github.com/neondatabase/neon/issues/4025>
+    loading_started_at: Instant,
+
     state: watch::Sender<TenantState>,
 
     // Overridden tenant-specific config parameters.
@@ -177,9 +181,9 @@ impl UninitializedTimeline<'_> {
     ///
     /// The new timeline is initialized in Active state, and its background jobs are
     /// started
-    pub fn initialize(self, _ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
+    pub fn initialize(self, ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(&mut timelines, true, true)
+        self.initialize_with_lock(ctx, &mut timelines, true, true)
     }
 
     /// Like `initialize`, but the caller is already holding lock on Tenant::timelines.
@@ -189,6 +193,7 @@ impl UninitializedTimeline<'_> {
     /// been initialized.
     fn initialize_with_lock(
         mut self,
+        ctx: &RequestContext,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
         load_layer_map: bool,
         activate: bool,
@@ -229,7 +234,9 @@ impl UninitializedTimeline<'_> {
                 new_timeline.maybe_spawn_flush_loop();
 
                 if activate {
-                    new_timeline.activate();
+                    new_timeline
+                        .activate(ctx)
+                        .context("initializing timeline activation")?;
                 }
             }
         }
@@ -469,7 +476,7 @@ impl Tenant {
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
 
@@ -504,7 +511,7 @@ impl Tenant {
             // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
             // will ingest data which may require looking at the layers which are not yet available locally
-            match timeline.initialize_with_lock(&mut timelines_accessor, true, false) {
+            match timeline.initialize_with_lock(ctx, &mut timelines_accessor, true, false) {
                 Ok(new_timeline) => new_timeline,
                 Err(e) => {
                     error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
@@ -616,7 +623,7 @@ impl Tenant {
                 match tenant_clone.attach(ctx).await {
                     Ok(_) => {}
                     Err(e) => {
-                        tenant_clone.set_broken(&e.to_string());
+                        tenant_clone.set_broken(e.to_string());
                         error!("error attaching tenant: {:?}", e);
                     }
                 }
@@ -629,7 +636,7 @@ impl Tenant {
     ///
     /// Background task that downloads all data for a tenant and brings it to Active state.
     ///
-    #[instrument(skip(self, ctx), fields(tenant_id=%self.tenant_id))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     async fn attach(self: &Arc<Tenant>, ctx: RequestContext) -> anyhow::Result<()> {
         // Create directory with marker file to indicate attaching state.
         // The load_local_tenants() function in tenant::mgr relies on the marker file
@@ -750,7 +757,7 @@ impl Tenant {
 
         // Start background operations and open the tenant for business.
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate()?;
+        self.activate(&ctx)?;
 
         info!("Done");
 
@@ -824,7 +831,10 @@ impl Tenant {
     pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         Arc::new(Tenant::new(
-            TenantState::Broken,
+            TenantState::Broken {
+                reason: "create_broken_tenant".into(),
+                backtrace: String::new(),
+            },
             conf,
             TenantConfOpt::default(),
             wal_redo_manager,
@@ -885,7 +895,7 @@ impl Tenant {
                 match tenant_clone.load(&ctx).await {
                     Ok(()) => {}
                     Err(err) => {
-                        tenant_clone.set_broken(&err.to_string());
+                        tenant_clone.set_broken(err.to_string());
                         error!("could not load tenant {tenant_id}: {err:?}");
                     }
                 }
@@ -1022,7 +1032,7 @@ impl Tenant {
 
         // Start background operations and open the tenant for business.
         // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate()?;
+        self.activate(ctx)?;
 
         info!("Done");
 
@@ -1358,12 +1368,7 @@ impl Tenant {
 
         // Stop the walreceiver first.
         debug!("waiting for wal receiver to shutdown");
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_id),
-            Some(timeline_id),
-        )
-        .await;
+        timeline.walreceiver.stop().await;
         debug!("wal receiver shutdown confirmed");
 
         info!("waiting for timeline tasks to shutdown");
@@ -1442,7 +1447,7 @@ impl Tenant {
     }
 
     pub fn current_state(&self) -> TenantState {
-        *self.state.borrow()
+        self.state.borrow().clone()
     }
 
     pub fn is_active(&self) -> bool {
@@ -1450,18 +1455,18 @@ impl Tenant {
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
-    fn activate(&self) -> anyhow::Result<()> {
+    fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
         let mut result = Ok(());
         self.state.send_modify(|current_state| {
-            match *current_state {
+            match &*current_state {
                 TenantState::Active => {
                     // activate() was called on an already Active tenant. Shouldn't happen.
                     result = Err(anyhow::anyhow!("Tenant is already active"));
                 }
-                TenantState::Broken => {
+                TenantState::Broken { reason, .. } => {
                     // This shouldn't happen either
                     result = Err(anyhow::anyhow!(
-                        "Could not activate tenant because it is in broken state"
+                        "Could not activate tenant because it is in broken state due to: {reason}",
                     ));
                 }
                 TenantState::Stopping => {
@@ -1472,7 +1477,7 @@ impl Tenant {
                 TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Active;
 
-                    info!("Activating tenant {}", self.tenant_id);
+                    debug!(tenant_id = %self.tenant_id, "Activating tenant");
 
                     let timelines_accessor = self.timelines.lock().unwrap();
                     let not_broken_timelines = timelines_accessor
@@ -1483,9 +1488,47 @@ impl Tenant {
                     // down when they notice that the tenant is inactive.
                     tasks::start_background_loops(self.tenant_id);
 
+                    let mut activated_timelines = 0;
+                    let mut timelines_broken_during_activation = 0;
+
                     for timeline in not_broken_timelines {
-                        timeline.activate();
+                        match timeline
+                            .activate(ctx)
+                            .context("timeline activation for activating tenant")
+                        {
+                            Ok(()) => {
+                                activated_timelines += 1;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to activate timeline {}: {:#}",
+                                    timeline.timeline_id, e
+                                );
+                                timeline.set_state(TimelineState::Broken);
+                                *current_state = TenantState::broken_from_reason(format!(
+                                    "failed to activate timeline {}: {}",
+                                    timeline.timeline_id, e
+                                ));
+
+                                timelines_broken_during_activation += 1;
+                            }
+                        }
                     }
+
+                    let elapsed = self.loading_started_at.elapsed();
+                    let total_timelines = timelines_accessor.len();
+
+                    // log a lot of stuff, because some tenants sometimes suffer from user-visible
+                    // times to activate. see https://github.com/neondatabase/neon/issues/4025
+                    info!(
+                        since_creation_millis = elapsed.as_millis(),
+                        tenant_id = %self.tenant_id,
+                        activated_timelines,
+                        timelines_broken_during_activation,
+                        total_timelines,
+                        post_state = <&'static str>::from(&*current_state),
+                        "activation attempt finished"
+                    );
                 }
             }
         });
@@ -1495,7 +1538,7 @@ impl Tenant {
     /// Change tenant status to Stopping, to mark that it is being shut down
     pub fn set_stopping(&self) {
         self.state.send_modify(|current_state| {
-            match *current_state {
+            match current_state {
                 TenantState::Active | TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Stopping;
 
@@ -1511,8 +1554,8 @@ impl Tenant {
                         timeline.set_state(TimelineState::Stopping);
                     }
                 }
-                TenantState::Broken => {
-                    info!("Cannot set tenant to Stopping state, it is already in Broken state");
+                TenantState::Broken { reason, .. } => {
+                    info!("Cannot set tenant to Stopping state, it is in Broken state due to: {reason}");
                 }
                 TenantState::Stopping => {
                     // The tenant was detached, or system shutdown was requested, while we were
@@ -1523,7 +1566,7 @@ impl Tenant {
         });
     }
 
-    pub fn set_broken(&self, reason: &str) {
+    pub fn set_broken(&self, reason: String) {
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Active => {
@@ -1531,24 +1574,24 @@ impl Tenant {
                     // while loading or attaching a tenant. A tenant that has already been
                     // activated should never be marked as broken. We cope with it the best
                     // we can, but it shouldn't happen.
-                    *current_state = TenantState::Broken;
                     warn!("Changing Active tenant to Broken state, reason: {}", reason);
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
-                TenantState::Broken => {
+                TenantState::Broken { .. } => {
                     // This shouldn't happen either
                     warn!("Tenant is already in Broken state");
                 }
                 TenantState::Stopping => {
                     // This shouldn't happen either
-                    *current_state = TenantState::Broken;
                     warn!(
                         "Marking Stopping tenant as Broken state, reason: {}",
                         reason
                     );
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
                 TenantState::Loading | TenantState::Attaching => {
                     info!("Setting tenant as Broken state, reason: {}", reason);
-                    *current_state = TenantState::Broken;
+                    *current_state = TenantState::broken_from_reason(reason);
                 }
             }
         });
@@ -1561,7 +1604,7 @@ impl Tenant {
     pub async fn wait_to_become_active(&self) -> anyhow::Result<()> {
         let mut receiver = self.state.subscribe();
         loop {
-            let current_state = *receiver.borrow_and_update();
+            let current_state = receiver.borrow_and_update().clone();
             match current_state {
                 TenantState::Loading | TenantState::Attaching => {
                     // in these states, there's a chance that we can reach ::Active
@@ -1570,12 +1613,12 @@ impl Tenant {
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
-                TenantState::Broken | TenantState::Stopping => {
+                TenantState::Broken { .. } | TenantState::Stopping => {
                     // There's no chance the tenant can transition back into ::Active
                     anyhow::bail!(
                         "Tenant {} will not become active. Current state: {:?}",
                         self.tenant_id,
-                        current_state,
+                        &current_state,
                     );
                 }
             }
@@ -1715,6 +1758,13 @@ impl Tenant {
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         *self.tenant_conf.write().unwrap() = new_tenant_conf;
+        // Don't hold self.timelines.lock() during the notifies.
+        // There's no risk of deadlock right now, but there could be if we consolidate
+        // mutexes in struct Timeline in the future.
+        let timelines = self.list_timelines();
+        for timeline in timelines {
+            timeline.tenant_conf_updated();
+        }
     }
 
     fn create_timeline_data(
@@ -1756,21 +1806,23 @@ impl Tenant {
         let (state, mut rx) = watch::channel(state);
 
         tokio::spawn(async move {
-            let current_state = *rx.borrow_and_update();
+            let mut current_state: &'static str = From::from(&*rx.borrow_and_update());
             let tid = tenant_id.to_string();
             TENANT_STATE_METRIC
-                .with_label_values(&[&tid, current_state.as_str()])
+                .with_label_values(&[&tid, current_state])
                 .inc();
             loop {
                 match rx.changed().await {
                     Ok(()) => {
-                        let new_state = *rx.borrow();
+                        let new_state: &'static str = From::from(&*rx.borrow_and_update());
                         TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, current_state.as_str()])
+                            .with_label_values(&[&tid, current_state])
                             .dec();
                         TENANT_STATE_METRIC
-                            .with_label_values(&[&tid, new_state.as_str()])
+                            .with_label_values(&[&tid, new_state])
                             .inc();
+
+                        current_state = new_state;
                     }
                     Err(_sender_dropped_error) => {
                         info!("Tenant dropped the state updates sender, quitting waiting for tenant state change");
@@ -1783,6 +1835,9 @@ impl Tenant {
         Tenant {
             tenant_id,
             conf,
+            // using now here is good enough approximation to catch tenants with really long
+            // activation times.
+            loading_started_at: Instant::now(),
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
             gc_cs: tokio::sync::Mutex::new(()),
@@ -1865,7 +1920,7 @@ impl Tenant {
             .to_string();
 
             // Convert the config to a toml file.
-            conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
+            conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
 
             let mut target_config_file = VirtualFile::open_with_options(
                 target_config_path,
@@ -2093,7 +2148,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let src_id = src_timeline.timeline_id;
 
@@ -2186,7 +2241,7 @@ impl Tenant {
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
-            .initialize_with_lock(&mut timelines, true, true)?;
+            .initialize_with_lock(ctx, &mut timelines, true, true)?;
         drop(timelines);
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
@@ -2299,7 +2354,7 @@ impl Tenant {
 
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
-            raw_timeline.initialize_with_lock(&mut timelines, false, true)?
+            raw_timeline.initialize_with_lock(ctx, &mut timelines, false, true)?
         };
 
         info!(
@@ -2791,6 +2846,9 @@ pub mod harness {
                 trace_read_requests: Some(tenant_conf.trace_read_requests),
                 eviction_policy: Some(tenant_conf.eviction_policy),
                 min_resident_size_override: tenant_conf.min_resident_size_override,
+                evictions_low_residence_duration_metric_threshold: Some(
+                    tenant_conf.evictions_low_residence_duration_metric_threshold,
+                ),
             }
         }
     }
@@ -2823,7 +2881,13 @@ pub mod harness {
             };
 
             LOG_HANDLE.get_or_init(|| {
-                logging::init(logging::LogFormat::Test).expect("Failed to init test logging")
+                logging::init(
+                    logging::LogFormat::Test,
+                    // enable it in case in case the tests exercise code paths that use
+                    // debug_assert_current_span_has_tenant_and_timeline_id
+                    logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+                )
+                .expect("Failed to init test logging")
             });
 
             let repo_dir = PageServerConf::test_repo_dir(test_name);

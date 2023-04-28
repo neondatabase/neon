@@ -1,7 +1,9 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
+
+use crate::spec::ComputeSpec;
 
 #[derive(Serialize, Debug)]
 pub struct GenericAPIError {
@@ -12,8 +14,9 @@ pub struct GenericAPIError {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeStatusResponse {
-    pub tenant: String,
-    pub timeline: String,
+    pub start_time: DateTime<Utc>,
+    pub tenant: Option<String>,
+    pub timeline: Option<String>,
     pub status: ComputeStatus,
     #[serde(serialize_with = "rfc3339_serialize")]
     pub last_active: DateTime<Utc>,
@@ -43,6 +46,8 @@ pub enum ComputeStatus {
     Init,
     // Compute is configured and running.
     Running,
+    // New spec is being applied.
+    Configuration,
     // Either startup or configuration failed,
     // compute will exit soon or is waiting for
     // control-plane to terminate it.
@@ -59,8 +64,29 @@ where
 /// Response of the /metrics.json API
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ComputeMetrics {
+    pub wait_for_spec_ms: u64,
     pub sync_safekeepers_ms: u64,
     pub basebackup_ms: u64,
     pub config_ms: u64,
     pub total_startup_ms: u64,
+}
+
+/// Response of the `/computes/{compute_id}/spec` control-plane API.
+/// This is not actually a compute API response, so consider moving
+/// to a different place.
+#[derive(Deserialize, Debug)]
+pub struct ControlPlaneSpecResponse {
+    pub spec: Option<ComputeSpec>,
+    pub status: ControlPlaneComputeStatus,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneComputeStatus {
+    // Compute is known to control-plane, but it's not
+    // yet attached to any timeline / endpoint.
+    Empty,
+    // Compute is attached to some timeline / endpoint and
+    // should be able to start with provided spec.
+    Attached,
 }

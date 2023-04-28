@@ -48,7 +48,6 @@ mod layer_coverage;
 
 use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
-use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
@@ -275,6 +274,7 @@ where
     /// Helper function for BatchedUpdates::insert_historic
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
+        // TODO: See #3869, resulting #4088, attempted fix and repro #4094
         self.historic.insert(
             historic_layer_coverage::LayerKey::from(&*layer),
             Arc::clone(&layer),
@@ -283,8 +283,6 @@ where
         if Self::is_l0(&layer) {
             self.l0_delta_layers.push(layer);
         }
-
-        NUM_ONDISK_LAYERS.inc();
     }
 
     ///
@@ -309,8 +307,6 @@ where
                 "failed to locate removed historic layer from l0_delta_layers"
             );
         }
-
-        NUM_ONDISK_LAYERS.dec();
     }
 
     pub(self) fn replace_historic_noflush(

@@ -520,6 +520,43 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/tenant/{tenant_id}/synthetic_size:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: |
+        Calculate tenant's synthetic size
+      responses:
+        "200":
+          description: Tenant's synthetic size
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyntheticSizeResponse"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}/size:
     parameters:
       - name: tenant_id
@@ -829,11 +866,8 @@ components:
       type: object
       required:
         - id
-        - state
       properties:
         id:
-          type: string
-        state:
           type: string
         current_physical_size:
           type: integer
@@ -951,6 +985,84 @@ components:
         latest_gc_cutoff_lsn:
           type: string
           format: hex
+
+    SyntheticSizeResponse:
+      type: object
+      required:
+        - id
+        - size
+        - segment_sizes
+        - inputs
+      properties:
+        id:
+          type: string
+          format: hex
+        size:
+          type: integer
+        segment_sizes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SegmentSize"
+        inputs:
+          type: object
+          properties:
+            segments:
+              type: array
+              items:
+                $ref: "#/components/schemas/SegmentData"
+            timeline_inputs:
+              type: array
+              items:
+                $ref: "#/components/schemas/TimelineInput"
+
+    SegmentSize:
+      type: object
+      required:
+        - method
+        - accum_size
+      properties:
+        method:
+          type: string
+        accum_size:
+          type: integer
+
+    SegmentData:
+      type: object
+      required:
+        - segment
+      properties:
+        segment:
+          type: object
+          required:
+            - lsn
+          properties:
+            parent:
+              type: integer
+            lsn:
+              type: integer
+            size:
+              type: integer
+            needed:
+              type: boolean
+        timeline_id:
+          type: string
+          format: hex
+        kind:
+          type: string
+
+    TimelineInput:
+      type: object
+      required:
+        - timeline_id
+      properties:
+        ancestor_id:
+          type: string
+        ancestor_lsn:
+          type: string
+        timeline_id:
+          type: string
+          format: hex
+
     Error:
       type: object
       required:

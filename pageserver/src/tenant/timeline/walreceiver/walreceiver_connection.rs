@@ -37,12 +37,12 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use pq_proto::PageserverFeedback;
 use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
-pub struct WalConnectionStatus {
+pub(super) struct WalConnectionStatus {
     /// If we were able to initiate a postgres connection, this means that safekeeper process is at least running.
     pub is_connected: bool,
     /// Defines a healthy connection as one on which pageserver received WAL from safekeeper
@@ -60,7 +60,7 @@ pub struct WalConnectionStatus {
 
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
 /// messages as we go.
-pub async fn handle_walreceiver_connection(
+pub(super) async fn handle_walreceiver_connection(
     timeline: Arc<Timeline>,
     wal_source_connconf: PgConnectionConfig,
     events_sender: watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
@@ -319,12 +319,12 @@ pub async fn handle_walreceiver_connection(
                 timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
-            let last_received_lsn = u64::from(last_lsn);
+            let last_received_lsn = last_lsn;
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let disk_consistent_lsn = u64::from(timeline.get_disk_consistent_lsn());
+            let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
-            let remote_consistent_lsn = u64::from(timeline_remote_consistent_lsn);
+            let remote_consistent_lsn = timeline_remote_consistent_lsn;
             let ts = SystemTime::now();
 
             // Update the status about what we just received. This is shown in the mgmt API.

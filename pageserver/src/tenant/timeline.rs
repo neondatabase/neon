@@ -14,6 +14,7 @@ use pageserver_api::models::{
     DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceStatus, TimelineState,
 };
 use remote_storage::GenericRemoteStorage;
+use storage_broker::BrokerClientChannel;
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -30,7 +31,7 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::broker_client::is_broker_client_initialized;
+use crate::broker_client::{get_broker_client, is_broker_client_initialized};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
@@ -47,7 +48,7 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::TimelineMetrics;
+use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
@@ -71,11 +72,12 @@ use crate::walredo::WalRedoManager;
 use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
 use crate::{is_temporary, task_mgr};
-use walreceiver::spawn_connection_manager_task;
 
 pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
+use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::config::TenantConf;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -160,7 +162,7 @@ pub struct Timeline {
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
-    metrics: TimelineMetrics,
+    pub(super) metrics: TimelineMetrics,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
@@ -214,6 +216,7 @@ pub struct Timeline {
     /// or None if WAL receiver has not received anything for this timeline
     /// yet.
     pub last_received_wal: Mutex<Option<WalReceiverInfo>>,
+    pub walreceiver: WalReceiver,
 
     /// Relation size cache
     pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
@@ -866,10 +869,18 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn activate(self: &Arc<Self>) {
+    pub fn activate(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+        if is_broker_client_initialized() {
+            self.launch_wal_receiver(ctx, get_broker_client().clone())?;
+        } else if cfg!(test) {
+            info!("not launching WAL receiver because broker client hasn't been initialized");
+        } else {
+            anyhow::bail!("broker client not initialized");
+        }
+
         self.set_state(TimelineState::Active);
-        self.launch_wal_receiver();
         self.launch_eviction_task();
+        Ok(())
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -925,6 +936,7 @@ impl Timeline {
         }
     }
 
+    #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
@@ -1126,6 +1138,8 @@ impl Timeline {
                 if let Some(delta) = local_layer_residence_duration {
                     self.metrics
                         .evictions_with_low_residence_duration
+                        .read()
+                        .unwrap()
                         .observe(delta);
                     info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
                 } else {
@@ -1199,6 +1213,35 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
 
+    fn get_evictions_low_residence_duration_metric_threshold(
+        tenant_conf: &TenantConfOpt,
+        default_tenant_conf: &TenantConf,
+    ) -> Duration {
+        tenant_conf
+            .evictions_low_residence_duration_metric_threshold
+            .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
+    }
+
+    pub(super) fn tenant_conf_updated(&self) {
+        // NB: Most tenant conf options are read by background loops, so,
+        // changes will automatically be picked up.
+
+        // The threshold is embedded in the metric. So, we need to update it.
+        {
+            let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
+                &self.tenant_conf.read().unwrap(),
+                &self.conf.default_tenant_conf,
+            );
+            let tenant_id_str = self.tenant_id.to_string();
+            let timeline_id_str = self.timeline_id.to_string();
+            self.metrics
+                .evictions_with_low_residence_duration
+                .write()
+                .unwrap()
+                .change_threshold(&tenant_id_str, &timeline_id_str, new_threshold);
+        }
+    }
+
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory, but not the layer map.
@@ -1220,7 +1263,36 @@ impl Timeline {
         let (layer_flush_start_tx, _) = tokio::sync::watch::channel(0);
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
 
+        let tenant_conf_guard = tenant_conf.read().unwrap();
+        let wal_connect_timeout = tenant_conf_guard
+            .walreceiver_connect_timeout
+            .unwrap_or(conf.default_tenant_conf.walreceiver_connect_timeout);
+        let lagging_wal_timeout = tenant_conf_guard
+            .lagging_wal_timeout
+            .unwrap_or(conf.default_tenant_conf.lagging_wal_timeout);
+        let max_lsn_wal_lag = tenant_conf_guard
+            .max_lsn_wal_lag
+            .unwrap_or(conf.default_tenant_conf.max_lsn_wal_lag);
+        let evictions_low_residence_duration_metric_threshold =
+            Self::get_evictions_low_residence_duration_metric_threshold(
+                &tenant_conf_guard,
+                &conf.default_tenant_conf,
+            );
+        drop(tenant_conf_guard);
+
         Arc::new_cyclic(|myself| {
+            let walreceiver = WalReceiver::new(
+                TenantTimelineId::new(tenant_id, timeline_id),
+                Weak::clone(myself),
+                WalReceiverConf {
+                    wal_connect_timeout,
+                    lagging_wal_timeout,
+                    max_lsn_wal_lag,
+                    auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
+                    availability_zone: conf.availability_zone.clone(),
+                },
+            );
+
             let mut result = Timeline {
                 conf,
                 tenant_conf,
@@ -1231,6 +1303,7 @@ impl Timeline {
                 layers: RwLock::new(LayerMap::default()),
 
                 walredo_mgr,
+                walreceiver,
 
                 remote_client: remote_client.map(Arc::new),
 
@@ -1252,7 +1325,7 @@ impl Timeline {
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                         "mtime",
-                        conf.evictions_low_residence_duration_metric_threshold,
+                        evictions_low_residence_duration_metric_threshold,
                     ),
                 ),
 
@@ -1350,44 +1423,17 @@ impl Timeline {
         *flush_loop_state = FlushLoopState::Running;
     }
 
-    pub(super) fn launch_wal_receiver(self: &Arc<Self>) {
-        if !is_broker_client_initialized() {
-            if cfg!(test) {
-                info!("not launching WAL receiver because broker client hasn't been initialized");
-                return;
-            } else {
-                panic!("broker client not initialized");
-            }
-        }
-
+    pub(super) fn launch_wal_receiver(
+        &self,
+        ctx: &RequestContext,
+        broker_client: BrokerClientChannel,
+    ) -> anyhow::Result<()> {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
             self.timeline_id, self.tenant_id
         );
-        let tenant_conf_guard = self.tenant_conf.read().unwrap();
-        let lagging_wal_timeout = tenant_conf_guard
-            .lagging_wal_timeout
-            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
-        let walreceiver_connect_timeout = tenant_conf_guard
-            .walreceiver_connect_timeout
-            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
-        let max_lsn_wal_lag = tenant_conf_guard
-            .max_lsn_wal_lag
-            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
-        drop(tenant_conf_guard);
-        let self_clone = Arc::clone(self);
-        let background_ctx =
-            // XXX: this is a detached_child. Plumb through the ctx from call sites.
-            RequestContext::todo_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-        spawn_connection_manager_task(
-            self_clone,
-            walreceiver_connect_timeout,
-            lagging_wal_timeout,
-            max_lsn_wal_lag,
-            crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
-            self.conf.availability_zone.clone(),
-            background_ctx,
-        );
+        self.walreceiver.start(ctx, broker_client)?;
+        Ok(())
     }
 
     ///
@@ -2303,6 +2349,7 @@ impl Timeline {
                             id,
                             ctx.task_kind()
                         );
+                        UNEXPECTED_ONDEMAND_DOWNLOADS.inc();
                         timeline.download_remote_layer(remote_layer).await?;
                         continue 'layer_map_search;
                     }
@@ -3766,11 +3813,13 @@ impl Timeline {
     /// If the caller has a deadline or needs a timeout, they can simply stop polling:
     /// we're **cancellation-safe** because the download happens in a separate task_mgr task.
     /// So, the current download attempt will run to completion even if we stop polling.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%remote_layer.short_id()))]
+    #[instrument(skip_all, fields(layer=%remote_layer.short_id()))]
     pub async fn download_remote_layer(
         &self,
         remote_layer: Arc<RemoteLayer>,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         use std::sync::atomic::Ordering::Relaxed;
 
         let permit = match Arc::clone(&remote_layer.ongoing_download)
@@ -3814,6 +3863,8 @@ impl Timeline {
                     .await;
 
                 if let Ok(size) = &result {
+                    info!("layer file download finished");
+
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
                     self_clone.metrics.resident_physical_size_gauge.add(*size);
@@ -3885,6 +3936,8 @@ impl Timeline {
                     updates.flush();
                     drop(layers);
 
+                    info!("on-demand download successful");
+
                     // Now that we've inserted the download into the layer map,
                     // close the semaphore. This will make other waiters for
                     // this download return Ok(()).
@@ -3892,7 +3945,7 @@ impl Timeline {
                     remote_layer.ongoing_download.close();
                 } else {
                     // Keep semaphore open. We'll drop the permit at the end of the function.
-                    error!("on-demand download failed: {:?}", result.as_ref().unwrap_err());
+                    error!("layer file download failed: {:?}", result.as_ref().unwrap_err());
                 }
 
                 // Don't treat it as an error if the task that triggered the download
@@ -4202,4 +4255,37 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {}
+
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
+    use utils::tracing_span_assert;
+
+    pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
+        tracing_span_assert::MultiNameExtractor<2>,
+    > = once_cell::sync::Lazy::new(|| {
+        tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
+    });
+
+    pub static TIMELINE_ID_EXTRACTOR: once_cell::sync::Lazy<
+        tracing_span_assert::MultiNameExtractor<2>,
+    > = once_cell::sync::Lazy::new(|| {
+        tracing_span_assert::MultiNameExtractor::new("TimelineId", ["timeline_id", "timeline"])
+    });
+
+    match tracing_span_assert::check_fields_present([
+        &*TENANT_ID_EXTRACTOR,
+        &*TIMELINE_ID_EXTRACTOR,
+    ]) {
+        Ok(()) => (),
+        Err(missing) => panic!(
+            "missing extractors: {:?}",
+            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
+        ),
+    }
 }

@@ -29,11 +29,6 @@
                 "vartype": "enum"
             },
             {
-                "name": "hot_standby",
-                "value": "on",
-                "vartype": "bool"
-            },
-            {
                 "name": "wal_log_hints",
                 "value": "on",
                 "vartype": "bool"

@@ -1,0 +1,67 @@
+# Helm chart values for neon-proxy-scram.
+# This is a YAML-formatted file.
+
+deploymentStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 100%
+    maxUnavailable: 50%
+
+image:
+  repository: neondatabase/neon
+
+settings:
+  authBackend: "console"
+  authEndpoint: "http://neon-internal-api.${PREVIEW_NAME}.aws.neon.build/management/api/v2"
+  domain: "*.cloud.${PREVIEW_NAME}.aws.neon.build"
+  sentryEnvironment: "staging"
+  wssPort: 8443
+  metricCollectionEndpoint: "http://neon-internal-api.${PREVIEW_NAME}.aws.neon.build/billing/api/v1/usage_events"
+  metricCollectionInterval: "1min"
+
+# -- Additional labels for neon-proxy pods
+podLabels:
+  neon_service: proxy-scram
+  neon_env: test
+  neon_region: ${PREVIEW_NAME}.eu-central-1
+
+
+exposedService:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    external-dns.alpha.kubernetes.io/hostname: cloud.${PREVIEW_NAME}.aws.neon.build
+  httpsPort: 443
+
+#metrics:
+#  enabled: true
+#  serviceMonitor:
+#    enabled: true
+#    selector:
+#      release: kube-prometheus-stack
+
+extraManifests:
+  - apiVersion: operator.victoriametrics.com/v1beta1
+    kind: VMServiceScrape
+    metadata:
+      name: "{{ include \"neon-proxy.fullname\" . }}"
+      labels:
+        helm.sh/chart: neon-proxy-{{ .Chart.Version }}
+        app.kubernetes.io/name: neon-proxy
+        app.kubernetes.io/instance: "{{ include \"neon-proxy.fullname\" . }}"
+        app.kubernetes.io/version: "{{ .Chart.AppVersion }}"
+        app.kubernetes.io/managed-by: Helm
+      namespace: "{{ .Release.Namespace }}"
+    spec:
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: "neon-proxy"
+      endpoints:
+        - port: http
+          path: /metrics
+          interval: 10s
+          scrapeTimeout: 10s
+      namespaceSelector:
+        matchNames:
+          - "{{ .Release.Namespace }}"

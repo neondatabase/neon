@@ -7,15 +7,15 @@ from typing import Any, Dict, Optional, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonBroker,
     NeonEnv,
     NeonEnvBuilder,
     PortDistributor,
-    Postgres,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
-    assert_tenant_status,
+    assert_tenant_state,
     tenant_exists,
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -87,20 +87,20 @@ def new_pageserver_service(
 
 
 @contextmanager
-def pg_cur(pg):
-    with closing(pg.connect()) as conn:
+def pg_cur(endpoint):
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             yield cur
 
 
-def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Event):
+def load(endpoint: Endpoint, stop_event: threading.Event, load_ok_event: threading.Event):
     log.info("load started")
 
     inserted_ctr = 0
     failed = False
     while not stop_event.is_set():
         try:
-            with pg_cur(pg) as cur:
+            with pg_cur(endpoint) as cur:
                 cur.execute("INSERT INTO load VALUES ('some payload')")
                 inserted_ctr += 1
         except:  # noqa: E722
@@ -110,7 +110,7 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
             load_ok_event.clear()
         else:
             if failed:
-                with pg_cur(pg) as cur:
+                with pg_cur(endpoint) as cur:
                     # if we recovered after failure verify that we have correct number of rows
                     log.info("recovering at %s", inserted_ctr)
                     cur.execute("SELECT count(*) FROM load")
@@ -124,14 +124,14 @@ def load(pg: Postgres, stop_event: threading.Event, load_ok_event: threading.Eve
 
 
 def populate_branch(
-    pg: Postgres,
+    endpoint: Endpoint,
     tenant_id: TenantId,
     ps_http: PageserverHttpClient,
     create_table: bool,
     expected_sum: Optional[int],
 ) -> Tuple[TimelineId, Lsn]:
     # insert some data
-    with pg_cur(pg) as cur:
+    with pg_cur(endpoint) as cur:
         cur.execute("SHOW neon.timeline_id")
         timeline_id = TimelineId(cur.fetchone()[0])
         log.info("timeline to relocate %s", timeline_id)
@@ -196,19 +196,19 @@ def check_timeline_attached(
 
 def switch_pg_to_new_pageserver(
     env: NeonEnv,
-    pg: Postgres,
+    endpoint: Endpoint,
     new_pageserver_port: int,
     tenant_id: TenantId,
     timeline_id: TimelineId,
 ) -> Path:
-    pg.stop()
+    endpoint.stop()
 
-    pg_config_file_path = Path(pg.config_file_path())
+    pg_config_file_path = Path(endpoint.config_file_path())
     pg_config_file_path.open("a").write(
         f"\nneon.pageserver_connstring = 'postgresql://no_user:@localhost:{new_pageserver_port}'"
     )
 
-    pg.start()
+    endpoint.start()
 
     timeline_to_detach_local_path = (
         env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
@@ -226,8 +226,8 @@ def switch_pg_to_new_pageserver(
     return timeline_to_detach_local_path
 
 
-def post_migration_check(pg: Postgres, sum_before_migration: int, old_local_path: Path):
-    with pg_cur(pg) as cur:
+def post_migration_check(endpoint: Endpoint, sum_before_migration: int, old_local_path: Path):
+    with pg_cur(endpoint) as cur:
         # check that data is still there
         cur.execute("SELECT sum(key) FROM t")
         assert cur.fetchone() == (sum_before_migration,)
@@ -288,12 +288,12 @@ def test_tenant_relocation(
     log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, initial_timeline_id)
 
     env.neon_cli.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
-    pg_main = env.postgres.create_start(
+    ep_main = env.endpoints.create_start(
         branch_name="test_tenant_relocation_main", tenant_id=tenant_id
     )
 
     timeline_id_main, current_lsn_main = populate_branch(
-        pg_main,
+        ep_main,
         tenant_id=tenant_id,
         ps_http=pageserver_http,
         create_table=True,
@@ -306,12 +306,12 @@ def test_tenant_relocation(
         ancestor_start_lsn=current_lsn_main,
         tenant_id=tenant_id,
     )
-    pg_second = env.postgres.create_start(
+    ep_second = env.endpoints.create_start(
         branch_name="test_tenant_relocation_second", tenant_id=tenant_id
     )
 
     timeline_id_second, current_lsn_second = populate_branch(
-        pg_second,
+        ep_second,
         tenant_id=tenant_id,
         ps_http=pageserver_http,
         create_table=False,
@@ -327,14 +327,14 @@ def test_tenant_relocation(
 
     if with_load == "with_load":
         # create load table
-        with pg_cur(pg_main) as cur:
+        with pg_cur(ep_main) as cur:
             cur.execute("CREATE TABLE load(value text)")
 
         load_stop_event = threading.Event()
         load_ok_event = threading.Event()
         load_thread = threading.Thread(
             target=load,
-            args=(pg_main, load_stop_event, load_ok_event),
+            args=(ep_main, load_stop_event, load_ok_event),
             daemon=True,  # To make sure the child dies when the parent errors
         )
         load_thread.start()
@@ -416,11 +416,11 @@ def test_tenant_relocation(
 
             # wait for tenant to finish attaching
             tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
-            assert tenant_status["state"] in ["Attaching", "Active"]
+            assert tenant_status["state"]["slug"] in ["Attaching", "Active"]
             wait_until(
                 number_of_iterations=10,
                 interval=1,
-                func=lambda: assert_tenant_status(new_pageserver_http, tenant_id, "Active"),
+                func=lambda: assert_tenant_state(new_pageserver_http, tenant_id, "Active"),
             )
 
             check_timeline_attached(
@@ -450,7 +450,7 @@ def test_tenant_relocation(
 
         old_local_path_main = switch_pg_to_new_pageserver(
             env,
-            pg_main,
+            ep_main,
             new_pageserver_pg_port,
             tenant_id,
             timeline_id_main,
@@ -458,7 +458,7 @@ def test_tenant_relocation(
 
         old_local_path_second = switch_pg_to_new_pageserver(
             env,
-            pg_second,
+            ep_second,
             new_pageserver_pg_port,
             tenant_id,
             timeline_id_second,
@@ -475,11 +475,11 @@ def test_tenant_relocation(
             interval=1,
             func=lambda: tenant_exists(pageserver_http, tenant_id),
         )
-        post_migration_check(pg_main, 500500, old_local_path_main)
-        post_migration_check(pg_second, 1001000, old_local_path_second)
+        post_migration_check(ep_main, 500500, old_local_path_main)
+        post_migration_check(ep_second, 1001000, old_local_path_second)
 
         # ensure that we can successfully read all relations on the new pageserver
-        with pg_cur(pg_second) as cur:
+        with pg_cur(ep_second) as cur:
             cur.execute(
                 """
                 DO $$

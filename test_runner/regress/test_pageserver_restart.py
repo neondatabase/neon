@@ -11,9 +11,9 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_pageserver_restart")
-    pg = env.postgres.create_start("test_pageserver_restart")
+    endpoint = env.endpoints.create_start("test_pageserver_restart")
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
@@ -59,7 +59,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
     tenant_status = client.tenant_status(env.initial_tenant)
     log.info("Tenant status : %s", tenant_status)
-    assert tenant_status["state"] == "Loading"
+    assert tenant_status["state"]["slug"] == "Loading"
 
     # Try to read. This waits until the loading finishes, and then return normally.
     cur.execute("SELECT count(*) FROM foo")
@@ -84,13 +84,13 @@ def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
         }
     )
     env.neon_cli.create_timeline("test_pageserver_chaos", tenant_id=tenant)
-    pg = env.postgres.create_start("test_pageserver_chaos", tenant_id=tenant)
+    endpoint = env.endpoints.create_start("test_pageserver_chaos", tenant_id=tenant)
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
     # from shared_buffers without hitting the page server, which defeats the point
     # of this test.
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE TABLE foo (id int, t text, updates int)")
             cur.execute("CREATE INDEX ON foo (id)")
@@ -116,12 +116,12 @@ def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder):
 
     # Update the whole table, then immediately kill and restart the pageserver
     for i in range(1, 15):
-        pg.safe_psql("UPDATE foo set updates = updates + 1")
+        endpoint.safe_psql("UPDATE foo set updates = updates + 1")
 
         # This kills the pageserver immediately, to simulate a crash
         env.pageserver.stop(immediate=True)
         env.pageserver.start()
 
         # Check that all the updates are visible
-        num_updates = pg.safe_psql("SELECT sum(updates) FROM foo")[0][0]
+        num_updates = endpoint.safe_psql("SELECT sum(updates) FROM foo")[0][0]
         assert num_updates == i * 100000

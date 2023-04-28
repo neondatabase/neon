@@ -7,13 +7,13 @@ deploymentStrategy:
     maxSurge: 100%
     maxUnavailable: 50%
 
-# Delay the kill signal by 7 days (7 * 24 * 60 * 60)
+# Delay the kill signal by 5 minutes (5 * 60)
 # The pod(s) will stay in Terminating, keeps the existing connections
 # but doesn't receive new ones
 containerLifecycle:
   preStop:
     exec:
-      command: ["/bin/sh", "-c", "sleep 604800"]
+      command: ["/bin/sh", "-c", "sleep 300"]
 terminationGracePeriodSeconds: 604800
 
 image:
@@ -23,6 +23,7 @@ settings:
   authBackend: "console"
   authEndpoint: "http://neon-internal-api.aws.neon.build/management/api/v2"
   domain: "*.eu-west-1.aws.neon.build"
+  otelExporterOtlpEndpoint: "https://otel-collector.zeta.eu-west-1.internal.aws.neon.build"
   sentryEnvironment: "staging"
   wssPort: 8443
   metricCollectionEndpoint: "http://neon-internal-api.aws.neon.build/billing/api/v1/usage_events"

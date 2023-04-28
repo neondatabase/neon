@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
-use crate::compute::{ComputeNode, ComputeState};
+use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
@@ -18,8 +18,15 @@ use tracing_utils::http::OtelName;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
-        tenant: state.tenant.clone(),
-        timeline: state.timeline.clone(),
+        start_time: state.start_time,
+        tenant: state
+            .pspec
+            .as_ref()
+            .map(|pspec| pspec.tenant_id.to_string()),
+        timeline: state
+            .pspec
+            .as_ref()
+            .map(|pspec| pspec.timeline_id.to_string()),
         status: state.status,
         last_active: state.last_active,
         error: state.error.clone(),
@@ -79,7 +86,10 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let res = crate::checker::check_writability(compute).await;
             match res {
                 Ok(_) => Response::new(Body::from("true")),
-                Err(e) => Response::new(Body::from(e.to_string())),
+                Err(e) => {
+                    error!("check_writability failed: {}", e);
+                    Response::new(Body::from(e.to_string()))
+                }
             }
         }
 
@@ -135,6 +145,12 @@ async fn handle_configure_request(
     let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
     if let Ok(request) = serde_json::from_str::<ConfigurationRequest>(&spec_raw) {
         let spec = request.spec;
+
+        let parsed_spec = match ParsedSpec::try_from(spec) {
+            Ok(ps) => ps,
+            Err(msg) => return Err((msg, StatusCode::PRECONDITION_FAILED)),
+        };
+
         // XXX: wrap state update under lock in code blocks. Otherwise,
         // we will try to `Send` `mut state` into the spawned thread
         // bellow, which will cause error:
@@ -143,14 +159,14 @@ async fn handle_configure_request(
         // ```
         {
             let mut state = compute.state.lock().unwrap();
-            if state.status != ComputeStatus::Empty {
+            if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
                 let msg = format!(
                     "invalid compute status for configuration request: {:?}",
                     state.status.clone()
                 );
                 return Err((msg, StatusCode::PRECONDITION_FAILED));
             }
-            state.spec = spec;
+            state.pspec = Some(parsed_spec);
             state.status = ComputeStatus::ConfigurationPending;
             compute.state_changed.notify_all();
             drop(state);

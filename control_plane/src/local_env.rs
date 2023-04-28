@@ -200,14 +200,8 @@ impl LocalEnv {
         self.neon_distrib_dir.join("storage_broker")
     }
 
-    pub fn pg_data_dirs_path(&self) -> PathBuf {
-        self.base_data_dir.join("pgdatadirs").join("tenants")
-    }
-
-    pub fn pg_data_dir(&self, tenant_id: &TenantId, branch_name: &str) -> PathBuf {
-        self.pg_data_dirs_path()
-            .join(tenant_id.to_string())
-            .join(branch_name)
+    pub fn endpoints_path(&self) -> PathBuf {
+        self.base_data_dir.join("endpoints")
     }
 
     // TODO: move pageserver files into ./pageserver
@@ -427,7 +421,7 @@ impl LocalEnv {
             }
         }
 
-        fs::create_dir_all(self.pg_data_dirs_path())?;
+        fs::create_dir_all(self.endpoints_path())?;
 
         for safekeeper in &self.safekeepers {
             fs::create_dir_all(SafekeeperNode::datadir_path_by_id(self, safekeeper.id))?;
