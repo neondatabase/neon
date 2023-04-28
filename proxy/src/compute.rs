@@ -220,10 +220,14 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
-    async fn do_connect(&self) -> Result<PostgresConnection, ConnectionError> {
+    async fn do_connect(
+        &self,
+        allow_self_signed_compute: bool,
+    ) -> Result<PostgresConnection, ConnectionError> {
         let (socket_addr, stream, host) = self.connect_raw().await?;
 
         let tls_connector = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(allow_self_signed_compute)
             .build()
             .unwrap();
         let mut mk_tls = postgres_native_tls::MakeTlsConnector::new(tls_connector);
@@ -257,8 +261,11 @@ impl ConnCfg {
     }
 
     /// Connect to a corresponding compute node.
-    pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
-        self.do_connect()
+    pub async fn connect(
+        &self,
+        allow_self_signed_compute: bool,
+    ) -> Result<PostgresConnection, ConnectionError> {
+        self.do_connect(allow_self_signed_compute)
             .inspect_err(|err| {
                 // Immediately log the error we have at our disposal.
                 error!("couldn't connect to compute node: {err}");

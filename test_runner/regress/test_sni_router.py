@@ -37,7 +37,6 @@ class PgSniRouter(PgProtocol):
         neon_binpath: Path,
         port: int,
         destination: str,
-        destination_port: int,
         tls_cert: Path,
         tls_key: Path,
     ):
@@ -49,7 +48,6 @@ class PgSniRouter(PgProtocol):
         self.neon_binpath = neon_binpath
         self.port = port
         self.destination = destination
-        self.destination_port = destination_port
         self.tls_cert = tls_cert
         self.tls_key = tls_key
         self._popen: Optional[subprocess.Popen[bytes]] = None
@@ -62,7 +60,6 @@ class PgSniRouter(PgProtocol):
             *["--tls-cert", self.tls_cert],
             *["--tls-key", self.tls_key],
             *["--destination", self.destination],
-            *["--destination-port", str(self.destination_port)],
         ]
 
         self._popen = subprocess.Popen(args)
@@ -110,7 +107,7 @@ def test_pg_sni_router(
 ):
 
     generate_tls_cert(
-        "external.test", test_output_dir / "router.crt", test_output_dir / "router.key"
+        "endpoint.namespace.localtest.me", test_output_dir / "router.crt", test_output_dir / "router.key"
     )
 
     # Start a stand-alone Postgres to test with
@@ -122,8 +119,7 @@ def test_pg_sni_router(
     with PgSniRouter(
         neon_binpath=neon_binpath,
         port=router_port,
-        destination="localhost",
-        destination_port=pg_port,
+        destination="localtest.me",
         tls_cert=test_output_dir / "router.crt",
         tls_key=test_output_dir / "router.key",
     ) as router:
@@ -133,7 +129,7 @@ def test_pg_sni_router(
             "select 1",
             dbname="postgres",
             sslmode="require",
-            host="localhost.external.test",
+            host=f"endpoint--namespace--{pg_port}.localtest.me",
             hostaddr="127.0.0.1",
         )
         assert out[0][0] == 1

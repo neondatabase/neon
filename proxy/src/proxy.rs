@@ -155,7 +155,7 @@ pub async fn handle_ws_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
+    let client = Client::new(stream, creds, &params, session_id, false);
     cancel_map
         .with_session(|session| client.connect_to_db(session, true))
         .await
@@ -194,7 +194,15 @@ async fn handle_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
+    let allow_self_signed_compute = config.allow_self_signed_compute;
+
+    let client = Client::new(
+        stream,
+        creds,
+        &params,
+        session_id,
+        allow_self_signed_compute,
+    );
     cancel_map
         .with_session(|session| client.connect_to_db(session, false))
         .await
@@ -297,9 +305,11 @@ async fn connect_to_compute_once(
         NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
     };
 
+    let allow_self_signed_compute = node_info.allow_self_signed_compute;
+
     node_info
         .config
-        .connect()
+        .connect(allow_self_signed_compute)
         .inspect_err(invalidate_cache)
         .await
 }
@@ -420,6 +430,8 @@ struct Client<'a, S> {
     params: &'a StartupMessageParams,
     /// Unique connection ID.
     session_id: uuid::Uuid,
+    /// Allow self-signed certificates (for testing).
+    allow_self_signed_compute: bool,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -429,12 +441,14 @@ impl<'a, S> Client<'a, S> {
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
+        allow_self_signed_compute: bool,
     ) -> Self {
         Self {
             stream,
             creds,
             params,
             session_id,
+            allow_self_signed_compute,
         }
     }
 }
@@ -451,6 +465,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             mut creds,
             params,
             session_id,
+            allow_self_signed_compute,
         } = self;
 
         let extra = console::ConsoleReqExtra {
@@ -472,6 +487,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             reported_auth_ok,
             value: mut node_info,
         } = auth_result;
+
+        node_info.allow_self_signed_compute = allow_self_signed_compute;
 
         let mut node = connect_to_compute(&mut node_info, params, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
