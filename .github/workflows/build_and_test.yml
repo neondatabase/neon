@@ -577,7 +577,6 @@ jobs:
 
   neon-image-arch:
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.9.2-debug
 
     strategy:
       fail-fast: false
@@ -585,6 +584,7 @@ jobs:
         arch: [ amd64, arm64 ]
 
     runs-on: ${{ fromJson((matrix.arch == 'arm64' && '["self-hosted", "dev", "arm64"]') || '["self-hosted", "gen3", "large"]') }}
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
 
     defaults:
       run:
@@ -630,8 +630,10 @@ jobs:
         run: rm -rf ~/.ecr
 
   neon-image:
-    runs-on: [ self-hosted, gen3, small ]
     needs: [ tag, neon-image-arch ]
+
+    runs-on: [ self-hosted, gen3, small ]
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
 
     steps:
       - name: Configure ECR and Docker Hub login
@@ -753,14 +755,18 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-  compute-node-image:
-    runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.2-debug
+  compute-node-image-arch:
     needs: [ tag ]
+
     strategy:
       fail-fast: false
       matrix:
         version: [ v14, v15 ]
+        arch: [ amd64, arm64 ]
+
+    runs-on: ${{ fromJson((matrix.arch == 'arm64' && '["self-hosted", "dev", "arm64"]') || '["self-hosted", "gen3", "large"]') }}
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
+
     defaults:
       run:
         shell: sh -eu {0}
@@ -799,12 +805,63 @@ jobs:
                            --build-arg PG_VERSION=${{ matrix.version }}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-node
-                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
-                           --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
+                           --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
+
+  compute-node-image:
+    needs: [ tag, compute-node-image-arch ]
+
+    runs-on: [ self-hosted, gen3, small ]
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
+
+    steps:
+      - name: Configure ECR and Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
+
+      - name: Create multi-arch manifest
+        run: |
+          docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}}-arm64 \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}}-amd64
+
+          docker manifest create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}}-arm64 \
+                         --amend 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}}-amd64
+
+          docker manifest create neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} \
+                          --amend neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}-arm64 \
+                          --amend neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}-amd64
+
+          docker manifest create neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} \
+                         --amend neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}}-arm64 \
+                         --amend neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}}-amd64
+
+      - name: Push manifests
+        run: |
+          docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}}
+          docker manifest push 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}}
+
+          docker manifest push neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
+          docker manifest push neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
 
   vm-compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
