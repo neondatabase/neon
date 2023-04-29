@@ -13,6 +13,7 @@ use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use utils::http::endpoint::request_span;
 
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
@@ -378,29 +379,32 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     router
         .data(Arc::new(conf))
         .data(auth)
-        .get("/v1/status", status_handler)
+        .get("/v1/status", |r| request_span(r, status_handler))
         // Will be used in the future instead of implicit timeline creation
-        .post("/v1/tenant/timeline", timeline_create_handler)
-        .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_status_handler,
-        )
-        .delete(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_delete_force_handler,
-        )
-        .delete("/v1/tenant/:tenant_id", tenant_delete_force_handler)
-        .post("/v1/pull_timeline", timeline_pull_handler)
+        .post("/v1/tenant/timeline", |r| {
+            request_span(r, timeline_create_handler)
+        })
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            request_span(r, timeline_status_handler)
+        })
+        .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            request_span(r, timeline_delete_force_handler)
+        })
+        .delete("/v1/tenant/:tenant_id", |r| {
+            request_span(r, tenant_delete_force_handler)
+        })
+        .post("/v1/pull_timeline", |r| {
+            request_span(r, timeline_pull_handler)
+        })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename",
-            timeline_files_handler,
+            |r| request_span(r, timeline_files_handler),
         )
         // for tests
-        .post(
-            "/v1/record_safekeeper_info/:tenant_id/:timeline_id",
-            record_safekeeper_info,
-        )
-        .get("/v1/debug_dump", dump_debug_handler)
+        .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {
+            request_span(r, record_safekeeper_info)
+        })
+        .get("/v1/debug_dump", |r| request_span(r, dump_debug_handler))
 }
 
 #[cfg(test)]
