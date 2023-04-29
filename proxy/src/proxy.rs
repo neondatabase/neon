@@ -213,7 +213,7 @@ async fn handle_client(
 /// It's easier to work with owned `stream` here as we need to upgrade it to TLS;
 /// we also take an extra care of propagating only the select handshake errors to client.
 #[tracing::instrument(skip_all)]
-async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     mut tls: Option<&TlsConfig>,
     cancel_map: &CancelMap,
@@ -350,7 +350,7 @@ async fn connect_to_compute(
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 #[tracing::instrument(skip_all)]
-async fn prepare_client_connection(
+pub async fn prepare_client_connection(
     node: &compute::PostgresConnection,
     reported_auth_ok: bool,
     session: cancellation::Session<'_>,
