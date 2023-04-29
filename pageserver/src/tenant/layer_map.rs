@@ -285,7 +285,7 @@ where
                 }
                 warn!("Replace duplicate layer {} in layer map", layer.short_id());
             }
-            Replacement::Unexpected(_) => bail!("Replace layer with itslef is prohibited"),
+            Replacement::Unexpected(_) => bail!("Replace layer with itself is prohibited"),
             Replacement::NotFound | Replacement::RemovalBuffered => {
                 self.historic.insert(key, Arc::clone(&layer));
 
