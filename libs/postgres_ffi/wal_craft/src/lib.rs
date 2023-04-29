@@ -102,7 +102,6 @@ impl Conf {
             .arg(&unix_socket_dir_path)
             .arg("-D")
             .arg(&self.datadir)
-            .args(["-c", "logging_collector=on"]) // stderr will mess up with tests output
             .args(REQUIRED_POSTGRES_CONFIG.iter().flat_map(|cfg| ["-c", cfg]))
             .spawn()?;
         let server = PostgresServer {
