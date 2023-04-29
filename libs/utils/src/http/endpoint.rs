@@ -131,7 +131,9 @@ impl RequestCancelled {
 
 impl Drop for RequestCancelled {
     fn drop(&mut self) {
-        if let Some(span) = self.warn.take() {
+        if std::thread::panicking() {
+            // we are unwinding due to panicking, assume we are not dropped for cancellation
+        } else if let Some(span) = self.warn.take() {
             // the span has all of the info already, but the outer `.instrument(span)` has already
             // been dropped, so we need to manually re-enter it for this message.
             //
