@@ -222,6 +222,10 @@ postgres=# select * from t;
 > ./target/debug/neon_local stop
 ```
 
+## Running own installation
+
+If you are interested in running your own cluster of neon storages and compute, it is described in the following doc: [docs/deployment.md](./docs/deployment.md)
+
 ## Running tests
 
 Ensure your dependencies are installed as described [here](https://github.com/neondatabase/neon#dependency-installation-notes).
