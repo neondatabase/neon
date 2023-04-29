@@ -352,7 +352,7 @@ impl PageServerHandler {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         ctx: RequestContext,
-    ) -> anyhow::Result<()>
+    ) -> Result<(), QueryError>
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
@@ -398,7 +398,9 @@ impl PageServerHandler {
                 Some(FeMessage::CopyData(bytes)) => bytes,
                 Some(FeMessage::Terminate) => break,
                 Some(m) => {
-                    anyhow::bail!("unexpected message: {m:?} during COPY");
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "unexpected message: {m:?} during COPY"
+                    )));
                 }
                 None => break, // client disconnected
             };
