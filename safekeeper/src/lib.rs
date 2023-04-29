@@ -1,6 +1,4 @@
-use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
-use tokio::runtime::Runtime;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -98,55 +96,3 @@ impl SafeKeeperConf {
         }
     }
 }
-
-// Tokio runtimes.
-pub static WAL_SERVICE_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("WAL service worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create WAL service runtime")
-});
-
-pub static HTTP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("HTTP worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create WAL service runtime")
-});
-
-pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("broker worker")
-        .worker_threads(2) // there are only 2 tasks, having more threads doesn't make sense
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
-});
-
-pub static WAL_REMOVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("WAL remover")
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
-});
-
-pub static WAL_BACKUP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("WAL backup worker")
-        .enable_all()
-        .build()
-        .expect("Failed to create WAL backup runtime")
-});
-
-pub static METRICS_SHIFTER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_name("metric shifter")
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("Failed to create broker runtime")
-});
