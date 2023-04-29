@@ -357,6 +357,8 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
 
 /// Safekeeper http router.
 pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError> {
+    use utils::http::endpoint::RequestSpan;
+
     let mut router = endpoint::make_router();
     if conf.auth.is_some() {
         router = router.middleware(auth_middleware(|request| {
@@ -378,29 +380,34 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
     router
         .data(Arc::new(conf))
         .data(auth)
-        .get("/v1/status", status_handler)
+        .get("/v1/status", |r| RequestSpan(status_handler).handle(r))
         // Will be used in the future instead of implicit timeline creation
-        .post("/v1/tenant/timeline", timeline_create_handler)
-        .get(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_status_handler,
-        )
-        .delete(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id",
-            timeline_delete_force_handler,
-        )
-        .delete("/v1/tenant/:tenant_id", tenant_delete_force_handler)
-        .post("/v1/pull_timeline", timeline_pull_handler)
+        .post("/v1/tenant/timeline", |r| {
+            RequestSpan(timeline_create_handler).handle(r)
+        })
+        .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            RequestSpan(timeline_status_handler).handle(r)
+        })
+        .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
+            RequestSpan(timeline_delete_force_handler).handle(r)
+        })
+        .delete("/v1/tenant/:tenant_id", |r| {
+            RequestSpan(tenant_delete_force_handler).handle(r)
+        })
+        .post("/v1/pull_timeline", |r| {
+            RequestSpan(timeline_pull_handler).handle(r)
+        })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename",
-            timeline_files_handler,
+            |r| RequestSpan(timeline_files_handler).handle(r),
         )
         // for tests
-        .post(
-            "/v1/record_safekeeper_info/:tenant_id/:timeline_id",
-            record_safekeeper_info,
-        )
-        .get("/v1/debug_dump", dump_debug_handler)
+        .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {
+            RequestSpan(record_safekeeper_info).handle(r)
+        })
+        .get("/v1/debug_dump", |r| {
+            RequestSpan(dump_debug_handler).handle(r)
+        })
 }
 
 #[cfg(test)]
