@@ -18,7 +18,7 @@ def httpserver_listen_address(port_distributor: PortDistributor):
     return ("localhost", port)
 
 
-def handle_db(dbs, operation):
+def handle_db(dbs, roles, operation):
     if operation["op"] == "set":
         if "old_name" in operation and operation["old_name"] in dbs:
             dbs[operation["name"]] = dbs[operation["old_name"]]
@@ -31,11 +31,14 @@ def handle_db(dbs, operation):
         raise ValueError("Invalid op")
 
 
-def handle_role(roles, operation):
+def handle_role(dbs, roles, operation):
     if operation["op"] == "set":
         if "old_name" in operation and operation["old_name"] in roles:
             roles[operation["name"]] = roles[operation["old_name"]]
             roles.pop(operation["old_name"])
+            for db, owner in dbs.items():
+                if owner == operation["old_name"]:
+                    dbs[db] = operation["name"]
         if "password" in operation:
             roles[operation["name"]] = operation["password"]
     elif operation["op"] == "del":
@@ -52,12 +55,13 @@ def ddl_forward_handler(request: Request, dbs: Dict[str, str], roles: Dict[str, 
         log.info("Received invalid JSON")
         return Response(status=400)
     json = request.json
-    if "dbs" in json:
-        for operation in json["dbs"]:
-            handle_db(dbs, operation)
+    # Handle roles first
     if "roles" in json:
         for operation in json["roles"]:
-            handle_role(roles, operation)
+            handle_role(dbs, roles, operation)
+    if "dbs" in json:
+        for operation in json["dbs"]:
+            handle_db(dbs, roles, operation)
     return Response(status=200)
 
 
@@ -188,4 +192,14 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     cur.execute("COMMIT")
     ddl.wait()
     assert ddl.roles == {"bork" : "cork"}
+
+    cur.execute("DROP ROLE bork");
+    ddl.wait()
+    assert ddl.roles == {}
+
+    cur.execute("CREATE ROLE bork WITH PASSWORD 'dork'")
+    cur.execute("CREATE DATABASE stork WITH OWNER=bork")
+    cur.execute("ALTER ROLE bork RENAME TO cork")
+    ddl.wait()
+    assert ddl.dbs == {"stork" : "cork"}
     conn.close()

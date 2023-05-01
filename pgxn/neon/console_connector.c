@@ -27,7 +27,7 @@ typedef enum
 typedef struct
 {
     char name[NAMEDATALEN];
-    char owner[NAMEDATALEN];
+    Oid owner;
     char old_name[NAMEDATALEN];
     OpType type;
 } DbEntry;
@@ -84,9 +84,9 @@ static char *ConstructDeltaMessage()
             pushJsonbValue(&state, WJB_BEGIN_OBJECT, NULL);
             PushKeyValue(&state, "op", entry->type == Op_Set ? "set" : "del");
             PushKeyValue(&state, "name", entry->name);
-            if(entry->owner[0] != '\0')
+            if(entry->owner != InvalidOid)
             {
-                PushKeyValue(&state, "owner", entry->owner);
+                PushKeyValue(&state, "owner", GetUserNameFromId(entry->owner, false));
             }
             if(entry->old_name[0] != '\0')
             {
@@ -221,8 +221,8 @@ static void MergeTable()
                 NULL);
 
             to_write->type = entry->type;
-            if(entry->owner[0] != '\0')
-                strlcpy(to_write->owner, entry->owner, NAMEDATALEN);
+            if(entry->owner != InvalidOid)
+                to_write->owner = entry->owner;
             strlcpy(to_write->old_name, entry->old_name, NAMEDATALEN);
             if(entry->old_name[0] != '\0')
             {
@@ -349,10 +349,10 @@ static void HandleCreateDb(CreatedbStmt *stmt)
         memset(entry->old_name, 0, sizeof(entry->old_name));
 
     entry->type = Op_Set;
-    if(downer)
-        strlcpy(entry->owner, defGetString(downer), NAMEDATALEN);
+    if(downer && downer->arg)
+        entry->owner = get_role_oid(defGetString(downer), false);
     else
-        strlcpy(entry->owner, GetUserNameFromId(GetUserId(), false), NAMEDATALEN);
+        entry->owner = GetUserId();
 }
 
 static void HandleAlterOwner(AlterOwnerStmt *stmt)
@@ -370,7 +370,7 @@ static void HandleAlterOwner(AlterOwnerStmt *stmt)
     if(!found)
         memset(entry->old_name, 0, sizeof(entry->old_name));
 
-    strlcpy(entry->owner, get_rolespec_name(stmt->newowner), NAMEDATALEN);
+    entry->owner = get_role_oid(get_rolespec_name(stmt->newowner), false);
     entry->type = Op_Set;
 }
 
@@ -396,7 +396,7 @@ static void HandleDbRename(RenameStmt *stmt)
             strlcpy(entry_for_new_name->old_name, entry->old_name, NAMEDATALEN);
         else
             strlcpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
-        strlcpy(entry_for_new_name->owner, entry->owner, NAMEDATALEN);
+        entry_for_new_name->owner = entry->owner;
         hash_search(
             CurrentDdlTable->db_table,
             stmt->subname,
@@ -406,7 +406,7 @@ static void HandleDbRename(RenameStmt *stmt)
     else
     {
         strlcpy(entry_for_new_name->old_name, stmt->subname, NAMEDATALEN);
-        entry_for_new_name->owner[0] = '\0';
+        entry_for_new_name->owner = InvalidOid;
     }
 }
 
@@ -420,10 +420,9 @@ static void HandleDropDb(DropdbStmt *stmt)
         HASH_ENTER,
         &found);
     entry->type = Op_Delete;
-    memset(entry->owner, 0, sizeof(entry->owner));
+    entry->owner = InvalidOid;
     if(!found)
-        memset(entry->old_name, 0, sizeof(entry->owner));
-
+        memset(entry->old_name, 0, sizeof(entry->old_name));
 }
 
 static void HandleCreateRole(CreateRoleStmt *stmt)
