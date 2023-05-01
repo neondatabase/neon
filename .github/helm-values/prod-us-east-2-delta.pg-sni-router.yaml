@@ -13,6 +13,7 @@ exposedService:
 
 settings:
   domain: "*.snirouter.delta.us-east-2.internal.aws.neon.tech"
+  sentryEnvironment: "production"
 
 imagePullSecrets:
   - name: docker-hub-neon
