@@ -195,8 +195,8 @@ jobs:
             target_cluster: prod-eu-central-1-gamma
           - target_region: ap-southeast-1
             target_cluster: prod-ap-southeast-1-epsilon
-          #- target_region: us-east-1
-          #  target_cluster: prod-us-east-1-theta
+          - target_region: us-east-1
+            target_cluster: prod-us-east-1-theta
     environment:
       name: prod-${{ matrix.target_region }}
     steps:

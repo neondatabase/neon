@@ -245,8 +245,8 @@ jobs:
         include:
           - target_region:  us-east-2
             target_cluster: dev-us-east-2-beta
-          #- target_region:  eu-west-1
-          #  target_cluster: dev-eu-west-1-zeta
+          - target_region:  eu-west-1
+            target_cluster: dev-eu-west-1-zeta
           - target_region:  eu-central-1
             target_cluster: dev-eu-central-1-alpha
     environment:
