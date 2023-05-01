@@ -13,6 +13,7 @@ exposedService:
 
 settings:
   domain: "*.snirouter.beta.us-east-2.internal.aws.neon.build"
+  sentryEnvironment: "staging"
 
 imagePullSecrets:
   - name: docker-hub-neon

@@ -13,6 +13,7 @@ exposedService:
 
 settings:
   domain: "*.snirouter.zeta.eu-west-1.internal.aws.neon.build"
+  sentryEnvironment: "staging"
 
 imagePullSecrets:
   - name: docker-hub-neon
