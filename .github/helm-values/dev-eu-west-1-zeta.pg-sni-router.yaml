@@ -1,0 +1,21 @@
+useCertManager: true
+
+replicaCount: 3
+
+image:
+  tag: "3113"
+
+exposedService:
+  # exposedService.port -- Exposed Service proxy port
+  port: 4432
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: "*.snirouter.zeta.eu-west-1.internal.aws.neon.build"
+
+settings:
+  domain: "*.snirouter.zeta.eu-west-1.internal.aws.neon.build"
+
+imagePullSecrets:
+  - name: docker-hub-neon
+
+metrics:
+  enabled: false
