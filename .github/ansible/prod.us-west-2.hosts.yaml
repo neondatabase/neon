@@ -58,3 +58,15 @@ storage:
           ansible_host: i-074682f9d3c712e7c
         safekeeper-2.us-west-2.aws.neon.tech:
           ansible_host: i-042b7efb1729d7966
+        safekeeper-3.us-west-2.aws.neon.tech:
+          ansible_host: i-089f6b9ef426dff76
+        safekeeper-4.us-west-2.aws.neon.tech:
+          ansible_host: i-0fe6bf912c4710c82
+        safekeeper-5.us-west-2.aws.neon.tech:
+          ansible_host: i-0a83c1c46d2b4e409
+        safekeeper-6.us-west-2.aws.neon.tech:
+          ansible_host: i-0fef5317b8fdc9f8d
+        safekeeper-7.us-west-2.aws.neon.tech:
+          ansible_host: i-0be739190d4289bf9
+        safekeeper-8.us-west-2.aws.neon.tech:
+          ansible_host: i-00e851803669e5cfe                    
