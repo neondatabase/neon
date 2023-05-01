@@ -2,9 +2,6 @@ useCertManager: true
 
 replicaCount: 3
 
-image:
-  tag: "3113"
-
 exposedService:
   # exposedService.port -- Exposed Service proxy port
   port: 4432
