@@ -48,7 +48,8 @@ RUN set -e \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pageserver_binutils  \
-      --bin draw_timeline_dir --bin safekeeper  \
+      --bin draw_timeline_dir \
+      --bin safekeeper  \
       --bin storage_broker  \
       --bin proxy  \
       --locked --release \
