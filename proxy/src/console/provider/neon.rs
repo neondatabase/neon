@@ -8,6 +8,7 @@ use super::{
 use crate::{auth::ClientCredentials, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Clone)]
@@ -100,11 +101,12 @@ impl Api {
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config.host(host).port(port);
+            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,
                 aux: body.aux.into(),
+                allow_self_signed_compute: false,
             };
 
             Ok(node)

@@ -11,11 +11,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::task::JoinError;
 
-use crate::debug_dump;
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
+use crate::{debug_dump, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
@@ -175,6 +177,49 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
         .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
+}
+
+/// Pull timeline from peer safekeeper instances.
+async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let data: pull_timeline::Request = json_request(&mut request).await?;
+
+    let resp = pull_timeline::handle_request(data)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, resp)
+}
+
+/// Download a file from the timeline directory.
+// TODO: figure out a better way to copy files between safekeepers
+async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let filename: String = parse_request_param(&request, "filename")?;
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+
+    let filepath = tli.timeline_dir.join(filename);
+    let mut file = File::open(&filepath)
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    let mut content = Vec::new();
+    // TODO: don't store files in memory
+    file.read_to_end(&mut content)
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .body(Body::from(content))
+        .map_err(|e| ApiError::InternalServerError(e.into()))
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -353,6 +398,11 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             timeline_delete_force_handler,
         )
         .delete("/v1/tenant/:tenant_id", tenant_delete_force_handler)
+        .post("/v1/pull_timeline", timeline_pull_handler)
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename",
+            timeline_files_handler,
+        )
         // for tests
         .post(
             "/v1/record_safekeeper_info/:tenant_id/:timeline_id",

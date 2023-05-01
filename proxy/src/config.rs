@@ -12,6 +12,7 @@ pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
     pub auth_backend: auth::BackendType<'static, ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
+    pub allow_self_signed_compute: bool,
 }
 
 #[derive(Debug)]

@@ -15,6 +15,7 @@ pub mod handler;
 pub mod http;
 pub mod json_ctrl;
 pub mod metrics;
+pub mod pull_timeline;
 pub mod receive_wal;
 pub mod remove_wal;
 pub mod safekeeper;

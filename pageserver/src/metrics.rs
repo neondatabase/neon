@@ -287,14 +287,33 @@ impl EvictionsWithLowResidenceDuration {
         let Some(_counter) = self.counter.take() else {
             return;
         };
-        EVICTIONS_WITH_LOW_RESIDENCE_DURATION
-            .remove_label_values(&[
-                tenant_id,
-                timeline_id,
-                self.data_source,
-                &Self::threshold_label_value(self.threshold),
-            ])
-            .expect("we own the metric, no-one else should remove it");
+
+        let threshold = Self::threshold_label_value(self.threshold);
+
+        let removed = EVICTIONS_WITH_LOW_RESIDENCE_DURATION.remove_label_values(&[
+            tenant_id,
+            timeline_id,
+            self.data_source,
+            &threshold,
+        ]);
+
+        match removed {
+            Err(e) => {
+                // this has been hit in staging as
+                // <https://neondatabase.sentry.io/issues/4142396994/>, but we don't know how.
+                // because we can be in the drop path already, don't risk:
+                // - "double-panic => illegal instruction" or
+                // - future "drop panick => abort"
+                //
+                // so just nag: (the error has the labels)
+                tracing::warn!("failed to remove EvictionsWithLowResidenceDuration, it was already removed? {e:#?}");
+            }
+            Ok(()) => {
+                // to help identify cases where we double-remove the same values, let's log all
+                // deletions?
+                tracing::info!("removed EvictionsWithLowResidenceDuration with {tenant_id}, {timeline_id}, {}, {threshold}", self.data_source);
+            }
+        }
     }
 }
 

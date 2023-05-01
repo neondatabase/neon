@@ -1,0 +1,19 @@
+useCertManager: true
+
+replicaCount: 3
+
+exposedService:
+  # exposedService.port -- Exposed Service proxy port
+  port: 4432
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: "*.snirouter.delta.us-east-2.internal.aws.neon.tech"
+
+settings:
+  domain: "*.snirouter.delta.us-east-2.internal.aws.neon.tech"
+  sentryEnvironment: "production"
+
+imagePullSecrets:
+  - name: docker-hub-neon
+
+metrics:
+  enabled: false
