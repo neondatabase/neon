@@ -625,6 +625,12 @@ void InitConsoleConnector()
         NULL,
         NULL);
 
+    const char *jwt_token = getenv("NEON_CONSOLE_JWT");
+    if(!jwt_token)
+    {
+        elog(LOG, "Missing NEON_CONSOLE_JWT environment variable, forwarding will not be authenticated");
+    }
+
     if(curl_global_init(CURL_GLOBAL_DEFAULT))
     {
         elog(ERROR, "Failed to initialize curl");
@@ -636,5 +642,15 @@ void InitConsoleConnector()
     if((ContentHeader = curl_slist_append(ContentHeader, "Content-Type: application/json")) == NULL)
     {
         elog(ERROR, "Failed to initialize content header");
+    }
+
+    if(jwt_token)
+    {
+        char auth_header[8192];
+        snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", jwt_token);
+        if((ContentHeader = curl_slist_append(ContentHeader, auth_header)) == NULL)
+        {
+            elog(ERROR, "Failed to initialize authorization header");
+        }
     }
 }
