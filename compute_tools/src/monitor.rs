@@ -74,7 +74,7 @@ fn watch_compute_activity(compute: &ComputeNode) {
                             // Found non-idle backend, so the last activity is NOW.
                             // Save it and exit the for loop. Also clear the idle backend
                             // `state_change` timestamps array as it doesn't matter now.
-                            last_active = Utc::now();
+                            last_active = Some(Utc::now());
                             idle_backs.clear();
                             break;
                         }
@@ -82,15 +82,16 @@ fn watch_compute_activity(compute: &ComputeNode) {
 
                     // Get idle backend `state_change` with the max timestamp.
                     if let Some(last) = idle_backs.iter().max() {
-                        last_active = *last;
+                        last_active = Some(*last);
                     }
                 }
 
                 // Update the last activity in the shared state if we got a more recent one.
                 let mut state = compute.state.lock().unwrap();
+                // NB: `Some(<DateTime>)` is always greater than `None`.
                 if last_active > state.last_active {
                     state.last_active = last_active;
-                    debug!("set the last compute activity time to: {}", last_active);
+                    debug!("set the last compute activity time to: {:?}", last_active);
                 }
             }
             Err(e) => {

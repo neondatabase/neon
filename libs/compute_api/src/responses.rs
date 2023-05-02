@@ -19,7 +19,7 @@ pub struct ComputeStatusResponse {
     pub timeline: Option<String>,
     pub status: ComputeStatus,
     #[serde(serialize_with = "rfc3339_serialize")]
-    pub last_active: DateTime<Utc>,
+    pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
 }
 
@@ -29,7 +29,7 @@ pub struct ComputeState {
     pub status: ComputeStatus,
     /// Timestamp of the last Postgres activity
     #[serde(serialize_with = "rfc3339_serialize")]
-    pub last_active: DateTime<Utc>,
+    pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
 }
 
@@ -54,11 +54,15 @@ pub enum ComputeStatus {
     Failed,
 }
 
-fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
+fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    x.to_rfc3339().serialize(s)
+    if let Some(x) = x {
+        x.to_rfc3339().serialize(s)
+    } else {
+        s.serialize_none()
+    }
 }
 
 /// Response of the /metrics.json API

@@ -67,8 +67,9 @@ pub struct ComputeNode {
 pub struct ComputeState {
     pub start_time: DateTime<Utc>,
     pub status: ComputeStatus,
-    /// Timestamp of the last Postgres activity
-    pub last_active: DateTime<Utc>,
+    /// Timestamp of the last Postgres activity. It could be `None` if
+    /// compute wasn't used since start.
+    pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
     pub pspec: Option<ParsedSpec>,
     pub metrics: ComputeMetrics,
@@ -79,7 +80,7 @@ impl ComputeState {
         Self {
             start_time: Utc::now(),
             status: ComputeStatus::Empty,
-            last_active: Utc::now(),
+            last_active: None,
             error: None,
             pspec: None,
             metrics: ComputeMetrics::default(),
