@@ -8,7 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::endpoint::Replication;
+use control_plane::endpoint::ComputeMode;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -481,7 +481,7 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
                 timeline_id,
                 None,
                 pg_version,
-                Replication::Primary,
+                ComputeMode::Primary,
             )?;
             println!("Done");
         }
@@ -568,8 +568,8 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .iter()
                 .filter(|(_, endpoint)| endpoint.tenant_id == tenant_id)
             {
-                let lsn_str = match endpoint.replication {
-                    Replication::Static(lsn) => {
+                let lsn_str = match endpoint.mode {
+                    ComputeMode::Static(lsn) => {
                         // -> read-only endpoint
                         // Use the node's LSN.
                         lsn.to_string()
@@ -632,21 +632,14 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .copied()
                 .unwrap_or(false);
 
-            let replication = match (lsn, hot_standby) {
-                (Some(lsn), false) => Replication::Static(lsn),
-                (None, true) => Replication::Replica,
-                (None, false) => Replication::Primary,
+            let mode = match (lsn, hot_standby) {
+                (Some(lsn), false) => ComputeMode::Static(lsn),
+                (None, true) => ComputeMode::Replica,
+                (None, false) => ComputeMode::Primary,
                 (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
             };
 
-            cplane.new_endpoint(
-                tenant_id,
-                &endpoint_id,
-                timeline_id,
-                port,
-                pg_version,
-                replication,
-            )?;
+            cplane.new_endpoint(tenant_id, &endpoint_id, timeline_id, port, pg_version, mode)?;
         }
         "start" => {
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
@@ -670,11 +663,11 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .unwrap_or(false);
 
             if let Some(endpoint) = endpoint {
-                match (&endpoint.replication, hot_standby) {
-                    (Replication::Static(_), true) => {
+                match (&endpoint.mode, hot_standby) {
+                    (ComputeMode::Static(_), true) => {
                         bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
                     }
-                    (Replication::Primary, true) => {
+                    (ComputeMode::Primary, true) => {
                         bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
                     }
                     _ => {}
@@ -701,10 +694,10 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     .copied()
                     .context("Failed to `pg-version` from the argument string")?;
 
-                let replication = match (lsn, hot_standby) {
-                    (Some(lsn), false) => Replication::Static(lsn),
-                    (None, true) => Replication::Replica,
-                    (None, false) => Replication::Primary,
+                let mode = match (lsn, hot_standby) {
+                    (Some(lsn), false) => ComputeMode::Static(lsn),
+                    (None, true) => ComputeMode::Replica,
+                    (None, false) => ComputeMode::Primary,
                     (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
                 };
 
@@ -721,7 +714,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     timeline_id,
                     port,
                     pg_version,
-                    replication,
+                    mode,
                 )?;
                 ep.start(&auth_token)?;
             }

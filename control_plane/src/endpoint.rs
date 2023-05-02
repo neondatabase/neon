@@ -31,7 +31,7 @@ pub struct EndpointConf {
     tenant_id: TenantId,
     #[serde_as(as = "DisplayFromStr")]
     timeline_id: TimelineId,
-    replication: Replication,
+    mode: ComputeMode,
     port: u16,
     pg_version: u32,
 }
@@ -86,7 +86,7 @@ impl ComputeControlPlane {
         timeline_id: TimelineId,
         port: Option<u16>,
         pg_version: u32,
-        replication: Replication,
+        mode: ComputeMode,
     ) -> Result<Arc<Endpoint>> {
         let port = port.unwrap_or_else(|| self.get_port());
 
@@ -96,7 +96,7 @@ impl ComputeControlPlane {
             env: self.env.clone(),
             pageserver: Arc::clone(&self.pageserver),
             timeline_id,
-            replication,
+            mode,
             tenant_id,
             pg_version,
         });
@@ -107,7 +107,7 @@ impl ComputeControlPlane {
                 name: name.to_string(),
                 tenant_id,
                 timeline_id,
-                replication,
+                mode,
                 port,
                 pg_version,
             })?,
@@ -122,12 +122,13 @@ impl ComputeControlPlane {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum Replication {
+pub enum ComputeMode {
     // Regular read-write node
     Primary,
     // if recovery_target_lsn is provided, and we want to pin the node to a specific LSN
-    Static(Lsn),
+    Static(#[serde_as(as = "DisplayFromStr")] Lsn),
     // Hot standby; read-only replica.
     // Future versions may want to distinguish between replicas with hot standby
     // feedback and other kinds of replication configurations.
@@ -141,7 +142,7 @@ pub struct Endpoint {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
     // Some(lsn) if this is a read-only endpoint anchored at 'lsn'. None for the primary.
-    pub replication: Replication,
+    pub mode: ComputeMode,
 
     // port and address of the Postgres server
     pub address: SocketAddr,
@@ -181,7 +182,7 @@ impl Endpoint {
             env: env.clone(),
             pageserver: Arc::clone(pageserver),
             timeline_id: conf.timeline_id,
-            replication: conf.replication,
+            mode: conf.mode,
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
         })
@@ -319,8 +320,8 @@ impl Endpoint {
 
         conf.append_line("");
         // Replication-related configurations, such as WAL sending
-        match &self.replication {
-            Replication::Primary => {
+        match &self.mode {
+            ComputeMode::Primary => {
                 // Configure backpressure
                 // - Replication write lag depends on how fast the walreceiver can process incoming WAL.
                 //   This lag determines latency of get_page_at_lsn. Speed of applying WAL is about 10MB/sec,
@@ -362,10 +363,10 @@ impl Endpoint {
                     conf.append("synchronous_standby_names", "pageserver");
                 }
             }
-            Replication::Static(lsn) => {
+            ComputeMode::Static(lsn) => {
                 conf.append("recovery_target_lsn", &lsn.to_string());
             }
-            Replication::Replica => {
+            ComputeMode::Replica => {
                 assert!(!self.env.safekeepers.is_empty());
 
                 // TODO: use future host field from safekeeper spec
@@ -405,8 +406,8 @@ impl Endpoint {
     }
 
     fn load_basebackup(&self, auth_token: &Option<String>) -> Result<()> {
-        let backup_lsn = match &self.replication {
-            Replication::Primary => {
+        let backup_lsn = match &self.mode {
+            ComputeMode::Primary => {
                 if !self.env.safekeepers.is_empty() {
                     // LSN 0 means that it is bootstrap and we need to download just
                     // latest data from the pageserver. That is a bit clumsy but whole bootstrap
@@ -422,8 +423,8 @@ impl Endpoint {
                     None
                 }
             }
-            Replication::Static(lsn) => Some(*lsn),
-            Replication::Replica => {
+            ComputeMode::Static(lsn) => Some(*lsn),
+            ComputeMode::Replica => {
                 None // Take the latest snapshot available to start with
             }
         };
@@ -522,7 +523,7 @@ impl Endpoint {
         // 3. Load basebackup
         self.load_basebackup(auth_token)?;
 
-        if self.replication != Replication::Primary {
+        if self.mode != ComputeMode::Primary {
             File::create(self.pgdata().join("standby.signal"))?;
         }
 
