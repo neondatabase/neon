@@ -96,7 +96,7 @@ static shmem_request_hook_type prev_shmem_request_hook;
 #endif
 static int   lfc_shrinking_factor; /* power of two by which local cache size will be shrinked when lfc_free_space_watermark is reached */
 
-extern void FileCacheMonitorMain(Datum main_arg);
+void FileCacheMonitorMain(Datum main_arg);
 
 static void
 lfc_shmem_startup(void)
