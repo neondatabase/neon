@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::pg_helpers::PgOptionsSerialize;
-use compute_api::spec::ComputeSpec;
+use compute_api::spec::{ComputeMode, ComputeSpec};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
@@ -34,17 +34,23 @@ pub fn line_in_file(path: &Path, line: &str) -> Result<bool> {
 /// Create or completely rewrite configuration file specified by `path`
 pub fn write_postgres_conf(path: &Path, spec: &ComputeSpec) -> Result<()> {
     // File::create() destroys the file content if it exists.
-    let mut postgres_conf = File::create(path)?;
+    let mut file = File::create(path)?;
 
-    write_auto_managed_block(&mut postgres_conf, &spec.cluster.settings.as_pg_settings())?;
-
-    Ok(())
-}
-
-// Write Postgres config block wrapped with generated comment section
-fn write_auto_managed_block(file: &mut File, buf: &str) -> Result<()> {
     writeln!(file, "# Managed by compute_ctl: begin")?;
-    writeln!(file, "{}", buf)?;
+
+    writeln!(file, "{}", &spec.cluster.settings.as_pg_settings())?;
+
+    match spec.mode {
+        ComputeMode::Primary => {}
+        ComputeMode::Static(lsn) => {
+            write!(file, "hot_standby=on")?;
+            write!(file, "recovery_target_lsn='{lsn}'")?;
+        }
+        ComputeMode::Replica => {
+            write!(file, "hot_standby=on")?;
+        }
+    }
+
     writeln!(file, "# Managed by compute_ctl: end")?;
 
     Ok(())

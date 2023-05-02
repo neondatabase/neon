@@ -3,8 +3,10 @@
 //! The spec.json file is used to pass information to 'compute_ctl'. It contains
 //! all the information needed to start up the right version of PostgreSQL,
 //! and connect it to the storage nodes.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
+use utils::lsn::Lsn;
 
 /// String type alias representing Postgres identifier and
 /// intended to be used for DB / role names.
@@ -12,6 +14,7 @@ pub type PgIdent = String;
 
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
+#[serde_as]
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ComputeSpec {
     pub format_version: f32,
@@ -24,9 +27,27 @@ pub struct ComputeSpec {
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
 
+    #[serde(default)]
+    pub mode: ComputeMode,
+
     pub storage_auth_token: Option<String>,
 
     pub startup_tracing_context: Option<HashMap<String, String>>,
+}
+
+#[serde_as]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub enum ComputeMode {
+    /// A read-write node
+    #[default]
+    Primary,
+    /// A read-only node, pinned at a particular LSN
+    Static(#[serde_as(as = "DisplayFromStr")] Lsn),
+    /// A read-only node that follows the tip of the branch in hot standby mode
+    ///
+    /// Future versions may want to distinguish between replicas with hot standby
+    /// feedback and other kinds of replication configurations.
+    Replica,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
