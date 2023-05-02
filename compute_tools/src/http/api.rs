@@ -1,5 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::net::IpAddr;
+use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::thread;
 
@@ -221,7 +223,7 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
 #[tokio::main]
 async fn serve(state: Arc<ComputeNode>) {
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3080));
+    let addr = SocketAddr::new(IpAddr::from(Ipv6Addr::UNSPECIFIED), 3080);
 
     let make_service = make_service_fn(move |_conn| {
         let state = state.clone();
