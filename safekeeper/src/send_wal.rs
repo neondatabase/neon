@@ -399,7 +399,14 @@ impl SafekeeperPostgresHandler {
         } else {
             None
         };
-        let end_pos = stop_pos.unwrap_or(Lsn::INVALID);
+
+        // How much WAL is immediately available for sending? If we have a
+        // 'stop_pos', we know we have all the WAL up to that point. Otherwise,
+        // initialize the value with the starting position. If we actually have
+        // more WAL available, wait_wal() will update the value on the first
+        // iteration. If the client requested a starting position that is ahead
+        // of what we have, we still report that as the end-of-WAL.
+        let end_pos = stop_pos.unwrap_or(start_pos);
 
         info!(
             "starting streaming from {:?} till {:?}",
@@ -551,7 +558,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
 
             self.pgb
                 .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                    sent_ptr: self.start_pos.0,
+                    sent_ptr: self.end_pos.0,
                     timestamp: get_current_timestamp(),
                     request_reply: true,
                 }))
