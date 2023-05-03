@@ -38,11 +38,13 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use storage_broker::BrokerClientChannel;
 use tokio::select;
-use tokio::sync::watch;
+use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use utils::id::TenantTimelineId;
+
+use self::connection_manager::ConnectionManagerStatus;
 
 use super::Timeline;
 
@@ -63,6 +65,7 @@ pub struct WalReceiver {
     timeline_ref: Weak<Timeline>,
     conf: WalReceiverConf,
     started: AtomicBool,
+    manager_status: Arc<RwLock<Option<ConnectionManagerStatus>>>,
 }
 
 impl WalReceiver {
@@ -76,6 +79,7 @@ impl WalReceiver {
             timeline_ref,
             conf,
             started: AtomicBool::new(false),
+            manager_status: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -96,8 +100,8 @@ impl WalReceiver {
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-
         let wal_receiver_conf = self.conf.clone();
+        let loop_status = Arc::clone(&self.manager_status);
         task_mgr::spawn(
             WALRECEIVER_RUNTIME.handle(),
             TaskKind::WalReceiverManager,
@@ -115,24 +119,28 @@ impl WalReceiver {
                     select! {
                         _ = task_mgr::shutdown_watcher() => {
                             info!("WAL receiver shutdown requested, shutting down");
-                            connection_manager_state.shutdown().await;
-                            return Ok(());
+                            break;
                         },
                         loop_step_result = connection_manager_loop_step(
                             &mut broker_client,
                             &mut connection_manager_state,
                             &walreceiver_ctx,
+                            &loop_status,
                         ) => match loop_step_result {
                             ControlFlow::Continue(()) => continue,
                             ControlFlow::Break(()) => {
                                 info!("Connection manager loop ended, shutting down");
-                                connection_manager_state.shutdown().await;
-                                return Ok(());
+                                break;
                             }
                         },
                     }
                 }
-            }.instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
+
+                connection_manager_state.shutdown().await;
+                *loop_status.write().await = None;
+                Ok(())
+            }
+            .instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
         );
 
         self.started.store(true, atomic::Ordering::Release);
@@ -148,6 +156,10 @@ impl WalReceiver {
         )
         .await;
         self.started.store(false, atomic::Ordering::Release);
+    }
+
+    pub(super) async fn status(&self) -> Option<ConnectionManagerStatus> {
+        self.manager_status.read().await.clone()
     }
 }
 
