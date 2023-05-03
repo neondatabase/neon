@@ -1075,11 +1075,16 @@ impl Tenant {
                     let index_part = match index_part {
                         MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
                         MaybeDeletedIndexPart::Deleted => {
-                            /// TODO: we won't reach here if remote storage gets de-configured after start of the deletion operation.
-                            /// Example: start deletion operation, finishes upload of index part, pageserver crashes, remote storage gets de-configured, pageserver starts.
-                            ///
-                            /// We don't really anticipate remote storage to be de-configured, so, for now, this is fine.
-                            /// Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
+                            // TODO: we won't reach here if remote storage gets de-configured after start of the deletion operation.
+                            // Example:
+                            //  start deletion operation
+                            //  finishes upload of index part
+                            //  pageserver crashes
+                            //  remote storage gets de-configured
+                            //  pageserver starts
+                            //
+                            // We don't really anticipate remote storage to be de-configured, so, for now, this is fine.
+                            // Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
                             info!("is_deleted is set on remote, resuming removal of local data originally done by timeline deletion handler");
                             std::fs::remove_dir_all(
                                 self.conf.timeline_path(&timeline_id, &self.tenant_id),
