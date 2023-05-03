@@ -646,7 +646,13 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    // NOTE: if there were no tasks to call stop we need to call stop by ourselves first
+    /// Set the deleted_at field in the remote index file.
+    ///
+    /// This fails if the upload queue has not been `stop()`ed.
+    ///
+    /// The caller is responsible for calling `stop()` AND for waiting
+    /// for any ongoing upload tasks to finish after `stop()` has succeeded.
+    /// Check method [`RemoteTimelineClient::stop`] for details.
     pub(crate) async fn persist_index_part_with_deleted_flag(
         self: &Arc<Self>,
     ) -> anyhow::Result<()> {
