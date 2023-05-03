@@ -1021,6 +1021,16 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     wait_until(50, 0.1, hit_failpoint)
 
+    # we log this error if a client hangs up
+    # might as well use it as another indicator that the test works
+    hangup_log_message = f".*DELETE.*{child_timeline_id}.*request was dropped before completing"
+    env.pageserver.allowed_errors.append(hangup_log_message)
+
+    def got_hangup_log_message():
+        assert env.pageserver.log_contains(hangup_log_message)
+
+    wait_until(50, 0.1, got_hangup_log_message)
+
     # ok, retry without failpoint, it should succeed
     ps_http.configure_failpoints((failpoint_name, "off"))
 
