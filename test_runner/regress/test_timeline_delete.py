@@ -1,5 +1,5 @@
 import pytest
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
@@ -92,3 +92,37 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
     ) as exc:
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
+
+
+def test_delete_timeline_post_rm_failure(neon_env_builder: NeonEnvBuilder):
+    """
+    If there is a failure after removing the timeline directory, the delete operation
+    should be retryable.
+    """
+
+    env = neon_env_builder.init_start()
+    assert env.initial_timeline
+
+    ps_http = env.pageserver.http_client()
+
+    failpoint_name = "timeline-delete-after-rm"
+    ps_http.configure_failpoints((failpoint_name, "return"))
+
+    with pytest.raises(PageserverApiException, match=f"failpoint: {failpoint_name}"):
+        ps_http.timeline_delete(env.initial_tenant, env.initial_timeline)
+
+    at_failpoint_log_message = f".*{env.initial_timeline}.*at failpoint {failpoint_name}.*"
+    env.pageserver.allowed_errors.append(at_failpoint_log_message)
+
+    # retry without failpoint, it should succeed
+    ps_http.configure_failpoints((failpoint_name, "off"))
+
+    # this should succeed
+    ps_http.timeline_delete(env.initial_tenant, env.initial_timeline, timeout=2)
+    # the second call will try to transition the timeline into Stopping state, but it's already in that state
+    env.pageserver.allowed_errors.append(
+        f".*{env.initial_timeline}.*Ignoring new state, equal to the existing one: Stopping"
+    )
+
+
+# TODO Test that we correctly handle GC of files that are stuck in upload queue.

@@ -1472,6 +1472,10 @@ impl Tenant {
             drop(layer_removal_guard);
         }
 
+        fail::fail_point!("timeline-delete-after-rm", |_| {
+            Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
+        });
+
         // Remove the timeline from the map.
         let mut timelines = self.timelines.lock().unwrap();
         let children_exist = timelines
