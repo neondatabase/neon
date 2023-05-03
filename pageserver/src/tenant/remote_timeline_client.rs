@@ -216,7 +216,7 @@ use std::sync::{Arc, Mutex};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use std::ops::DerefMut;
 use tokio::runtime::Runtime;
-use tracing::{debug, error, info, warn, Span};
+use tracing::{debug, error, info, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
@@ -694,7 +694,7 @@ impl RemoteTimelineClient {
 
         #[cfg(feature = "testing")]
         tokio::task::spawn_blocking({
-            let current = Span::current();
+            let current = tracing::Span::current();
             move || {
                 let _entered = current.entered();
                 tracing::info!(
