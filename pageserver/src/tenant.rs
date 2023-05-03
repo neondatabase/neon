@@ -1400,18 +1400,17 @@ impl Tenant {
         timeline.walreceiver.stop().await;
         debug!("wal receiver shutdown confirmed");
 
+        // Prevent new uploads from starting.
         if let Some(remote_client) = timeline.remote_client.as_ref() {
             remote_client.stop()?;
         }
 
-        // NOTE: there is no guarantee that after this point no tasks related to a timeline are running.
-        //     Tasks can spawn new tasks before they see the cancellation request.
-        //     There is nothing preventing spawning new tasks after shutdown is requested for particular timeline or tenant.
+        // Stop & wait for the remaining timeline tasks, including upload tasks.
         info!("waiting for timeline tasks to shutdown");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
 
-        // Make sure we marked timeline as deleted on the remote
-        // so we wont pick it up next time during attach or pageserver restart
+        // Mark timeline as deleted in S3 so we wont pick it up next time
+        // during attach or pageserver restart.
         // See comment in persist_index_part_with_deleted_flag.
         if let Some(remote_client) = timeline.remote_client.as_ref() {
             remote_client.persist_index_part_with_deleted_flag().await?;
