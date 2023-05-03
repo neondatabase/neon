@@ -1446,8 +1446,12 @@ impl Tenant {
                 Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
             });
 
-            // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
-            // with some layers missing.
+            // NB: This need not be atomic because the deleted flag in the IndexPart
+            // will be observed during tenant/timeline load. The deletion will be resumed there.
+            //
+            // For configurations without remote storage, we tolerate that we're not crash-safe here.
+            // The timeline may come up Active but with missing layer files, in such setups.
+            // See https://github.com/neondatabase/neon/pull/3919#issuecomment-1531726720
             std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
                 format!(
                     "Failed to remove local timeline directory '{}'",
