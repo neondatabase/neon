@@ -299,7 +299,7 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
             raise RuntimeError(
                 f"timed out waiting {elapsed:.0f}s for remote_consistent_lsn propagation: status before {stat_before}, status current {stat_after}"
             )
-        time.sleep(0.5)
+        time.sleep(1)
 
 
 # Test that old WAL consumed by peers and pageserver is removed from safekeepers.
@@ -383,12 +383,15 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     wait(
         lambda first_segments=first_segments: all(not os.path.exists(p) for p in first_segments),
         "first segment get removed",
+        wait_f=lambda http_cli=http_cli, tenant_id=tenant_id, timeline_id=timeline_id: log.info(
+            f"waiting for segments removal, sk info: {http_cli.timeline_status(tenant_id=tenant_id, timeline_id=timeline_id)}"
+        ),
     )
 
 
 # Wait for something, defined as f() returning True, raising error if this
-# doesn't happen without timeout seconds.
-def wait(f, desc, timeout=30):
+# doesn't happen without timeout seconds, and calling wait_f while waiting.
+def wait(f, desc, timeout=30, wait_f=None):
     started_at = time.time()
     while True:
         if f():
@@ -397,6 +400,8 @@ def wait(f, desc, timeout=30):
         if elapsed > timeout:
             raise RuntimeError(f"timed out waiting {elapsed:.0f}s for {desc}")
         time.sleep(0.5)
+        if wait_f is not None:
+            wait_f()
 
 
 def is_segment_offloaded(
@@ -1249,3 +1254,98 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     with closing(endpoint_other.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO t (key) VALUES (123)")
+
+
+def test_pull_timeline(neon_env_builder: NeonEnvBuilder):
+    def safekeepers_guc(env: NeonEnv, sk_names: List[int]) -> str:
+        return ",".join([f"localhost:{sk.port.pg}" for sk in env.safekeepers if sk.id in sk_names])
+
+    def execute_payload(endpoint: Endpoint):
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                # we rely upon autocommit after each statement
+                # as waiting for acceptors happens there
+                cur.execute("CREATE TABLE IF NOT EXISTS t(key int, value text)")
+                cur.execute("INSERT INTO t VALUES (0, 'something')")
+                sum_before = query_scalar(cur, "SELECT SUM(key) FROM t")
+
+                cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
+                sum_after = query_scalar(cur, "SELECT SUM(key) FROM t")
+                assert sum_after == sum_before + 5000050000
+
+    def show_statuses(safekeepers: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
+        for sk in safekeepers:
+            http_cli = sk.http_client()
+            try:
+                status = http_cli.timeline_status(tenant_id, timeline_id)
+                log.info(f"Safekeeper {sk.id} status: {status}")
+            except Exception as e:
+                log.info(f"Safekeeper {sk.id} status error: {e}")
+
+    neon_env_builder.num_safekeepers = 4
+    env = neon_env_builder.init_start()
+    env.neon_cli.create_branch("test_pull_timeline")
+
+    log.info("Use only first 3 safekeepers")
+    env.safekeepers[3].stop()
+    active_safekeepers = [1, 2, 3]
+    endpoint = env.endpoints.create("test_pull_timeline")
+    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.start()
+
+    # learn neon timeline from compute
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+
+    execute_payload(endpoint)
+    show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+    log.info("Kill safekeeper 2, continue with payload")
+    env.safekeepers[1].stop(immediate=True)
+    execute_payload(endpoint)
+
+    log.info("Initialize new safekeeper 4, pull data from 1 & 3")
+    env.safekeepers[3].start()
+
+    res = (
+        env.safekeepers[3]
+        .http_client()
+        .pull_timeline(
+            {
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+                "http_hosts": [
+                    f"http://localhost:{env.safekeepers[0].port.http}",
+                    f"http://localhost:{env.safekeepers[2].port.http}",
+                ],
+            }
+        )
+    )
+    log.info("Finished pulling timeline")
+    log.info(res)
+
+    show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+    log.info("Restarting compute with new config to verify that it works")
+    active_safekeepers = [1, 3, 4]
+
+    endpoint.stop_and_destroy().create("test_pull_timeline")
+    endpoint.adjust_for_safekeepers(safekeepers_guc(env, active_safekeepers))
+    endpoint.start()
+
+    execute_payload(endpoint)
+    show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+    log.info("Stop sk1 (simulate failure) and use only quorum of sk3 and sk4")
+    env.safekeepers[0].stop(immediate=True)
+    execute_payload(endpoint)
+    show_statuses(env.safekeepers, tenant_id, timeline_id)
+
+    log.info("Restart sk4 and and use quorum of sk1 and sk4")
+    env.safekeepers[3].stop()
+    env.safekeepers[2].stop()
+    env.safekeepers[0].start()
+    env.safekeepers[3].start()
+
+    execute_payload(endpoint)
+    show_statuses(env.safekeepers, tenant_id, timeline_id)

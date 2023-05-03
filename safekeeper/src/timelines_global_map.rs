@@ -159,6 +159,26 @@ impl GlobalTimelines {
         Ok(())
     }
 
+    /// Load timeline from disk to the memory.
+    pub fn load_timeline(ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+        let (conf, wal_backup_launcher_tx) = TIMELINES_STATE.lock().unwrap().get_dependencies();
+
+        match Timeline::load_timeline(conf, ttid, wal_backup_launcher_tx) {
+            Ok(timeline) => {
+                let tli = Arc::new(timeline);
+                // TODO: prevent concurrent timeline creation/loading
+                TIMELINES_STATE
+                    .lock()
+                    .unwrap()
+                    .timelines
+                    .insert(ttid, tli.clone());
+                Ok(tli)
+            }
+            // If we can't load a timeline, it's bad. Caller will figure it out.
+            Err(e) => bail!("failed to load timeline {}, reason: {:?}", ttid, e),
+        }
+    }
+
     /// Get the number of timelines in the map.
     pub fn timelines_count() -> usize {
         TIMELINES_STATE.lock().unwrap().timelines.len()

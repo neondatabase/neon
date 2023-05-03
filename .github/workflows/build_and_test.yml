@@ -418,10 +418,7 @@ jobs:
       - uses: actions/github-script@v6
         if: >
           !cancelled() &&
-          github.event_name == 'pull_request' && (
-            steps.create-allure-report-debug.outputs.report-url ||
-            steps.create-allure-report-release.outputs.report-url
-          )
+          github.event_name == 'pull_request'
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5

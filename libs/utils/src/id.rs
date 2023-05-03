@@ -265,6 +265,26 @@ impl fmt::Display for TenantTimelineId {
     }
 }
 
+impl FromStr for TenantTimelineId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.split('/');
+        let tenant_id = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("TenantTimelineId must contain tenant_id"))?
+            .parse()?;
+        let timeline_id = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("TenantTimelineId must contain timeline_id"))?
+            .parse()?;
+        if parts.next().is_some() {
+            anyhow::bail!("TenantTimelineId must contain only tenant_id and timeline_id");
+        }
+        Ok(TenantTimelineId::new(tenant_id, timeline_id))
+    }
+}
+
 // Unique ID of a storage node (safekeeper or pageserver). Supposed to be issued
 // by the console.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash, Debug, Serialize, Deserialize)]

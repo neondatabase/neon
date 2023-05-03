@@ -1820,6 +1820,36 @@ class VanillaPostgres(PgProtocol):
             self.pg_bin.run_capture(["initdb", "-D", str(pgdatadir)])
         self.configure([f"port = {port}\n"])
 
+    def enable_tls(self):
+        assert not self.running
+        # generate self-signed certificate
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-x509",
+                "-days",
+                "365",
+                "-nodes",
+                "-text",
+                "-out",
+                self.pgdatadir / "server.crt",
+                "-keyout",
+                self.pgdatadir / "server.key",
+                "-subj",
+                "/CN=localhost",
+            ]
+        )
+        # configure postgresql.conf
+        self.configure(
+            [
+                "ssl = on",
+                "ssl_cert_file = 'server.crt'",
+                "ssl_key_file = 'server.key'",
+            ]
+        )
+
     def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
         assert not self.running
@@ -1992,6 +2022,7 @@ class NeonProxy(PgProtocol):
                 # Link auth backend params
                 *["--auth-backend", "link"],
                 *["--uri", NeonProxy.link_auth_uri],
+                *["--allow-self-signed-compute", "true"],
             ]
 
     @dataclass(frozen=True)
@@ -2012,6 +2043,7 @@ class NeonProxy(PgProtocol):
     def __init__(
         self,
         neon_binpath: Path,
+        test_output_dir: Path,
         proxy_port: int,
         http_port: int,
         mgmt_port: int,
@@ -2025,6 +2057,7 @@ class NeonProxy(PgProtocol):
         self.host = host
         self.http_port = http_port
         self.neon_binpath = neon_binpath
+        self.test_output_dir = test_output_dir
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
         self.auth_backend = auth_backend
@@ -2051,7 +2084,8 @@ class NeonProxy(PgProtocol):
                 *["--metric-collection-interval", self.metric_collection_interval],
             ]
 
-        self._popen = subprocess.Popen(args)
+        logfile = open(self.test_output_dir / "proxy.log", "w")
+        self._popen = subprocess.Popen(args, stdout=logfile, stderr=logfile)
         self._wait_until_ready()
         return self
 
@@ -2108,7 +2142,7 @@ class NeonProxy(PgProtocol):
             try:
                 self._popen.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                log.warn("failed to gracefully terminate proxy; killing")
+                log.warning("failed to gracefully terminate proxy; killing")
                 self._popen.kill()
 
     @staticmethod
@@ -2119,6 +2153,7 @@ class NeonProxy(PgProtocol):
 
         if create_user:
             log.info("creating a new user for link auth test")
+            local_vanilla_pg.enable_tls()
             local_vanilla_pg.start()
             local_vanilla_pg.safe_psql(f"create user {pg_user} with login superuser")
 
@@ -2152,7 +2187,9 @@ class NeonProxy(PgProtocol):
 
 
 @pytest.fixture(scope="function")
-def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterator[NeonProxy]:
+def link_proxy(
+    port_distributor: PortDistributor, neon_binpath: Path, test_output_dir: Path
+) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
 
     http_port = port_distributor.get_port()
@@ -2161,6 +2198,7 @@ def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterato
 
     with NeonProxy(
         neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
@@ -2172,7 +2210,10 @@ def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterato
 
 @pytest.fixture(scope="function")
 def static_proxy(
-    vanilla_pg: VanillaPostgres, port_distributor: PortDistributor, neon_binpath: Path
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 
@@ -2191,6 +2232,7 @@ def static_proxy(
 
     with NeonProxy(
         neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
@@ -2586,6 +2628,7 @@ class SafekeeperTimelineStatus:
     commit_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
+    peer_horizon_lsn: Lsn
     remote_consistent_lsn: Lsn
 
 
@@ -2618,6 +2661,13 @@ class SafekeeperHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def timeline_create(
         self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
     ):
@@ -2643,6 +2693,7 @@ class SafekeeperHttpClient(requests.Session):
             commit_lsn=Lsn(resj["commit_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
+            peer_horizon_lsn=Lsn(resj["peer_horizon_lsn"]),
             remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
         )
 

@@ -27,6 +27,11 @@ on:
         required: true
         type: boolean
         default: true
+      deployPgSniRouter:
+        description: 'Deploy pg-sni-router'
+        required: true
+        type: boolean
+        default: true
       disclamerAcknowledged:
         description: 'I confirm that there is an emergency and I can not use regular release workflow'
         required: true
@@ -171,3 +176,42 @@ jobs:
       - name: Deploy storage-broker
         run:
           helm upgrade neon-storage-broker-lb neondatabase/neon-storage-broker --namespace neon-storage-broker-lb --create-namespace --install --atomic -f .github/helm-values/${{ matrix.target_cluster }}.neon-storage-broker.yaml --set image.tag=${{ inputs.dockerTag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 5m0s
+
+  deploy-pg-sni-router:
+    runs-on: prod
+    container: 093970136003.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
+    if: inputs.deployPgSniRouter && inputs.disclamerAcknowledged
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - target_region:  us-east-2
+            target_cluster: prod-us-east-2-delta
+          - target_region:  us-west-2
+            target_cluster: prod-us-west-2-eta
+          - target_region: eu-central-1
+            target_cluster: prod-eu-central-1-gamma
+          - target_region: ap-southeast-1
+            target_cluster: prod-ap-southeast-1-epsilon
+          - target_region: us-east-1
+            target_cluster: prod-us-east-1-theta
+    environment:
+      name: prod-${{ matrix.target_region }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+          ref: ${{ inputs.branch }}
+  
+      - name: Configure environment
+        run: |
+          helm repo add neondatabase https://neondatabase.github.io/helm-charts
+          aws --region ${{ matrix.target_region }} eks update-kubeconfig --name  ${{ matrix.target_cluster }}
+  
+      - name: Deploy pg-sni-router
+        run:
+          helm upgrade neon-pg-sni-router neondatabase/neon-pg-sni-router --namespace neon-pg-sni-router --create-namespace --install --debug --atomic -f .github/helm-values/${{ matrix.target_cluster }}.pg-sni-router.yaml --set image.tag=${{ inputs.dockerTag }} --set settings.sentryUrl=${{ secrets.SENTRY_URL_BROKER }} --wait --timeout 15m0s

@@ -50,7 +50,7 @@ pub struct AppendLogicalMessage {
     pub pg_version: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct AppendResult {
     // safekeeper state after append
     state: SafeKeeperState,
@@ -133,7 +133,7 @@ fn send_proposer_elected(tli: &Arc<Timeline>, term: Term, lsn: Lsn) -> anyhow::R
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct InsertedWAL {
     begin_lsn: Lsn,
     pub end_lsn: Lsn,
