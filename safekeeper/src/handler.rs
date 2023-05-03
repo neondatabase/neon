@@ -10,7 +10,7 @@ use tracing::{info, info_span, Instrument};
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
-use crate::metrics::{TrafficMetrics, PG_QUERIES_RECEIVED, PG_QUERIES_FINISHED};
+use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::QueryError;

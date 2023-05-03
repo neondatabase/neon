@@ -19,10 +19,10 @@ use tokio::task::JoinHandle;
 use tokio::{runtime, time::sleep};
 use tracing::*;
 
-use crate::GlobalTimelines;
-use crate::SafeKeeperConf;
 use crate::metrics::BROKER_PULLED_UPDATES;
 use crate::metrics::BROKER_PUSHED_UPDATES;
+use crate::GlobalTimelines;
+use crate::SafeKeeperConf;
 
 const RETRY_INTERVAL_MSEC: u64 = 1000;
 const PUSH_INTERVAL_MSEC: u64 = 1000;

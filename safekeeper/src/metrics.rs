@@ -10,7 +10,7 @@ use anyhow::Result;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    register_int_counter_vec, Gauge, IntCounterVec, IntGaugeVec, IntCounter, register_int_counter,
+    register_int_counter, register_int_counter_vec, Gauge, IntCounter, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 

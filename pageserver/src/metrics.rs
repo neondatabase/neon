@@ -1,9 +1,9 @@
 use metrics::core::{AtomicU64, GenericCounter};
 use metrics::{
     register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge_vec, register_uint_gauge_vec, Counter, CounterVec,
-    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge,
-    UIntGaugeVec,
+    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
+    Counter, CounterVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::models::TenantState;
@@ -477,6 +477,56 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     )
     .expect("Failed to register tenant_task_events metric")
 });
+
+// walreceiver metrics
+
+pub static WALRECEIVER_STARTED_CONNECTIONS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_walreceiver_started_connections_total",
+        "Number of started walreceiver connections"
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_ACTIVE_MANAGERS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "pageserver_walreceiver_active_managers",
+        "Number of active walreceiver managers"
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_SWITCHES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_walreceiver_switches_total",
+        "Number of walreceiver manager change_connection calls",
+        &["reason"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_BROKER_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_walreceiver_broker_updates_total",
+        "Number of received broker updates in walreceiver"
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_CANDIDATES_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_walreceiver_candidates_events_total",
+        "Number of walreceiver candidate events",
+        &["event"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_CANDIDATES_ADDED: Lazy<IntCounter> =
+    Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["add"]));
+
+pub static WALRECEIVER_CANDIDATES_REMOVED: Lazy<IntCounter> =
+    Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["remove"]));
 
 // Metrics collected on WAL redo operations
 //

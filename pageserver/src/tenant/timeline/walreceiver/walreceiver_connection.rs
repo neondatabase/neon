@@ -24,8 +24,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use super::TaskStateUpdate;
-use crate::context::RequestContext;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
+use crate::{context::RequestContext, metrics::WALRECEIVER_STARTED_CONNECTIONS};
 use crate::{
     task_mgr,
     task_mgr::TaskKind,
@@ -68,6 +68,8 @@ pub(super) async fn handle_walreceiver_connection(
     connect_timeout: Duration,
     ctx: RequestContext,
 ) -> anyhow::Result<()> {
+    WALRECEIVER_STARTED_CONNECTIONS.inc();
+
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
 
