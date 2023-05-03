@@ -402,11 +402,13 @@ impl ComputeNode {
         self.pg_reload_conf(&mut client)?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
-        handle_roles(&spec, &mut client)?;
-        handle_databases(&spec, &mut client)?;
-        handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(&spec, self.connstr.as_str(), &mut client)?;
-        handle_extensions(&spec, &mut client)?;
+        if spec.mode == ComputeMode::Primary {
+            handle_roles(&spec, &mut client)?;
+            handle_databases(&spec, &mut client)?;
+            handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
+            handle_grants(&spec, self.connstr.as_str(), &mut client)?;
+            handle_extensions(&spec, &mut client)?;
+        }
 
         // 'Close' connection
         drop(client);
