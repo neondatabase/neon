@@ -43,10 +43,12 @@ pub fn write_postgres_conf(path: &Path, spec: &ComputeSpec) -> Result<()> {
     match spec.mode {
         ComputeMode::Primary => {}
         ComputeMode::Static(lsn) => {
+            // hot_standby is 'on' by default, but let's be explicit
             writeln!(file, "hot_standby=on")?;
             writeln!(file, "recovery_target_lsn='{lsn}'")?;
         }
         ComputeMode::Replica => {
+            // hot_standby is 'on' by default, but let's be explicit
             writeln!(file, "hot_standby=on")?;
         }
     }
