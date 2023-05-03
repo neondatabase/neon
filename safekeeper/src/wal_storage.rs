@@ -27,7 +27,7 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-use crate::metrics::{time_io_closure, WalStorageMetrics};
+use crate::metrics::{time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS};
 use crate::safekeeper::SafeKeeperState;
 
 use crate::wal_backup::read_object;
@@ -455,6 +455,7 @@ fn remove_segments_from_disk(
                 n_removed += 1;
                 min_removed = min(min_removed, segno);
                 max_removed = max(max_removed, segno);
+                REMOVED_WAL_SEGMENTS.inc();
             }
         }
     }

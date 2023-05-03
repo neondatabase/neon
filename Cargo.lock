@@ -3674,6 +3674,7 @@ dependencies = [
  "remote_storage",
  "reqwest",
  "safekeeper_api",
+ "scopeguard",
  "serde",
  "serde_json",
  "serde_with",
