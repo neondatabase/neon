@@ -38,16 +38,16 @@ pub fn write_postgres_conf(path: &Path, spec: &ComputeSpec) -> Result<()> {
 
     writeln!(file, "# Managed by compute_ctl: begin")?;
 
-    writeln!(file, "{}", &spec.cluster.settings.as_pg_settings())?;
+    write!(file, "{}", &spec.cluster.settings.as_pg_settings())?;
 
     match spec.mode {
         ComputeMode::Primary => {}
         ComputeMode::Static(lsn) => {
-            write!(file, "hot_standby=on")?;
-            write!(file, "recovery_target_lsn='{lsn}'")?;
+            writeln!(file, "hot_standby=on")?;
+            writeln!(file, "recovery_target_lsn='{lsn}'")?;
         }
         ComputeMode::Replica => {
-            write!(file, "hot_standby=on")?;
+            writeln!(file, "hot_standby=on")?;
         }
     }
 
