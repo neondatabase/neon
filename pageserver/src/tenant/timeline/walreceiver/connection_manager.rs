@@ -13,6 +13,10 @@ use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, ti
 
 use super::{TaskStateUpdate, WalReceiverConf};
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::metrics::{
+    WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
+    WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
+};
 use crate::task_mgr::TaskKind;
 use crate::tenant::Timeline;
 use anyhow::Context;
@@ -56,6 +60,11 @@ pub(super) async fn connection_manager_loop_step(
             info!("Timeline dropped state updates sender before becoming active, stopping wal connection manager loop");
             return ControlFlow::Break(());
         }
+    }
+
+    WALRECEIVER_ACTIVE_MANAGERS.inc();
+    scopeguard::defer! {
+        WALRECEIVER_ACTIVE_MANAGERS.dec();
     }
 
     let id = TenantTimelineId {
@@ -400,6 +409,10 @@ impl ConnectionManagerState {
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
     async fn change_connection(&mut self, new_sk: NewWalConnectionCandidate, ctx: &RequestContext) {
+        WALRECEIVER_SWITCHES
+            .with_label_values(&[new_sk.reason.name()])
+            .inc();
+
         self.drop_old_connection(true).await;
 
         let id = self.id;
@@ -515,6 +528,8 @@ impl ConnectionManagerState {
 
     /// Adds another broker timeline into the state, if its more recent than the one already added there for the same key.
     fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
+        WALRECEIVER_BROKER_UPDATES.inc();
+
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
         let old_entry = self.wal_stream_candidates.insert(
             new_safekeeper_id,
@@ -526,6 +541,7 @@ impl ConnectionManagerState {
 
         if old_entry.is_none() {
             info!("New SK node was added: {new_safekeeper_id}");
+            WALRECEIVER_CANDIDATES_ADDED.inc();
         }
     }
 
@@ -794,6 +810,7 @@ impl ConnectionManagerState {
             for node_id in node_ids_to_remove {
                 info!("Safekeeper node {node_id} did not send events for over {lagging_wal_timeout:?}, not retrying the connections");
                 self.wal_connection_retries.remove(&node_id);
+                WALRECEIVER_CANDIDATES_REMOVED.inc();
             }
         }
     }
@@ -817,8 +834,6 @@ struct NewWalConnectionCandidate {
     safekeeper_id: NodeId,
     wal_source_connconf: PgConnectionConfig,
     availability_zone: Option<String>,
-    // This field is used in `derive(Debug)` only.
-    #[allow(dead_code)]
     reason: ReconnectReason,
 }
 
@@ -845,6 +860,18 @@ enum ReconnectReason {
         check_time: NaiveDateTime,
         threshold: Duration,
     },
+}
+
+impl ReconnectReason {
+    fn name(&self) -> &str {
+        match self {
+            ReconnectReason::NoExistingConnection => "NoExistingConnection",
+            ReconnectReason::LaggingWal { .. } => "LaggingWal",
+            ReconnectReason::SwitchAvailabilityZone => "SwitchAvailabilityZone",
+            ReconnectReason::NoWalTimeout { .. } => "NoWalTimeout",
+            ReconnectReason::NoKeepAlives { .. } => "NoKeepAlives",
+        }
+    }
 }
 
 fn wal_stream_connection_config(
