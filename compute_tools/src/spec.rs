@@ -13,7 +13,7 @@ use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
 use compute_api::responses::{ControlPlaneComputeStatus, ControlPlaneSpecResponse};
-use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
+use compute_api::spec::{ComputeSpec, Database, GenericOption, PgIdent, Role};
 
 // Do control plane request and return response if any. In case of error it
 // returns a bool flag indicating whether it makes sense to retry the request
@@ -62,7 +62,7 @@ fn do_control_plane_request(
     }
 }
 
-/// Request spec from the control-plane by compute_id. If `NEON_CONSOLE_JWT`
+/// Request spec from the control-plane by compute_id. If `NEON_CONTROL_PLANE_TOKEN`
 /// env variable is set, it will be used for authorization.
 pub fn get_spec_from_control_plane(
     base_uri: &str,
@@ -88,7 +88,20 @@ pub fn get_spec_from_control_plane(
             Ok(spec_resp) => match spec_resp.status {
                 ControlPlaneComputeStatus::Empty => Ok(None),
                 ControlPlaneComputeStatus::Attached => {
-                    if let Some(spec) = spec_resp.spec {
+                    if let Some(mut spec) = spec_resp.spec {
+                        let ddl_address = format!(
+                            "{base_uri}/management/api/v2/computes/{compute_id}/dbs_and_roles"
+                        );
+                        let option = GenericOption {
+                            name: "neon.console_url".to_string(),
+                            value: Some(ddl_address),
+                            vartype: "string".to_string(),
+                        };
+                        if let Some(ref mut settings) = spec.cluster.settings {
+                            settings.push(option)
+                        } else {
+                            spec.cluster.settings = Some(vec![option]);
+                        }
                         Ok(Some(spec))
                     } else {
                         bail!("compute is attached, but spec is empty")

@@ -15,6 +15,7 @@
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 static char *ConsoleURL = NULL;
+static bool ForwardDDL = true;
 static CURL *CurlHandle;
 static struct curl_slist *ContentHeader = NULL;
 
@@ -137,9 +138,11 @@ static void SendDeltasToConsole()
         return;
     if(!ConsoleURL)
     {
-        elog(LOG, "ConsoleURL not set, skipping forwarding");
+        elog(LOG, "ConsoleURL not set, skipping forwarded");
         return;
     }
+    if(!ForwardDDL)
+        return;
 
     char *message = ConstructDeltaMessage();
 
@@ -625,10 +628,22 @@ void InitConsoleConnector()
         NULL,
         NULL);
 
-    const char *jwt_token = getenv("NEON_CONSOLE_JWT");
+    DefineCustomBoolVariable(
+        "neon.forward_ddl",
+        "Controls whether to forward DDL to the console",
+        NULL,
+        &ForwardDDL,
+        true,
+        PGC_USERSET,
+        0,
+        NULL,
+        NULL,
+        NULL);
+
+    const char *jwt_token = getenv("NEON_CONTROL_PLANE_TOKEN");
     if(!jwt_token)
     {
-        elog(LOG, "Missing NEON_CONSOLE_JWT environment variable, forwarding will not be authenticated");
+        elog(LOG, "Missing NEON_CONTROL_PLANE_TOKEN environment variable, forwarding will not be authenticated");
     }
 
     if(curl_global_init(CURL_GLOBAL_DEFAULT))
