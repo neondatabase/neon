@@ -7,8 +7,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     RemoteStorageKind,
-    wait_for_last_flush_lsn,
-    wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn,
+    last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import LayerMapInfo
 from fixtures.types import TimelineId
@@ -104,11 +103,8 @@ def test_threshold_based_eviction(
     # create a bunch of layers
     with env.endpoints.create_start("main", tenant_id=tenant_id) as pg:
         pg_bin.run(["pgbench", "-i", "-s", "3", pg.connstr()])
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        last_flush_lsn_upload(env, pg, tenant_id, timeline_id)
     # wrap up and shutdown safekeepers so that no more layers will be created after the final checkpoint
-    wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
-        tenant_id, timeline_id, env.safekeepers, env.pageserver
-    )
     for sk in env.safekeepers:
         sk.stop()
     ps_http.timeline_checkpoint(tenant_id, timeline_id)
