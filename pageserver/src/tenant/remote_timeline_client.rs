@@ -264,7 +264,8 @@ pub enum MaybeDeletedIndexPart {
 /// Errors that can arise when calling [`RemoteTimelineClient::stop`].
 #[derive(Debug, thiserror::Error)]
 pub enum StopError {
-    /// Callers are responsible for checking this before calling `stop()`.
+    /// Returned if the upload queue was never initialized.
+    /// See [`RemoteTimelineClient::init_upload_queue`] and [`RemoteTimelineClient::init_upload_queue_for_empty_remote`].
     #[error("queue is not initialized")]
     QueueUninitialized,
 }

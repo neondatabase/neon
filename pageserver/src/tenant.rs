@@ -1404,7 +1404,16 @@ impl Tenant {
 
         // Prevent new uploads from starting.
         if let Some(remote_client) = timeline.remote_client.as_ref() {
-            remote_client.stop()?;
+            let res = remote_client.stop();
+            match &res {
+                Ok(()) => {}
+                Err(e) => match e {
+                    remote_timeline_client::StopError::QueueUninitialized => {
+                        // This could happen if the timeline is Broken, e.g., because it failed to fetch IndexPart when it was loaded.
+                    }
+                },
+            }
+            res?;
         }
 
         // Stop & wait for the remaining timeline tasks, including upload tasks.
