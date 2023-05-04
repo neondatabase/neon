@@ -328,12 +328,8 @@ impl LayerAccessStats {
                     guard.0 += 1;
                     let occurences = guard.0;
                     guard.1.call(move || {
-                        // Spawn a new task to have a new tracing root. It's ok, it only happens every 10 secs.
-                        tokio::spawn(async move {
-                            warn!(occurences, "latest_activity not available, this is an implementation bug, using fallback value");
-                        });
-                    });
-                    fallback()
+                        warn!(parent: None, occurences, "latest_activity not available, this is an implementation bug, using fallback value");
+                    })
                 }
             },
         }
