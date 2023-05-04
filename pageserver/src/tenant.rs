@@ -1452,17 +1452,20 @@ impl Tenant {
 
         let mut rx = {
             let mut g = timeline.delete_self.lock().await;
+
+            // see if we should join any existing attempt
             let maybe_rx = if let Some(maybe_done) = g.as_ref() {
                 use timeline::MaybeDone;
-                // we got the lock, let's see if the previous attempt failed permanently
-                // TODO: is here some deadlock with the lock acquisition order?
 
                 match maybe_done {
                     MaybeDone::Done(Ok(())) => return Ok(()),
                     MaybeDone::Done(Err(e)) if e.is_permanent() => {
                         return Err(DeleteTimelineError::from(e))
                     }
-                    MaybeDone::Pending(rx) => rx.upgrade(),
+                    MaybeDone::Pending(rx) => {
+                        // important: upgrading and later resubscription happens while holding the lock
+                        rx.upgrade()
+                    }
                     MaybeDone::Done(Err(_retryable)) => None,
                 }
             } else {
@@ -1474,21 +1477,16 @@ impl Tenant {
             } else {
                 // try another time
                 let (tx, rx) = tokio::sync::broadcast::channel(1);
-                // now anyone else racing will see the None
+                let rx = Arc::new(rx);
                 let this = self.clone();
                 let timeline = timeline.clone();
 
-                let rx = Arc::new(rx);
-
-                // sadly futures::future::FutureExt::shared requires clone, which we cannot give
-                // for tokio::task::JoinError
-                //
                 // TODO: this could be tenant scoped task_mgr task?
                 tokio::spawn({
                     let rx = rx.clone();
                     async move {
                         // to uphold the MaybeDone promise, we keep the channel alive *until* we've
-                        // swapped the values
+                        // swapped the MaybeDone::Pending -> MaybeDone::Done value
                         let tx = tx;
                         let rx = rx;
 
