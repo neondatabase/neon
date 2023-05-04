@@ -573,7 +573,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
 
             self.pgb
                 .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                    sent_ptr: self.end_pos.0,
+                    wal_end: self.end_pos.0,
                     timestamp: get_current_timestamp(),
                     request_reply: true,
                 }))

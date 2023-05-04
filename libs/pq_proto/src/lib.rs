@@ -613,7 +613,7 @@ pub struct XLogDataBody<'a> {
 
 #[derive(Debug)]
 pub struct WalSndKeepAlive {
-    pub sent_ptr: u64,
+    pub wal_end: u64, // current end of WAL on the server
     pub timestamp: i64,
     pub request_reply: bool,
 }
@@ -924,7 +924,7 @@ impl<'a> BeMessage<'a> {
                 buf.put_u8(b'd');
                 write_body(buf, |buf| {
                     buf.put_u8(b'k');
-                    buf.put_u64(req.sent_ptr);
+                    buf.put_u64(req.wal_end);
                     buf.put_i64(req.timestamp);
                     buf.put_u8(u8::from(req.request_reply));
                 });
