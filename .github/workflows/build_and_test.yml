@@ -796,7 +796,7 @@ jobs:
 
       - name: Downloading vm-builder
         run: |
-          curl -L https://github.com/neondatabase/neonvm/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
       - name: Build vm image
