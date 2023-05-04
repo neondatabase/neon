@@ -9,6 +9,7 @@ import requests
 
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, parse_metrics
+from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import Fn
 
@@ -266,19 +267,21 @@ class PageserverHttpClient(requests.Session):
 
     def timeline_create(
         self,
+        pg_version: PgVersion,
         tenant_id: TenantId,
         new_timeline_id: Optional[TimelineId] = None,
         ancestor_timeline_id: Optional[TimelineId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
     ) -> Dict[Any, Any]:
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline",
-            json={
-                "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
-                "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
-                "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
-            },
-        )
+        body: Dict[str, Any] = {
+            "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
+            "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
+            "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
+        }
+        if pg_version != PgVersion.NOT_SET:
+            body["pg_version"] = int(pg_version)
+
+        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body)
         self.verbose_error(res)
         if res.status_code == 409:
             raise Exception(f"could not create timeline: already exists for id {new_timeline_id}")
