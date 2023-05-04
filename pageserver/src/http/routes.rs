@@ -139,12 +139,9 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::DeleteTimelineError) -> Self {
         use crate::tenant::DeleteTimelineError::*;
         match value {
-            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found")),
-            HasChildren => ApiError::BadRequest(anyhow::anyhow!(
-                "Cannot delete timeline which has child timelines"
-            )),
-            StopUploadQueue(e) => ApiError::InternalServerError(e.into()),
-            Other(e) => ApiError::InternalServerError(e),
+            NotFound => ApiError::NotFound(value.into()),
+            HasChildren => ApiError::BadRequest(value.into()),
+            _ => ApiError::InternalServerError(value.into()),
         }
     }
 }

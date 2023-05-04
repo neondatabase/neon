@@ -204,7 +204,6 @@ mod download;
 pub mod index;
 mod upload;
 
-use anyhow::Context;
 use chrono::Utc;
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
