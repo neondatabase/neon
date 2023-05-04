@@ -49,7 +49,7 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::TimelineMetrics;
+use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
@@ -78,6 +78,7 @@ pub(super) use self::eviction_task::EvictionTaskTenantState;
 use self::eviction_task::EvictionTaskTimelineState;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
+use super::config::TenantConf;
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -162,7 +163,7 @@ pub struct Timeline {
     ancestor_timeline: Option<Arc<Timeline>>,
     ancestor_lsn: Lsn,
 
-    metrics: TimelineMetrics,
+    pub(super) metrics: TimelineMetrics,
 
     /// Ensures layers aren't frozen by checkpointer between
     /// [`Timeline::get_layer_for_write`] and layer reads.
@@ -588,15 +589,25 @@ impl Timeline {
 
         let _timer = self.metrics.wait_lsn_time_histo.start_timer();
 
-        self.last_record_lsn.wait_for_timeout(lsn, self.conf.wait_lsn_timeout).await
-            .with_context(||
-                format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}",
-                    lsn, self.get_last_record_lsn(), self.get_disk_consistent_lsn()
-                )
-            )?;
-
-        Ok(())
+        match self
+            .last_record_lsn
+            .wait_for_timeout(lsn, self.conf.wait_lsn_timeout)
+            .await
+        {
+            Ok(()) => Ok(()),
+            seqwait_error => {
+                drop(_timer);
+                let walreceiver_status = self.walreceiver.status().await;
+                seqwait_error.with_context(|| format!(
+                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, {}",
+                    lsn,
+                    self.get_last_record_lsn(),
+                    self.get_disk_consistent_lsn(),
+                    walreceiver_status.map(|status| status.to_human_readable_string())
+                            .unwrap_or_else(|| "WalReceiver status: Not active".to_string()),
+                ))
+            }
+        }
     }
 
     /// Check that it is valid to request operations with that lsn.
@@ -936,6 +947,7 @@ impl Timeline {
         }
     }
 
+    #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
@@ -1137,6 +1149,8 @@ impl Timeline {
                 if let Some(delta) = local_layer_residence_duration {
                     self.metrics
                         .evictions_with_low_residence_duration
+                        .read()
+                        .unwrap()
                         .observe(delta);
                     info!(layer=%local_layer.short_id(), residence_millis=delta.as_millis(), "evicted layer after known residence period");
                 } else {
@@ -1210,6 +1224,35 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.eviction_policy)
     }
 
+    fn get_evictions_low_residence_duration_metric_threshold(
+        tenant_conf: &TenantConfOpt,
+        default_tenant_conf: &TenantConf,
+    ) -> Duration {
+        tenant_conf
+            .evictions_low_residence_duration_metric_threshold
+            .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
+    }
+
+    pub(super) fn tenant_conf_updated(&self) {
+        // NB: Most tenant conf options are read by background loops, so,
+        // changes will automatically be picked up.
+
+        // The threshold is embedded in the metric. So, we need to update it.
+        {
+            let new_threshold = Self::get_evictions_low_residence_duration_metric_threshold(
+                &self.tenant_conf.read().unwrap(),
+                &self.conf.default_tenant_conf,
+            );
+            let tenant_id_str = self.tenant_id.to_string();
+            let timeline_id_str = self.timeline_id.to_string();
+            self.metrics
+                .evictions_with_low_residence_duration
+                .write()
+                .unwrap()
+                .change_threshold(&tenant_id_str, &timeline_id_str, new_threshold);
+        }
+    }
+
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory, but not the layer map.
@@ -1241,6 +1284,11 @@ impl Timeline {
         let max_lsn_wal_lag = tenant_conf_guard
             .max_lsn_wal_lag
             .unwrap_or(conf.default_tenant_conf.max_lsn_wal_lag);
+        let evictions_low_residence_duration_metric_threshold =
+            Self::get_evictions_low_residence_duration_metric_threshold(
+                &tenant_conf_guard,
+                &conf.default_tenant_conf,
+            );
         drop(tenant_conf_guard);
 
         Arc::new_cyclic(|myself| {
@@ -1288,7 +1336,7 @@ impl Timeline {
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
                         "mtime",
-                        conf.evictions_low_residence_duration_metric_threshold,
+                        evictions_low_residence_duration_metric_threshold,
                     ),
                 ),
 
@@ -1447,8 +1495,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                let l = Arc::new(layer);
-                updates.insert_historic(l)?;
+                updates.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1480,7 +1527,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(Arc::new(layer))?;
+                updates.insert_historic(Arc::new(layer));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1554,7 +1601,7 @@ impl Timeline {
             // remote index file?
             // If so, rename_to_backup those files & replace their local layer with
             // a RemoteLayer in the layer map so that we re-download them on-demand.
-            if let Some(local_layer) = &local_layer {
+            if let Some(local_layer) = local_layer {
                 let local_layer_path = local_layer
                     .local_path()
                     .expect("caller must ensure that local_layers only contains local layers");
@@ -1579,6 +1626,7 @@ impl Timeline {
                         anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                     } else {
                         self.metrics.resident_physical_size_gauge.sub(local_size);
+                        updates.remove_historic(local_layer);
                         // fall-through to adding the remote layer
                     }
                 } else {
@@ -1617,11 +1665,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    if let Some(local_layer) = &local_layer {
-                        updates.replace_historic(local_layer, remote_layer)?;
-                    } else {
-                        updates.insert_historic(remote_layer)?;
-                    }
+                    updates.insert_historic(remote_layer);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1648,11 +1692,7 @@ impl Timeline {
                         ),
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    if let Some(local_layer) = &local_layer {
-                        updates.replace_historic(local_layer, remote_layer)?;
-                    } else {
-                        updates.insert_historic(remote_layer)?;
-                    }
+                    updates.insert_historic(remote_layer);
                 }
             }
         }
@@ -2326,6 +2366,7 @@ impl Timeline {
                             id,
                             ctx.task_kind()
                         );
+                        UNEXPECTED_ONDEMAND_DOWNLOADS.inc();
                         timeline.download_remote_layer(remote_layer).await?;
                         continue 'layer_map_search;
                     }
@@ -2703,7 +2744,7 @@ impl Timeline {
             LayerResidenceStatus::Resident,
             LayerResidenceEventReason::LayerCreate,
         );
-        batch_updates.insert_historic(l)?;
+        batch_updates.insert_historic(l);
         batch_updates.flush();
 
         // update the timeline's physical size
@@ -2915,7 +2956,7 @@ impl Timeline {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            updates.insert_historic(l)?;
+            updates.insert_historic(l);
         }
         updates.flush();
         drop(layers);
@@ -3353,7 +3394,7 @@ impl Timeline {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            updates.insert_historic(x)?;
+            updates.insert_historic(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -3805,11 +3846,13 @@ impl Timeline {
     /// If the caller has a deadline or needs a timeout, they can simply stop polling:
     /// we're **cancellation-safe** because the download happens in a separate task_mgr task.
     /// So, the current download attempt will run to completion even if we stop polling.
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%remote_layer.short_id()))]
+    #[instrument(skip_all, fields(layer=%remote_layer.short_id()))]
     pub async fn download_remote_layer(
         &self,
         remote_layer: Arc<RemoteLayer>,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         use std::sync::atomic::Ordering::Relaxed;
 
         let permit = match Arc::clone(&remote_layer.ongoing_download)
@@ -3853,6 +3896,8 @@ impl Timeline {
                     .await;
 
                 if let Ok(size) = &result {
+                    info!("layer file download finished");
+
                     // XXX the temp file is still around in Err() case
                     // and consumes space until we clean up upon pageserver restart.
                     self_clone.metrics.resident_physical_size_gauge.add(*size);
@@ -3924,6 +3969,8 @@ impl Timeline {
                     updates.flush();
                     drop(layers);
 
+                    info!("on-demand download successful");
+
                     // Now that we've inserted the download into the layer map,
                     // close the semaphore. This will make other waiters for
                     // this download return Ok(()).
@@ -3931,7 +3978,7 @@ impl Timeline {
                     remote_layer.ongoing_download.close();
                 } else {
                     // Keep semaphore open. We'll drop the permit at the end of the function.
-                    error!("on-demand download failed: {:?}", result.as_ref().unwrap_err());
+                    error!("layer file download failed: {:?}", result.as_ref().unwrap_err());
                 }
 
                 // Don't treat it as an error if the task that triggered the download
@@ -4249,4 +4296,37 @@ fn rename_to_backup(path: &Path) -> anyhow::Result<()> {
     }
 
     bail!("couldn't find an unused backup number for {:?}", path)
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {}
+
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
+    use utils::tracing_span_assert;
+
+    pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
+        tracing_span_assert::MultiNameExtractor<2>,
+    > = once_cell::sync::Lazy::new(|| {
+        tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
+    });
+
+    pub static TIMELINE_ID_EXTRACTOR: once_cell::sync::Lazy<
+        tracing_span_assert::MultiNameExtractor<2>,
+    > = once_cell::sync::Lazy::new(|| {
+        tracing_span_assert::MultiNameExtractor::new("TimelineId", ["timeline_id", "timeline"])
+    });
+
+    match tracing_span_assert::check_fields_present([
+        &*TENANT_ID_EXTRACTOR,
+        &*TIMELINE_ID_EXTRACTOR,
+    ]) {
+        Ok(()) => (),
+        Err(missing) => panic!(
+            "missing extractors: {:?}",
+            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
+        ),
+    }
 }

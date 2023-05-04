@@ -1,48 +1,23 @@
-//! Postgres protocol proxy/router.
-//!
-//! This service listens psql port and can check auth via external service
-//! (control plane API in our case) and can create new databases and accounts
-//! in somewhat transparent manner (again via communication with control plane API).
+use proxy::auth;
+use proxy::console;
+use proxy::http;
+use proxy::metrics;
 
-mod auth;
-mod cache;
-mod cancellation;
-mod compute;
-mod config;
-mod console;
-mod error;
-mod http;
-mod logging;
-mod metrics;
-mod parse;
-mod proxy;
-mod sasl;
-mod scram;
-mod stream;
-mod url;
-mod waiters;
-
-use anyhow::{bail, Context};
+use anyhow::bail;
 use clap::{self, Arg};
-use config::ProxyConfig;
-use futures::FutureExt;
-use std::{borrow::Cow, future::Future, net::SocketAddr};
-use tokio::{net::TcpListener, task::JoinError};
-use tracing::{info, warn};
+use proxy::config::{self, ProxyConfig};
+use std::{borrow::Cow, net::SocketAddr};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+use tracing::warn;
 use utils::{project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
 
-/// Flattens `Result<Result<T>>` into `Result<T>`.
-async fn flatten_err(
-    f: impl Future<Output = Result<anyhow::Result<()>, JoinError>>,
-) -> anyhow::Result<()> {
-    f.map(|r| r.context("join error").and_then(|x| x)).await
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _logging_guard = logging::init().await?;
+    let _logging_guard = proxy::logging::init().await?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
@@ -66,64 +41,45 @@ async fn main() -> anyhow::Result<()> {
     let proxy_address: SocketAddr = args.get_one::<String>("proxy").unwrap().parse()?;
     info!("Starting proxy on {proxy_address}");
     let proxy_listener = TcpListener::bind(proxy_address).await?;
+    let cancellation_token = CancellationToken::new();
 
-    let mut tasks = vec![
-        tokio::spawn(handle_signals()),
-        tokio::spawn(http::server::task_main(http_listener)),
-        tokio::spawn(proxy::task_main(config, proxy_listener)),
-        tokio::spawn(console::mgmt::task_main(mgmt_listener)),
-    ];
+    let mut client_tasks = vec![tokio::spawn(proxy::proxy::task_main(
+        config,
+        proxy_listener,
+        cancellation_token.clone(),
+    ))];
 
     if let Some(wss_address) = args.get_one::<String>("wss") {
         let wss_address: SocketAddr = wss_address.parse()?;
         info!("Starting wss on {wss_address}");
         let wss_listener = TcpListener::bind(wss_address).await?;
 
-        tasks.push(tokio::spawn(http::websocket::task_main(
+        client_tasks.push(tokio::spawn(http::websocket::task_main(
             config,
             wss_listener,
+            cancellation_token.clone(),
         )));
     }
+
+    let mut tasks = vec![
+        tokio::spawn(proxy::handle_signals(cancellation_token)),
+        tokio::spawn(http::server::task_main(http_listener)),
+        tokio::spawn(console::mgmt::task_main(mgmt_listener)),
+    ];
 
     if let Some(metrics_config) = &config.metric_collection {
         tasks.push(tokio::spawn(metrics::task_main(metrics_config)));
     }
 
-    // This combinator will block until either all tasks complete or
-    // one of them finishes with an error (others will be cancelled).
-    let tasks = tasks.into_iter().map(flatten_err);
-    let _: Vec<()> = futures::future::try_join_all(tasks).await?;
-
-    Ok(())
-}
-
-/// Handle unix signals appropriately.
-async fn handle_signals() -> anyhow::Result<()> {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    let mut hangup = signal(SignalKind::hangup())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-
-    loop {
-        tokio::select! {
-            // Hangup is commonly used for config reload.
-            _ = hangup.recv() => {
-                warn!("received SIGHUP; config reload is not supported");
-            }
-            // Shut down the whole application.
-            _ = interrupt.recv() => {
-                warn!("received SIGINT, exiting immediately");
-                bail!("interrupted");
-            }
-            // TODO: Don't accept new proxy connections.
-            // TODO: Shut down once all exisiting connections have been closed.
-            _ = terminate.recv() => {
-                warn!("received SIGTERM, exiting immediately");
-                bail!("terminated");
-            }
-        }
+    let tasks = futures::future::try_join_all(tasks.into_iter().map(proxy::flatten_err));
+    let client_tasks =
+        futures::future::try_join_all(client_tasks.into_iter().map(proxy::flatten_err));
+    tokio::select! {
+        // We are only expecting an error from these forever tasks
+        res = tasks => { res?; },
+        res = client_tasks => { res?; },
     }
+    Ok(())
 }
 
 /// ProxyConfig is created at proxy startup, and lives forever.
@@ -140,6 +96,14 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         (None, None) => None,
         _ => bail!("either both or neither tls-key and tls-cert must be specified"),
     };
+
+    let allow_self_signed_compute: bool = args
+        .get_one::<String>("allow-self-signed-compute")
+        .unwrap()
+        .parse()?;
+    if allow_self_signed_compute {
+        warn!("allowing self-signed compute certificates");
+    }
 
     let metric_collection = match (
         args.get_one::<String>("metric-collection-endpoint"),
@@ -190,6 +154,7 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         tls_config,
         auth_backend,
         metric_collection,
+        allow_self_signed_compute,
     }));
 
     Ok(config)
@@ -279,6 +244,12 @@ fn cli() -> clap::Command {
                 .long("wake-compute-cache")
                 .help("cache for `wake_compute` api method (use `size=0` to disable)")
                 .default_value(config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO),
+        )
+        .arg(
+            Arg::new("allow-self-signed-compute")
+                .long("allow-self-signed-compute")
+                .help("Allow self-signed certificates for compute nodes (for testing)")
+                .default_value("false"),
         )
 }
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{anyhow, Context};
-use bindgen::callbacks::ParseCallbacks;
+use bindgen::callbacks::{DeriveInfo, ParseCallbacks};
 
 #[derive(Debug)]
 struct PostgresFfiCallbacks;
@@ -20,7 +20,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
 
     // Add any custom #[derive] attributes to the data structures that bindgen
     // creates.
-    fn add_derives(&self, name: &str) -> Vec<String> {
+    fn add_derives(&self, derive_info: &DeriveInfo) -> Vec<String> {
         // This is the list of data structures that we want to serialize/deserialize.
         let serde_list = [
             "XLogRecord",
@@ -31,7 +31,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
             "ControlFileData",
         ];
 
-        if serde_list.contains(&name) {
+        if serde_list.contains(&derive_info.name) {
             vec![
                 "Default".into(), // Default allows us to easily fill the padding fields with 0.
                 "Serialize".into(),

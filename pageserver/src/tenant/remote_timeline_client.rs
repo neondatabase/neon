@@ -219,7 +219,8 @@ use utils::lsn::Lsn;
 
 use crate::metrics::{
     MeasureRemoteOp, RemoteOpFileKind, RemoteOpKind, RemoteTimelineClientMetrics,
-    REMOTE_ONDEMAND_DOWNLOADED_BYTES, REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
+    RemoteTimelineClientMetricsCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
+    REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
 };
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::{
@@ -367,9 +368,13 @@ impl RemoteTimelineClient {
 
     /// Download index file
     pub async fn download_index_file(&self) -> Result<IndexPart, DownloadError> {
-        let _unfinished_gauge_guard = self
-            .metrics
-            .call_begin(&RemoteOpFileKind::Index, &RemoteOpKind::Download);
+        let _unfinished_gauge_guard = self.metrics.call_begin(
+            &RemoteOpFileKind::Index,
+            &RemoteOpKind::Download,
+            crate::metrics::RemoteTimelineClientMetricsCallTrackSize::DontTrackSize {
+                reason: "no need for a downloads gauge",
+            },
+        );
 
         download::download_index_part(
             self.conf,
@@ -398,9 +403,13 @@ impl RemoteTimelineClient {
         layer_metadata: &LayerFileMetadata,
     ) -> anyhow::Result<u64> {
         let downloaded_size = {
-            let _unfinished_gauge_guard = self
-                .metrics
-                .call_begin(&RemoteOpFileKind::Layer, &RemoteOpKind::Download);
+            let _unfinished_gauge_guard = self.metrics.call_begin(
+                &RemoteOpFileKind::Layer,
+                &RemoteOpKind::Download,
+                crate::metrics::RemoteTimelineClientMetricsCallTrackSize::DontTrackSize {
+                    reason: "no need for a downloads gauge",
+                },
+            );
             download::download_layer_file(
                 self.conf,
                 &self.storage_impl,
@@ -886,11 +895,32 @@ impl RemoteTimelineClient {
     fn calls_unfinished_metric_impl(
         &self,
         op: &UploadOp,
-    ) -> Option<(RemoteOpFileKind, RemoteOpKind)> {
+    ) -> Option<(
+        RemoteOpFileKind,
+        RemoteOpKind,
+        RemoteTimelineClientMetricsCallTrackSize,
+    )> {
+        use RemoteTimelineClientMetricsCallTrackSize::DontTrackSize;
         let res = match op {
-            UploadOp::UploadLayer(_, _) => (RemoteOpFileKind::Layer, RemoteOpKind::Upload),
-            UploadOp::UploadMetadata(_, _) => (RemoteOpFileKind::Index, RemoteOpKind::Upload),
-            UploadOp::Delete(file_kind, _) => (*file_kind, RemoteOpKind::Delete),
+            UploadOp::UploadLayer(_, m) => (
+                RemoteOpFileKind::Layer,
+                RemoteOpKind::Upload,
+                RemoteTimelineClientMetricsCallTrackSize::Bytes(m.file_size()),
+            ),
+            UploadOp::UploadMetadata(_, _) => (
+                RemoteOpFileKind::Index,
+                RemoteOpKind::Upload,
+                DontTrackSize {
+                    reason: "metadata uploads are tiny",
+                },
+            ),
+            UploadOp::Delete(file_kind, _) => (
+                *file_kind,
+                RemoteOpKind::Delete,
+                DontTrackSize {
+                    reason: "should we track deletes? positive or negative sign?",
+                },
+            ),
             UploadOp::Barrier(_) => {
                 // we do not account these
                 return None;
@@ -900,20 +930,20 @@ impl RemoteTimelineClient {
     }
 
     fn calls_unfinished_metric_begin(&self, op: &UploadOp) {
-        let (file_kind, op_kind) = match self.calls_unfinished_metric_impl(op) {
+        let (file_kind, op_kind, track_bytes) = match self.calls_unfinished_metric_impl(op) {
             Some(x) => x,
             None => return,
         };
-        let guard = self.metrics.call_begin(&file_kind, &op_kind);
+        let guard = self.metrics.call_begin(&file_kind, &op_kind, track_bytes);
         guard.will_decrement_manually(); // in unfinished_ops_metric_end()
     }
 
     fn calls_unfinished_metric_end(&self, op: &UploadOp) {
-        let (file_kind, op_kind) = match self.calls_unfinished_metric_impl(op) {
+        let (file_kind, op_kind, track_bytes) = match self.calls_unfinished_metric_impl(op) {
             Some(x) => x,
             None => return,
         };
-        self.metrics.call_end(&file_kind, &op_kind);
+        self.metrics.call_end(&file_kind, &op_kind, track_bytes);
     }
 
     fn stop(&self) {
@@ -981,11 +1011,19 @@ impl RemoteTimelineClient {
 mod tests {
     use super::*;
     use crate::{
-        tenant::harness::{TenantHarness, TIMELINE_ID},
+        context::RequestContext,
+        tenant::{
+            harness::{TenantHarness, TIMELINE_ID},
+            Tenant,
+        },
         DEFAULT_PG_VERSION,
     };
     use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
-    use std::{collections::HashSet, path::Path};
+    use std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+    };
+    use tokio::runtime::EnterGuard;
     use utils::lsn::Lsn;
 
     pub(super) fn dummy_contents(name: &str) -> Vec<u8> {
@@ -1034,39 +1072,80 @@ mod tests {
         assert_eq!(found, expected);
     }
 
+    struct TestSetup {
+        runtime: &'static tokio::runtime::Runtime,
+        entered_runtime: EnterGuard<'static>,
+        harness: TenantHarness<'static>,
+        tenant: Arc<Tenant>,
+        tenant_ctx: RequestContext,
+        remote_fs_dir: PathBuf,
+        client: Arc<RemoteTimelineClient>,
+    }
+
+    impl TestSetup {
+        fn new(test_name: &str) -> anyhow::Result<Self> {
+            // Use a current-thread runtime in the test
+            let runtime = Box::leak(Box::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?,
+            ));
+            let entered_runtime = runtime.enter();
+
+            let test_name = Box::leak(Box::new(format!("remote_timeline_client__{test_name}")));
+            let harness = TenantHarness::create(test_name)?;
+            let (tenant, ctx) = runtime.block_on(harness.load());
+            // create an empty timeline directory
+            let timeline =
+                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            let _ = timeline.initialize(&ctx).unwrap();
+
+            let remote_fs_dir = harness.conf.workdir.join("remote_fs");
+            std::fs::create_dir_all(remote_fs_dir)?;
+            let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
+
+            let storage_config = RemoteStorageConfig {
+                max_concurrent_syncs: std::num::NonZeroUsize::new(
+                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
+                )
+                .unwrap(),
+                max_sync_errors: std::num::NonZeroU32::new(
+                    remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
+                )
+                .unwrap(),
+                storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
+            };
+
+            let storage = GenericRemoteStorage::from_config(&storage_config).unwrap();
+
+            let client = Arc::new(RemoteTimelineClient {
+                conf: harness.conf,
+                runtime,
+                tenant_id: harness.tenant_id,
+                timeline_id: TIMELINE_ID,
+                storage_impl: storage,
+                upload_queue: Mutex::new(UploadQueue::Uninitialized),
+                metrics: Arc::new(RemoteTimelineClientMetrics::new(
+                    &harness.tenant_id,
+                    &TIMELINE_ID,
+                )),
+            });
+
+            Ok(Self {
+                runtime,
+                entered_runtime,
+                harness,
+                tenant,
+                tenant_ctx: ctx,
+                remote_fs_dir,
+                client,
+            })
+        }
+    }
+
     // Test scheduling
     #[test]
     fn upload_scheduling() -> anyhow::Result<()> {
-        // Use a current-thread runtime in the test
-        let runtime = Box::leak(Box::new(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?,
-        ));
-        let _entered = runtime.enter();
-
-        let harness = TenantHarness::create("upload_scheduling")?;
-        let (tenant, ctx) = runtime.block_on(harness.load());
-        let _timeline =
-            tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let timeline_path = harness.timeline_path(&TIMELINE_ID);
-
-        let remote_fs_dir = harness.conf.workdir.join("remote_fs");
-        std::fs::create_dir_all(remote_fs_dir)?;
-        let remote_fs_dir = std::fs::canonicalize(harness.conf.workdir.join("remote_fs"))?;
-
-        let storage_config = RemoteStorageConfig {
-            max_concurrent_syncs: std::num::NonZeroUsize::new(
-                remote_storage::DEFAULT_REMOTE_STORAGE_MAX_CONCURRENT_SYNCS,
-            )
-            .unwrap(),
-            max_sync_errors: std::num::NonZeroU32::new(
-                remote_storage::DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS,
-            )
-            .unwrap(),
-            storage: RemoteStorageKind::LocalFs(remote_fs_dir.clone()),
-        };
-
         // Test outline:
         //
         // Schedule upload of a bunch of layers. Check that they are started immediately, not queued
@@ -1081,21 +1160,19 @@ mod tests {
         // Schedule another deletion. Check that it's launched immediately.
         // Schedule index upload. Check that it's queued
 
-        println!("workdir: {}", harness.conf.workdir.display());
-
-        let storage_impl = GenericRemoteStorage::from_config(&storage_config)?;
-        let client = Arc::new(RemoteTimelineClient {
-            conf: harness.conf,
+        let TestSetup {
             runtime,
-            tenant_id: harness.tenant_id,
-            timeline_id: TIMELINE_ID,
-            storage_impl,
-            upload_queue: Mutex::new(UploadQueue::Uninitialized),
-            metrics: Arc::new(RemoteTimelineClientMetrics::new(
-                &harness.tenant_id,
-                &TIMELINE_ID,
-            )),
-        });
+            entered_runtime: _entered_runtime,
+            harness,
+            tenant: _tenant,
+            tenant_ctx: _tenant_ctx,
+            remote_fs_dir,
+            client,
+        } = TestSetup::new("upload_scheduling").unwrap();
+
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+
+        println!("workdir: {}", harness.conf.workdir.display());
 
         let remote_timeline_dir =
             remote_fs_dir.join(timeline_path.strip_prefix(&harness.conf.workdir)?);
@@ -1212,6 +1289,92 @@ mod tests {
                 "index_part.json",
             ],
             &remote_timeline_dir,
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn bytes_unfinished_gauge_for_layer_file_uploads() -> anyhow::Result<()> {
+        // Setup
+
+        let TestSetup {
+            runtime,
+            harness,
+            client,
+            ..
+        } = TestSetup::new("metrics")?;
+
+        let metadata = dummy_metadata(Lsn(0x10));
+        client.init_upload_queue_for_empty_remote(&metadata)?;
+
+        let timeline_path = harness.timeline_path(&TIMELINE_ID);
+
+        let layer_file_name_1: LayerFileName = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__00000000016B59D8-00000000016B5A51".parse().unwrap();
+        let content_1 = dummy_contents("foo");
+        std::fs::write(
+            timeline_path.join(layer_file_name_1.file_name()),
+            &content_1,
+        )?;
+
+        #[derive(Debug, PartialEq)]
+        struct BytesStartedFinished {
+            started: Option<usize>,
+            finished: Option<usize>,
+        }
+        let get_bytes_started_stopped = || {
+            let started = client
+                .metrics
+                .get_bytes_started_counter_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
+                .map(|v| v.try_into().unwrap());
+            let stopped = client
+                .metrics
+                .get_bytes_finished_counter_value(&RemoteOpFileKind::Layer, &RemoteOpKind::Upload)
+                .map(|v| v.try_into().unwrap());
+            BytesStartedFinished {
+                started,
+                finished: stopped,
+            }
+        };
+
+        // Test
+
+        let init = get_bytes_started_stopped();
+
+        client.schedule_layer_file_upload(
+            &layer_file_name_1,
+            &LayerFileMetadata::new(content_1.len() as u64),
+        )?;
+
+        let pre = get_bytes_started_stopped();
+
+        runtime.block_on(client.wait_completion())?;
+
+        let post = get_bytes_started_stopped();
+
+        // Validate
+
+        assert_eq!(
+            init,
+            BytesStartedFinished {
+                started: None,
+                finished: None
+            }
+        );
+        assert_eq!(
+            pre,
+            BytesStartedFinished {
+                started: Some(content_1.len()),
+                // assert that the _finished metric is created eagerly so that subtractions work on first sample
+                finished: Some(0),
+            }
+        );
+        assert_eq!(
+            post,
+            BytesStartedFinished {
+                started: Some(content_1.len()),
+                finished: Some(content_1.len())
+            }
         );
 
         Ok(())

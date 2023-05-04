@@ -118,6 +118,10 @@ pub struct Tenant {
     // Global pageserver config parameters
     pub conf: &'static PageServerConf,
 
+    /// The value creation timestamp, used to measure activation delay, see:
+    /// <https://github.com/neondatabase/neon/issues/4025>
+    loading_started_at: Instant,
+
     state: watch::Sender<TenantState>,
 
     // Overridden tenant-specific config parameters.
@@ -1476,7 +1480,7 @@ impl Tenant {
                 TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Active;
 
-                    info!("Activating tenant {}", self.tenant_id);
+                    debug!(tenant_id = %self.tenant_id, "Activating tenant");
 
                     let timelines_accessor = self.timelines.lock().unwrap();
                     let not_broken_timelines = timelines_accessor
@@ -1487,12 +1491,17 @@ impl Tenant {
                     // down when they notice that the tenant is inactive.
                     tasks::start_background_loops(self.tenant_id);
 
+                    let mut activated_timelines = 0;
+                    let mut timelines_broken_during_activation = 0;
+
                     for timeline in not_broken_timelines {
                         match timeline
                             .activate(ctx)
                             .context("timeline activation for activating tenant")
                         {
-                            Ok(()) => {}
+                            Ok(()) => {
+                                activated_timelines += 1;
+                            }
                             Err(e) => {
                                 error!(
                                     "Failed to activate timeline {}: {:#}",
@@ -1503,9 +1512,26 @@ impl Tenant {
                                     "failed to activate timeline {}: {}",
                                     timeline.timeline_id, e
                                 ));
+
+                                timelines_broken_during_activation += 1;
                             }
                         }
                     }
+
+                    let elapsed = self.loading_started_at.elapsed();
+                    let total_timelines = timelines_accessor.len();
+
+                    // log a lot of stuff, because some tenants sometimes suffer from user-visible
+                    // times to activate. see https://github.com/neondatabase/neon/issues/4025
+                    info!(
+                        since_creation_millis = elapsed.as_millis(),
+                        tenant_id = %self.tenant_id,
+                        activated_timelines,
+                        timelines_broken_during_activation,
+                        total_timelines,
+                        post_state = <&'static str>::from(&*current_state),
+                        "activation attempt finished"
+                    );
                 }
             }
         });
@@ -1735,6 +1761,13 @@ impl Tenant {
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
         *self.tenant_conf.write().unwrap() = new_tenant_conf;
+        // Don't hold self.timelines.lock() during the notifies.
+        // There's no risk of deadlock right now, but there could be if we consolidate
+        // mutexes in struct Timeline in the future.
+        let timelines = self.list_timelines();
+        for timeline in timelines {
+            timeline.tenant_conf_updated();
+        }
     }
 
     fn create_timeline_data(
@@ -1805,6 +1838,9 @@ impl Tenant {
         Tenant {
             tenant_id,
             conf,
+            // using now here is good enough approximation to catch tenants with really long
+            // activation times.
+            loading_started_at: Instant::now(),
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
             timelines: Mutex::new(HashMap::new()),
             gc_cs: tokio::sync::Mutex::new(()),
@@ -1887,7 +1923,7 @@ impl Tenant {
             .to_string();
 
             // Convert the config to a toml file.
-            conf_content += &toml_edit::easy::to_string(&tenant_conf)?;
+            conf_content += &toml_edit::ser::to_string(&tenant_conf)?;
 
             let mut target_config_file = VirtualFile::open_with_options(
                 target_config_path,
@@ -2815,6 +2851,9 @@ pub mod harness {
                 trace_read_requests: Some(tenant_conf.trace_read_requests),
                 eviction_policy: Some(tenant_conf.eviction_policy),
                 min_resident_size_override: tenant_conf.min_resident_size_override,
+                evictions_low_residence_duration_metric_threshold: Some(
+                    tenant_conf.evictions_low_residence_duration_metric_threshold,
+                ),
             }
         }
     }
@@ -2847,7 +2886,13 @@ pub mod harness {
             };
 
             LOG_HANDLE.get_or_init(|| {
-                logging::init(logging::LogFormat::Test).expect("Failed to init test logging")
+                logging::init(
+                    logging::LogFormat::Test,
+                    // enable it in case in case the tests exercise code paths that use
+                    // debug_assert_current_span_has_tenant_and_timeline_id
+                    logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+                )
+                .expect("Failed to init test logging")
             });
 
             let repo_dir = PageServerConf::test_repo_dir(test_name);

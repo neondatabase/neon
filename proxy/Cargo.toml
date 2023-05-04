@@ -62,8 +62,11 @@ utils.workspace = true
 uuid.workspace = true
 webpki-roots.workspace = true
 x509-parser.workspace = true
+native-tls.workspace = true
+postgres-native-tls.workspace = true
 
 workspace_hack.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true

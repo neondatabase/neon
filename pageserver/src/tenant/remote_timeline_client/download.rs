@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use crate::config::PageServerConf;
 use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::timeline::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
@@ -43,6 +44,8 @@ pub async fn download_layer_file<'a>(
     layer_file_name: &'a LayerFileName,
     layer_metadata: &'a LayerFileMetadata,
 ) -> Result<u64, DownloadError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+
     let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
 
     let local_path = timeline_path.join(layer_file_name.file_name());
@@ -154,7 +157,7 @@ pub async fn download_layer_file<'a>(
         .with_context(|| format!("Could not fsync layer file {}", local_path.display(),))
         .map_err(DownloadError::Other)?;
 
-    tracing::info!("download complete: {}", local_path.display());
+    tracing::debug!("download complete: {}", local_path.display());
 
     Ok(bytes_amount)
 }

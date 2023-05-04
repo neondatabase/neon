@@ -18,6 +18,7 @@ use tracing_utils::http::OtelName;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
+        start_time: state.start_time,
         tenant: state
             .pspec
             .as_ref()
@@ -85,7 +86,10 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let res = crate::checker::check_writability(compute).await;
             match res {
                 Ok(_) => Response::new(Body::from("true")),
-                Err(e) => Response::new(Body::from(e.to_string())),
+                Err(e) => {
+                    error!("check_writability failed: {}", e);
+                    Response::new(Body::from(e.to_string()))
+                }
             }
         }
 
@@ -155,7 +159,7 @@ async fn handle_configure_request(
         // ```
         {
             let mut state = compute.state.lock().unwrap();
-            if state.status != ComputeStatus::Empty {
+            if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
                 let msg = format!(
                     "invalid compute status for configuration request: {:?}",
                     state.status.clone()

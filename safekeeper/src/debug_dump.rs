@@ -9,9 +9,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use postgres_ffi::XLogSegNo;
+use serde::Deserialize;
 use serde::Serialize;
 
-use utils::http::json::display_serialize;
+use serde_with::{serde_as, DisplayFromStr};
 use utils::id::NodeId;
 use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
@@ -22,11 +23,11 @@ use crate::safekeeper::SafekeeperMemState;
 use crate::safekeeper::TermHistory;
 use crate::SafeKeeperConf;
 
-use crate::timeline::ReplicaState;
+use crate::send_wal::WalSenderState;
 use crate::GlobalTimelines;
 
 /// Various filters that influence the resulting JSON output.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Args {
     /// Dump all available safekeeper state. False by default.
     pub dump_all: bool,
@@ -51,7 +52,7 @@ pub struct Args {
 }
 
 /// Response for debug dump request.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub start_time: DateTime<Utc>,
     pub finish_time: DateTime<Utc>,
@@ -61,7 +62,7 @@ pub struct Response {
 }
 
 /// Safekeeper configuration.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub id: NodeId,
     pub workdir: PathBuf,
@@ -72,22 +73,23 @@ pub struct Config {
     pub wal_backup_enabled: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Timeline {
-    #[serde(serialize_with = "display_serialize")]
+    #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde(serialize_with = "display_serialize")]
+    #[serde_as(as = "DisplayFromStr")]
     pub timeline_id: TimelineId,
     pub control_file: Option<SafeKeeperState>,
     pub memory: Option<Memory>,
     pub disk_content: Option<DiskContent>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Memory {
     pub is_cancelled: bool,
     pub peers_info_len: usize,
-    pub replicas: Vec<Option<ReplicaState>>,
+    pub walsenders: Vec<WalSenderState>,
     pub wal_backup_active: bool,
     pub active: bool,
     pub num_computes: u32,
@@ -102,12 +104,12 @@ pub struct Memory {
     pub file_open: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DiskContent {
     pub files: Vec<FileInfo>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FileInfo {
     pub name: String,
     pub size: u64,

@@ -781,6 +781,19 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
 
+    if let Some(evictions_low_residence_duration_metric_threshold) =
+        request_data.evictions_low_residence_duration_metric_threshold
+    {
+        tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
+            humantime::parse_duration(&evictions_low_residence_duration_metric_threshold)
+                .with_context(bad_duration(
+                    "evictions_low_residence_duration_metric_threshold",
+                    &evictions_low_residence_duration_metric_threshold,
+                ))
+                .map_err(ApiError::BadRequest)?,
+        );
+    }
+
     let target_tenant_id = request_data
         .new_tenant_id
         .map(TenantId::from)
@@ -913,6 +926,19 @@ async fn update_tenant_config_handler(
     }
 
     tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
+
+    if let Some(evictions_low_residence_duration_metric_threshold) =
+        request_data.evictions_low_residence_duration_metric_threshold
+    {
+        tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
+            humantime::parse_duration(&evictions_low_residence_duration_metric_threshold)
+                .with_context(bad_duration(
+                    "evictions_low_residence_duration_metric_threshold",
+                    &evictions_low_residence_duration_metric_threshold,
+                ))
+                .map_err(ApiError::BadRequest)?,
+        );
+    }
 
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
@@ -1175,6 +1201,37 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     )
 }
 
+#[cfg(feature = "testing")]
+async fn post_tracing_event_handler(mut r: Request<Body>) -> Result<Response<Body>, ApiError> {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum Level {
+        Error,
+        Warn,
+        Info,
+        Debug,
+        Trace,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    struct Request {
+        level: Level,
+        message: String,
+    }
+    let body: Request = json_request(&mut r)
+        .await
+        .map_err(|_| ApiError::BadRequest(anyhow::anyhow!("invalid JSON body")))?;
+
+    match body.level {
+        Level::Error => tracing::error!(?body.message),
+        Level::Warn => tracing::warn!(?body.message),
+        Level::Info => tracing::info!(?body.message),
+        Level::Debug => tracing::debug!(?body.message),
+        Level::Trace => tracing::trace!(?body.message),
+    }
+
+    json_response(StatusCode::OK, ())
+}
+
 pub fn make_router(
     conf: &'static PageServerConf,
     launch_ts: &'static LaunchTimestamp,
@@ -1315,5 +1372,9 @@ pub fn make_router(
             testing_api!("set tenant state to broken", handle_tenant_break),
         )
         .get("/v1/panic", |r| RequestSpan(always_panic_handler).handle(r))
+        .post(
+            "/v1/tracing/event",
+            testing_api!("emit a tracing event", post_tracing_event_handler),
+        )
         .any(handler_404))
 }

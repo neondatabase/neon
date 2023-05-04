@@ -17,7 +17,7 @@ storage:
           kind: "LayerAccessThreshold"
           period: "10m"
           threshold: &default_eviction_threshold "24h"
-      evictions_low_residence_duration_metric_threshold: *default_eviction_threshold
+        evictions_low_residence_duration_metric_threshold: *default_eviction_threshold
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
@@ -34,13 +34,21 @@ storage:
     pageservers:
       hosts:
         pageserver-0.us-west-2.aws.neon.tech:
-          ansible_host: i-0d9f6dfae0e1c780d 
+          ansible_host: i-0d9f6dfae0e1c780d
         pageserver-1.us-west-2.aws.neon.tech:
           ansible_host: i-0c834be1dddba8b3f
         pageserver-2.us-west-2.aws.neon.tech:
           ansible_host: i-051642d372c0a4f32
         pageserver-3.us-west-2.aws.neon.tech:
           ansible_host: i-00c3844beb9ad1c6b
+        pageserver-4.us-west-2.aws.neon.tech:
+          ansible_host: i-013263dd1c239adcc
+        pageserver-5.us-west-2.aws.neon.tech:
+          ansible_host: i-00ca6417c7bf96820
+        pageserver-6.us-west-2.aws.neon.tech:
+          ansible_host: i-01cdf7d2bc1433b6a
+        pageserver-7.us-west-2.aws.neon.tech:
+          ansible_host: i-02eec9b40617db5bc
 
     safekeepers:
       hosts:
@@ -49,5 +57,16 @@ storage:
         safekeeper-1.us-west-2.aws.neon.tech:
           ansible_host: i-074682f9d3c712e7c
         safekeeper-2.us-west-2.aws.neon.tech:
-          ansible_host: i-042b7efb1729d7966 
-          
+          ansible_host: i-042b7efb1729d7966
+        safekeeper-3.us-west-2.aws.neon.tech:
+          ansible_host: i-089f6b9ef426dff76
+        safekeeper-4.us-west-2.aws.neon.tech:
+          ansible_host: i-0fe6bf912c4710c82
+        safekeeper-5.us-west-2.aws.neon.tech:
+          ansible_host: i-0a83c1c46d2b4e409
+        safekeeper-6.us-west-2.aws.neon.tech:
+          ansible_host: i-0fef5317b8fdc9f8d
+        safekeeper-7.us-west-2.aws.neon.tech:
+          ansible_host: i-0be739190d4289bf9
+        safekeeper-8.us-west-2.aws.neon.tech:
+          ansible_host: i-00e851803669e5cfe                    

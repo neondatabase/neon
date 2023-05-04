@@ -17,6 +17,8 @@
 #include "pagestore_client.h"
 #include "fmgr.h"
 #include "access/xlog.h"
+#include "access/xlogutils.h"
+#include "storage/buf_internals.h"
 
 #include "libpq-fe.h"
 #include "libpq/pqformat.h"
@@ -56,6 +58,8 @@ char	   *neon_auth_token;
 int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
 int			readahead_buffer_size = 128;
+
+bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
 static void pageserver_flush(void);
 
@@ -467,6 +471,8 @@ pg_init_libpagestore(void)
 		smgr_hook = smgr_neon;
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
+		old_redo_read_buffer_filter = redo_read_buffer_filter;
+		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
 	lfc_init();
 }

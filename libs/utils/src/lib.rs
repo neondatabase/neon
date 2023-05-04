@@ -54,6 +54,10 @@ pub mod measured_stream;
 pub mod serde_percent;
 pub mod serde_regex;
 
+pub mod pageserver_feedback;
+
+pub mod tracing_span_assert;
+
 pub mod rate_limit;
 
 /// use with fail::cfg("$name", "return(2000)")

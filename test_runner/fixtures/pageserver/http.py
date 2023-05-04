@@ -519,6 +519,13 @@ class PageserverHttpClient(requests.Session):
 
         assert res.status_code == 200
 
+    def download_all_layers(self, tenant_id: TenantId, timeline_id: TimelineId):
+        info = self.layer_map_info(tenant_id, timeline_id)
+        for layer in info.historic_layers:
+            if not layer.remote:
+                continue
+            self.download_layer(tenant_id, timeline_id, layer.layer_file_name)
+
     def evict_layer(self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: str):
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}",
@@ -542,4 +549,14 @@ class PageserverHttpClient(requests.Session):
 
     def tenant_break(self, tenant_id: TenantId):
         res = self.put(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/break")
+        self.verbose_error(res)
+
+    def post_tracing_event(self, level: str, message: str):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tracing/event",
+            json={
+                "level": level,
+                "message": message,
+            },
+        )
         self.verbose_error(res)

@@ -1457,6 +1457,7 @@ class NeonCli(AbstractNeonCli):
         branch_name: str,
         endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
@@ -1476,6 +1477,8 @@ class NeonCli(AbstractNeonCli):
             args.extend(["--port", str(port)])
         if endpoint_id is not None:
             args.append(endpoint_id)
+        if hot_standby:
+            args.extend(["--hot-standby", "true"])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -1823,6 +1826,36 @@ class VanillaPostgres(PgProtocol):
             self.pg_bin.run_capture(["initdb", "-D", str(pgdatadir)])
         self.configure([f"port = {port}\n"])
 
+    def enable_tls(self):
+        assert not self.running
+        # generate self-signed certificate
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-x509",
+                "-days",
+                "365",
+                "-nodes",
+                "-text",
+                "-out",
+                self.pgdatadir / "server.crt",
+                "-keyout",
+                self.pgdatadir / "server.key",
+                "-subj",
+                "/CN=localhost",
+            ]
+        )
+        # configure postgresql.conf
+        self.configure(
+            [
+                "ssl = on",
+                "ssl_cert_file = 'server.crt'",
+                "ssl_key_file = 'server.key'",
+            ]
+        )
+
     def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
         assert not self.running
@@ -1919,15 +1952,26 @@ def remote_pg(
     connstr = os.getenv("BENCHMARK_CONNSTR")
     if connstr is None:
         raise ValueError("no connstr provided, use BENCHMARK_CONNSTR environment variable")
+
+    host = parse_dsn(connstr).get("host", "")
+    is_neon = host.endswith(".neon.build")
+
     start_ms = int(datetime.utcnow().timestamp() * 1000)
     with RemotePostgres(pg_bin, connstr) as remote_pg:
+        if is_neon:
+            timeline_id = TimelineId(remote_pg.safe_psql("SHOW neon.timeline_id")[0][0])
+
         yield remote_pg
 
     end_ms = int(datetime.utcnow().timestamp() * 1000)
-    host = parse_dsn(connstr).get("host", "")
-    if host.endswith(".neon.build"):
+    if is_neon:
         # Add 10s margin to the start and end times
-        allure_add_grafana_links(host, start_ms - 10_000, end_ms + 10_000)
+        allure_add_grafana_links(
+            host,
+            timeline_id,
+            start_ms - 10_000,
+            end_ms + 10_000,
+        )
 
 
 class PSQL:
@@ -1984,6 +2028,7 @@ class NeonProxy(PgProtocol):
                 # Link auth backend params
                 *["--auth-backend", "link"],
                 *["--uri", NeonProxy.link_auth_uri],
+                *["--allow-self-signed-compute", "true"],
             ]
 
     @dataclass(frozen=True)
@@ -2004,6 +2049,7 @@ class NeonProxy(PgProtocol):
     def __init__(
         self,
         neon_binpath: Path,
+        test_output_dir: Path,
         proxy_port: int,
         http_port: int,
         mgmt_port: int,
@@ -2017,6 +2063,7 @@ class NeonProxy(PgProtocol):
         self.host = host
         self.http_port = http_port
         self.neon_binpath = neon_binpath
+        self.test_output_dir = test_output_dir
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
         self.auth_backend = auth_backend
@@ -2043,9 +2090,21 @@ class NeonProxy(PgProtocol):
                 *["--metric-collection-interval", self.metric_collection_interval],
             ]
 
-        self._popen = subprocess.Popen(args)
+        logfile = open(self.test_output_dir / "proxy.log", "w")
+        self._popen = subprocess.Popen(args, stdout=logfile, stderr=logfile)
         self._wait_until_ready()
         return self
+
+    # Sends SIGTERM to the proxy if it has been started
+    def terminate(self):
+        if self._popen:
+            self._popen.terminate()
+
+    # Waits for proxy to exit if it has been opened with a default timeout of
+    # two seconds. Raises subprocess.TimeoutExpired if the proxy does not exit in time.
+    def wait_for_exit(self, timeout=2):
+        if self._popen:
+            self._popen.wait(timeout=2)
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
@@ -2089,7 +2148,7 @@ class NeonProxy(PgProtocol):
             try:
                 self._popen.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                log.warn("failed to gracefully terminate proxy; killing")
+                log.warning("failed to gracefully terminate proxy; killing")
                 self._popen.kill()
 
     @staticmethod
@@ -2100,6 +2159,7 @@ class NeonProxy(PgProtocol):
 
         if create_user:
             log.info("creating a new user for link auth test")
+            local_vanilla_pg.enable_tls()
             local_vanilla_pg.start()
             local_vanilla_pg.safe_psql(f"create user {pg_user} with login superuser")
 
@@ -2133,7 +2193,9 @@ class NeonProxy(PgProtocol):
 
 
 @pytest.fixture(scope="function")
-def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterator[NeonProxy]:
+def link_proxy(
+    port_distributor: PortDistributor, neon_binpath: Path, test_output_dir: Path
+) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
 
     http_port = port_distributor.get_port()
@@ -2142,6 +2204,7 @@ def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterato
 
     with NeonProxy(
         neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
@@ -2153,7 +2216,10 @@ def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterato
 
 @pytest.fixture(scope="function")
 def static_proxy(
-    vanilla_pg: VanillaPostgres, port_distributor: PortDistributor, neon_binpath: Path
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 
@@ -2172,6 +2238,7 @@ def static_proxy(
 
     with NeonProxy(
         neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
@@ -2190,6 +2257,7 @@ class Endpoint(PgProtocol):
         super().__init__(host="localhost", port=port, user="cloud_admin", dbname="postgres")
         self.env = env
         self.running = False
+        self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
@@ -2201,6 +2269,7 @@ class Endpoint(PgProtocol):
         self,
         branch_name: str,
         endpoint_id: Optional[str] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> "Endpoint":
@@ -2215,12 +2284,14 @@ class Endpoint(PgProtocol):
         if endpoint_id is None:
             endpoint_id = self.env.generate_endpoint_id()
         self.endpoint_id = endpoint_id
+        self.branch_name = branch_name
 
         self.env.neon_cli.endpoint_create(
             branch_name,
             endpoint_id=self.endpoint_id,
             tenant_id=self.tenant_id,
             lsn=lsn,
+            hot_standby=hot_standby,
             port=self.port,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
@@ -2345,6 +2416,7 @@ class Endpoint(PgProtocol):
         self,
         branch_name: str,
         endpoint_id: Optional[str] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
     ) -> "Endpoint":
@@ -2359,6 +2431,7 @@ class Endpoint(PgProtocol):
             branch_name=branch_name,
             endpoint_id=endpoint_id,
             config_lines=config_lines,
+            hot_standby=hot_standby,
             lsn=lsn,
         ).start()
 
@@ -2392,6 +2465,7 @@ class EndpointFactory:
         endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
+        hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
     ) -> Endpoint:
         ep = Endpoint(
@@ -2405,6 +2479,7 @@ class EndpointFactory:
         return ep.create_start(
             branch_name=branch_name,
             endpoint_id=endpoint_id,
+            hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
         )
@@ -2415,6 +2490,7 @@ class EndpointFactory:
         endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
+        hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
     ) -> Endpoint:
         ep = Endpoint(
@@ -2433,6 +2509,7 @@ class EndpointFactory:
             branch_name=branch_name,
             endpoint_id=endpoint_id,
             lsn=lsn,
+            hot_standby=hot_standby,
             config_lines=config_lines,
         )
 
@@ -2441,6 +2518,36 @@ class EndpointFactory:
             ep.stop()
 
         return self
+
+    def new_replica(self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]]):
+        branch_name = origin.branch_name
+        assert origin in self.endpoints
+        assert branch_name is not None
+
+        return self.create(
+            branch_name=branch_name,
+            endpoint_id=endpoint_id,
+            tenant_id=origin.tenant_id,
+            lsn=None,
+            hot_standby=True,
+            config_lines=config_lines,
+        )
+
+    def new_replica_start(
+        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]] = None
+    ):
+        branch_name = origin.branch_name
+        assert origin in self.endpoints
+        assert branch_name is not None
+
+        return self.create_start(
+            branch_name=branch_name,
+            endpoint_id=endpoint_id,
+            tenant_id=origin.tenant_id,
+            lsn=None,
+            hot_standby=True,
+            config_lines=config_lines,
+        )
 
 
 @dataclass
@@ -2527,6 +2634,7 @@ class SafekeeperTimelineStatus:
     commit_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
+    peer_horizon_lsn: Lsn
     remote_consistent_lsn: Lsn
 
 
@@ -2559,6 +2667,13 @@ class SafekeeperHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
+    def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def timeline_create(
         self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
     ):
@@ -2584,6 +2699,7 @@ class SafekeeperHttpClient(requests.Session):
             commit_lsn=Lsn(resj["commit_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
+            peer_horizon_lsn=Lsn(resj["peer_horizon_lsn"]),
             remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
         )
 
@@ -2912,32 +3028,18 @@ def fork_at_current_lsn(
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
 
 
-def wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    safekeepers: List[Safekeeper],
-    pageserver: NeonPageserver,
-):
-    sk_commit_lsns = [
-        sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn for sk in safekeepers
-    ]
-    lsn = max(sk_commit_lsns)
-    ps_http = pageserver.http_client()
-    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, lsn)
-    return lsn
-
-
-def wait_for_sk_commit_lsn_to_reach_remote_storage(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    safekeepers: List[Safekeeper],
-    pageserver: NeonPageserver,
-):
-    lsn = wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
-        tenant_id, timeline_id, safekeepers, pageserver
-    )
-    ps_http = pageserver.http_client()
+def last_flush_lsn_upload(
+    env: NeonEnv, endpoint: Endpoint, tenant_id: TenantId, timeline_id: TimelineId
+) -> Lsn:
+    """
+    Wait for pageserver to catch to the latest flush LSN of given endpoint,
+    checkpoint pageserver, and wait for it to be uploaded (remote_consistent_lsn
+    reaching flush LSN).
+    """
+    last_flush_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    ps_http = env.pageserver.http_client()
+    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, last_flush_lsn)
     # force a checkpoint to trigger upload
     ps_http.timeline_checkpoint(tenant_id, timeline_id)
-    wait_for_upload(ps_http, tenant_id, timeline_id, lsn)
-    return lsn
+    wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
+    return last_flush_lsn

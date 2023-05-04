@@ -9,6 +9,7 @@ settings:
   authEndpoint: "https://console.stage.neon.tech/authenticate_proxy_request/"
   uri: "https://console.stage.neon.tech/psql_session/"
   domain: "pg.neon.build"
+  otelExporterOtlpEndpoint: "https://otel-collector.beta.us-east-2.internal.aws.neon.build"
   sentryEnvironment: "staging"
   metricCollectionEndpoint: "http://neon-internal-api.aws.neon.build/billing/api/v1/usage_events"
   metricCollectionInterval: "1min"

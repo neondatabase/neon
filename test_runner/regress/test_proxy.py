@@ -1,3 +1,5 @@
+import subprocess
+
 import psycopg2
 import pytest
 from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
@@ -134,3 +136,19 @@ def test_forward_params_to_client(static_proxy: NeonProxy):
             for name, value in cur.fetchall():
                 # Check that proxy has forwarded this parameter.
                 assert conn.get_parameter_status(name) == value
+
+
+@pytest.mark.timeout(5)
+def test_close_on_connections_exit(static_proxy: NeonProxy):
+    # Open two connections, send SIGTERM, then ensure that proxy doesn't exit
+    # until after connections close.
+    with static_proxy.connect(options="project=irrelevant"), static_proxy.connect(
+        options="project=irrelevant"
+    ):
+        static_proxy.terminate()
+        with pytest.raises(subprocess.TimeoutExpired):
+            static_proxy.wait_for_exit(timeout=2)
+        # Ensure we don't accept any more connections
+        with pytest.raises(psycopg2.OperationalError):
+            static_proxy.connect(options="project=irrelevant")
+    static_proxy.wait_for_exit()

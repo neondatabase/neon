@@ -39,6 +39,7 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
+    pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 }
 
 /// Per-tenant configuration options
@@ -93,6 +94,9 @@ pub struct TenantConf {
     pub trace_read_requests: bool,
     pub eviction_policy: EvictionPolicy,
     pub min_resident_size_override: Option<u64>,
+    // See the corresponding metric's help string.
+    #[serde(with = "humantime_serde")]
+    pub evictions_low_residence_duration_metric_threshold: Duration,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -164,6 +168,11 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub min_resident_size_override: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +237,9 @@ impl TenantConfOpt {
             min_resident_size_override: self
                 .min_resident_size_override
                 .or(global_conf.min_resident_size_override),
+            evictions_low_residence_duration_metric_threshold: self
+                .evictions_low_residence_duration_metric_threshold
+                .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
         }
     }
 }
@@ -260,6 +272,10 @@ impl Default for TenantConf {
             trace_read_requests: false,
             eviction_policy: EvictionPolicy::NoEviction,
             min_resident_size_override: None,
+            evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
+                DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
+            )
+            .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
         }
     }
 }
@@ -275,9 +291,9 @@ mod tests {
             ..TenantConfOpt::default()
         };
 
-        let toml_form = toml_edit::easy::to_string(&small_conf).unwrap();
+        let toml_form = toml_edit::ser::to_string(&small_conf).unwrap();
         assert_eq!(toml_form, "gc_horizon = 42\n");
-        assert_eq!(small_conf, toml_edit::easy::from_str(&toml_form).unwrap());
+        assert_eq!(small_conf, toml_edit::de::from_str(&toml_form).unwrap());
 
         let json_form = serde_json::to_string(&small_conf).unwrap();
         assert_eq!(json_form, "{\"gc_horizon\":42}");

@@ -8,6 +8,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
 use control_plane::endpoint::ComputeControlPlane;
+use control_plane::endpoint::ComputeMode;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -474,7 +475,14 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
             env.register_branch_mapping(name.to_string(), tenant_id, timeline_id)?;
 
             println!("Creating endpoint for imported timeline ...");
-            cplane.new_endpoint(tenant_id, name, timeline_id, None, None, pg_version)?;
+            cplane.new_endpoint(
+                tenant_id,
+                name,
+                timeline_id,
+                None,
+                pg_version,
+                ComputeMode::Primary,
+            )?;
             println!("Done");
         }
         Some(("branch", branch_match)) => {
@@ -560,19 +568,19 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .iter()
                 .filter(|(_, endpoint)| endpoint.tenant_id == tenant_id)
             {
-                let lsn_str = match endpoint.lsn {
-                    None => {
-                        // -> primary endpoint
+                let lsn_str = match endpoint.mode {
+                    ComputeMode::Static(lsn) => {
+                        // -> read-only endpoint
+                        // Use the node's LSN.
+                        lsn.to_string()
+                    }
+                    _ => {
+                        // -> primary endpoint or hot replica
                         // Use the LSN at the end of the timeline.
                         timeline_infos
                             .get(&endpoint.timeline_id)
                             .map(|bi| bi.last_record_lsn.to_string())
                             .unwrap_or_else(|| "?".to_string())
-                    }
-                    Some(lsn) => {
-                        // -> read-only endpoint
-                        // Use the endpoint's LSN.
-                        lsn.to_string()
                     }
                 };
 
@@ -619,7 +627,19 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .copied()
                 .context("Failed to parse postgres version from the argument string")?;
 
-            cplane.new_endpoint(tenant_id, &endpoint_id, timeline_id, lsn, port, pg_version)?;
+            let hot_standby = sub_args
+                .get_one::<bool>("hot-standby")
+                .copied()
+                .unwrap_or(false);
+
+            let mode = match (lsn, hot_standby) {
+                (Some(lsn), false) => ComputeMode::Static(lsn),
+                (None, true) => ComputeMode::Replica,
+                (None, false) => ComputeMode::Primary,
+                (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+            };
+
+            cplane.new_endpoint(tenant_id, &endpoint_id, timeline_id, port, pg_version, mode)?;
         }
         "start" => {
             let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
@@ -637,7 +657,21 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 None
             };
 
+            let hot_standby = sub_args
+                .get_one::<bool>("hot-standby")
+                .copied()
+                .unwrap_or(false);
+
             if let Some(endpoint) = endpoint {
+                match (&endpoint.mode, hot_standby) {
+                    (ComputeMode::Static(_), true) => {
+                        bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
+                    }
+                    (ComputeMode::Primary, true) => {
+                        bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
+                    }
+                    _ => {}
+                }
                 println!("Starting existing endpoint {endpoint_id}...");
                 endpoint.start(&auth_token)?;
             } else {
@@ -659,6 +693,14 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     .get_one::<u32>("pg-version")
                     .copied()
                     .context("Failed to `pg-version` from the argument string")?;
+
+                let mode = match (lsn, hot_standby) {
+                    (Some(lsn), false) => ComputeMode::Static(lsn),
+                    (None, true) => ComputeMode::Replica,
+                    (None, false) => ComputeMode::Primary,
+                    (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
+                };
+
                 // when used with custom port this results in non obvious behaviour
                 // port is remembered from first start command, i e
                 // start --port X
@@ -670,9 +712,9 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     tenant_id,
                     endpoint_id,
                     timeline_id,
-                    lsn,
                     port,
                     pg_version,
+                    mode,
                 )?;
                 ep.start(&auth_token)?;
             }
@@ -928,6 +970,12 @@ fn cli() -> Command {
         .help("Specify Lsn on the timeline to start from. By default, end of the timeline would be used.")
         .required(false);
 
+    let hot_standby_arg = Arg::new("hot-standby")
+        .value_parser(value_parser!(bool))
+        .long("hot-standby")
+        .help("If set, the node will be a hot replica on the specified timeline")
+        .required(false);
+
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
@@ -1052,6 +1100,7 @@ fn cli() -> Command {
                             .long("config-only")
                             .required(false))
                     .arg(pg_version_arg.clone())
+                    .arg(hot_standby_arg.clone())
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
@@ -1062,6 +1111,7 @@ fn cli() -> Command {
                     .arg(lsn_arg)
                     .arg(port_arg)
                     .arg(pg_version_arg)
+                    .arg(hot_standby_arg)
                 )
                 .subcommand(
                     Command::new("stop")

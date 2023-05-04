@@ -48,11 +48,10 @@ mod layer_coverage;
 
 use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
-use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
@@ -126,7 +125,7 @@ where
     ///
     /// Insert an on-disk layer.
     ///
-    pub fn insert_historic(&mut self, layer: Arc<L>) -> anyhow::Result<()> {
+    pub fn insert_historic(&mut self, layer: Arc<L>) {
         self.layer_map.insert_historic_noflush(layer)
     }
 
@@ -274,22 +273,16 @@ where
     ///
     /// Helper function for BatchedUpdates::insert_historic
     ///
-    pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) -> anyhow::Result<()> {
-        let key = historic_layer_coverage::LayerKey::from(&*layer);
-        if self.historic.contains(&key) {
-            bail!(
-                "Attempt to insert duplicate layer {} in layer map",
-                layer.short_id()
-            );
-        }
-        self.historic.insert(key, Arc::clone(&layer));
+    pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
+        // TODO: See #3869, resulting #4088, attempted fix and repro #4094
+        self.historic.insert(
+            historic_layer_coverage::LayerKey::from(&*layer),
+            Arc::clone(&layer),
+        );
 
         if Self::is_l0(&layer) {
             self.l0_delta_layers.push(layer);
         }
-
-        NUM_ONDISK_LAYERS.inc();
-        Ok(())
     }
 
     ///
@@ -314,8 +307,6 @@ where
                 "failed to locate removed historic layer from l0_delta_layers"
             );
         }
-
-        NUM_ONDISK_LAYERS.dec();
     }
 
     pub(self) fn replace_historic_noflush(
@@ -843,7 +834,7 @@ mod tests {
 
             let expected_in_counts = (1, usize::from(expected_l0));
 
-            map.batch_update().insert_historic(remote.clone()).unwrap();
+            map.batch_update().insert_historic(remote.clone());
             assert_eq!(count_layer_in(&map, &remote), expected_in_counts);
 
             let replaced = map

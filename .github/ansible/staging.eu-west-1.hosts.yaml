@@ -17,7 +17,7 @@ storage:
           kind: "LayerAccessThreshold"
           period: "20m"
           threshold: &default_eviction_threshold "20m"
-      evictions_low_residence_duration_metric_threshold: *default_eviction_threshold
+        evictions_low_residence_duration_metric_threshold: *default_eviction_threshold
       remote_storage:
         bucket_name: "{{ bucket_name }}"
         bucket_region: "{{ bucket_region }}"
@@ -35,6 +35,8 @@ storage:
       hosts:
         pageserver-0.eu-west-1.aws.neon.build:
           ansible_host: i-01d496c5041c7f34c
+        pageserver-1.eu-west-1.aws.neon.build:
+          ansible_host: i-0e8013e239ce3928c
 
     safekeepers:
       hosts:
@@ -44,3 +46,15 @@ storage:
           ansible_host: i-06969ee1bf2958bfc
         safekeeper-2.eu-west-1.aws.neon.build:
           ansible_host: i-087892e9625984a0b
+        safekeeper-3.eu-west-1.aws.neon.build:
+          ansible_host: i-0a6f91660e99e8891
+        safekeeper-4.eu-west-1.aws.neon.build:
+          ansible_host: i-0012e309e28e7c249
+        safekeeper-5.eu-west-1.aws.neon.build:
+          ansible_host: i-085a2b1193287b32e
+        safekeeper-6.eu-west-1.aws.neon.build:
+          ansible_host: i-0c713248465ed0fbd
+        safekeeper-7.eu-west-1.aws.neon.build:
+          ansible_host: i-02ad231aed2a80b7a
+        safekeeper-8.eu-west-1.aws.neon.build:
+          ansible_host: i-0dbbd8ffef66efda8

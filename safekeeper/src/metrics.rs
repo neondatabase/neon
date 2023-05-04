@@ -10,16 +10,16 @@ use anyhow::Result;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    register_int_counter_vec, Gauge, IntCounterVec, IntGaugeVec,
+    register_int_counter, register_int_counter_vec, Gauge, IntCounter, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
 use postgres_ffi::XLogSegNo;
+use utils::pageserver_feedback::PageserverFeedback;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     safekeeper::{SafeKeeperState, SafekeeperMemState},
-    timeline::ReplicaState,
     GlobalTimelines,
 };
 
@@ -72,6 +72,58 @@ pub static PG_IO_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
         &["client_az", "sk_az", "app_name", "dir", "same_az"]
     )
     .expect("Failed to register safekeeper_pg_io_bytes gauge")
+});
+pub static BROKER_PUSHED_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_broker_pushed_updates_total",
+        "Number of timeline updates pushed to the broker"
+    )
+    .expect("Failed to register safekeeper_broker_pushed_updates_total counter")
+});
+pub static BROKER_PULLED_UPDATES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_broker_pulled_updates_total",
+        "Number of timeline updates pulled and processed from the broker",
+        &["result"]
+    )
+    .expect("Failed to register safekeeper_broker_pulled_updates_total counter")
+});
+pub static PG_QUERIES_RECEIVED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_queries_received_total",
+        "Number of queries received through pg protocol",
+        &["query"]
+    )
+    .expect("Failed to register safekeeper_pg_queries_received_total counter")
+});
+pub static PG_QUERIES_FINISHED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_queries_finished_total",
+        "Number of queries finished through pg protocol",
+        &["query"]
+    )
+    .expect("Failed to register safekeeper_pg_queries_finished_total counter")
+});
+pub static REMOVED_WAL_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_removed_wal_segments_total",
+        "Number of WAL segments removed from the disk"
+    )
+    .expect("Failed to register safekeeper_removed_wal_segments_total counter")
+});
+pub static BACKED_UP_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backed_up_segments_total",
+        "Number of WAL segments backed up to the broker"
+    )
+    .expect("Failed to register safekeeper_backed_up_segments_total counter")
+});
+pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backup_errors_total",
+        "Number of errors during backup"
+    )
+    .expect("Failed to register safekeeper_backup_errors_total counter")
 });
 
 pub const LABEL_UNKNOWN: &str = "unknown";
@@ -231,7 +283,7 @@ pub fn time_io_closure(closure: impl FnOnce() -> Result<()>) -> Result<f64> {
 /// Metrics for a single timeline.
 pub struct FullTimelineInfo {
     pub ttid: TenantTimelineId,
-    pub replicas: Vec<ReplicaState>,
+    pub ps_feedback: PageserverFeedback,
     pub wal_backup_active: bool,
     pub timeline_is_active: bool,
     pub num_computes: u32,
@@ -242,6 +294,7 @@ pub struct FullTimelineInfo {
     pub persisted_state: SafeKeeperState,
 
     pub flush_lsn: Lsn,
+    pub remote_consistent_lsn: Lsn,
 
     pub wal_storage: WalStorageMetrics,
 }
@@ -514,19 +567,6 @@ impl Collector for TimelineCollector {
             let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
 
-            let mut most_advanced: Option<pq_proto::PageserverFeedback> = None;
-            for replica in tli.replicas.iter() {
-                if let Some(replica_feedback) = replica.pageserver_feedback {
-                    if let Some(current) = most_advanced {
-                        if current.last_received_lsn < replica_feedback.last_received_lsn {
-                            most_advanced = Some(replica_feedback);
-                        }
-                    } else {
-                        most_advanced = Some(replica_feedback);
-                    }
-                }
-            }
-
             self.commit_lsn
                 .with_label_values(labels)
                 .set(tli.mem_state.commit_lsn.into());
@@ -544,7 +584,7 @@ impl Collector for TimelineCollector {
                 .set(tli.mem_state.peer_horizon_lsn.into());
             self.remote_consistent_lsn
                 .with_label_values(labels)
-                .set(tli.mem_state.remote_consistent_lsn.into());
+                .set(tli.remote_consistent_lsn.into());
             self.timeline_active
                 .with_label_values(labels)
                 .set(tli.timeline_is_active as u64);
@@ -567,15 +607,17 @@ impl Collector for TimelineCollector {
                 .with_label_values(labels)
                 .set(tli.wal_storage.flush_wal_seconds);
 
-            if let Some(feedback) = most_advanced {
-                self.ps_last_received_lsn
+            self.ps_last_received_lsn
+                .with_label_values(labels)
+                .set(tli.ps_feedback.last_received_lsn.0);
+            if let Ok(unix_time) = tli
+                .ps_feedback
+                .replytime
+                .duration_since(SystemTime::UNIX_EPOCH)
+            {
+                self.feedback_last_time_seconds
                     .with_label_values(labels)
-                    .set(feedback.last_received_lsn);
-                if let Ok(unix_time) = feedback.replytime.duration_since(SystemTime::UNIX_EPOCH) {
-                    self.feedback_last_time_seconds
-                        .with_label_values(labels)
-                        .set(unix_time.as_secs());
-                }
+                    .set(unix_time.as_secs());
             }
 
             if tli.last_removed_segno != 0 {

@@ -14,4 +14,5 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
-workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+
+workspace_hack.workspace = true

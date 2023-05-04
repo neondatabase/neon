@@ -32,14 +32,12 @@ use utils::lsn::Lsn;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::ComputeSpec;
 
-use crate::checker::create_writability_check_data;
 use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
-    pub start_time: DateTime<Utc>,
     // Url type maintains proper escaping
     pub connstr: url::Url,
     pub pgdata: String,
@@ -67,6 +65,7 @@ pub struct ComputeNode {
 
 #[derive(Clone, Debug)]
 pub struct ComputeState {
+    pub start_time: DateTime<Utc>,
     pub status: ComputeStatus,
     /// Timestamp of the last Postgres activity
     pub last_active: DateTime<Utc>,
@@ -78,6 +77,7 @@ pub struct ComputeState {
 impl ComputeState {
     pub fn new() -> Self {
         Self {
+            start_time: Utc::now(),
             status: ComputeStatus::Empty,
             last_active: Utc::now(),
             error: None,
@@ -249,18 +249,63 @@ impl ComputeNode {
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip(self, compute_state))]
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
+        #[derive(Clone)]
+        enum Replication {
+            Primary,
+            Static { lsn: Lsn },
+            HotStandby,
+        }
+
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+        let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
+
+        let hot_replica = if let Some(option) = spec.cluster.settings.find_ref("hot_standby") {
+            if let Some(value) = &option.value {
+                anyhow::ensure!(option.vartype == "bool");
+                matches!(value.as_str(), "on" | "yes" | "true")
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let replication = if hot_replica {
+            Replication::HotStandby
+        } else if let Some(lsn) = spec.cluster.settings.find("recovery_target_lsn") {
+            Replication::Static {
+                lsn: Lsn::from_str(&lsn)?,
+            }
+        } else {
+            Replication::Primary
+        };
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
         config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &pspec.spec)?;
 
-        info!("starting safekeepers syncing");
-        let lsn = self
-            .sync_safekeepers(pspec.storage_auth_token.clone())
-            .with_context(|| "failed to sync safekeepers")?;
-        info!("safekeepers synced at LSN {}", lsn);
+        // Syncing safekeepers is only safe with primary nodes: if a primary
+        // is already connected it will be kicked out, so a secondary (standby)
+        // cannot sync safekeepers.
+        let lsn = match &replication {
+            Replication::Primary => {
+                info!("starting safekeepers syncing");
+                let lsn = self
+                    .sync_safekeepers(pspec.storage_auth_token.clone())
+                    .with_context(|| "failed to sync safekeepers")?;
+                info!("safekeepers synced at LSN {}", lsn);
+                lsn
+            }
+            Replication::Static { lsn } => {
+                info!("Starting read-only node at static LSN {}", lsn);
+                *lsn
+            }
+            Replication::HotStandby => {
+                info!("Initializing standby from latest Pageserver LSN");
+                Lsn(0)
+            }
+        };
 
         info!(
             "getting basebackup@{} from pageserver {}",
@@ -275,6 +320,13 @@ impl ComputeNode {
 
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
+
+        match &replication {
+            Replication::Primary | Replication::Static { .. } => {}
+            Replication::HotStandby => {
+                add_standby_signal(pgdata_path)?;
+            }
+        }
 
         Ok(())
     }
@@ -342,7 +394,6 @@ impl ComputeNode {
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
         handle_grants(spec, self.connstr.as_str(), &mut client)?;
-        create_writability_check_data(&mut client)?;
         handle_extensions(spec, &mut client)?;
 
         // 'Close' connection
@@ -351,6 +402,48 @@ impl ComputeNode {
         info!(
             "finished configuration of compute for project {}",
             spec.cluster.cluster_id
+        );
+
+        Ok(())
+    }
+
+    // We could've wrapped this around `pg_ctl reload`, but right now we don't use
+    // `pg_ctl` for start / stop, so this just seems much easier to do as we already
+    // have opened connection to Postgres and superuser access.
+    #[instrument(skip(self, client))]
+    fn pg_reload_conf(&self, client: &mut Client) -> Result<()> {
+        client.simple_query("SELECT pg_reload_conf()")?;
+        Ok(())
+    }
+
+    /// Similar to `apply_config()`, but does a bit different sequence of operations,
+    /// as it's used to reconfigure a previously started and configured Postgres node.
+    #[instrument(skip(self))]
+    pub fn reconfigure(&self) -> Result<()> {
+        let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
+
+        // Write new config
+        let pgdata_path = Path::new(&self.pgdata);
+        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec)?;
+
+        let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
+        self.pg_reload_conf(&mut client)?;
+
+        // Proceed with post-startup configuration. Note, that order of operations is important.
+        handle_roles(&spec, &mut client)?;
+        handle_databases(&spec, &mut client)?;
+        handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
+        handle_grants(&spec, self.connstr.as_str(), &mut client)?;
+        handle_extensions(&spec, &mut client)?;
+
+        // 'Close' connection
+        drop(client);
+
+        let unknown_op = "unknown".to_string();
+        let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);
+        info!(
+            "finished reconfiguration of compute node for operation {}",
+            op_id
         );
 
         Ok(())
@@ -385,7 +478,7 @@ impl ComputeNode {
                 .unwrap()
                 .as_millis() as u64;
             state.metrics.total_startup_ms = startup_end_time
-                .signed_duration_since(self.start_time)
+                .signed_duration_since(compute_state.start_time)
                 .to_std()
                 .unwrap()
                 .as_millis() as u64;

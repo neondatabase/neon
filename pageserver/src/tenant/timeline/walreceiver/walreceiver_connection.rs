@@ -24,8 +24,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use super::TaskStateUpdate;
-use crate::context::RequestContext;
 use crate::metrics::LIVE_CONNECTIONS_COUNT;
+use crate::{context::RequestContext, metrics::WALRECEIVER_STARTED_CONNECTIONS};
 use crate::{
     task_mgr,
     task_mgr::TaskKind,
@@ -37,8 +37,8 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use pq_proto::PageserverFeedback;
-use utils::lsn::Lsn;
+use utils::pageserver_feedback::PageserverFeedback;
+use utils::{id::NodeId, lsn::Lsn};
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +56,8 @@ pub(super) struct WalConnectionStatus {
     pub streaming_lsn: Option<Lsn>,
     /// Latest commit_lsn received from the safekeeper. Can be zero if no message has been received yet.
     pub commit_lsn: Option<Lsn>,
+    /// The node it is connected to
+    pub node: NodeId,
 }
 
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
@@ -67,7 +69,10 @@ pub(super) async fn handle_walreceiver_connection(
     cancellation: CancellationToken,
     connect_timeout: Duration,
     ctx: RequestContext,
+    node: NodeId,
 ) -> anyhow::Result<()> {
+    WALRECEIVER_STARTED_CONNECTIONS.inc();
+
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
 
@@ -100,6 +105,7 @@ pub(super) async fn handle_walreceiver_connection(
         latest_wal_update: Utc::now().naive_utc(),
         streaming_lsn: None,
         commit_lsn: None,
+        node,
     };
     if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
@@ -122,7 +128,7 @@ pub(super) async fn handle_walreceiver_connection(
         false,
         async move {
             select! {
-                connection_result = connection => match connection_result{
+                connection_result = connection => match connection_result {
                     Ok(()) => info!("Walreceiver db connection closed"),
                     Err(connection_error) => {
                         if let Err(e) = ignore_expected_errors(connection_error) {
@@ -319,12 +325,12 @@ pub(super) async fn handle_walreceiver_connection(
                 timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
             // The last LSN we processed. It is not guaranteed to survive pageserver crash.
-            let last_received_lsn = u64::from(last_lsn);
+            let last_received_lsn = last_lsn;
             // `disk_consistent_lsn` is the LSN at which page server guarantees local persistence of all received data
-            let disk_consistent_lsn = u64::from(timeline.get_disk_consistent_lsn());
+            let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
             // The last LSN that is synced to remote storage and is guaranteed to survive pageserver crash
             // Used by safekeepers to remove WAL preceding `remote_consistent_lsn`.
-            let remote_consistent_lsn = u64::from(timeline_remote_consistent_lsn);
+            let remote_consistent_lsn = timeline_remote_consistent_lsn;
             let ts = SystemTime::now();
 
             // Update the status about what we just received. This is shown in the mgmt API.

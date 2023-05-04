@@ -18,6 +18,7 @@ use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogF
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use std::cmp::{max, min};
 
+use bytes::Bytes;
 use std::fs::{self, remove_file, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,7 +27,7 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-use crate::metrics::{time_io_closure, WalStorageMetrics};
+use crate::metrics::{time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS};
 use crate::safekeeper::SafeKeeperState;
 
 use crate::wal_backup::read_object;
@@ -36,6 +37,7 @@ use postgres_ffi::XLOG_BLCKSZ;
 
 use postgres_ffi::waldecoder::WalStreamDecoder;
 
+use pq_proto::SystemId;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub trait Storage {
@@ -110,10 +112,10 @@ impl PhysicalStorage {
     /// the disk. Otherwise, all LSNs are set to zero.
     pub fn new(
         ttid: &TenantTimelineId,
+        timeline_dir: PathBuf,
         conf: &SafeKeeperConf,
         state: &SafeKeeperState,
     ) -> Result<PhysicalStorage> {
-        let timeline_dir = conf.timeline_dir(ttid);
         let wal_seg_size = state.server.wal_seg_size as usize;
 
         // Find out where stored WAL ends, starting at commit_lsn which is a
@@ -453,6 +455,7 @@ fn remove_segments_from_disk(
                 n_removed += 1;
                 min_removed = min(min_removed, segno);
                 max_removed = max(max_removed, segno);
+                REMOVED_WAL_SEGMENTS.inc();
             }
         }
     }
@@ -478,6 +481,13 @@ pub struct WalReader {
 
     // We don't have WAL locally if LSN is less than local_start_lsn
     local_start_lsn: Lsn,
+    // We will respond with zero-ed bytes before this Lsn as long as
+    // pos is in the same segment as timeline_start_lsn.
+    timeline_start_lsn: Lsn,
+    // integer version number of PostgreSQL, e.g. 14; 15; 16
+    pg_version: u32,
+    system_id: SystemId,
+    timeline_start_segment: Option<Bytes>,
 }
 
 impl WalReader {
@@ -488,17 +498,25 @@ impl WalReader {
         start_pos: Lsn,
         enable_remote_read: bool,
     ) -> Result<Self> {
-        if start_pos < state.timeline_start_lsn {
+        if state.server.wal_seg_size == 0 || state.local_start_lsn == Lsn(0) {
+            bail!("state uninitialized, no data to read");
+        }
+
+        // TODO: Upgrade to bail!() once we know this couldn't possibly happen
+        if state.timeline_start_lsn == Lsn(0) {
+            warn!("timeline_start_lsn uninitialized before initializing wal reader");
+        }
+
+        if start_pos
+            < state
+                .timeline_start_lsn
+                .segment_lsn(state.server.wal_seg_size as usize)
+        {
             bail!(
-                "Requested streaming from {}, which is before the start of the timeline {}",
+                "Requested streaming from {}, which is before the start of the timeline {}, and also doesn't start at the first segment of that timeline",
                 start_pos,
                 state.timeline_start_lsn
             );
-        }
-
-        // TODO: add state.timeline_start_lsn == Lsn(0) check
-        if state.server.wal_seg_size == 0 || state.local_start_lsn == Lsn(0) {
-            bail!("state uninitialized, no data to read");
         }
 
         Ok(Self {
@@ -509,10 +527,65 @@ impl WalReader {
             wal_segment: None,
             enable_remote_read,
             local_start_lsn: state.local_start_lsn,
+            timeline_start_lsn: state.timeline_start_lsn,
+            pg_version: state.server.pg_version / 10000,
+            system_id: state.server.system_id,
+            timeline_start_segment: None,
         })
     }
 
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        // If this timeline is new, we may not have a full segment yet, so
+        // we pad the first bytes of the timeline's first WAL segment with 0s
+        if self.pos < self.timeline_start_lsn {
+            debug_assert_eq!(
+                self.pos.segment_number(self.wal_seg_size),
+                self.timeline_start_lsn.segment_number(self.wal_seg_size)
+            );
+
+            // All bytes after timeline_start_lsn are in WAL, but those before
+            // are not, so we manually construct an empty segment for the bytes
+            // not available in this timeline.
+            if self.timeline_start_segment.is_none() {
+                let it = postgres_ffi::generate_wal_segment(
+                    self.timeline_start_lsn.segment_number(self.wal_seg_size),
+                    self.system_id,
+                    self.pg_version,
+                    self.timeline_start_lsn,
+                )?;
+                self.timeline_start_segment = Some(it);
+            }
+
+            assert!(self.timeline_start_segment.is_some());
+            let segment = self.timeline_start_segment.take().unwrap();
+
+            let seg_bytes = &segment[..];
+
+            // How much of the current segment have we already consumed?
+            let pos_seg_offset = self.pos.segment_offset(self.wal_seg_size);
+
+            // How many bytes may we consume in total?
+            let tl_start_seg_offset = self.timeline_start_lsn.segment_offset(self.wal_seg_size);
+
+            debug_assert!(seg_bytes.len() > pos_seg_offset);
+            debug_assert!(seg_bytes.len() > tl_start_seg_offset);
+
+            // Copy as many bytes as possible into the buffer
+            let len = (tl_start_seg_offset - pos_seg_offset).min(buf.len());
+            buf[0..len].copy_from_slice(&seg_bytes[pos_seg_offset..pos_seg_offset + len]);
+
+            self.pos += len as u64;
+
+            // If we're done with the segment, we can release it's memory.
+            // However, if we're not yet done, store it so that we don't have to
+            // construct the segment the next time this function is called.
+            if self.pos < self.timeline_start_lsn {
+                self.timeline_start_segment = Some(segment);
+            }
+
+            return Ok(len);
+        }
+
         let mut wal_segment = match self.wal_segment.take() {
             Some(reader) => reader,
             None => self.open_segment().await?,

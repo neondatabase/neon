@@ -95,10 +95,13 @@ pub fn generate_wal_segment(
     segno: u64,
     system_id: u64,
     pg_version: u32,
+    lsn: Lsn,
 ) -> Result<Bytes, SerializeError> {
+    assert_eq!(segno, lsn.segment_number(WAL_SEGMENT_SIZE));
+
     match pg_version {
-        14 => v14::xlog_utils::generate_wal_segment(segno, system_id),
-        15 => v15::xlog_utils::generate_wal_segment(segno, system_id),
+        14 => v14::xlog_utils::generate_wal_segment(segno, system_id, lsn),
+        15 => v15::xlog_utils::generate_wal_segment(segno, system_id, lsn),
         _ => Err(SerializeError::BadInput),
     }
 }

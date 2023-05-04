@@ -135,6 +135,7 @@ pub struct TenantCreateRequest {
     // For now, this field is not even documented in the openapi_spec.yml.
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
+    pub evictions_low_residence_duration_metric_threshold: Option<String>,
 }
 
 #[serde_as]
@@ -181,6 +182,7 @@ pub struct TenantConfigRequest {
     // For now, this field is not even documented in the openapi_spec.yml.
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
+    pub evictions_low_residence_duration_metric_threshold: Option<String>,
 }
 
 impl TenantConfigRequest {
@@ -202,6 +204,7 @@ impl TenantConfigRequest {
             trace_read_requests: None,
             eviction_policy: None,
             min_resident_size_override: None,
+            evictions_low_residence_duration_metric_threshold: None,
         }
     }
 }

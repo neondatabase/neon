@@ -1,11 +1,11 @@
 use crate::{cancellation::CancelClosure, error::UserFacingError};
-use futures::TryFutureExt;
+use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::{io, net::SocketAddr};
+use std::{io, net::SocketAddr, time::Duration};
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio_postgres::NoTls;
+use tokio_postgres::tls::MakeTlsConnect;
 use tracing::{error, info, warn};
 
 const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
@@ -19,6 +19,9 @@ pub enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
+
+    #[error("{COULD_NOT_CONNECT}: {0}")]
+    TlsError(#[from] native_tls::Error),
 }
 
 impl UserFacingError for ConnectionError {
@@ -125,14 +128,34 @@ impl std::ops::DerefMut for ConnCfg {
     }
 }
 
+impl Default for ConnCfg {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnCfg {
     /// Establish a raw TCP connection to the compute node.
-    async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream)> {
+    async fn connect_raw(&self) -> io::Result<(SocketAddr, TcpStream, &str)> {
         use tokio_postgres::config::Host;
+
+        // wrap TcpStream::connect with timeout
+        let connect_with_timeout = |host, port| {
+            let connection_timeout = Duration::from_millis(10000);
+            tokio::time::timeout(connection_timeout, TcpStream::connect((host, port))).map(
+                move |res| match res {
+                    Ok(tcpstream_connect_res) => tcpstream_connect_res,
+                    Err(_) => Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("exceeded connection timeout {connection_timeout:?}"),
+                    )),
+                },
+            )
+        };
 
         let connect_once = |host, port| {
             info!("trying to connect to compute node at {host}:{port}");
-            TcpStream::connect((host, port)).and_then(|socket| async {
+            connect_with_timeout(host, port).and_then(|socket| async {
                 let socket_addr = socket.peer_addr()?;
                 // This prevents load balancer from severing the connection.
                 socket2::SockRef::from(&socket).set_keepalive(true)?;
@@ -165,9 +188,8 @@ impl ConnCfg {
                 Host::Unix(_) => continue, // unix sockets are not welcome here
             };
 
-            // TODO: maybe we should add a timeout.
             match connect_once(host, *port).await {
-                Ok(socket) => return Ok(socket),
+                Ok((sockaddr, stream)) => return Ok((sockaddr, stream, host)),
                 Err(err) => {
                     // We can't throw an error here, as there might be more hosts to try.
                     warn!("couldn't connect to compute node at {host}:{port}: {err}");
@@ -187,7 +209,10 @@ impl ConnCfg {
 
 pub struct PostgresConnection {
     /// Socket connected to a compute node.
-    pub stream: TcpStream,
+    pub stream: tokio_postgres::maybe_tls_stream::MaybeTlsStream<
+        tokio::net::TcpStream,
+        postgres_native_tls::TlsStream<tokio::net::TcpStream>,
+    >,
     /// PostgreSQL connection parameters.
     pub params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
@@ -195,11 +220,27 @@ pub struct PostgresConnection {
 }
 
 impl ConnCfg {
-    async fn do_connect(&self) -> Result<PostgresConnection, ConnectionError> {
-        // TODO: establish a secure connection to the DB.
-        let (socket_addr, mut stream) = self.connect_raw().await?;
-        let (client, connection) = self.0.connect_raw(&mut stream, NoTls).await?;
-        info!("connected to compute node at {socket_addr}");
+    async fn do_connect(
+        &self,
+        allow_self_signed_compute: bool,
+    ) -> Result<PostgresConnection, ConnectionError> {
+        let (socket_addr, stream, host) = self.connect_raw().await?;
+
+        let tls_connector = native_tls::TlsConnector::builder()
+            .danger_accept_invalid_certs(allow_self_signed_compute)
+            .build()
+            .unwrap();
+        let mut mk_tls = postgres_native_tls::MakeTlsConnector::new(tls_connector);
+        let tls = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut mk_tls, host)?;
+
+        // connect_raw() will not use TLS if sslmode is "disable"
+        let (client, connection) = self.0.connect_raw(stream, tls).await?;
+        let stream = connection.stream.into_inner();
+
+        info!(
+            "connected to compute node at {host} ({socket_addr}) sslmode={:?}",
+            self.0.get_ssl_mode()
+        );
 
         // This is very ugly but as of now there's no better way to
         // extract the connection parameters from tokio-postgres' connection.
@@ -220,8 +261,11 @@ impl ConnCfg {
     }
 
     /// Connect to a corresponding compute node.
-    pub async fn connect(&self) -> Result<PostgresConnection, ConnectionError> {
-        self.do_connect()
+    pub async fn connect(
+        &self,
+        allow_self_signed_compute: bool,
+    ) -> Result<PostgresConnection, ConnectionError> {
+        self.do_connect(allow_self_signed_compute)
             .inspect_err(|err| {
                 // Immediately log the error we have at our disposal.
                 error!("couldn't connect to compute node: {err}");
