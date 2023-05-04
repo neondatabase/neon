@@ -486,6 +486,7 @@ impl InnerDeleteTimelineError {
 
         match self {
             StopUploadQueue(_) => true,
+            #[cfg(feature = "testing")]
             Failpoint(_) => false,
             UploadFailed => false,
             ChildAppearedAfterRemoveDir => true,
