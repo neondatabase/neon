@@ -262,7 +262,7 @@ pub enum MaybeDeletedIndexPart {
 }
 
 /// Errors that can arise when calling [`RemoteTimelineClient::stop`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Clone)]
 pub enum StopError {
     /// Returned if the upload queue was never initialized.
     /// See [`RemoteTimelineClient::init_upload_queue`] and [`RemoteTimelineClient::init_upload_queue_for_empty_remote`].
@@ -681,7 +681,7 @@ impl RemoteTimelineClient {
                 stopped
                     .latest_metadata
                     .to_bytes()
-                    .context("serialize metadata")?,
+                    .expect("timeline metadata serialization expected to pass"),
             );
             index_part.deleted_at = Some(deleted_at);
             index_part
@@ -699,6 +699,7 @@ impl RemoteTimelineClient {
             stopped.deleted_at = None;
         });
 
+        // this is for pausing
         #[cfg(feature = "testing")]
         tokio::task::spawn_blocking({
             let current = tracing::Span::current();

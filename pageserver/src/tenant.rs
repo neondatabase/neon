@@ -448,10 +448,60 @@ pub enum DeleteTimelineError {
     NotFound,
     #[error("HasChildren")]
     HasChildren,
+    #[cfg(feature = "testing")]
+    #[cfg_attr(feature = "testing", error("failpoint {0}"))]
+    Failpoint(&'static str),
+    #[error("stop upload queue")]
+    StopUploadQueue,
+    #[error("failed to upload a tombstoned index_part.json")]
+    UploadFailed,
+    #[error("grew children while the layer files were deleted")]
+    ChildAppearedAfterRemoveDir,
+    #[error("task exited without sending response")]
+    InternalFailure,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InnerDeleteTimelineError {
+    // FIXME: this should be fixed by init order (either empty or from remote)
     #[error("stop upload queue: {0:#}")]
     StopUploadQueue(#[from] remote_timeline_client::StopError),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    #[cfg(feature = "testing")]
+    #[cfg_attr(feature = "testing", error("failpoint {0}"))]
+    Failpoint(&'static str),
+    // FIXME: should this really fail the delete, probably not?
+    // #[error("directory remove failed: {0:#}")]
+    // TimelineDirectoryRemoveFailed(std::io::Error),
+    #[error("failed to upload a tombstoned index_part.json")]
+    UploadFailed,
+    #[error("grew children while the layer files were deleted")]
+    ChildAppearedAfterRemoveDir,
+}
+
+impl InnerDeleteTimelineError {
+    fn is_permanent(&self) -> bool {
+        use InnerDeleteTimelineError::*;
+
+        match self {
+            StopUploadQueue(_) => true,
+            Failpoint(_) => false,
+            UploadFailed => false,
+            ChildAppearedAfterRemoveDir => true,
+        }
+    }
+}
+
+impl From<&InnerDeleteTimelineError> for DeleteTimelineError {
+    fn from(value: &InnerDeleteTimelineError) -> Self {
+        use InnerDeleteTimelineError::*;
+
+        match value {
+            StopUploadQueue(_) => DeleteTimelineError::StopUploadQueue,
+            Failpoint(s) => DeleteTimelineError::Failpoint(s),
+            UploadFailed => DeleteTimelineError::UploadFailed,
+            ChildAppearedAfterRemoveDir => DeleteTimelineError::ChildAppearedAfterRemoveDir,
+        }
+    }
 }
 
 struct RemoteStartupData {
@@ -1358,12 +1408,14 @@ impl Tenant {
 
     /// Removes timeline-related in-memory data
     pub async fn delete_timeline(
-        &self,
+        self: &Arc<Tenant>,
         timeline_id: TimelineId,
         _ctx: &RequestContext,
     ) -> Result<(), DeleteTimelineError> {
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
+        //
+        // FIXME: Except that Tenant::branch_timeline uses even broken timelines.
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
 
@@ -1389,13 +1441,86 @@ impl Tenant {
             timeline
         };
 
+        // multiple concurrent requests could had "transitioned" a timeline to stopping state,
+        // because repeat transitions to same state are allowed. because the delete_timeline will
+        // need to synchronize and cannot be original semi-lockless algorithm for "upload
+        // indexpart" part, we create a single task to delete the timeline.
+
+        let mut rx = {
+            let mut g = timeline.delete_self.lock().await;
+            let maybe_rx = if let Some(rx) = g.as_ref() {
+                // we got the lock, let's see if the previous attempt failed permanently
+                // TODO: is here some deadlock with the lock acquisition order?
+                let mut rx = rx.clone();
+                let spawn_new = match &*rx.borrow_and_update() {
+                    Some(Ok(())) => return Ok(()),
+                    Some(Err(InnerDeleteTimelineError::StopUploadQueue(_))) => {
+                        // this is permanent
+                        return Err(DeleteTimelineError::StopUploadQueue);
+                    }
+                    Some(Err(InnerDeleteTimelineError::ChildAppearedAfterRemoveDir)) => {
+                        // permanent, lucky to have raced that just now
+                        return Err(DeleteTimelineError::ChildAppearedAfterRemoveDir);
+                    }
+                    #[cfg(feature = "testing")]
+                    Some(Err(InnerDeleteTimelineError::Failpoint(_))) => {
+                        // let's try again
+                        true
+                    }
+                    Some(Err(InnerDeleteTimelineError::UploadFailed)) => {
+                        // again!
+                        true
+                    }
+                    None => false,
+                };
+
+                if spawn_new {
+                    None
+                } else {
+                    // this cannot be returned from None arm above, because NLL limitations.
+                    Some(rx)
+                }
+            } else {
+                None
+            };
+
+            if let Some(rx) = maybe_rx {
+                rx
+            } else {
+                // try another round
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                *g = Some(rx.clone());
+                let this = self.clone();
+                let timeline = timeline.clone();
+                tokio::spawn(async move {
+                    let res = this.unique_delete_timeline(&timeline).await;
+                    let _ = tx.send_replace(Some(res));
+                });
+                rx
+            }
+        };
+
+        // should read it right away to see if it's ready
+        loop {
+            rx.changed()
+                .await
+                .map_err(|_| DeleteTimelineError::InternalFailure)?;
+
+            if let Some(res) = &*rx.borrow_and_update() {
+                return match res {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(DeleteTimelineError::from(e)),
+                };
+            }
+        }
+    }
+
+    async fn unique_delete_timeline(
+        &self,
+        timeline: &Arc<Timeline>,
+    ) -> Result<(), InnerDeleteTimelineError> {
         // Now that the Timeline is in Stopping state, request all the related tasks to
         // shut down.
-        //
-        // NB: If you call delete_timeline multiple times concurrently, they will
-        // all go through the motions here. Make sure the code here is idempotent,
-        // and don't error out if some of the shutdown tasks have already been
-        // completed!
 
         // Stop the walreceiver first.
         debug!("waiting for wal receiver to shutdown");
@@ -1418,13 +1543,19 @@ impl Tenant {
 
         // Stop & wait for the remaining timeline tasks, including upload tasks.
         info!("waiting for timeline tasks to shutdown");
-        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline.timeline_id)).await;
 
         // Mark timeline as deleted in S3 so we wont pick it up next time
         // during attach or pageserver restart.
         // See comment in persist_index_part_with_deleted_flag.
         if let Some(remote_client) = timeline.remote_client.as_ref() {
-            remote_client.persist_index_part_with_deleted_flag().await?;
+            remote_client
+                .persist_index_part_with_deleted_flag()
+                .await
+                .map_err(|e| {
+                    warn!("failed to upload tombstoned index_part.json: {e:#}");
+                    InnerDeleteTimelineError::UploadFailed
+                })?;
         }
 
         {
@@ -1449,10 +1580,14 @@ impl Tenant {
             // NB: storage_sync upload tasks that reference these layers have been cancelled
             //     by the caller.
 
-            let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+            let local_timeline_directory = self
+                .conf
+                .timeline_path(&timeline.timeline_id, &self.tenant_id);
 
             fail::fail_point!("timeline-delete-before-rm", |_| {
-                Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
+                Err(InnerDeleteTimelineError::Failpoint(
+                    "timeline-delete-before-rm",
+                ))?
             });
 
             // NB: This need not be atomic because the deleted flag in the IndexPart
@@ -1461,51 +1596,45 @@ impl Tenant {
             // For configurations without remote storage, we tolerate that we're not crash-safe here.
             // The timeline may come up Active but with missing layer files, in such setups.
             // See https://github.com/neondatabase/neon/pull/3919#issuecomment-1531726720
-            std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
-                format!(
-                    "Failed to remove local timeline directory '{}'",
-                    local_timeline_directory.display()
-                )
-            })?;
+            if let Err(e) = std::fs::remove_dir_all(&local_timeline_directory) {
+                warn!("failed to remove timeline files after uploading tombstoned index_part.json: {e}");
+            }
 
             info!("finished deleting layer files, releasing layer_removal_cs.lock()");
             drop(layer_removal_guard);
         }
 
-        // Remove the timeline from the map.
-        let mut timelines = self.timelines.lock().unwrap();
-        let children_exist = timelines
-            .iter()
-            .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
-        // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
-        // We already deleted the layer files, so it's probably best to panic.
-        // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
-        if children_exist {
-            panic!("Timeline grew children while we removed layer files");
-        }
-        let removed_timeline = timelines.remove(&timeline_id);
-        if removed_timeline.is_none() {
-            // This can legitimately happen if there's a concurrent call to this function.
-            //   T1                                             T2
-            //   lock
-            //   unlock
-            //                                                  lock
-            //                                                  unlock
-            //                                                  remove files
-            //                                                  lock
-            //                                                  remove from map
-            //                                                  unlock
-            //                                                  return
-            //   remove files
-            //   lock
-            //   remove from map observes empty map
-            //   unlock
-            //   return
-            debug!("concurrent call to this function won the race");
-        }
-        drop(timelines);
+        // we use panicking to poison the tenant if we have grown a new branch while deleting.
+        // FIXME: don't allow branch_timeline while delete_timeline
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Remove the timeline from the map.
+            let mut timelines = self.timelines.lock().unwrap();
+            let children_exist = timelines
+                .iter()
+                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline.timeline_id));
+            // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
+            // We already deleted the layer files, so it's probably best to panic.
+            // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
+            if children_exist {
+                // this is to poison the tenants timelines mutex
+                panic!("Timeline grew children while we removed layer files");
+            }
+            let removed_timeline = timelines.remove(&timeline.timeline_id);
+            if removed_timeline.is_none() {
+                debug!("concurrent call to this function won the race");
+            }
+            drop(timelines);
+        }));
 
-        Ok(())
+        match res {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // not going to continue unwind, just fail.
+                // the panick has been already logged and reported, hopefully nothing got to start
+                // with this new timeline.
+                Err(InnerDeleteTimelineError::ChildAppearedAfterRemoveDir)
+            }
+        }
     }
 
     pub fn current_state(&self) -> TenantState {

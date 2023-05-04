@@ -226,6 +226,15 @@ pub struct Timeline {
     state: watch::Sender<TimelineState>,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
+
+    /// To have only one shutdown task, this mutex guards that operation.
+    ///
+    /// New tasks can join in and await for the result if they can upgrade the receiver. If they
+    /// cannot, it means that previous attempt completed, but did it complete successfully if we
+    /// are still reachable?
+    pub(super) delete_self: tokio::sync::Mutex<
+        Option<tokio::sync::watch::Receiver<Option<Result<(), super::InnerDeleteTimelineError>>>>,
+    >,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -1378,6 +1387,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
+                delete_self: tokio::sync::Mutex::default(),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
