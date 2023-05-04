@@ -191,9 +191,9 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     cur.execute("ALTER ROLE stork RENAME TO bork")
     cur.execute("COMMIT")
     ddl.wait()
-    assert ddl.roles == {"bork" : "cork"}
+    assert ddl.roles == {"bork": "cork"}
 
-    cur.execute("DROP ROLE bork");
+    cur.execute("DROP ROLE bork")
     ddl.wait()
     assert ddl.roles == {}
 
@@ -201,5 +201,5 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     cur.execute("CREATE DATABASE stork WITH OWNER=bork")
     cur.execute("ALTER ROLE bork RENAME TO cork")
     ddl.wait()
-    assert ddl.dbs == {"stork" : "cork"}
+    assert ddl.dbs == {"stork": "cork"}
     conn.close()
