@@ -232,9 +232,22 @@ pub struct Timeline {
     /// New tasks can join in and await for the result if they can upgrade the receiver. If they
     /// cannot, it means that previous attempt completed, but did it complete successfully if we
     /// are still reachable?
-    pub(super) delete_self: tokio::sync::Mutex<
-        Option<tokio::sync::watch::Receiver<Option<Result<(), super::InnerDeleteTimelineError>>>>,
-    >,
+    pub(super) delete_self:
+        tokio::sync::Mutex<Option<MaybeDone<Result<(), super::InnerDeleteTimelineError>>>>,
+}
+
+/// MaybeDone handles synchronization for multiple requests and the single actual task.
+///
+/// If request handlers witness `Pending` which they are able to upgrade, they are guaranteed a
+/// useful `recv().await`, where useful means "value" or "disconnect" arrives. If upgrade fails,
+/// this means that "disconnect" has happened in the past.
+///
+/// On successful execution the one executing task will set this to `Done` variant, with the actual
+/// resulting value.
+#[derive(Debug)]
+pub(super) enum MaybeDone<V> {
+    Pending(std::sync::Weak<tokio::sync::broadcast::Receiver<V>>),
+    Done(V),
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
