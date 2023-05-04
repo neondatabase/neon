@@ -1458,6 +1458,11 @@ impl Tenant {
                     Some(Ok(())) => return Ok(()),
                     Some(Err(e)) if e.is_permanent() => return Err(DeleteTimelineError::from(e)),
                     Some(Err(_retryable)) => true,
+                    // FIXME: if the task panics without getting to the send_replace, we will be
+                    // stuck here, so perhaps this should be a futures::future::Shared, only
+                    // communicate with the joinhandle return value?
+                    //
+                    // there is no test for this yet
                     None => false,
                 };
 
