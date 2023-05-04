@@ -449,7 +449,7 @@ pub enum DeleteTimelineError {
     #[error("Cannot delete timeline which has child timelines")]
     HasChildren,
     #[cfg(feature = "testing")]
-    #[cfg_attr(feature = "testing", error("failpoint {0}"))]
+    #[cfg_attr(feature = "testing", error("failpoint: {0}"))]
     Failpoint(&'static str),
     #[error("stop upload queue")]
     StopUploadQueue,
@@ -461,21 +461,23 @@ pub enum DeleteTimelineError {
     InternalFailure,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum InnerDeleteTimelineError {
     // FIXME: this should be fixed by init order (either empty or from remote)
-    #[error("stop upload queue: {0:#}")]
-    StopUploadQueue(#[from] remote_timeline_client::StopError),
+    StopUploadQueue(remote_timeline_client::StopError),
     #[cfg(feature = "testing")]
-    #[cfg_attr(feature = "testing", error("failpoint {0}"))]
     Failpoint(&'static str),
     // FIXME: should this really fail the delete, probably not?
     // #[error("directory remove failed: {0:#}")]
     // TimelineDirectoryRemoveFailed(std::io::Error),
-    #[error("failed to upload a tombstoned index_part.json")]
     UploadFailed,
-    #[error("grew children while the layer files were deleted")]
     ChildAppearedAfterRemoveDir,
+}
+
+impl From<remote_timeline_client::StopError> for InnerDeleteTimelineError {
+    fn from(e: remote_timeline_client::StopError) -> Self {
+        InnerDeleteTimelineError::StopUploadQueue(e)
+    }
 }
 
 impl InnerDeleteTimelineError {
