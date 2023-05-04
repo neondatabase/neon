@@ -292,6 +292,12 @@ def port_distributor(worker_base_port: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
 
+@pytest.fixture(scope="session")
+def httpserver_listen_address(port_distributor: PortDistributor):
+    port = port_distributor.get_port()
+    return ("localhost", port)
+
+
 @pytest.fixture(scope="function")
 def default_broker(
     port_distributor: PortDistributor,

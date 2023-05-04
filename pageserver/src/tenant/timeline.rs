@@ -11,7 +11,8 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
-    DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceStatus, TimelineState,
+    DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceEventReason, LayerResidenceStatus,
+    TimelineState,
 };
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
@@ -1111,7 +1112,7 @@ impl Timeline {
                 &layer_metadata,
                 local_layer
                     .access_stats()
-                    .clone_for_residence_change(LayerResidenceStatus::Evicted),
+                    .clone_for_residence_change(batch_updates, LayerResidenceStatus::Evicted),
             ),
             LayerFileName::Delta(delta_name) => RemoteLayer::new_delta(
                 self.tenant_id,
@@ -1120,7 +1121,7 @@ impl Timeline {
                 &layer_metadata,
                 local_layer
                     .access_stats()
-                    .clone_for_residence_change(LayerResidenceStatus::Evicted),
+                    .clone_for_residence_change(batch_updates, LayerResidenceStatus::Evicted),
             ),
         });
 
@@ -1489,7 +1490,7 @@ impl Timeline {
                     self.tenant_id,
                     &imgfilename,
                     file_size,
-                    LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
+                    LayerAccessStats::for_loading_layer(&updates, LayerResidenceStatus::Resident),
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1521,7 +1522,7 @@ impl Timeline {
                     self.tenant_id,
                     &deltafilename,
                     file_size,
-                    LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
+                    LayerAccessStats::for_loading_layer(&updates, LayerResidenceStatus::Resident),
                 );
 
                 trace!("found layer {}", layer.path().display());
@@ -1657,7 +1658,10 @@ impl Timeline {
                         self.timeline_id,
                         imgfilename,
                         &remote_layer_metadata,
-                        LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted),
+                        LayerAccessStats::for_loading_layer(
+                            &updates,
+                            LayerResidenceStatus::Evicted,
+                        ),
                     );
                     let remote_layer = Arc::new(remote_layer);
 
@@ -1682,7 +1686,10 @@ impl Timeline {
                         self.timeline_id,
                         deltafilename,
                         &remote_layer_metadata,
-                        LayerAccessStats::for_loading_layer(LayerResidenceStatus::Evicted),
+                        LayerAccessStats::for_loading_layer(
+                            &updates,
+                            LayerResidenceStatus::Evicted,
+                        ),
                     );
                     let remote_layer = Arc::new(remote_layer);
                     updates.insert_historic(remote_layer);
@@ -2729,11 +2736,16 @@ impl Timeline {
         ])?;
 
         // Add it to the layer map
-        self.layers
-            .write()
-            .unwrap()
-            .batch_update()
-            .insert_historic(Arc::new(new_delta));
+        let l = Arc::new(new_delta);
+        let mut layers = self.layers.write().unwrap();
+        let mut batch_updates = layers.batch_update();
+        l.access_stats().record_residence_event(
+            &batch_updates,
+            LayerResidenceStatus::Resident,
+            LayerResidenceEventReason::LayerCreate,
+        );
+        batch_updates.insert_historic(l);
+        batch_updates.flush();
 
         // update the timeline's physical size
         let sz = new_delta_path.metadata()?.len();
@@ -2938,7 +2950,13 @@ impl Timeline {
             self.metrics
                 .resident_physical_size_gauge
                 .add(metadata.len());
-            updates.insert_historic(Arc::new(l));
+            let l = Arc::new(l);
+            l.access_stats().record_residence_event(
+                &updates,
+                LayerResidenceStatus::Resident,
+                LayerResidenceEventReason::LayerCreate,
+            );
+            updates.insert_historic(l);
         }
         updates.flush();
         drop(layers);
@@ -3371,6 +3389,11 @@ impl Timeline {
 
             new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
             let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
+            x.access_stats().record_residence_event(
+                &updates,
+                LayerResidenceStatus::Resident,
+                LayerResidenceEventReason::LayerCreate,
+            );
             updates.insert_historic(x);
         }
 
@@ -3881,9 +3904,9 @@ impl Timeline {
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     let mut layers = self_clone.layers.write().unwrap();
                     let mut updates = layers.batch_update();
+                    let new_layer = remote_layer.create_downloaded_layer(&updates, self_clone.conf, *size);
                     {
                         use crate::tenant::layer_map::Replacement;
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
@@ -4155,7 +4178,15 @@ impl Timeline {
                 continue;
             }
 
-            let last_activity_ts = l.access_stats().latest_activity();
+            let last_activity_ts = l
+                .access_stats()
+                .latest_activity()
+                .unwrap_or_else(|| {
+                    // We only use this fallback if there's an implementation error.
+                    // `latest_activity` already does rate-limited warn!() log.
+                    debug!(layer=%l.filename().file_name(), "last_activity returns None, using SystemTime::now");
+                    SystemTime::now()
+                });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
                 layer: l,

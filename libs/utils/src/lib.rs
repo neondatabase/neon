@@ -58,6 +58,8 @@ pub mod pageserver_feedback;
 
 pub mod tracing_span_assert;
 
+pub mod rate_limit;
+
 /// use with fail::cfg("$name", "return(2000)")
 #[macro_export]
 macro_rules! failpoint_sleep_millis_async {
