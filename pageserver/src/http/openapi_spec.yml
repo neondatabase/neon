@@ -340,7 +340,26 @@ paths:
           format: hex
 
     post:
-      description: Schedules attach operation to happen in the background for given tenant
+      description: |
+        Schedules attach operation to happen in the background for the given tenant.
+        As soon as the caller sends this request, it must assume the pageserver
+        starts writing to the tenant's S3 state unless it receives one of the
+        distinguished errors below that state otherwise.
+
+        The method to identify whether a request has arrived at the pageserver, and
+        whether it has succeeded, is to poll for the tenant status to reach "Active"
+        or "Broken" state.
+        NB: these two values are currently not documented in this API spec.
+
+        There is no way to cancel an in-flight request.
+
+        If a client receives a not-distinguished response, e.g., a network timeout,
+        it MUST retry the /attach request and poll again for tenant status.
+
+        In any case, it must
+        * NOT ASSUME that the /attach request has been lost in the network,
+        * NOT ASSUME that the request has been lost based on a subsequent
+          tenant status request returning 404. (The request may still be in flight!)
       responses:
         "202":
           description: Tenant attaching scheduled
