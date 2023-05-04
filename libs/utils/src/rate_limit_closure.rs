@@ -18,15 +18,13 @@ impl RateLimitClosure {
     pub fn call<F: FnOnce()>(&mut self, f: F) {
         let now = Instant::now();
         match self.last {
-            Some(last) if now - last > self.interval => {
-                f();
-                self.last = Some(now);
+            Some(last) if now - last <= self.interval => {
+                // ratelimit
             }
-            None => {
-                f();
+            _ => {
                 self.last = Some(now);
+                f();
             }
-            Some(_) => {}
         }
     }
 }
