@@ -1501,10 +1501,10 @@ impl Tenant {
                                 Some(timeline::MaybeDone::Pending(weak)) => {
                                     let same = weak
                                         .upgrade()
-                                        // we don't yet have Reciver::same_channel
+                                        // we don't yet have Receiver::same_channel
                                         .map(|rx2| Arc::ptr_eq(&rx, &rx2))
                                         .unwrap_or(false);
-                                    assert!(same, "different channel had been replaced");
+                                    assert!(same, "different channel had been replaced or dropped");
                                 }
                                 other => panic!("unexpected MaybeDone: {other:?}"),
                             }
