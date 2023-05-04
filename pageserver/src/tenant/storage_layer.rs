@@ -300,28 +300,26 @@ impl LayerAccessStats {
         ret
     }
 
-    /// Get the latest access timestamp, falling back to latest residence event, falling back to `fallback`.
+    /// Get the latest access timestamp, falling back to latest residence event.
     ///
-    /// The `fallback` must be supplied for the case where there has not yet been a call to the
-    /// [`record_residence_event`] method.
-    /// If `fallback` needs to be used, we log a rate-limited warning in global scope.
-    pub(crate) fn latest_activity<F>(&self, fallback: F) -> SystemTime
-    where
-        F: FnOnce() -> SystemTime,
-    {
+    /// This function can only return `None` if there has not yet been a call to the
+    /// [`record_residence_event`] method. That would generally be considered an
+    /// implementation error. This function logs a rate-limited warning in that case.
+    ///
+    /// TODO: use type system to avoid the need for `fallback`.
+    /// The approach in https://github.com/neondatabase/neon/pull/3775
+    /// could be used to enforce that a residence event is recorded
+    /// before a layer is added to the layer map. We could also have
+    /// a layer wrapper type that holds the LayerAccessStats, and ensure
+    /// that that type can only be produced by inserting into the layer map.
+    pub(crate) fn latest_activity(&self) -> Option<SystemTime> {
         let locked = self.0.lock().unwrap();
         let inner = &locked.for_eviction_policy;
         match inner.last_accesses.recent() {
-            Some(a) => a.when,
+            Some(a) => Some(a.when),
             None => match inner.last_residence_changes.recent() {
-                Some(e) => e.timestamp,
+                Some(e) => Some(e.timestamp),
                 None => {
-                    // TODO: use type system to avoid the need for `fallback`.
-                    // The approach in https://github.com/neondatabase/neon/pull/3775
-                    // could be used to enforce that a residence event is recorded
-                    // before a layer is added to the layer map. We could also have
-                    // a layer wrapper type that holds the LayerAccessStats, and ensure
-                    // that that type can only be produced by inserting into the layer map.
                     static WARN_RATE_LIMIT: Lazy<Mutex<(usize, RateLimit)>> =
                         Lazy::new(|| Mutex::new((0, RateLimit::new(Duration::from_secs(10)))));
                     let mut guard = WARN_RATE_LIMIT.lock().unwrap();
@@ -329,7 +327,8 @@ impl LayerAccessStats {
                     let occurences = guard.0;
                     guard.1.call(move || {
                         warn!(parent: None, occurences, "latest_activity not available, this is an implementation bug, using fallback value");
-                    })
+                    });
+                    None
                 }
             },
         }
