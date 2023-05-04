@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use utils::history_buffer::HistoryBufferWithDropCounter;
-use utils::rate_limit_closure::RateLimitClosure;
+use utils::rate_limit::RateLimit;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -322,10 +322,8 @@ impl LayerAccessStats {
                     // before a layer is added to the layer map. We could also have
                     // a layer wrapper type that holds the LayerAccessStats, and ensure
                     // that that type can only be produced by inserting into the layer map.
-                    static WARN_RATE_LIMIT: Lazy<Mutex<(usize, RateLimitClosure)>> =
-                        Lazy::new(|| {
-                            Mutex::new((0, RateLimitClosure::new(Duration::from_secs(10))))
-                        });
+                    static WARN_RATE_LIMIT: Lazy<Mutex<(usize, RateLimit)>> =
+                        Lazy::new(|| Mutex::new((0, RateLimit::new(Duration::from_secs(10)))));
                     let mut guard = WARN_RATE_LIMIT.lock().unwrap();
                     guard.0 += 1;
                     let occurences = guard.0;

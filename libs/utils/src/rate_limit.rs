@@ -1,13 +1,13 @@
-//! A helper to rate limit the invocation of a closure.
+//! A helper to rate limit operations.
 
 use std::time::{Duration, Instant};
 
-pub struct RateLimitClosure {
+pub struct RateLimit {
     last: Option<Instant>,
     interval: Duration,
 }
 
-impl RateLimitClosure {
+impl RateLimit {
     pub fn new(interval: Duration) -> Self {
         Self {
             last: None,
@@ -15,6 +15,8 @@ impl RateLimitClosure {
         }
     }
 
+    /// Call `f` if the rate limit allows.
+    /// Don't call it otherwise.
     pub fn call<F: FnOnce()>(&mut self, f: F) {
         let now = Instant::now();
         match self.last {
@@ -35,12 +37,12 @@ mod tests {
 
     #[test]
     fn basics() {
-        use super::RateLimitClosure;
+        use super::RateLimit;
         use std::sync::atomic::Ordering::Relaxed;
         use std::time::Duration;
 
         let called = AtomicUsize::new(0);
-        let mut f = RateLimitClosure::new(Duration::from_millis(100));
+        let mut f = RateLimit::new(Duration::from_millis(100));
 
         let cl = || {
             called.fetch_add(1, Relaxed);
