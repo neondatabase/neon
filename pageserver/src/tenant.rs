@@ -499,6 +499,7 @@ impl From<&InnerDeleteTimelineError> for DeleteTimelineError {
 
         match value {
             StopUploadQueue(_) => DeleteTimelineError::StopUploadQueue,
+            #[cfg(feature = "testing")]
             Failpoint(s) => DeleteTimelineError::Failpoint(s),
             UploadFailed => DeleteTimelineError::UploadFailed,
             ChildAppearedAfterRemoveDir => DeleteTimelineError::ChildAppearedAfterRemoveDir,
