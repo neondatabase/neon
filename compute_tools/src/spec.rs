@@ -92,15 +92,15 @@ pub fn get_spec_from_control_plane(
                         let ddl_address = format!(
                             "{base_uri}/management/api/v2/computes/{compute_id}/dbs_and_roles"
                         );
-                        let option = GenericOption {
+                        let console_url_option = GenericOption {
                             name: "neon.console_url".to_string(),
                             value: Some(ddl_address),
                             vartype: "string".to_string(),
                         };
                         if let Some(ref mut settings) = spec.cluster.settings {
-                            settings.push(option)
+                            settings.push(console_url_option)
                         } else {
-                            spec.cluster.settings = Some(vec![option]);
+                            spec.cluster.settings = Some(vec![console_url_option]);
                         }
                         Ok(Some(spec))
                     } else {
