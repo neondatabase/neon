@@ -300,8 +300,8 @@ impl TryFrom<&'_ TenantCreateRequest> for TenantConfOpt {
 
         if let Some(gc_period) = &request_data.gc_period {
             tenant_conf.gc_period = Some(
-                humantime::parse_duration(&gc_period)
-                    .with_context(bad_duration("gc_period", &gc_period))?,
+                humantime::parse_duration(gc_period)
+                    .with_context(bad_duration("gc_period", gc_period))?,
             );
         }
         tenant_conf.gc_horizon = request_data.gc_horizon;
@@ -309,22 +309,22 @@ impl TryFrom<&'_ TenantCreateRequest> for TenantConfOpt {
 
         if let Some(pitr_interval) = &request_data.pitr_interval {
             tenant_conf.pitr_interval = Some(
-                humantime::parse_duration(&pitr_interval)
-                    .with_context(bad_duration("pitr_interval", &pitr_interval))?,
+                humantime::parse_duration(pitr_interval)
+                    .with_context(bad_duration("pitr_interval", pitr_interval))?,
             );
         }
 
         if let Some(walreceiver_connect_timeout) = &request_data.walreceiver_connect_timeout {
             tenant_conf.walreceiver_connect_timeout = Some(
-                humantime::parse_duration(&walreceiver_connect_timeout).with_context(
-                    bad_duration("walreceiver_connect_timeout", &walreceiver_connect_timeout),
+                humantime::parse_duration(walreceiver_connect_timeout).with_context(
+                    bad_duration("walreceiver_connect_timeout", walreceiver_connect_timeout),
                 )?,
             );
         }
         if let Some(lagging_wal_timeout) = &request_data.lagging_wal_timeout {
             tenant_conf.lagging_wal_timeout = Some(
-                humantime::parse_duration(&lagging_wal_timeout)
-                    .with_context(bad_duration("lagging_wal_timeout", &lagging_wal_timeout))?,
+                humantime::parse_duration(lagging_wal_timeout)
+                    .with_context(bad_duration("lagging_wal_timeout", lagging_wal_timeout))?,
             );
         }
         if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
@@ -337,8 +337,8 @@ impl TryFrom<&'_ TenantCreateRequest> for TenantConfOpt {
         tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
         if let Some(checkpoint_timeout) = &request_data.checkpoint_timeout {
             tenant_conf.checkpoint_timeout = Some(
-                humantime::parse_duration(&checkpoint_timeout)
-                    .with_context(bad_duration("checkpoint_timeout", &checkpoint_timeout))?,
+                humantime::parse_duration(checkpoint_timeout)
+                    .with_context(bad_duration("checkpoint_timeout", checkpoint_timeout))?,
             );
         }
 
@@ -347,8 +347,8 @@ impl TryFrom<&'_ TenantCreateRequest> for TenantConfOpt {
 
         if let Some(compaction_period) = &request_data.compaction_period {
             tenant_conf.compaction_period = Some(
-                humantime::parse_duration(&compaction_period)
-                    .with_context(bad_duration("compaction_period", &compaction_period))?,
+                humantime::parse_duration(compaction_period)
+                    .with_context(bad_duration("compaction_period", compaction_period))?,
             );
         }
 
@@ -365,10 +365,10 @@ impl TryFrom<&'_ TenantCreateRequest> for TenantConfOpt {
             &request_data.evictions_low_residence_duration_metric_threshold
         {
             tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
-                humantime::parse_duration(&evictions_low_residence_duration_metric_threshold)
+                humantime::parse_duration(evictions_low_residence_duration_metric_threshold)
                     .with_context(bad_duration(
                         "evictions_low_residence_duration_metric_threshold",
-                        &evictions_low_residence_duration_metric_threshold,
+                        evictions_low_residence_duration_metric_threshold,
                     ))?,
             );
         }
@@ -384,8 +384,8 @@ impl TryFrom<&'_ TenantConfigRequest> for TenantConfOpt {
         let mut tenant_conf = TenantConfOpt::default();
         if let Some(gc_period) = &request_data.gc_period {
             tenant_conf.gc_period = Some(
-                humantime::parse_duration(&gc_period)
-                    .with_context(bad_duration("gc_period", &gc_period))?,
+                humantime::parse_duration(gc_period)
+                    .with_context(bad_duration("gc_period", gc_period))?,
             );
         }
         tenant_conf.gc_horizon = request_data.gc_horizon;
@@ -393,21 +393,21 @@ impl TryFrom<&'_ TenantConfigRequest> for TenantConfOpt {
 
         if let Some(pitr_interval) = &request_data.pitr_interval {
             tenant_conf.pitr_interval = Some(
-                humantime::parse_duration(&pitr_interval)
-                    .with_context(bad_duration("pitr_interval", &pitr_interval))?,
+                humantime::parse_duration(pitr_interval)
+                    .with_context(bad_duration("pitr_interval", pitr_interval))?,
             );
         }
         if let Some(walreceiver_connect_timeout) = &request_data.walreceiver_connect_timeout {
             tenant_conf.walreceiver_connect_timeout = Some(
-                humantime::parse_duration(&walreceiver_connect_timeout).with_context(
-                    bad_duration("walreceiver_connect_timeout", &walreceiver_connect_timeout),
+                humantime::parse_duration(walreceiver_connect_timeout).with_context(
+                    bad_duration("walreceiver_connect_timeout", walreceiver_connect_timeout),
                 )?,
             );
         }
         if let Some(lagging_wal_timeout) = &request_data.lagging_wal_timeout {
             tenant_conf.lagging_wal_timeout = Some(
-                humantime::parse_duration(&lagging_wal_timeout)
-                    .with_context(bad_duration("lagging_wal_timeout", &lagging_wal_timeout))?,
+                humantime::parse_duration(lagging_wal_timeout)
+                    .with_context(bad_duration("lagging_wal_timeout", lagging_wal_timeout))?,
             );
         }
         tenant_conf.max_lsn_wal_lag = request_data.max_lsn_wal_lag;
@@ -416,8 +416,8 @@ impl TryFrom<&'_ TenantConfigRequest> for TenantConfOpt {
         tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
         if let Some(checkpoint_timeout) = &request_data.checkpoint_timeout {
             tenant_conf.checkpoint_timeout = Some(
-                humantime::parse_duration(&checkpoint_timeout)
-                    .with_context(bad_duration("checkpoint_timeout", &checkpoint_timeout))?,
+                humantime::parse_duration(checkpoint_timeout)
+                    .with_context(bad_duration("checkpoint_timeout", checkpoint_timeout))?,
             );
         }
         tenant_conf.compaction_target_size = request_data.compaction_target_size;
@@ -425,8 +425,8 @@ impl TryFrom<&'_ TenantConfigRequest> for TenantConfOpt {
 
         if let Some(compaction_period) = &request_data.compaction_period {
             tenant_conf.compaction_period = Some(
-                humantime::parse_duration(&compaction_period)
-                    .with_context(bad_duration("compaction_period", &compaction_period))?,
+                humantime::parse_duration(compaction_period)
+                    .with_context(bad_duration("compaction_period", compaction_period))?,
             );
         }
 
@@ -443,10 +443,10 @@ impl TryFrom<&'_ TenantConfigRequest> for TenantConfOpt {
             &request_data.evictions_low_residence_duration_metric_threshold
         {
             tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
-                humantime::parse_duration(&evictions_low_residence_duration_metric_threshold)
+                humantime::parse_duration(evictions_low_residence_duration_metric_threshold)
                     .with_context(bad_duration(
                         "evictions_low_residence_duration_metric_threshold",
-                        &evictions_low_residence_duration_metric_threshold,
+                        evictions_low_residence_duration_metric_threshold,
                     ))?,
             );
         }
