@@ -8,9 +8,12 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
+use anyhow::Context;
+use pageserver_api::models::{TenantConfigRequest, TenantCreateRequest};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::time::Duration;
+use utils::http::error::ApiError;
 
 pub mod defaults {
     // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
@@ -277,6 +280,199 @@ impl Default for TenantConf {
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
         }
+    }
+}
+
+// Helper function to standardize the error messages we produce on bad durations
+//
+// Intended to be used with anyhow's `with_context`, e.g.:
+//
+//   let value = result.with_context(bad_duration("name", &value))?;
+//
+fn bad_duration<'a>(field_name: &'static str, value: &'a str) -> impl 'a + Fn() -> String {
+    move || format!("Cannot parse `{field_name}` duration {value:?}")
+}
+
+impl TryFrom<&'_ TenantCreateRequest> for TenantConfOpt {
+    type Error = ApiError;
+
+    fn try_from(request_data: &TenantCreateRequest) -> Result<Self, Self::Error> {
+        let mut tenant_conf = TenantConfOpt::default();
+
+        if let Some(gc_period) = &request_data.gc_period {
+            tenant_conf.gc_period = Some(
+                humantime::parse_duration(&gc_period)
+                    .with_context(bad_duration("gc_period", &gc_period))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+        tenant_conf.gc_horizon = request_data.gc_horizon;
+        tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
+
+        if let Some(pitr_interval) = &request_data.pitr_interval {
+            tenant_conf.pitr_interval = Some(
+                humantime::parse_duration(&pitr_interval)
+                    .with_context(bad_duration("pitr_interval", &pitr_interval))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+
+        if let Some(walreceiver_connect_timeout) = &request_data.walreceiver_connect_timeout {
+            tenant_conf.walreceiver_connect_timeout = Some(
+                humantime::parse_duration(&walreceiver_connect_timeout)
+                    .with_context(bad_duration(
+                        "walreceiver_connect_timeout",
+                        &walreceiver_connect_timeout,
+                    ))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+        if let Some(lagging_wal_timeout) = &request_data.lagging_wal_timeout {
+            tenant_conf.lagging_wal_timeout = Some(
+                humantime::parse_duration(&lagging_wal_timeout)
+                    .with_context(bad_duration("lagging_wal_timeout", &lagging_wal_timeout))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+        if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
+            tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
+        }
+        if let Some(trace_read_requests) = request_data.trace_read_requests {
+            tenant_conf.trace_read_requests = Some(trace_read_requests);
+        }
+
+        tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
+        if let Some(checkpoint_timeout) = &request_data.checkpoint_timeout {
+            tenant_conf.checkpoint_timeout = Some(
+                humantime::parse_duration(&checkpoint_timeout)
+                    .with_context(bad_duration("checkpoint_timeout", &checkpoint_timeout))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+
+        tenant_conf.compaction_target_size = request_data.compaction_target_size;
+        tenant_conf.compaction_threshold = request_data.compaction_threshold;
+
+        if let Some(compaction_period) = &request_data.compaction_period {
+            tenant_conf.compaction_period = Some(
+                humantime::parse_duration(&compaction_period)
+                    .with_context(bad_duration("compaction_period", &compaction_period))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+
+        if let Some(eviction_policy) = &request_data.eviction_policy {
+            tenant_conf.eviction_policy = Some(
+                serde::Deserialize::deserialize(eviction_policy)
+                    .context("parse field `eviction_policy`")
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+
+        tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
+
+        if let Some(evictions_low_residence_duration_metric_threshold) =
+            &request_data.evictions_low_residence_duration_metric_threshold
+        {
+            tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
+                humantime::parse_duration(&evictions_low_residence_duration_metric_threshold)
+                    .with_context(bad_duration(
+                        "evictions_low_residence_duration_metric_threshold",
+                        &evictions_low_residence_duration_metric_threshold,
+                    ))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+
+        Ok(tenant_conf)
+    }
+}
+
+impl TryFrom<&'_ TenantConfigRequest> for TenantConfOpt {
+    type Error = ApiError;
+
+    fn try_from(request_data: &TenantConfigRequest) -> Result<Self, Self::Error> {
+        let mut tenant_conf = TenantConfOpt::default();
+        if let Some(gc_period) = &request_data.gc_period {
+            tenant_conf.gc_period = Some(
+                humantime::parse_duration(&gc_period)
+                    .with_context(bad_duration("gc_period", &gc_period))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+        tenant_conf.gc_horizon = request_data.gc_horizon;
+        tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
+
+        if let Some(pitr_interval) = &request_data.pitr_interval {
+            tenant_conf.pitr_interval = Some(
+                humantime::parse_duration(&pitr_interval)
+                    .with_context(bad_duration("pitr_interval", &pitr_interval))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+        if let Some(walreceiver_connect_timeout) = &request_data.walreceiver_connect_timeout {
+            tenant_conf.walreceiver_connect_timeout = Some(
+                humantime::parse_duration(&walreceiver_connect_timeout)
+                    .with_context(bad_duration(
+                        "walreceiver_connect_timeout",
+                        &walreceiver_connect_timeout,
+                    ))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+        if let Some(lagging_wal_timeout) = &request_data.lagging_wal_timeout {
+            tenant_conf.lagging_wal_timeout = Some(
+                humantime::parse_duration(&lagging_wal_timeout)
+                    .with_context(bad_duration("lagging_wal_timeout", &lagging_wal_timeout))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+        tenant_conf.max_lsn_wal_lag = request_data.max_lsn_wal_lag;
+        tenant_conf.trace_read_requests = request_data.trace_read_requests;
+
+        tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
+        if let Some(checkpoint_timeout) = &request_data.checkpoint_timeout {
+            tenant_conf.checkpoint_timeout = Some(
+                humantime::parse_duration(&checkpoint_timeout)
+                    .with_context(bad_duration("checkpoint_timeout", &checkpoint_timeout))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+        tenant_conf.compaction_target_size = request_data.compaction_target_size;
+        tenant_conf.compaction_threshold = request_data.compaction_threshold;
+
+        if let Some(compaction_period) = &request_data.compaction_period {
+            tenant_conf.compaction_period = Some(
+                humantime::parse_duration(&compaction_period)
+                    .with_context(bad_duration("compaction_period", &compaction_period))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+
+        if let Some(eviction_policy) = &request_data.eviction_policy {
+            tenant_conf.eviction_policy = Some(
+                serde::Deserialize::deserialize(eviction_policy)
+                    .context("parse field `eviction_policy`")
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+
+        tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
+
+        if let Some(evictions_low_residence_duration_metric_threshold) =
+            &request_data.evictions_low_residence_duration_metric_threshold
+        {
+            tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
+                humantime::parse_duration(&evictions_low_residence_duration_metric_threshold)
+                    .with_context(bad_duration(
+                        "evictions_low_residence_duration_metric_threshold",
+                        &evictions_low_residence_duration_metric_threshold,
+                    ))
+                    .map_err(ApiError::BadRequest)?,
+            );
+        }
+
+        Ok(tenant_conf)
     }
 }
 
