@@ -138,9 +138,13 @@ impl From<TenantStateError> for ApiError {
 impl From<crate::tenant::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::DeleteTimelineError) -> Self {
         use crate::tenant::DeleteTimelineError::*;
+        // need to use strings here, otherwise the {:?} formatting will always pick up the Debug
+        // for thiserror derived errors instead of the anyhow report.
         match value {
-            NotFound => ApiError::NotFound(value.into()),
-            HasChildren => ApiError::BadRequest(value.into()),
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found")),
+            HasChildren => ApiError::BadRequest(anyhow::anyhow!(
+                "Cannot delete timeline which has child timelines"
+            )),
             _ => ApiError::InternalServerError(value.into()),
         }
     }
