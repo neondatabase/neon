@@ -22,6 +22,8 @@ use crate::local_env::LocalEnv;
 use crate::pageserver::PageServerNode;
 use crate::postgresql_conf::PostgresConf;
 
+use compute_api::spec::ComputeMode;
+
 // contents of a endpoint.json file
 #[serde_as]
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -122,26 +124,12 @@ impl ComputeControlPlane {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ComputeMode {
-    // Regular read-write node
-    Primary,
-    // if recovery_target_lsn is provided, and we want to pin the node to a specific LSN
-    Static(#[serde_as(as = "DisplayFromStr")] Lsn),
-    // Hot standby; read-only replica.
-    // Future versions may want to distinguish between replicas with hot standby
-    // feedback and other kinds of replication configurations.
-    Replica,
-}
-
 #[derive(Debug)]
 pub struct Endpoint {
     /// used as the directory name
     name: String,
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
-    // Some(lsn) if this is a read-only endpoint anchored at 'lsn'. None for the primary.
     pub mode: ComputeMode,
 
     // port and address of the Postgres server

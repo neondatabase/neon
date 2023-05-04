@@ -30,7 +30,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::ComputeSpec;
+use compute_api::spec::{ComputeMode, ComputeSpec};
 
 use crate::config;
 use crate::pg_helpers::*;
@@ -249,37 +249,9 @@ impl ComputeNode {
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip(self, compute_state))]
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
-        #[derive(Clone)]
-        enum Replication {
-            Primary,
-            Static { lsn: Lsn },
-            HotStandby,
-        }
-
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
-
-        let hot_replica = if let Some(option) = spec.cluster.settings.find_ref("hot_standby") {
-            if let Some(value) = &option.value {
-                anyhow::ensure!(option.vartype == "bool");
-                matches!(value.as_str(), "on" | "yes" | "true")
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        let replication = if hot_replica {
-            Replication::HotStandby
-        } else if let Some(lsn) = spec.cluster.settings.find("recovery_target_lsn") {
-            Replication::Static {
-                lsn: Lsn::from_str(&lsn)?,
-            }
-        } else {
-            Replication::Primary
-        };
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
@@ -288,8 +260,8 @@ impl ComputeNode {
         // Syncing safekeepers is only safe with primary nodes: if a primary
         // is already connected it will be kicked out, so a secondary (standby)
         // cannot sync safekeepers.
-        let lsn = match &replication {
-            Replication::Primary => {
+        let lsn = match spec.mode {
+            ComputeMode::Primary => {
                 info!("starting safekeepers syncing");
                 let lsn = self
                     .sync_safekeepers(pspec.storage_auth_token.clone())
@@ -297,11 +269,11 @@ impl ComputeNode {
                 info!("safekeepers synced at LSN {}", lsn);
                 lsn
             }
-            Replication::Static { lsn } => {
+            ComputeMode::Static(lsn) => {
                 info!("Starting read-only node at static LSN {}", lsn);
-                *lsn
+                lsn
             }
-            Replication::HotStandby => {
+            ComputeMode::Replica => {
                 info!("Initializing standby from latest Pageserver LSN");
                 Lsn(0)
             }
@@ -321,9 +293,9 @@ impl ComputeNode {
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
 
-        match &replication {
-            Replication::Primary | Replication::Static { .. } => {}
-            Replication::HotStandby => {
+        match spec.mode {
+            ComputeMode::Primary | ComputeMode::Static(..) => {}
+            ComputeMode::Replica => {
                 add_standby_signal(pgdata_path)?;
             }
         }
@@ -430,11 +402,13 @@ impl ComputeNode {
         self.pg_reload_conf(&mut client)?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
-        handle_roles(&spec, &mut client)?;
-        handle_databases(&spec, &mut client)?;
-        handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(&spec, self.connstr.as_str(), &mut client)?;
-        handle_extensions(&spec, &mut client)?;
+        if spec.mode == ComputeMode::Primary {
+            handle_roles(&spec, &mut client)?;
+            handle_databases(&spec, &mut client)?;
+            handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
+            handle_grants(&spec, self.connstr.as_str(), &mut client)?;
+            handle_extensions(&spec, &mut client)?;
+        }
 
         // 'Close' connection
         drop(client);
@@ -467,7 +441,9 @@ impl ComputeNode {
 
         let pg = self.start_postgres(spec.storage_auth_token.clone())?;
 
-        self.apply_config(&compute_state)?;
+        if spec.spec.mode == ComputeMode::Primary {
+            self.apply_config(&compute_state)?;
+        }
 
         let startup_end_time = Utc::now();
         {
