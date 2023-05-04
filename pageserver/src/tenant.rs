@@ -1408,6 +1408,12 @@ impl Tenant {
             match &res {
                 Ok(()) => {}
                 Err(e) => match e {
+                    remote_timeline_client::StopError::QueueBroken => {
+                        // This happens if there's a panic inside above stop() call,
+                        // and we call stop() again after that.
+                        // The calling again can happen because we won't poison any
+                        // mutexes on the unwind path at the first panicking call.
+                    }
                     remote_timeline_client::StopError::QueueUninitialized => {
                         // This could happen if the timeline is Broken, e.g., because it failed to fetch IndexPart when it was loaded.
                     }

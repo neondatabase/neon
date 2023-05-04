@@ -23,6 +23,7 @@ pub(super) enum UploadQueue {
     Uninitialized,
     Initialized(UploadQueueInitialized),
     Stopped(UploadQueueStopped),
+    Broken,
 }
 
 impl UploadQueue {
@@ -31,6 +32,7 @@ impl UploadQueue {
             UploadQueue::Uninitialized => "Uninitialized",
             UploadQueue::Initialized(_) => "Initialized",
             UploadQueue::Stopped(_) => "Stopped",
+            UploadQueue::Broken => "Broken",
         }
     }
 }
@@ -91,7 +93,7 @@ impl UploadQueue {
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
-            UploadQueue::Initialized(_) | UploadQueue::Stopped(_) => {
+            UploadQueue::Initialized(_) | UploadQueue::Stopped(_) | UploadQueue::Broken => {
                 anyhow::bail!("already initialized, state {}", self.as_str())
             }
         }
@@ -125,7 +127,7 @@ impl UploadQueue {
     ) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
             UploadQueue::Uninitialized => (),
-            UploadQueue::Initialized(_) | UploadQueue::Stopped(_) => {
+            UploadQueue::Initialized(_) | UploadQueue::Stopped(_) | UploadQueue::Broken => {
                 anyhow::bail!("already initialized, state {}", self.as_str())
             }
         }
@@ -175,7 +177,7 @@ impl UploadQueue {
 
     pub(crate) fn initialized_mut(&mut self) -> anyhow::Result<&mut UploadQueueInitialized> {
         match self {
-            UploadQueue::Uninitialized | UploadQueue::Stopped(_) => {
+            UploadQueue::Broken | UploadQueue::Uninitialized | UploadQueue::Stopped(_) => {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
             UploadQueue::Initialized(x) => Ok(x),
