@@ -4131,11 +4131,15 @@ impl Timeline {
                 continue;
             }
 
-            // Use UNIX_EPOCH as a fallback timestamp in case we have a bug and forget to record a residence event for the layer.
             let last_activity_ts = l
                 .access_stats()
                 .latest_activity()
-                .unwrap_or(SystemTime::UNIX_EPOCH);
+                .unwrap_or_else(|| {
+                    // We only use this fallback if there's an implementation error.
+                    // `latest_activity` already does rate-limited warn!() log.
+                    debug!(layer=%l.filename().file_name(), "last_activity returns None, using SystemTime::now");
+                    SystemTime::now()
+                });
 
             resident_layers.push(LocalLayerInfoForDiskUsageEviction {
                 layer: l,
