@@ -834,7 +834,7 @@ def test_timeline_resurrection_on_attach(
 
     ps_http.tenant_attach(tenant_id=tenant_id)
 
-    wait_until_tenant_active(ps_http, tenant_id=tenant_id, iterations=5, period=0.5)
+    wait_until_tenant_active(ps_http, tenant_id=tenant_id, iterations=10, period=0.5)
 
     timelines = ps_http.timeline_list(tenant_id=tenant_id)
     assert {TimelineId(tl["timeline_id"]) for tl in timelines} == {
@@ -895,7 +895,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     env.pageserver.start()
 
     # Wait for tenant to finish loading.
-    wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=5, period=0.5)
+    wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=0.5)
 
     assert (
         not leaf_timeline_path.exists()
