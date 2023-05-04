@@ -1,6 +1,6 @@
 import enum
 import os
-from typing import Iterator
+from typing import Iterator, Optional
 
 import pytest
 from _pytest.config.argparsing import Parser
@@ -23,13 +23,24 @@ class PgVersion(str, enum.Enum):
     # to explicitly rely on the default server version (could be different from pg_version fixture value)
     NOT_SET = "<-POSTRGRES VERSION IS NOT SET->"
 
-    @staticmethod
-    def from_int(int_version: int) -> "PgVersion":
-        return PgVersion(str(int_version)[:2])
-
     # Make it less confusing in logs
     def __repr__(self) -> str:
         return f"'{self.value}'"
+
+    @classmethod
+    def _missing_(cls, value) -> Optional["PgVersion"]:
+        known_values = {v.value for _, v in cls.__members__.items()}
+
+        # Allow passing version as a string with "v" prefix (e.g. "v14")
+        if isinstance(value, str) and value.lower().startswith("v") and value[1:] in known_values:
+            return cls(value[1:])
+        # Allow passing version as an int (e.g. 15 or 150002, both will be converted to PgVersion.V15)
+        elif isinstance(value, int) and str(value)[:2] in known_values:
+            return cls(str(value)[:2])
+
+        # Make mypy happy
+        # See https://github.com/python/mypy/issues/3974
+        return None
 
 
 DEFAULT_VERSION: PgVersion = PgVersion.V14
