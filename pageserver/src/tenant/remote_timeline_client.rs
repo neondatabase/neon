@@ -1066,40 +1066,47 @@ impl RemoteTimelineClient {
         // into stopped state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
         // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
         let mut guard = self.upload_queue.lock().unwrap();
-        match &*guard {
+        match &mut *guard {
             UploadQueue::Uninitialized => Err(StopError::QueueUninitialized),
             UploadQueue::Stopped(_) => {
                 // nothing to do
                 info!("another concurrent task already shut down the queue");
                 Ok(())
             }
-            UploadQueue::Initialized(qi) => {
+            UploadQueue::Initialized(UploadQueueInitialized {
+                latest_files,
+                latest_metadata,
+                last_uploaded_consistent_lsn,
+                ..
+            }) => {
                 info!("shutting down upload queue");
-
-                // Prepare index part to put into stopped state
-                let index_part = IndexPart::new(
-                    qi.latest_files.clone(),
-                    qi.last_uploaded_consistent_lsn,
-                    qi.latest_metadata
-                        .to_bytes()
-                        .map_err(StopError::SerializeMetadata)?,
-                );
 
                 // Replace the queue with the Stopped state, taking ownership of the old
                 // Initialized queue. We will do some checks on it, and then drop it.
                 let qi = {
-                    let upload_queue = std::mem::replace(
-                        &mut *guard,
-                        UploadQueue::Stopped(UploadQueueStopped {
-                            last_uploaded_index_part: index_part,
-                        }),
-                    );
+                    // take or clone what we need
+                    let latest_files = std::mem::take(latest_files);
+                    let last_uploaded_consistent_lsn = *last_uploaded_consistent_lsn;
+                    // this could be Copy
+                    let latest_metadata = latest_metadata.clone();
+
+                    let stopped = UploadQueueStopped {
+                        latest_files,
+                        last_uploaded_consistent_lsn,
+                        latest_metadata,
+                        deleted_at: None,
+                    };
+
+                    let upload_queue =
+                        std::mem::replace(&mut *guard, UploadQueue::Stopped(stopped));
                     if let UploadQueue::Initialized(qi) = upload_queue {
                         qi
                     } else {
                         unreachable!("we checked in the match above that it is Initialized");
                     }
                 };
+
+                assert!(qi.latest_files.is_empty(), "do not use this anymore");
 
                 // consistency check
                 assert_eq!(
