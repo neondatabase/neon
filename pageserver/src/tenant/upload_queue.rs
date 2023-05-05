@@ -76,7 +76,7 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) queued_operations: VecDeque<UploadOp>,
 }
 
-#[derive(Clone,Copy)]
+#[derive(Clone, Copy)]
 pub(super) enum SetDeletedFlagProgress {
     NotRunning,
     InProgress(NaiveDateTime),
