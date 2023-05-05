@@ -230,8 +230,8 @@ pub struct Timeline {
     /// To have only one shutdown task, this mutex guards that operation.
     ///
     /// New tasks can join in and await for the result if they can upgrade the receiver. If they
-    /// cannot, it means that previous attempt completed, but did it complete successfully if we
-    /// are still reachable?
+    /// cannot, it means that previous attempt completed so they can just read the Done variant.
+    /// After reading the Done variant, they can decide to restart the delete attempt.
     pub(super) delete_self:
         tokio::sync::Mutex<Option<MaybeDone<Result<(), super::InnerDeleteTimelineError>>>>,
 }
