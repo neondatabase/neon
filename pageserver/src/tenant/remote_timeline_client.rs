@@ -724,6 +724,10 @@ impl RemoteTimelineClient {
         )
         .await?;
 
+        fail::fail_point!("persist_index_part_with_deleted_flag_after_upload", |_| {
+            anyhow::bail!("bailing for test")
+        });
+
         // all good, keep the deleted_at flag
         ScopeGuard::into_inner(undo_deleted_at);
 

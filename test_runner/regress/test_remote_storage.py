@@ -1089,4 +1089,47 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
         thread.join()
 
 
+def test_delete_timeline_upload_fails_restarted(neon_env_builder: NeonEnvBuilder):
+    """
+    If the tombstoned index_part.json upload fails, instead of continiously
+    failing we should see first a fail and then success.
+    """
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        test_name="test_delete_timeline_upload_fails_restarted",
+    )
+
+    env = neon_env_builder.init_start()
+
+    child_timeline_id = env.neon_cli.create_branch("child", "main")
+
+    ps_http = env.pageserver.http_client()
+
+    failpoint_name = "persist_index_part_with_deleted_flag_after_upload"
+    ps_http.configure_failpoints((failpoint_name, "return"))
+
+    expected = "failed to upload a tombstoned index_part.json"
+
+    with pytest.raises(PageserverApiException, match=expected):
+        ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
+
+    env.pageserver.allowed_errors.append(
+        rf".* Error processing HTTP request: InternalServerError\({expected}.*"
+    )
+    env.pageserver.allowed_errors.append(
+        r".* failed to upload tombstoned index_part\.json: bailing for test.*"
+    )
+
+    # ok, retry without failpoint, it should succeed
+    ps_http.configure_failpoints((failpoint_name, "off"))
+
+    ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
+
+    env.pageserver.allowed_errors.append(
+        f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+    )
+
+    raise Exception("foo")
+
+
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
