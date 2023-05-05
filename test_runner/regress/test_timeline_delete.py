@@ -113,7 +113,9 @@ def test_delete_timeline_post_rm_failure(neon_env_builder: NeonEnvBuilder):
 
     at_failpoint_log_message = f".*{env.initial_timeline}.*at failpoint {failpoint_name}.*"
     env.pageserver.allowed_errors.append(at_failpoint_log_message)
-    env.pageserver.allowed_errors.append(f".*DELETE.*{env.initial_timeline}.*InternalServerError.*{failpoint_name}")
+    env.pageserver.allowed_errors.append(
+        f".*DELETE.*{env.initial_timeline}.*InternalServerError.*{failpoint_name}"
+    )
 
     # retry without failpoint, it should succeed
     ps_http.configure_failpoints((failpoint_name, "off"))
@@ -124,7 +126,9 @@ def test_delete_timeline_post_rm_failure(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(
         f".*{env.initial_timeline}.*Ignoring new state, equal to the existing one: Stopping"
     )
-    env.pageserver.allowed_errors.append(f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*")
+    env.pageserver.allowed_errors.append(
+        f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*"
+    )
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
