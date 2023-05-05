@@ -43,8 +43,6 @@ storage:
           ansible_host: i-00c3844beb9ad1c6b
         pageserver-4.us-west-2.aws.neon.tech:
           ansible_host: i-013263dd1c239adcc
-        pageserver-5.us-west-2.aws.neon.tech:
-          ansible_host: i-00ca6417c7bf96820
         pageserver-6.us-west-2.aws.neon.tech:
           ansible_host: i-01cdf7d2bc1433b6a
         pageserver-7.us-west-2.aws.neon.tech:
