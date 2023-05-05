@@ -75,7 +75,6 @@ enum-map.workspace = true
 enumset.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
-take_mut = "0.2.2"
 
 [dev-dependencies]
 criterion.workspace = true
