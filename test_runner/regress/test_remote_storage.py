@@ -937,19 +937,23 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
     failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
     ps_http.configure_failpoints((failpoint_name, "pause"))
 
-    def first_call(result_queue):
+    def delete_timeline_call(name, result_queue, barrier):
+        if barrier:
+            barrier.wait()
         try:
-            log.info("first call start")
+            log.info(f"{name} start")
             ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=10)
-            log.info("first call success")
+            log.info(f"{name} success")
             result_queue.put("success")
         except Exception:
-            log.exception("first call failed")
+            log.exception(f"{name} failed")
             result_queue.put("failure, see log for stack trace")
 
     first_call_result: queue.Queue[str] = queue.Queue()
-    first_call_thread = threading.Thread(target=first_call, args=(first_call_result,))
+    first_call_thread = threading.Thread(target=delete_timeline_call, args=("first call", first_call_result, None,))
     first_call_thread.start()
+
+    second_call_thread = None
 
     try:
 
@@ -960,32 +964,34 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
 
         wait_until(50, 0.1, first_call_hit_failpoint)
 
-        # make the second call and assert behavior
-        log.info("second call start")
-        with pytest.raises(
-            PageserverApiException, match="timeline is deleting, deleted_at"
-        ) as second_call_err:
-            ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
-        assert second_call_err.value.status_code == 500
-        env.pageserver.allowed_errors.append(
-            f".*{child_timeline_id}.*timeline is deleting, deleted_at: .*"
-        )
+        barrier = threading.Barrier(2)
+
+        second_call_result: queue.Queue[str] = queue.Queue()
+        second_call_thread = threading.Thread(target=delete_timeline_call, args=("second call", second_call_result, barrier,))
+        second_call_thread.start()
+
+        barrier.wait()
+
         # the second call will try to transition the timeline into Stopping state as well
         env.pageserver.allowed_errors.append(
             f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
         )
-        log.info("second call failed as expected")
 
-        # by now we know that the second call failed, let's ensure the first call will finish
+        # release the pause
         ps_http.configure_failpoints((failpoint_name, "off"))
 
+        # both should had succeeded, near at the same time
         result = first_call_result.get()
+        assert result == "success"
+        result = second_call_result.get()
         assert result == "success"
 
     finally:
-        log.info("joining first call thread")
+        log.info("joining call threads")
         # in any case, make sure the lifetime of the thread is bounded to this test
         first_call_thread.join()
+        if second_call_thread:
+            second_call_thread.join()
 
 
 def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
