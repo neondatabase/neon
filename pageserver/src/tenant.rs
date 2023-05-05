@@ -455,6 +455,8 @@ pub enum DeleteTimelineError {
     StopUploadQueue,
     #[error("failed to upload a tombstoned index_part.json")]
     UploadFailed,
+    #[error("remove timeline files after uploading tombstoned index_part.json")]
+    TimelineDirectoryRemoveFailed,
     #[error("grew children while the layer files were deleted")]
     ChildAppearedAfterRemoveDir,
     #[error("task exited without sending response")]
@@ -467,9 +469,7 @@ pub enum InnerDeleteTimelineError {
     StopUploadQueue(remote_timeline_client::StopError),
     #[cfg(feature = "testing")]
     Failpoint(&'static str),
-    // FIXME: should this really fail the delete, probably not?
-    // #[error("directory remove failed: {0:#}")]
-    // TimelineDirectoryRemoveFailed(std::io::Error),
+    TimelineDirectoryRemoveFailed,
     UploadFailed,
     ChildAppearedAfterRemoveDir,
 }
@@ -489,6 +489,7 @@ impl InnerDeleteTimelineError {
             #[cfg(feature = "testing")]
             Failpoint(_) => false,
             UploadFailed => false,
+            TimelineDirectoryRemoveFailed => false,
             ChildAppearedAfterRemoveDir => true,
         }
     }
@@ -503,6 +504,7 @@ impl From<&InnerDeleteTimelineError> for DeleteTimelineError {
             #[cfg(feature = "testing")]
             Failpoint(s) => DeleteTimelineError::Failpoint(s),
             UploadFailed => DeleteTimelineError::UploadFailed,
+            TimelineDirectoryRemoveFailed => DeleteTimelineError::TimelineDirectoryRemoveFailed,
             ChildAppearedAfterRemoveDir => DeleteTimelineError::ChildAppearedAfterRemoveDir,
         }
     }
@@ -1105,6 +1107,7 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
+    #[instrument(skip_all, fields(timeline_id))]
     async fn load_local_timeline(
         &self,
         timeline_id: TimelineId,
@@ -1416,6 +1419,8 @@ impl Tenant {
         timeline_id: TimelineId,
         _ctx: &RequestContext,
     ) -> Result<(), DeleteTimelineError> {
+        timeline::debug_assert_current_span_has_tenant_and_timeline_id();
+
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
         //
@@ -1622,13 +1627,45 @@ impl Tenant {
             // For configurations without remote storage, we tolerate that we're not crash-safe here.
             // The timeline may come up Active but with missing layer files, in such setups.
             // See https://github.com/neondatabase/neon/pull/3919#issuecomment-1531726720
-            if let Err(e) = std::fs::remove_dir_all(local_timeline_directory) {
-                warn!("failed to remove timeline files after uploading tombstoned index_part.json: {e}");
+            match std::fs::remove_dir_all(&local_timeline_directory) {
+                Ok(()) => {} // continue with deletion
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // This can happen if we're called a second time, e.g.,
+                    // because of a previous failure/cancellation at/after
+                    // failpoint timeline-delete-after-rm.
+                    //
+                    // It can also happen if we race with tenant detach, because,
+                    // it doesn't grab the layer_removal_cs lock.
+                    //
+                    // For now, log and continue.
+                    // warn! level is technically not appropriate for the
+                    // first case because we should expect retries to happen.
+                    // But the error is so rare, it seems better to get attention if it happens.
+                    let tenant_state = self.current_state();
+                    warn!(
+                        timeline_dir=?local_timeline_directory,
+                        ?tenant_state,
+                        "timeline directory not found, proceeding anyway"
+                    );
+                    // continue with the rest of the deletion
+                }
+                Err(e) => {
+                    // Log error details because std::io::Error is not Clone => can't store it in the error.
+                    error!(error=%e, ?local_timeline_directory, "failed to remove the timeline directory");
+                    return Err(InnerDeleteTimelineError::TimelineDirectoryRemoveFailed);
+                }
             }
 
             info!("finished deleting layer files, releasing layer_removal_cs.lock()");
             drop(layer_removal_guard);
         }
+
+        #[cfg(feature = "testing")]
+        fail::fail_point!("timeline-delete-after-rm", |_| {
+            Err(InnerDeleteTimelineError::Failpoint(
+                "failpoint: timeline-delete-after-rm",
+            ))?
+        });
 
         // we use panicking to poison the tenant if we have grown a new branch while deleting.
         // FIXME: don't allow branch_timeline while delete_timeline
