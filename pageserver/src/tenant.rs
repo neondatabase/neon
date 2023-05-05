@@ -1051,6 +1051,7 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
+    #[instrument(skip_all, fields(timeline_id))]
     async fn load_local_timeline(
         &self,
         timeline_id: TimelineId,
