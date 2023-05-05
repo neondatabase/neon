@@ -2,6 +2,7 @@
 //! Other modules should use stuff from this module instead of
 //! directly relying on deps like `reqwest` (think loose coupling).
 
+pub mod pg_to_json;
 pub mod server;
 pub mod websocket;
 

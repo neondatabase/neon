@@ -5,13 +5,14 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
-use hashbrown::HashMap;
+use std::collections::HashMap;
 use hyper::{
     server::{accept, conn::AddrIncoming},
     upgrade::Upgraded,
     Body, Method, Request, Response, StatusCode,
 };
 use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
+use percent_encoding::percent_decode;
 use pin_project_lite::pin_project;
 use pq_proto::StartupMessageParams;
 use serde_json::Value;
@@ -257,7 +258,7 @@ async fn handle_sql(
         None => return Err(anyhow::anyhow!("no host header"))
     };
 
-    let body = request.into_body();
+    let mut body = request.into_body();
     let mut data = Vec::with_capacity(512);
     while let Some(chunk) = body.next().await {
         data.extend(&chunk?);
@@ -269,7 +270,7 @@ async fn handle_sql(
         params: Vec<serde_json::Value>
     }
 
-    let queryData: QueryData = serde_json::from_slice(&data)?;
+    let query_data: QueryData = serde_json::from_slice(&data)?;
 
     let params = StartupMessageParams::new([
         ("user", username),
@@ -315,11 +316,11 @@ async fn handle_sql(
         }
     });
 
-    let query = &queryData.query;
-    let params = queryData.params.iter().map(|value| match value {
+    let query = &query_data.query;
+    let params = query_data.params.iter().map(|value| match value {
         // Value::Null => &None as &(dyn ToSql + Sync),
         Value::Bool(b) => b as &(dyn ToSql + Sync),
-        Value::Number(n) => &n.as_f64() as &(dyn ToSql + Sync),
+        // Value::Number(n) => &n.as_f64() as &(dyn ToSql + Sync),
         Value::String(s) => s as &(dyn ToSql + Sync),
         _ => panic!("wrong parameter type")
     }).collect::<Vec<&(dyn ToSql + Sync)>>();
@@ -340,7 +341,7 @@ pub struct ConnectionCache {
     connections: HashMap<String, tokio_postgres::Client>,
 }
 
-/*
+
 impl ConnectionCache {
     pub fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
@@ -401,7 +402,7 @@ impl ConnectionCache {
         Ok(serde_json::to_string(&rows)?)
     }
 }
-*/
+
 
 pub async fn task_main(
     config: &'static ProxyConfig,
