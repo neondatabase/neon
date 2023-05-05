@@ -273,9 +273,9 @@ pub enum StopError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistIndexPartWithDeletedFlagError {
-    #[error("timeline is already deleting, started at {0:?}")]
+    #[error("another task is already setting the deleted_flag, started at {0:?}")]
     AlreadyInProgress(NaiveDateTime),
-    #[error("timeline is deleting, deleted_at: {0:?}")]
+    #[error("the deleted_flag was already set, value is {0:?}")]
     AlreadyDeleted(NaiveDateTime),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
