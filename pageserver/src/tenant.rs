@@ -59,6 +59,7 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
+use crate::tenant::remote_timeline_client::PersistIndexPartWithDeletedFlagError;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
@@ -1363,6 +1364,8 @@ impl Tenant {
         timeline_id: TimelineId,
         _ctx: &RequestContext,
     ) -> Result<(), DeleteTimelineError> {
+        timeline::debug_assert_current_span_has_tenant_and_timeline_id();
+
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
         let timeline = {
@@ -1425,7 +1428,15 @@ impl Tenant {
         // during attach or pageserver restart.
         // See comment in persist_index_part_with_deleted_flag.
         if let Some(remote_client) = timeline.remote_client.as_ref() {
-            remote_client.persist_index_part_with_deleted_flag().await?;
+            match remote_client.persist_index_part_with_deleted_flag().await {
+                // If we (now, or already) marked it successfully as deleted, we can proceed
+                Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
+                // Bail out otherwise
+                Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
+                | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
+                    return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
+                }
+            }
         }
 
         {
@@ -1462,16 +1473,42 @@ impl Tenant {
             // For configurations without remote storage, we tolerate that we're not crash-safe here.
             // The timeline may come up Active but with missing layer files, in such setups.
             // See https://github.com/neondatabase/neon/pull/3919#issuecomment-1531726720
-            std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
-                format!(
-                    "Failed to remove local timeline directory '{}'",
-                    local_timeline_directory.display()
-                )
-            })?;
+            match std::fs::remove_dir_all(&local_timeline_directory) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // This can happen if we're called a second time, e.g.,
+                    // because of a previous failure/cancellation at/after
+                    // failpoint timeline-delete-after-rm.
+                    //
+                    // It can also happen if we race with tenant detach, because,
+                    // it doesn't grab the layer_removal_cs lock.
+                    //
+                    // For now, log and continue.
+                    // warn! level is technically not appropriate for the
+                    // first case because we should expect retries to happen.
+                    // But the error is so rare, it seems better to get attention if it happens.
+                    let tenant_state = self.current_state();
+                    warn!(
+                        timeline_dir=?local_timeline_directory,
+                        ?tenant_state,
+                        "timeline directory not found, proceeding anyway"
+                    );
+                    // continue with the rest of the deletion
+                }
+                res => res.with_context(|| {
+                    format!(
+                        "Failed to remove local timeline directory '{}'",
+                        local_timeline_directory.display()
+                    )
+                })?,
+            }
 
             info!("finished deleting layer files, releasing layer_removal_cs.lock()");
             drop(layer_removal_guard);
         }
+
+        fail::fail_point!("timeline-delete-after-rm", |_| {
+            Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
+        });
 
         // Remove the timeline from the map.
         let mut timelines = self.timelines.lock().unwrap();
