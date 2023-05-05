@@ -467,7 +467,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
             id: *id,
             state: state.clone(),
             current_physical_size: None,
-            has_in_progress_downloads: Some(state.has_in_progress_downloads()),
+            attachment_status: state.attachment_status(),
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -492,7 +492,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
             id: tenant_id,
             state: state.clone(),
             current_physical_size: Some(current_physical_size),
-            has_in_progress_downloads: Some(state.has_in_progress_downloads()),
+            attachment_status: state.attachment_status(),
         })
     }
     .instrument(info_span!("tenant_status_handler", tenant = %tenant_id))

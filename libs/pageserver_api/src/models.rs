@@ -48,13 +48,29 @@ pub enum TenantState {
 }
 
 impl TenantState {
-    pub fn has_in_progress_downloads(&self) -> bool {
+    pub fn attachment_status(&self) -> TenantAttachmentStatus {
+        use TenantAttachmentStatus::*;
         match self {
-            Self::Loading => true,
-            Self::Attaching => true,
-            Self::Active => false,
-            Self::Stopping => false,
-            Self::Broken { .. } => false,
+            Self::Attaching => Maybe,
+            // tenant mgr startup distinguishes attaching from loading via marker file.
+            // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
+            Self::Loading => Attached,
+            // We only reach Active after successful load / attach.
+            // So, call atttachment status Attached.
+            Self::Active => Attached,
+            // The attach procedure only transitions the tenant from Attaching to Broken
+            // AFTER it has written the marker file. So, we return Maybe until we've written
+            // the marker file. After that, we want to return Attached so that a transiently
+            // failing Attach will not leave the contorl plane operation retrying forever.
+            // The control plane's attach procedure (tenant relocation) does a health check after
+            // observing `Attached` anyway, so, it's fine.
+            //
+            // See OpenAPI docs for more context.
+            Self::Broken { .. } => Attached,
+            // Why is Stopping a Maybe case? Because, during pageserver shutdown,
+            // we set the Stopping state irrespective of whether the tenant
+            // has finished attaching or not.
+            Self::Stopping => Maybe,
         }
     }
 
@@ -209,16 +225,26 @@ impl TenantConfigRequest {
     }
 }
 
+/// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantAttachmentStatus {
+    Maybe,
+    Attached,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
+    // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
-    pub has_in_progress_downloads: Option<bool>,
+    pub attachment_status: TenantAttachmentStatus,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -691,7 +717,7 @@ mod tests {
             id: TenantId::generate(),
             state: TenantState::Active,
             current_physical_size: Some(42),
-            has_in_progress_downloads: Some(false),
+            attachment_status: TenantAttachmentStatus::Attached,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -699,7 +725,7 @@ mod tests {
                 "slug": "Active",
             },
             "current_physical_size": 42,
-            "has_in_progress_downloads": false,
+            "has_in_progress_downloads": "attached",
         });
 
         let original_broken = TenantInfo {
@@ -709,7 +735,7 @@ mod tests {
                 backtrace: "backtrace info".into(),
             },
             current_physical_size: Some(42),
-            has_in_progress_downloads: Some(false),
+            attachment_status: TenantAttachmentStatus::Attached,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -721,7 +747,7 @@ mod tests {
                 }
             },
             "current_physical_size": 42,
-            "has_in_progress_downloads": false,
+            "attachment_status": "attached",
         });
 
         assert_eq!(
