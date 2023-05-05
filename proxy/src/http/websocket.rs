@@ -172,6 +172,7 @@ async fn ws_handler(
     session_id: uuid::Uuid,
     cache: Arc<Mutex<ConnectionCache>>,
 ) -> Result<Response<Body>, ApiError> {
+
     let host = request
         .headers()
         .get("host")
@@ -193,8 +194,9 @@ async fn ws_handler(
 
         // Return the response so the spawned future can continue.
         Ok(response)
+
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        match handle_sql(config, request, cache).await {
+        match handle_sql(config, request).await {
             Ok(resp) => json_response(StatusCode::OK, resp).map(|mut r| {
                 r.headers_mut().insert(
                     "Access-Control-Allow-Origin",
@@ -204,10 +206,12 @@ async fn ws_handler(
             }),
             Err(e) => json_response(StatusCode::BAD_REQUEST, format!("error: {e:?}")),
         }
+
     } else if request.uri().path() == "/sleep" {
         // sleep 15ms
         tokio::time::sleep(std::time::Duration::from_millis(15)).await;
         json_response(StatusCode::OK, "done")
+
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }
@@ -216,9 +220,8 @@ async fn ws_handler(
 // XXX: return different error codes
 async fn handle_sql(
     config: &'static ProxyConfig,
-    request: Request<Body>,
-    cache: Arc<Mutex<ConnectionCache>>,
-) -> anyhow::Result<String> {
+    request: Request<Body>
+) -> anyhow::Result<Vec<Value>> {
 
     let headers = request.headers();
 
@@ -319,7 +322,7 @@ async fn handle_sql(
 
     let query = &query_data.query;
     let params = query_data.params.iter().map(|value| {
-        let boxed: Box<dyn ToSql + Sync + Send> =  match value {
+        let boxed: Box<dyn ToSql + Sync + Send> = match value {
             Value::Null => Box::new(None::<bool>),
             Value::Bool(b) => Box::new(b.clone()),
             Value::Number(n) => Box::new(n.as_f64().unwrap()),
@@ -328,7 +331,6 @@ async fn handle_sql(
         };
         boxed
     }).collect::<Vec<Box<dyn ToSql + Sync + Send>>>();
-
 
     let pg_rows: Vec<Row> = client
         .query_raw(query, params)
@@ -343,7 +345,7 @@ async fn handle_sql(
 
     let rows = rows?;
 
-    Ok(serde_json::to_string(&rows)?)
+    Ok(rows)
 }
 
 pub struct ConnectionCache {
