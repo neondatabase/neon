@@ -1017,13 +1017,21 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     ps_http.configure_failpoints((failpoint_name, "pause"))
 
     with pytest.raises(requests.exceptions.Timeout):
-        ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
+        ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=1)
 
     # make sure the timeout was due to the failpoint
     at_failpoint_log_message = f".*{child_timeline_id}.*at failpoint {failpoint_name}.*"
 
     def hit_failpoint():
         assert env.pageserver.log_contains(at_failpoint_log_message)
+
+    def delete_timeline_call(queue, barrier):
+        barrier.wait()
+        try:
+            ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
+            queue.put("success")
+        except Exception as e:
+            queue.put(e)
 
     wait_until(50, 0.1, hit_failpoint)
 
@@ -1037,15 +1045,28 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     wait_until(50, 0.1, got_hangup_log_message)
 
-    # ok, retry without failpoint, it should succeed
-    ps_http.configure_failpoints((failpoint_name, "off"))
+    q: queue.Queue[str|Exception] = queue.Queue()
+    barrier = threading.Barrier(2)
+    thread = threading.Thread(target=delete_timeline_call, args=(q,barrier,))
+    thread.start()
 
-    # this should succeed
-    ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
-    # the second call will try to transition the timeline into Stopping state, but it's already in that state
-    env.pageserver.allowed_errors.append(
-        f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
-    )
+    try:
+        barrier.wait()
+        # ok, retry without failpoint, it should succeed
+        ps_http.configure_failpoints((failpoint_name, "off"))
+
+        # this should succeed
+        val = q.get(timeout=5)
+        if val == "success":
+            # the second call will try to transition the timeline into Stopping state, but it's already in that state
+            env.pageserver.allowed_errors.append(
+                f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+            )
+        else:
+            assert isinstance(val, Exception), f"{val} ({type(val)}) was unexpected"
+            raise val
+    finally:
+        thread.join()
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
