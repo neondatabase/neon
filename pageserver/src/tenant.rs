@@ -3441,14 +3441,26 @@ mod tests {
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
             .await?;
 
+        // The branchpoints should contain all timelines, even ones marked
+        // as Broken.
+        {
+            let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
+            assert_eq!(branchpoints.len(), 1);
+            assert_eq!(branchpoints[0], Lsn(0x40));
+        }
+
+        // You can read the key from the child branch even though the parent is
+        // Broken, as long as you don't need to access data from the parent.
         assert_eq!(
-            newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await?,
-            TEST_IMG(&format!("foo at {}", Lsn(0x40)))
+            newtline.get(*TEST_KEY, Lsn(0x70), &ctx).await?,
+            TEST_IMG(&format!("foo at {}", Lsn(0x70)))
         );
 
-        let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
-        assert_eq!(branchpoints.len(), 1);
-        assert_eq!(branchpoints[0], Lsn(0x40));
+        // This needs to traverse to the parent, and fails.
+        let err = newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("will not become active. Current state: Broken"));
 
         Ok(())
     }

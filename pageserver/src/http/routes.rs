@@ -105,6 +105,9 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::Cancelled => {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
             }
+            PageReconstructError::AncestorStopping(_) => {
+                ApiError::InternalServerError(anyhow::Error::new(pre))
+            }
             PageReconstructError::WalRedo(pre) => {
                 ApiError::InternalServerError(anyhow::Error::new(pre))
             }
