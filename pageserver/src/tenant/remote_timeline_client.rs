@@ -204,6 +204,7 @@ mod download;
 pub mod index;
 mod upload;
 
+use anyhow::Context;
 use chrono::Utc;
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
@@ -680,7 +681,7 @@ impl RemoteTimelineClient {
                 stopped
                     .latest_metadata
                     .to_bytes()
-                    .expect("timeline metadata serialization expected to pass"),
+                    .context("serialize TimelineMetadata")?,
             );
             index_part.deleted_at = Some(deleted_at);
             index_part
