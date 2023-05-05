@@ -323,16 +323,17 @@ async fn handle_sql(
         }
     });
 
-    // let sql = percent_decode(sql.as_bytes()).decode_utf8()?.to_string();
+    let query = &queryData.query;
+    let params = queryData.params.iter().map(|value| match value {
+        Value::Null => None as &(dyn ToSql + Sync),
+        Value::Bool(b) => b as &(dyn ToSql + Sync),
+        Value::Number(n) => &n.as_f64() as &(dyn ToSql + Sync),
+        Value::String(s) => s as &(dyn ToSql + Sync),
+        _ => panic!("wrong parameter type")
+    }).collect::<Vec<&(dyn ToSql + Sync)>>().as_ref();
 
     let rows: Vec<HashMap<_, _>> = client
-        .query(&queryData.query, queryData.params.iter().map(|x| match x { 
-            Value::Null => None,
-            Value::Bool(boolean) => boolean,
-            Value::Number(number) => number,
-            Value::String(string) => string,
-            _ => return Err(anyhow::anyhow!("unsupported param type"))
-         }).collect())
+        .query(query, params)
         .await?
         .into_iter()
         .filter_map(|el| {
