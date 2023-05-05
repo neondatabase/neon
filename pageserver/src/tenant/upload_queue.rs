@@ -76,12 +76,18 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) queued_operations: VecDeque<UploadOp>,
 }
 
+#[derive(Clone,Copy)]
+pub(super) enum SetDeletedFlagProgress {
+    NotRunning,
+    InProgress(NaiveDateTime),
+    Successful(NaiveDateTime),
+}
+
 pub(super) struct UploadQueueStopped {
     pub(super) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
     pub(super) last_uploaded_consistent_lsn: Lsn,
     pub(super) latest_metadata: TimelineMetadata,
-    /// If Some(), a call to `persist_index_part_with_deleted_flag` is ongoing or finished.
-    pub(super) deleted_at: Option<NaiveDateTime>,
+    pub(super) deleted_at: SetDeletedFlagProgress,
 }
 
 impl UploadQueue {

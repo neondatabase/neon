@@ -59,6 +59,7 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
+use crate::tenant::remote_timeline_client::PersistIndexPartWithDeletedFlagError;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
@@ -1426,7 +1427,15 @@ impl Tenant {
         // during attach or pageserver restart.
         // See comment in persist_index_part_with_deleted_flag.
         if let Some(remote_client) = timeline.remote_client.as_ref() {
-            remote_client.persist_index_part_with_deleted_flag().await?;
+            match remote_client.persist_index_part_with_deleted_flag().await {
+                // If we (now, or already) marked it successfully as deleted, we can proceed
+                Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
+                // Bail out otherwise
+                Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
+                | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
+                    return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
+                }
+            }
         }
 
         {
