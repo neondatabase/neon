@@ -1622,7 +1622,7 @@ impl Tenant {
             // For configurations without remote storage, we tolerate that we're not crash-safe here.
             // The timeline may come up Active but with missing layer files, in such setups.
             // See https://github.com/neondatabase/neon/pull/3919#issuecomment-1531726720
-            if let Err(e) = std::fs::remove_dir_all(&local_timeline_directory) {
+            if let Err(e) = std::fs::remove_dir_all(local_timeline_directory) {
                 warn!("failed to remove timeline files after uploading tombstoned index_part.json: {e}");
             }
 
