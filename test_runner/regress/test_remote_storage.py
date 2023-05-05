@@ -1129,7 +1129,5 @@ def test_delete_timeline_upload_fails_restarted(neon_env_builder: NeonEnvBuilder
         f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
     )
 
-    raise Exception("foo")
-
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
