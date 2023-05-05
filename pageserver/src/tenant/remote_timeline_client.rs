@@ -205,7 +205,7 @@ pub mod index;
 mod upload;
 
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
 use scopeguard::ScopeGuard;
@@ -243,6 +243,7 @@ use utils::id::{TenantId, TimelineId};
 use self::index::IndexPart;
 
 use super::storage_layer::LayerFileName;
+use super::upload_queue::SetDeletedFlagProgress;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -268,6 +269,16 @@ pub enum StopError {
     /// See [`RemoteTimelineClient::init_upload_queue`] and [`RemoteTimelineClient::init_upload_queue_for_empty_remote`].
     #[error("queue is not initialized")]
     QueueUninitialized,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PersistIndexPartWithDeletedFlagError {
+    #[error("another task is already setting the deleted_flag, started at {0:?}")]
+    AlreadyInProgress(NaiveDateTime),
+    #[error("the deleted_flag was already set, value is {0:?}")]
+    AlreadyDeleted(NaiveDateTime),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 /// A client for accessing a timeline's data in remote storage.
@@ -656,7 +667,7 @@ impl RemoteTimelineClient {
     /// Check method [`RemoteTimelineClient::stop`] for details.
     pub(crate) async fn persist_index_part_with_deleted_flag(
         self: &Arc<Self>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PersistIndexPartWithDeletedFlagError> {
         let index_part_with_deleted_at = {
             let mut locked = self.upload_queue.lock().unwrap();
 
@@ -664,16 +675,26 @@ impl RemoteTimelineClient {
             // we can have inprogress index part upload that can overwrite the file
             // with missing is_deleted flag that we going to set below
             let stopped = match &mut *locked {
-                UploadQueue::Uninitialized => anyhow::bail!("is not Stopped but Uninitialized"),
-                UploadQueue::Initialized(_) => anyhow::bail!("is not Stopped but Initialized"),
+                UploadQueue::Uninitialized => {
+                    return Err(anyhow::anyhow!("is not Stopped but Uninitialized").into())
+                }
+                UploadQueue::Initialized(_) => {
+                    return Err(anyhow::anyhow!("is not Stopped but Initialized").into())
+                }
                 UploadQueue::Stopped(stopped) => stopped,
             };
 
-            if let Some(deleted_at) = stopped.deleted_at.as_ref() {
-                anyhow::bail!("timeline is deleting, deleted_at: {:?}", deleted_at);
-            }
+            match stopped.deleted_at {
+                SetDeletedFlagProgress::NotRunning => (), // proceed
+                SetDeletedFlagProgress::InProgress(at) => {
+                    return Err(PersistIndexPartWithDeletedFlagError::AlreadyInProgress(at));
+                }
+                SetDeletedFlagProgress::Successful(at) => {
+                    return Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(at));
+                }
+            };
             let deleted_at = Utc::now().naive_utc();
-            stopped.deleted_at = Some(deleted_at);
+            stopped.deleted_at = SetDeletedFlagProgress::InProgress(deleted_at);
 
             let mut index_part = IndexPart::new(
                 stopped.latest_files.clone(),
@@ -696,7 +717,7 @@ impl RemoteTimelineClient {
                 ),
                 UploadQueue::Stopped(stopped) => stopped,
             };
-            stopped.deleted_at = None;
+            stopped.deleted_at = SetDeletedFlagProgress::NotRunning;
         });
 
         // Have a failpoint that can use the `pause` failpoint action.
@@ -727,11 +748,28 @@ impl RemoteTimelineClient {
         .await?;
 
         fail::fail_point!("persist_index_part_with_deleted_flag_after_upload", |_| {
-            anyhow::bail!("bailing for test")
+            Err(PersistIndexPartWithDeletedFlagError::Other(
+                anyhow::anyhow!("failpoint persist_index_part_with_deleted_flag_after_upload"),
+            ))
         });
 
-        // all good, keep the deleted_at flag
+        // all good, disarm the guard and mark as success
         ScopeGuard::into_inner(undo_deleted_at);
+        {
+            let mut locked = self.upload_queue.lock().unwrap();
+            let stopped = match &mut *locked {
+                UploadQueue::Uninitialized | UploadQueue::Initialized(_) => unreachable!(
+                    "there's no way out of Stopping, and we checked it's Stopping above: {:?}",
+                    locked.as_str(),
+                ),
+                UploadQueue::Stopped(stopped) => stopped,
+            };
+            stopped.deleted_at = SetDeletedFlagProgress::Successful(
+                index_part_with_deleted_at
+                    .deleted_at
+                    .expect("we set it above"),
+            );
+        }
 
         Ok(())
     }
@@ -1100,7 +1138,7 @@ impl RemoteTimelineClient {
                         latest_files,
                         last_uploaded_consistent_lsn,
                         latest_metadata,
-                        deleted_at: None,
+                        deleted_at: SetDeletedFlagProgress::NotRunning,
                     };
 
                     let upload_queue =
