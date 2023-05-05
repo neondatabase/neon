@@ -798,23 +798,23 @@ def test_timeline_resurrection_on_attach(
         log.info("upload of checkpoint is done")
 
     branch_timeline_id = env.neon_cli.create_branch("new", "main")
-    new_pg = env.endpoints.create_start("new")
 
     if fill_branch:
-        with new_pg.cursor() as cur:
-            cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
-            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+        with env.endpoints.create_start("new") as new_pg:
+            with new_pg.cursor() as cur:
+                cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
+                current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
-            # wait until pageserver receives that data
-            wait_for_last_record_lsn(ps_http, tenant_id, branch_timeline_id, current_lsn)
+                # wait until pageserver receives that data
+                wait_for_last_record_lsn(ps_http, tenant_id, branch_timeline_id, current_lsn)
 
-            # run checkpoint manually to be sure that data landed in remote storage
-            ps_http.timeline_checkpoint(tenant_id, branch_timeline_id)
+                # run checkpoint manually to be sure that data landed in remote storage
+                ps_http.timeline_checkpoint(tenant_id, branch_timeline_id)
 
-            # wait until pageserver successfully uploaded a checkpoint to remote storage
-            log.info("waiting for checkpoint upload")
-            wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
-            log.info("upload of checkpoint is done")
+                # wait until pageserver successfully uploaded a checkpoint to remote storage
+                log.info("waiting for checkpoint upload")
+                wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
+                log.info("upload of checkpoint is done")
     else:
         pass
 
