@@ -4,7 +4,8 @@ use crate::{
     proxy::handle_ws_client,
 };
 use bytes::{Buf, Bytes};
-use futures::{Sink, Stream, StreamExt};
+use futures::{Sink, Stream, StreamExt, TryStreamExt};
+use tokio_postgres::Row;
 use std::collections::HashMap;
 use hyper::{
     server::{accept, conn::AddrIncoming},
@@ -317,18 +318,26 @@ async fn handle_sql(
     });
 
     let query = &query_data.query;
-    let params = query_data.params.iter().map(|value| match value {
-        // Value::Null => &None as &(dyn ToSql + Sync),
-        Value::Bool(b) => b as &(dyn ToSql + Sync),
-        // Value::Number(n) => &n.as_f64() as &(dyn ToSql + Sync),
-        Value::String(s) => s as &(dyn ToSql + Sync),
-        _ => panic!("wrong parameter type")
-    }).collect::<Vec<&(dyn ToSql + Sync)>>();
+    let params = query_data.params.iter().map(|value| {
+        let boxed: Box<dyn ToSql + Sync + Send> =  match value {
+            Value::Null => Box::new(None::<bool>),
+            Value::Bool(b) => Box::new(b.clone()),
+            Value::Number(n) => Box::new(n.as_f64().unwrap()),
+            Value::String(s) => Box::new(s.clone()),
+            _ => panic!("wrong parameter type")
+        };
+        boxed
+    }).collect::<Vec<Box<dyn ToSql + Sync + Send>>>();
 
-    let rows: Result<Vec<serde_json::Value>, anyhow::Error> = client
-        .query(query, params.as_ref())
+
+    let pg_rows: Vec<Row> = client
+        .query_raw(query, params)
         .await?
-        .into_iter()
+        .try_collect::<Vec<Row>>()
+        .await?;
+
+    let rows: Result<Vec<serde_json::Value>, anyhow::Error> = pg_rows
+        .iter()
         .map(postgres_row_to_json_value)
         .collect();
 

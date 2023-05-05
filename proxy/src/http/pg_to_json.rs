@@ -11,12 +11,12 @@ pub type JSONValue = serde_json::Value;
 pub type RowData = Map<String, JSONValue>;
 pub type Error = anyhow::Error; // from: https://github.com/dtolnay/anyhow
 
-pub fn postgres_row_to_json_value(row: Row) -> Result<JSONValue, Error> {
+pub fn postgres_row_to_json_value(row: &Row) -> Result<JSONValue, Error> {
     let row_data = postgres_row_to_row_data(row)?;
     Ok(JSONValue::Object(row_data))
 }
 
-pub fn postgres_row_to_row_data(row: Row) -> Result<RowData, Error> {
+pub fn postgres_row_to_row_data(row: &Row) -> Result<RowData, Error> {
     let mut result: Map<String, JSONValue> = Map::new();
     for (i, column) in row.columns().iter().enumerate() {
         let name = column.name();
