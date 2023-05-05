@@ -31,11 +31,15 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
 
     # tenant can create branches
     tenant_http_client.timeline_create(
-        tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
+        pg_version=env.pg_version,
+        tenant_id=env.initial_tenant,
+        ancestor_timeline_id=new_timeline_id,
     )
     # console can create branches for tenant
     pageserver_http_client.timeline_create(
-        tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
+        pg_version=env.pg_version,
+        tenant_id=env.initial_tenant,
+        ancestor_timeline_id=new_timeline_id,
     )
 
     # fail to create branch using token with different tenant_id
@@ -43,7 +47,9 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         PageserverApiException, match="Forbidden: Tenant id mismatch. Permission denied"
     ):
         invalid_tenant_http_client.timeline_create(
-            tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
+            pg_version=env.pg_version,
+            tenant_id=env.initial_tenant,
+            ancestor_timeline_id=new_timeline_id,
         )
 
     # create tenant using management token

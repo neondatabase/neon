@@ -11,4 +11,5 @@ serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
 
+utils = { path = "../utils" }
 workspace_hack.workspace = true

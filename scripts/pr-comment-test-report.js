@@ -37,7 +37,7 @@ module.exports = async ({ github, context, fetch, reports }) => {
         const {buildType, reportUrl, jsonUrl} = report
 
         if (!reportUrl || !jsonUrl) {
-            console.warn(`"reportUrl" or "jsonUrl" aren't set for ${buildType} build`)
+            commentBody += `#### ${buildType} build: no tests were run or test report is not available\n`
             continue
         }
 
@@ -78,7 +78,7 @@ module.exports = async ({ github, context, fetch, reports }) => {
         }
 
         const totalTestsCount = failedTests.length + passedTests.length + skippedTests.length
-        commentBody += `#### ${buildType} build: ${totalTestsCount} tests run: ${passedTests.length} passed, ${failedTests.length} failed, ${skippedTests.length} ([full report](${reportUrl}))\n`
+        commentBody += `#### ${buildType} build: ${totalTestsCount} tests run: ${passedTests.length} passed, ${failedTests.length} failed, ${skippedTests.length} skipped ([full report](${reportUrl}))\n`
         if (failedTests.length > 0) {
             commentBody += `Failed tests:\n`
             for (const test of failedTests) {

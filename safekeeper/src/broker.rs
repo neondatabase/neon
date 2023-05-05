@@ -14,10 +14,13 @@ use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::Request;
 
 use std::time::Duration;
+use std::time::Instant;
 use tokio::task::JoinHandle;
 use tokio::{runtime, time::sleep};
 use tracing::*;
 
+use crate::metrics::BROKER_PULLED_UPDATES;
+use crate::metrics::BROKER_PUSHED_UPDATES;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 
@@ -49,12 +52,17 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
             // is under plain mutex. That's ok, all this code is not performance
             // sensitive and there is no risk of deadlock as we don't await while
             // lock is held.
+            let now = Instant::now();
             let mut active_tlis = GlobalTimelines::get_all();
             active_tlis.retain(|tli| tli.is_active());
             for tli in &active_tlis {
                 let sk_info = tli.get_safekeeper_info(&conf);
                 yield sk_info;
+                BROKER_PUSHED_UPDATES.inc();
             }
+            let elapsed = now.elapsed();
+            // Log duration every second. Should be about 10MB of logs per day.
+            info!("pushed {} timeline updates to broker in {:?}", active_tlis.len(), elapsed);
             sleep(push_interval).await;
         }
     };
@@ -79,6 +87,10 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
         .context("subscribe_safekeper_info request failed")?
         .into_inner();
 
+    let ok_counter = BROKER_PULLED_UPDATES.with_label_values(&["ok"]);
+    let not_found = BROKER_PULLED_UPDATES.with_label_values(&["not_found"]);
+    let err_counter = BROKER_PULLED_UPDATES.with_label_values(&["error"]);
+
     while let Some(msg) = stream.message().await? {
         let proto_ttid = msg
             .tenant_timeline_id
@@ -91,7 +103,15 @@ async fn pull_loop(conf: SafeKeeperConf) -> Result<()> {
             // connection to the broker.
 
             // note: there are blocking operations below, but it's considered fine for now
-            tli.record_safekeeper_info(msg).await?
+            let res = tli.record_safekeeper_info(msg).await;
+            if res.is_ok() {
+                ok_counter.inc();
+            } else {
+                err_counter.inc();
+            }
+            res?;
+        } else {
+            not_found.inc();
         }
     }
     bail!("end of stream");

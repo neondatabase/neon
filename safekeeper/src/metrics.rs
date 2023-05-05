@@ -10,7 +10,7 @@ use anyhow::Result;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    register_int_counter_vec, Gauge, IntCounterVec, IntGaugeVec,
+    register_int_counter, register_int_counter_vec, Gauge, IntCounter, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
@@ -72,6 +72,58 @@ pub static PG_IO_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
         &["client_az", "sk_az", "app_name", "dir", "same_az"]
     )
     .expect("Failed to register safekeeper_pg_io_bytes gauge")
+});
+pub static BROKER_PUSHED_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_broker_pushed_updates_total",
+        "Number of timeline updates pushed to the broker"
+    )
+    .expect("Failed to register safekeeper_broker_pushed_updates_total counter")
+});
+pub static BROKER_PULLED_UPDATES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_broker_pulled_updates_total",
+        "Number of timeline updates pulled and processed from the broker",
+        &["result"]
+    )
+    .expect("Failed to register safekeeper_broker_pulled_updates_total counter")
+});
+pub static PG_QUERIES_RECEIVED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_queries_received_total",
+        "Number of queries received through pg protocol",
+        &["query"]
+    )
+    .expect("Failed to register safekeeper_pg_queries_received_total counter")
+});
+pub static PG_QUERIES_FINISHED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_queries_finished_total",
+        "Number of queries finished through pg protocol",
+        &["query"]
+    )
+    .expect("Failed to register safekeeper_pg_queries_finished_total counter")
+});
+pub static REMOVED_WAL_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_removed_wal_segments_total",
+        "Number of WAL segments removed from the disk"
+    )
+    .expect("Failed to register safekeeper_removed_wal_segments_total counter")
+});
+pub static BACKED_UP_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backed_up_segments_total",
+        "Number of WAL segments backed up to the broker"
+    )
+    .expect("Failed to register safekeeper_backed_up_segments_total counter")
+});
+pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backup_errors_total",
+        "Number of errors during backup"
+    )
+    .expect("Failed to register safekeeper_backup_errors_total counter")
 });
 
 pub const LABEL_UNKNOWN: &str = "unknown";

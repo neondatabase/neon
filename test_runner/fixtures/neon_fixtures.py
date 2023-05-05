@@ -45,6 +45,7 @@ from typing_extensions import Literal
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -75,7 +76,6 @@ Env = Dict[str, str]
 
 DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
-DEFAULT_PG_VERSION_DEFAULT: str = "14"
 
 BASE_PORT: int = 15000
 WORKER_PORT_NUM: int = 1000
@@ -148,18 +148,7 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def pg_version() -> Iterator[str]:
-    if env_default_pg_version := os.environ.get("DEFAULT_PG_VERSION"):
-        version = env_default_pg_version
-    else:
-        version = DEFAULT_PG_VERSION_DEFAULT
-
-    log.info(f"pg_version is {version}")
-    yield version
-
-
-@pytest.fixture(scope="session")
-def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: str) -> Iterator[Path]:
+def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
     versioned_dir = pg_distrib_dir / f"v{pg_version}"
 
     psql_bin_path = versioned_dir / "bin/psql"
@@ -290,6 +279,12 @@ class PortDistributor:
 @pytest.fixture(scope="session")
 def port_distributor(worker_base_port: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
+
+
+@pytest.fixture(scope="session")
+def httpserver_listen_address(port_distributor: PortDistributor):
+    port = port_distributor.get_port()
+    return ("localhost", port)
 
 
 @pytest.fixture(scope="function")
@@ -586,7 +581,7 @@ class NeonEnvBuilder:
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
         pg_distrib_dir: Path,
-        pg_version: str,
+        pg_version: PgVersion,
         remote_storage: Optional[RemoteStorage] = None,
         remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
@@ -1035,7 +1030,7 @@ def _shared_simple_env(
     top_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1092,7 +1087,7 @@ def neon_env_builder(
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
     default_broker: NeonBroker,
     run_id: uuid.UUID,
 ) -> Iterator[NeonEnvBuilder]:
@@ -1747,7 +1742,7 @@ def append_pageserver_param_overrides(
 class PgBin:
     """A helper class for executing postgres binaries"""
 
-    def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: str):
+    def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion):
         self.log_dir = log_dir
         self.pg_version = pg_version
         self.pg_bin_path = pg_distrib_dir / f"v{pg_version}" / "bin"
@@ -1806,7 +1801,7 @@ class PgBin:
 
 
 @pytest.fixture(scope="function")
-def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: str) -> PgBin:
+def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
@@ -1894,7 +1889,7 @@ def vanilla_pg(
     test_output_dir: Path,
     port_distributor: PortDistributor,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
 ) -> Iterator[VanillaPostgres]:
     pgdatadir = test_output_dir / "pgdata-vanilla"
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
@@ -1939,7 +1934,7 @@ class RemotePostgres(PgProtocol):
 
 @pytest.fixture(scope="function")
 def remote_pg(
-    test_output_dir: Path, pg_distrib_dir: Path, pg_version: str
+    test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion
 ) -> Iterator[RemotePostgres]:
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
@@ -2623,7 +2618,7 @@ class Safekeeper:
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
-    pg_version: int
+    pg_version: int  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
     flush_lsn: Lsn
     commit_lsn: Lsn
     timeline_start_lsn: Lsn
@@ -2669,7 +2664,11 @@ class SafekeeperHttpClient(requests.Session):
         return res_json
 
     def timeline_create(
-        self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        pg_version: int,  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
+        commit_lsn: Lsn,
     ):
         body = {
             "tenant_id": str(tenant_id),

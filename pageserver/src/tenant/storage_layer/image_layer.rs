@@ -53,7 +53,7 @@ use utils::{
 };
 
 use super::filename::{ImageFileName, LayerFileName};
-use super::{Layer, LayerAccessStatsReset, LayerIter, LayerResidenceStatus, PathOrConf};
+use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf};
 
 ///
 /// Header stored in the beginning of the file
@@ -438,7 +438,7 @@ impl ImageLayer {
             key_range: summary.key_range,
             lsn: summary.lsn,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
+            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
                 loaded: false,
@@ -598,7 +598,7 @@ impl ImageLayerWriterInner {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::for_new_layer_file(),
+            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,

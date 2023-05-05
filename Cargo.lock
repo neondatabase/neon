@@ -1032,6 +1032,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "utils",
  "workspace_hack",
 ]
 
@@ -1105,6 +1106,7 @@ dependencies = [
  "anyhow",
  "clap 4.2.2",
  "comfy-table",
+ "compute_api",
  "git-version",
  "nix",
  "once_cell",
@@ -3674,6 +3676,7 @@ dependencies = [
  "remote_storage",
  "reqwest",
  "safekeeper_api",
+ "scopeguard",
  "serde",
  "serde_json",
  "serde_with",

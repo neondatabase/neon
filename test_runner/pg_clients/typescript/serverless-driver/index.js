@@ -1,8 +1,11 @@
 #! /usr/bin/env node
 
-import { Client } from '@neondatabase/serverless'
+import ws from 'ws'
+import { neonConfig, Client } from '@neondatabase/serverless'
 
 (async () => {
+    neonConfig.webSocketConstructor = ws
+
     const client = new Client({
         host: process.env.NEON_HOST,
         database: process.env.NEON_DATABASE,

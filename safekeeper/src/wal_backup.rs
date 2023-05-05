@@ -25,6 +25,7 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
+use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS};
 use crate::timeline::{PeerInfo, Timeline};
 use crate::{GlobalTimelines, SafeKeeperConf};
 
@@ -394,7 +395,13 @@ async fn backup_single_segment(
             )
         })?;
 
-    backup_object(&segment_file_path, &remote_segment_path, seg.size()).await?;
+    let res = backup_object(&segment_file_path, &remote_segment_path, seg.size()).await;
+    if res.is_ok() {
+        BACKED_UP_SEGMENTS.inc();
+    } else {
+        BACKUP_ERRORS.inc();
+    }
+    res?;
     debug!("Backup of {} done", segment_file_path.display());
 
     Ok(())

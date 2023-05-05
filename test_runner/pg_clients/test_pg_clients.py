@@ -16,10 +16,9 @@ from fixtures.utils import subprocess_capture
         "rust/tokio-postgres",
         "python/asyncpg",
         "python/pg8000",
-        pytest.param(
-            "swift/PostgresClientKitExample",  # See https://github.com/neondatabase/neon/pull/2008#discussion_r911896592
-            marks=pytest.mark.xfail(reason="Neither SNI nor parameters is supported"),
-        ),
+        # PostgresClientKitExample does not support SNI or connection options, so it uses workaround D (https://neon.tech/sni)
+        # See example itself: test_runner/pg_clients/swift/PostgresClientKitExample/Sources/PostgresClientKitExample/main.swift
+        "swift/PostgresClientKitExample",
         "swift/PostgresNIOExample",
         "typescript/postgresql-client",
         "typescript/serverless-driver",

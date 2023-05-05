@@ -184,7 +184,14 @@ impl Timeline {
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
-                let last_activity_ts = hist_layer.access_stats().latest_activity();
+
+                let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
+                    // We only use this fallback if there's an implementation error.
+                    // `latest_activity` already does rate-limited warn!() log.
+                    debug!(layer=%hist_layer.filename().file_name(), "last_activity returns None, using SystemTime::now");
+                    SystemTime::now()
+                });
+
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
                     Err(_e) => {
