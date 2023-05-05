@@ -49,8 +49,8 @@ pub enum ComputeMode {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Cluster {
-    pub cluster_id: String,
-    pub name: String,
+    pub cluster_id: Option<String>,
+    pub name: Option<String>,
     pub state: Option<String>,
     pub roles: Vec<Role>,
     pub databases: Vec<Database>,

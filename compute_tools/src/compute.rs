@@ -376,7 +376,7 @@ impl ComputeNode {
 
         info!(
             "finished configuration of compute for project {}",
-            spec.cluster.cluster_id
+            spec.cluster.cluster_id.as_deref().unwrap_or("None")
         );
 
         Ok(())
@@ -434,7 +434,7 @@ impl ComputeNode {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            spec.spec.cluster.cluster_id,
+            spec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
             spec.spec.operation_uuid.as_deref().unwrap_or("None"),
             spec.tenant_id,
             spec.timeline_id,
