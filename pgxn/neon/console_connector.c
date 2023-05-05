@@ -621,7 +621,7 @@ void InitConsoleConnector()
         "URL of the Neon Console, which will be forwarded changes to dbs and roles",
         NULL,
         &ConsoleURL,
-        "",
+        NULL,
         PGC_SUSET,
         0,
         NULL,
