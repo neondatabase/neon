@@ -7,7 +7,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import pytest
 import requests
@@ -1059,7 +1059,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     wait_until(50, 0.1, got_hangup_log_message)
 
-    q: queue.Queue[str | Exception] = queue.Queue()
+    q: queue.Queue[Union[str, Exception]] = queue.Queue()
     barrier = threading.Barrier(2)
     thread = threading.Thread(
         target=delete_timeline_call,
