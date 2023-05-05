@@ -16,7 +16,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use percent_encoding::percent_decode;
-use tokio_postgres::types::ToSql;
+use tokio_postgres::types::{ToSql, FromSql};
 use std::collections::HashMap;
 use std::{
     convert::Infallible,
@@ -336,24 +336,18 @@ async fn handle_sql(
         .query(query, params)
         .await?
         .into_iter()
-        .filter_map(|el| {
-            if let tokio_postgres::SimpleQueryMessage::Row(row) = el {
-                let mut serilaized_row: HashMap<String, String> = HashMap::new();
-                for i in 0..row.len() {
-                    let col = row.columns().get(i).map_or("?", |c| c.name());
-                    let val = row.get(i).unwrap_or("?");
-                    serilaized_row.insert(col.into(), val.into());
-                }
-                Some(serilaized_row)
-            } else {
-                None
+        .filter_map(|row| {
+            let mut serialized_row: HashMap<String, String> = HashMap::new();
+            for i in 0..row.len() {
+                let col = row.columns().get(i).map_or("?", |c| c.name());
+                let val = row.get(i).unwrap_or("?");
+                serialized_row.insert(col.into(), val.into());
             }
+            Some(serialized_row)
         })
         .collect();
 
     Ok(serde_json::to_string(&rows)?)
-
-    // ConnectionCache::execute(&cache, conn_string, &hostname, sql).await
 }
 
 pub struct ConnectionCache {
