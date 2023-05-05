@@ -1,5 +1,9 @@
 import pytest
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    RemoteStorageKind,
+)
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
@@ -94,11 +98,20 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 
 
-def test_delete_timeline_post_rm_failure(neon_env_builder: NeonEnvBuilder):
+# cover the two cases: remote storage configured vs not configured
+@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
+def test_delete_timeline_post_rm_failure(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
     """
     If there is a failure after removing the timeline directory, the delete operation
     should be retryable.
     """
+
+    if remote_storage_kind is not None:
+        neon_env_builder.enable_remote_storage(
+            remote_storage_kind, "test_delete_timeline_post_rm_failure"
+        )
 
     env = neon_env_builder.init_start()
     assert env.initial_timeline
