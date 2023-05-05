@@ -699,7 +699,8 @@ impl RemoteTimelineClient {
             stopped.deleted_at = None;
         });
 
-        // this is for pausing
+        // Have a failpoint that can use the `pause` failpoint action.
+        // We don't want to block the executor thread, hence, spawn_blocking + await.
         #[cfg(feature = "testing")]
         tokio::task::spawn_blocking({
             let current = tracing::Span::current();
