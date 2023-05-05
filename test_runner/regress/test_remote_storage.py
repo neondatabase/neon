@@ -950,7 +950,14 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
             result_queue.put("failure, see log for stack trace")
 
     first_call_result: queue.Queue[str] = queue.Queue()
-    first_call_thread = threading.Thread(target=delete_timeline_call, args=("first call", first_call_result, None,))
+    first_call_thread = threading.Thread(
+        target=delete_timeline_call,
+        args=(
+            "first call",
+            first_call_result,
+            None,
+        ),
+    )
     first_call_thread.start()
 
     second_call_thread = None
@@ -967,7 +974,14 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
         barrier = threading.Barrier(2)
 
         second_call_result: queue.Queue[str] = queue.Queue()
-        second_call_thread = threading.Thread(target=delete_timeline_call, args=("second call", second_call_result, barrier,))
+        second_call_thread = threading.Thread(
+            target=delete_timeline_call,
+            args=(
+                "second call",
+                second_call_result,
+                barrier,
+            ),
+        )
         second_call_thread.start()
 
         barrier.wait()
@@ -1045,9 +1059,15 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     wait_until(50, 0.1, got_hangup_log_message)
 
-    q: queue.Queue[str|Exception] = queue.Queue()
+    q: queue.Queue[str | Exception] = queue.Queue()
     barrier = threading.Barrier(2)
-    thread = threading.Thread(target=delete_timeline_call, args=(q,barrier,))
+    thread = threading.Thread(
+        target=delete_timeline_call,
+        args=(
+            q,
+            barrier,
+        ),
+    )
     thread.start()
 
     try:
