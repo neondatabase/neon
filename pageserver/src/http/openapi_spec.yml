@@ -348,8 +348,11 @@ paths:
 
         The method to identify whether a request has arrived at the pageserver, and
         whether it has succeeded, is to poll for the tenant status to reach "Active"
-        or "Broken" state.
-        NB: these two values are currently not documented in this API spec.
+        or "Broken" state. These values are currently not explicitly documented in
+        the API spec.
+        Polling for `has_in_progress_downloads == false` is INCORRECT because that
+        value can turn `false` during shutdown while the Attach operation is still
+        unfinished.
 
         There is no way to cancel an in-flight request.
 
