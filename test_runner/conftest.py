@@ -1,4 +1,5 @@
 pytest_plugins = (
+    "fixtures.build_type",
     "fixtures.pg_version",
     "fixtures.neon_fixtures",
     "fixtures.benchmark_fixture",
