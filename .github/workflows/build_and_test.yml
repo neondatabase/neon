@@ -630,6 +630,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
 
@@ -715,6 +716,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
@@ -767,6 +769,7 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-node
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
