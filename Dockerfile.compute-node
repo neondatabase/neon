@@ -1,5 +1,5 @@
 ARG PG_VERSION
-ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+ARG REPOSITORY=neondatabase
 ARG IMAGE=rust
 ARG TAG=pinned
 
