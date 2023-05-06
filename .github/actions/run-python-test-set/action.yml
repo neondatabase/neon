@@ -201,10 +201,9 @@ runs:
         path: /tmp/test_output/test_create_snapshot/compatibility_snapshot_pg14/
         prefix: latest
 
-    - name: Create Allure report
+    - name: Upload test results
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
+      uses: ./.github/actions/allure-report-store
       with:
-        action: store
-        build_type: ${{ inputs.build_type }}
-        test_selection: ${{ inputs.test_selection }}
+        report-dir: /tmp/test_output/allure/results
+        unique-key: ${{ inputs.test_selection }}-${{ inputs.build_type }}
