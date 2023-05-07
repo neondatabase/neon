@@ -1686,9 +1686,9 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		if (current_size >= ((uint64) max_cluster_size) * 1024 * 1024)
 			ereport(ERROR,
 					(errcode(ERRCODE_DISK_FULL),
-					 errmsg("could not extend file because cluster size limit (%d MB) has been exceeded",
+					 errmsg("could not extend file because project size limit (%d MB) has been exceeded",
 							max_cluster_size),
-					 errhint("This limit is defined by neon.max_cluster_size GUC")));
+					 errhint("This limit is defined externally by the project size limit, and internally by neon.max_cluster_size GUC")));
 	}
 
 	/*
