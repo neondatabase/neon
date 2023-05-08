@@ -226,7 +226,6 @@ impl TenantConfigRequest {
 }
 
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
-#[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantAttachmentStatus {
