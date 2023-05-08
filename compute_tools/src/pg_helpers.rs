@@ -123,7 +123,8 @@ impl RoleExt for Role {
         // XXX: consider putting LOGIN as a default option somewhere higher, e.g. in control-plane.
         // For now, we do not use generic `options` for roles. Once used, add
         // `self.options.as_pg_options()` somewhere here.
-        let mut params: String = "LOGIN".to_string();
+        let mut params: String = self.options.as_pg_options();
+        params.push_str(" LOGIN");
 
         if let Some(pass) = &self.encrypted_password {
             // Some time ago we supported only md5 and treated all encrypted_password as md5.
