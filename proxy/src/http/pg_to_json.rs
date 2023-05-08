@@ -1,5 +1,6 @@
 
 use anyhow::{anyhow, Context};
+use chrono::{Utc, DateTime, NaiveDateTime, NaiveTime, NaiveDate};
 use serde_json::Map;
 use tokio_postgres::{
     types::{FromSql, Type},
@@ -38,6 +39,21 @@ pub fn pg_cell_to_json_value(
     Ok(match *column.type_() {
         // for rust-postgres <> postgres type-mappings: https://docs.rs/postgres/latest/postgres/types/trait.FromSql.html#types
         // for postgres types: https://www.postgresql.org/docs/7.4/datatype.html#DATATYPE-TABLE
+
+        Type::TIMESTAMPTZ => get_basic(row, column, column_i, |a: DateTime<Utc>| {
+            Ok(JSONValue::String(a.to_rfc3339()))
+        })?,
+        Type::TIMESTAMP => get_basic(row, column, column_i, |a: NaiveDateTime| {
+            Ok(JSONValue::String(a.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()))
+        })?,
+        
+        Type::TIME => get_basic(row, column, column_i, |a: NaiveTime| {
+            Ok(JSONValue::String(a.format("%H:%M:%S%.6f").to_string()))
+        })?,
+        Type::DATE => get_basic(row, column, column_i, |a: NaiveDate| {
+            Ok(JSONValue::String(a.format("%Y-%m-%d").to_string()))
+        })?,
+        // no TIMETZ support?
 
         // single types
         Type::BOOL => get_basic(row, column, column_i, |a: bool| Ok(JSONValue::Bool(a)))?,

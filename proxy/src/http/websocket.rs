@@ -273,10 +273,9 @@ async fn handle_sql(
         query: String,
         params: Vec<serde_json::Value>
     }
-
     let query_data: QueryData = serde_json::from_slice(&data)?;
 
-    let params = StartupMessageParams::new([
+    let credential_params = StartupMessageParams::new([
         ("user", username),
         ("database", dbname),
         ("application_name", "proxy_http_sql"),
@@ -286,7 +285,7 @@ async fn handle_sql(
     let creds = config
         .auth_backend
         .as_ref()
-        .map(|_| auth::ClientCredentials::parse(&params, Some(hostname), common_names))
+        .map(|_| auth::ClientCredentials::parse(&credential_params, Some(hostname), common_names))
         .transpose()?;
 
     let extra = console::ConsoleReqExtra {
@@ -321,7 +320,7 @@ async fn handle_sql(
     });
 
     let query = &query_data.query;
-    let params = query_data.params.iter().map(|value| {
+    let query_params = query_data.params.iter().map(|value| {
         let boxed: Box<dyn ToSql + Sync + Send> = match value {
             Value::Null => Box::new(None::<bool>),
             Value::Bool(b) => Box::new(b.clone()),
@@ -330,10 +329,10 @@ async fn handle_sql(
             _ => panic!("wrong parameter type")
         };
         boxed
-    }).collect::<Vec<Box<dyn ToSql + Sync + Send>>>();
+    }).collect::<Vec<_>>();
 
     let pg_rows: Vec<Row> = client
-        .query_raw(query, params)
+        .query_raw(query, query_params)
         .await?
         .try_collect::<Vec<Row>>()
         .await?;
