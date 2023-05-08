@@ -116,26 +116,7 @@ pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub new_tenant_id: Option<TenantId>,
-    pub checkpoint_distance: Option<u64>,
-    pub checkpoint_timeout: Option<String>,
-    pub compaction_target_size: Option<u64>,
-    pub compaction_period: Option<String>,
-    pub compaction_threshold: Option<usize>,
-    pub gc_horizon: Option<u64>,
-    pub gc_period: Option<String>,
-    pub image_creation_threshold: Option<usize>,
-    pub pitr_interval: Option<String>,
-    pub walreceiver_connect_timeout: Option<String>,
-    pub lagging_wal_timeout: Option<String>,
-    pub max_lsn_wal_lag: Option<NonZeroU64>,
-    pub trace_read_requests: Option<bool>,
-    // We defer the parsing of the eviction_policy field to the request handler.
-    // Otherwise we'd have to move the types for eviction policy into this package.
-    // We might do that once the eviction feature has stabilizied.
-    // For now, this field is not even documented in the openapi_spec.yml.
-    pub eviction_policy: Option<serde_json::Value>,
-    pub min_resident_size_override: Option<u64>,
-    pub evictions_low_residence_duration_metric_threshold: Option<String>,
+    pub tenant_config: TenantConfig,
 }
 
 #[serde_as]
@@ -157,11 +138,8 @@ impl TenantCreateRequest {
     }
 }
 
-#[serde_as]
-#[derive(Serialize, Deserialize)]
-pub struct TenantConfigRequest {
-    #[serde_as(as = "DisplayFromStr")]
-    pub tenant_id: TenantId,
+#[derive(Serialize, Deserialize, Default)]
+pub struct TenantConfig {
     #[serde(default)]
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
@@ -178,33 +156,26 @@ pub struct TenantConfigRequest {
     pub trace_read_requests: Option<bool>,
     // We defer the parsing of the eviction_policy field to the request handler.
     // Otherwise we'd have to move the types for eviction policy into this package.
-    // We might do that once the eviction feature has stabilizied.
+    // We might do that once the eviction feature has stabilized.
     // For now, this field is not even documented in the openapi_spec.yml.
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
-    pub evictions_low_residence_duration_metric_threshold: Option<String>,
+    pub evictions_low_residence_duration_metric_threshold: Option<String>
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct TenantConfigRequest {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: TenantId,
+    pub tenant_config: TenantConfig,
 }
 
 impl TenantConfigRequest {
     pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
         TenantConfigRequest {
             tenant_id,
-            checkpoint_distance: None,
-            checkpoint_timeout: None,
-            compaction_target_size: None,
-            compaction_period: None,
-            compaction_threshold: None,
-            gc_horizon: None,
-            gc_period: None,
-            image_creation_threshold: None,
-            pitr_interval: None,
-            walreceiver_connect_timeout: None,
-            lagging_wal_timeout: None,
-            max_lsn_wal_lag: None,
-            trace_read_requests: None,
-            eviction_policy: None,
-            min_resident_size_override: None,
-            evictions_low_residence_duration_metric_threshold: None,
+            tenant_config: TenantConfig { checkpoint_distance: None, checkpoint_timeout: None, compaction_target_size: None, compaction_period: None, compaction_threshold: None, gc_horizon: None, gc_period: None, image_creation_threshold: None, pitr_interval: None, walreceiver_connect_timeout: None, lagging_wal_timeout: None, max_lsn_wal_lag: None, trace_read_requests: None, eviction_policy: None, min_resident_size_override: None, evictions_low_residence_duration_metric_threshold: None }
         }
     }
 }

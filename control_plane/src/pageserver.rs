@@ -8,9 +8,7 @@ use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, Context};
-use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
-};
+use pageserver_api::models::{TenantConfig, TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -318,59 +316,61 @@ impl PageServerNode {
         let mut settings = settings.clone();
         let request = TenantCreateRequest {
             new_tenant_id,
-            checkpoint_distance: settings
-                .remove("checkpoint_distance")
-                .map(|x| x.parse::<u64>())
-                .transpose()?,
-            checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
-            compaction_target_size: settings
-                .remove("compaction_target_size")
-                .map(|x| x.parse::<u64>())
-                .transpose()?,
-            compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
-            compaction_threshold: settings
-                .remove("compaction_threshold")
-                .map(|x| x.parse::<usize>())
-                .transpose()?,
-            gc_horizon: settings
-                .remove("gc_horizon")
-                .map(|x| x.parse::<u64>())
-                .transpose()?,
-            gc_period: settings.remove("gc_period").map(|x| x.to_string()),
-            image_creation_threshold: settings
-                .remove("image_creation_threshold")
-                .map(|x| x.parse::<usize>())
-                .transpose()?,
-            pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
-            walreceiver_connect_timeout: settings
-                .remove("walreceiver_connect_timeout")
-                .map(|x| x.to_string()),
-            lagging_wal_timeout: settings
-                .remove("lagging_wal_timeout")
-                .map(|x| x.to_string()),
-            max_lsn_wal_lag: settings
-                .remove("max_lsn_wal_lag")
-                .map(|x| x.parse::<NonZeroU64>())
-                .transpose()
-                .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-            trace_read_requests: settings
-                .remove("trace_read_requests")
-                .map(|x| x.parse::<bool>())
-                .transpose()
-                .context("Failed to parse 'trace_read_requests' as bool")?,
-            eviction_policy: settings
-                .remove("eviction_policy")
-                .map(serde_json::from_str)
-                .transpose()
-                .context("Failed to parse 'eviction_policy' json")?,
-            min_resident_size_override: settings
-                .remove("min_resident_size_override")
-                .map(|x| x.parse::<u64>())
-                .transpose()
-                .context("Failed to parse 'min_resident_size_override' as integer")?,
-            evictions_low_residence_duration_metric_threshold: settings
-                .remove("evictions_low_residence_duration_metric_threshold")
-                .map(|x| x.to_string()),
+            tenant_config: TenantConfig {
+                checkpoint_distance: settings
+                    .remove("checkpoint_distance")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
+                compaction_target_size: settings
+                    .remove("compaction_target_size")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
+                compaction_threshold: settings
+                    .remove("compaction_threshold")
+                    .map(|x| x.parse::<usize>())
+                    .transpose()?,
+                gc_horizon: settings
+                    .remove("gc_horizon")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()?,
+                gc_period: settings.remove("gc_period").map(|x| x.to_string()),
+                image_creation_threshold: settings
+                    .remove("image_creation_threshold")
+                    .map(|x| x.parse::<usize>())
+                    .transpose()?,
+                pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
+                walreceiver_connect_timeout: settings
+                    .remove("walreceiver_connect_timeout")
+                    .map(|x| x.to_string()),
+                lagging_wal_timeout: settings
+                    .remove("lagging_wal_timeout")
+                    .map(|x| x.to_string()),
+                max_lsn_wal_lag: settings
+                    .remove("max_lsn_wal_lag")
+                    .map(|x| x.parse::<NonZeroU64>())
+                    .transpose()
+                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
+                trace_read_requests: settings
+                    .remove("trace_read_requests")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'trace_read_requests' as bool")?,
+                eviction_policy: settings
+                    .remove("eviction_policy")
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .context("Failed to parse 'eviction_policy' json")?,
+                min_resident_size_override: settings
+                    .remove("min_resident_size_override")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'min_resident_size_override' as integer")?,
+                evictions_low_residence_duration_metric_threshold: settings
+                    .remove("evictions_low_residence_duration_metric_threshold")
+                    .map(|x| x.to_string()),
+            },
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -395,62 +395,64 @@ impl PageServerNode {
         self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
             .json(&TenantConfigRequest {
                 tenant_id,
-                checkpoint_distance: settings
-                    .get("checkpoint_distance")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'checkpoint_distance' as an integer")?,
-                checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
-                compaction_target_size: settings
-                    .get("compaction_target_size")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'compaction_target_size' as an integer")?,
-                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
-                compaction_threshold: settings
-                    .get("compaction_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()
-                    .context("Failed to parse 'compaction_threshold' as an integer")?,
-                gc_horizon: settings
-                    .get("gc_horizon")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'gc_horizon' as an integer")?,
-                gc_period: settings.get("gc_period").map(|x| x.to_string()),
-                image_creation_threshold: settings
-                    .get("image_creation_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()
-                    .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
-                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
-                walreceiver_connect_timeout: settings
-                    .get("walreceiver_connect_timeout")
-                    .map(|x| x.to_string()),
-                lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
-                max_lsn_wal_lag: settings
-                    .get("max_lsn_wal_lag")
-                    .map(|x| x.parse::<NonZeroU64>())
-                    .transpose()
-                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-                trace_read_requests: settings
-                    .get("trace_read_requests")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'trace_read_requests' as bool")?,
-                eviction_policy: settings
-                    .get("eviction_policy")
-                    .map(|x| serde_json::from_str(x))
-                    .transpose()
-                    .context("Failed to parse 'eviction_policy' json")?,
-                min_resident_size_override: settings
-                    .get("min_resident_size_override")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'min_resident_size_override' as an integer")?,
-                evictions_low_residence_duration_metric_threshold: settings
-                    .get("evictions_low_residence_duration_metric_threshold")
-                    .map(|x| x.to_string()),
+                tenant_config: TenantConfig {
+                    checkpoint_distance: settings
+                        .get("checkpoint_distance")
+                        .map(|x| x.parse::<u64>())
+                        .transpose()
+                        .context("Failed to parse 'checkpoint_distance' as an integer")?,
+                    checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
+                    compaction_target_size: settings
+                        .get("compaction_target_size")
+                        .map(|x| x.parse::<u64>())
+                        .transpose()
+                        .context("Failed to parse 'compaction_target_size' as an integer")?,
+                    compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
+                    compaction_threshold: settings
+                        .get("compaction_threshold")
+                        .map(|x| x.parse::<usize>())
+                        .transpose()
+                        .context("Failed to parse 'compaction_threshold' as an integer")?,
+                    gc_horizon: settings
+                        .get("gc_horizon")
+                        .map(|x| x.parse::<u64>())
+                        .transpose()
+                        .context("Failed to parse 'gc_horizon' as an integer")?,
+                    gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                    image_creation_threshold: settings
+                        .get("image_creation_threshold")
+                        .map(|x| x.parse::<usize>())
+                        .transpose()
+                        .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
+                    pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+                    walreceiver_connect_timeout: settings
+                        .get("walreceiver_connect_timeout")
+                        .map(|x| x.to_string()),
+                    lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
+                    max_lsn_wal_lag: settings
+                        .get("max_lsn_wal_lag")
+                        .map(|x| x.parse::<NonZeroU64>())
+                        .transpose()
+                        .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
+                    trace_read_requests: settings
+                        .get("trace_read_requests")
+                        .map(|x| x.parse::<bool>())
+                        .transpose()
+                        .context("Failed to parse 'trace_read_requests' as bool")?,
+                    eviction_policy: settings
+                        .get("eviction_policy")
+                        .map(|x| serde_json::from_str(x))
+                        .transpose()
+                        .context("Failed to parse 'eviction_policy' json")?,
+                    min_resident_size_override: settings
+                        .get("min_resident_size_override")
+                        .map(|x| x.parse::<u64>())
+                        .transpose()
+                        .context("Failed to parse 'min_resident_size_override' as an integer")?,
+                    evictions_low_residence_duration_metric_threshold: settings
+                        .get("evictions_low_residence_duration_metric_threshold")
+                        .map(|x| x.to_string())
+                }
             })
             .send()?
             .error_from_body()?;
