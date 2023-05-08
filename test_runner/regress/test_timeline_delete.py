@@ -86,7 +86,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     assert exc.value.status_code == 404
 
-    # Check that we didnt pick up the timeline again after restart.
+    # Check that we didn't pick up the timeline again after restart.
     # See https://github.com/neondatabase/neon/issues/3560
     env.pageserver.stop(immediate=True)
     env.pageserver.start()

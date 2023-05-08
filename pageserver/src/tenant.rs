@@ -1421,10 +1421,12 @@ impl Tenant {
         }
 
         // Stop & wait for the remaining timeline tasks, including upload tasks.
+        // NB: This and other delete_timeline calls do not run as a task_mgr task,
+        //     so, they are not affected by this shutdown_tasks() call.
         info!("waiting for timeline tasks to shutdown");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
 
-        // Mark timeline as deleted in S3 so we wont pick it up next time
+        // Mark timeline as deleted in S3 so we won't pick it up next time
         // during attach or pageserver restart.
         // See comment in persist_index_part_with_deleted_flag.
         if let Some(remote_client) = timeline.remote_client.as_ref() {
