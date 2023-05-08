@@ -1,4 +1,4 @@
-[![Neon](https://user-images.githubusercontent.com/13738772/226361003-df182292-9ffb-4903-9aad-6e53872bec47.png)](https://neon.tech)
+[![Neon](https://user-images.githubusercontent.com/13738772/236813940-dcfdcb5b-69d3-449b-a686-013febe834d4.png)](https://neon.tech)
 
 # Neon
 
