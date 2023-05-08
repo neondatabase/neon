@@ -799,6 +799,11 @@ def test_timeline_resurrection_on_attach(
 
     branch_timeline_id = env.neon_cli.create_branch("new", "main")
 
+    # Two variants of this test:
+    # - In fill_branch=True, the deleted branch has layer files.
+    # - In fill_branch=False, it doesn't, it just has the metadata file.
+    # A broken implementation is conceivable that tries to "optimize" handling of empty branches, e.g.,
+    # by skipping IndexPart uploads if the layer file set doesn't change. That would be wrong, catch those.
     if fill_branch:
         with env.endpoints.create_start("new") as new_pg:
             with new_pg.cursor() as cur:
