@@ -26,7 +26,7 @@ before the compute node starts.
 
 ## Components
 
-compute_ctl, PostgreSQL, neon (extension), Compute Host Node
+compute_ctl, PostgreSQL, neon (extension), Compute Host Node, Extension Store
 
 ## Requirements
 
@@ -140,7 +140,8 @@ Cons:
 
 ### Alternative solutions
 
-1. Allow users to add their extensions to the base image  
+1. Allow users to add their extensions to the base image
+   
    Pros:
     - Easy to deploy
 
@@ -149,16 +150,20 @@ Cons:
     - All extensions are shared across all users: It doesn't allow users to
       bring their own restrictive-licensed extensions
 
-2. Bring Your Own compute image  
+2. Bring Your Own compute image
+   
    Pros:
     - Still easy to deploy
+    - User can bring own patched version of PostgreSQL
 
    Cons:
     - First start latency is O(sizeof(extensions image))
     - Warm instance pool for skipping pod schedule latency is not feasible with
       O(n) custom images
+    - Support channels are difficult to manage
 
 3. Download all user extensions in bulk on compute start
+   
    Pros:
     - Easy to deploy
     - No startup latency issues for "clean" users.
@@ -169,6 +174,7 @@ Cons:
       latency issues
 
 4. Store user's extensions in persistent storage
+   
    Pros:
     - Easy to deploy
     - No startup latency issues
@@ -181,6 +187,19 @@ Cons:
       the device is unavailable whilst moving the mount between instances).
     - EBS can only mount on one instance at a time (except the expensive IO2
       device type).
+
+5. Store user's extensions in network drive
+   
+   Pros:
+    - Easy to deploy
+    - Few startup latency issues
+    - Warm instance pool for skipping pod schedule latency is possible
+
+   Cons:
+    - We'd need networked drives, and a lot of them, which would store many
+      duplicate extensions.
+    - **UNCHECKED:** Compute instance migration may not work nicely with
+      networked IOs
 
 
 ### Idea extensions
