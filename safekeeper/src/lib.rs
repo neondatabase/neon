@@ -61,6 +61,7 @@ pub struct SafeKeeperConf {
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
     pub backup_runtime_threads: Option<usize>,
+    pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
     pub auth: Option<Arc<JwtAuth>>,
 }
@@ -93,6 +94,7 @@ impl SafeKeeperConf {
             broker_keepalive_interval: Duration::from_secs(5),
             backup_runtime_threads: None,
             wal_backup_enabled: true,
+            backup_parallel_jobs: 1,
             auth: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
