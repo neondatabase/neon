@@ -160,7 +160,7 @@ pub struct TenantConfig {
     // For now, this field is not even documented in the openapi_spec.yml.
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
-    pub evictions_low_residence_duration_metric_threshold: Option<String>
+    pub evictions_low_residence_duration_metric_threshold: Option<String>,
 }
 
 #[serde_as]
@@ -175,7 +175,24 @@ impl TenantConfigRequest {
     pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
         TenantConfigRequest {
             tenant_id,
-            tenant_config: TenantConfig { checkpoint_distance: None, checkpoint_timeout: None, compaction_target_size: None, compaction_period: None, compaction_threshold: None, gc_horizon: None, gc_period: None, image_creation_threshold: None, pitr_interval: None, walreceiver_connect_timeout: None, lagging_wal_timeout: None, max_lsn_wal_lag: None, trace_read_requests: None, eviction_policy: None, min_resident_size_override: None, evictions_low_residence_duration_metric_threshold: None }
+            tenant_config: TenantConfig {
+                checkpoint_distance: None,
+                checkpoint_timeout: None,
+                compaction_target_size: None,
+                compaction_period: None,
+                compaction_threshold: None,
+                gc_horizon: None,
+                gc_period: None,
+                image_creation_threshold: None,
+                pitr_interval: None,
+                walreceiver_connect_timeout: None,
+                lagging_wal_timeout: None,
+                max_lsn_wal_lag: None,
+                trace_read_requests: None,
+                eviction_policy: None,
+                min_resident_size_override: None,
+                evictions_low_residence_duration_metric_threshold: None,
+            },
         }
     }
 }

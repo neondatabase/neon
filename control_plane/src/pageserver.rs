@@ -8,7 +8,10 @@ use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, Context};
-use pageserver_api::models::{TenantConfig, TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{
+    TenantConfig, TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest,
+    TimelineInfo,
+};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -423,7 +426,9 @@ impl PageServerNode {
                         .get("image_creation_threshold")
                         .map(|x| x.parse::<usize>())
                         .transpose()
-                        .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
+                        .context(
+                            "Failed to parse 'image_creation_threshold' as non zero integer",
+                        )?,
                     pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
                     walreceiver_connect_timeout: settings
                         .get("walreceiver_connect_timeout")
@@ -451,8 +456,8 @@ impl PageServerNode {
                         .context("Failed to parse 'min_resident_size_override' as an integer")?,
                     evictions_low_residence_duration_metric_threshold: settings
                         .get("evictions_low_residence_duration_metric_threshold")
-                        .map(|x| x.to_string())
-                }
+                        .map(|x| x.to_string()),
+                },
             })
             .send()?
             .error_from_body()?;
