@@ -450,7 +450,7 @@ pub enum DeleteTimelineError {
     #[error("HasChildren")]
     HasChildren,
     #[error("stop upload queue: {0:#}")]
-    StopUploadQueue(#[from] remote_timeline_client::StopError),
+    StopUploadQueue(remote_timeline_client::StopError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -1409,15 +1409,15 @@ impl Tenant {
         // Prevent new uploads from starting.
         if let Some(remote_client) = timeline.remote_client.as_ref() {
             let res = remote_client.stop();
-            match &res {
+            match res {
                 Ok(()) => {}
                 Err(e) => match e {
                     remote_timeline_client::StopError::QueueUninitialized => {
                         // This could happen if the timeline is Broken, e.g., because it failed to fetch IndexPart when it was loaded.
+                        return Err(DeleteTimelineError::StopUploadQueue(e));
                     }
                 },
             }
-            res?;
         }
 
         // Stop & wait for the remaining timeline tasks, including upload tasks.
