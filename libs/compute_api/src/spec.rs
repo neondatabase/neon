@@ -5,7 +5,6 @@
 //! and connect it to the storage nodes.
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use std::collections::HashMap;
 use utils::lsn::Lsn;
 
 /// String type alias representing Postgres identifier and
@@ -31,8 +30,6 @@ pub struct ComputeSpec {
     pub mode: ComputeMode,
 
     pub storage_auth_token: Option<String>,
-
-    pub startup_tracing_context: Option<HashMap<String, String>>,
 }
 
 #[serde_as]
