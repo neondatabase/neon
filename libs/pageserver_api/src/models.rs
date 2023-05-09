@@ -728,7 +728,7 @@ mod tests {
                 "slug": "Active",
             },
             "current_physical_size": 42,
-            "has_in_progress_downloads": "attached",
+            "attachment_status": "attached",
         });
 
         let original_broken = TenantInfo {
