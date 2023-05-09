@@ -138,6 +138,62 @@ pub struct TenantCreateRequest {
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
 }
 
+pub struct TenantConfigProjection {
+    pub checkpoint_distance: Option<u64>,
+    pub checkpoint_timeout: Option<String>,
+    pub compaction_target_size: Option<u64>,
+    pub compaction_period: Option<String>,
+    pub compaction_threshold: Option<usize>,
+    pub gc_horizon: Option<u64>,
+    pub gc_period: Option<String>,
+    pub image_creation_threshold: Option<usize>,
+    pub pitr_interval: Option<String>,
+    pub walreceiver_connect_timeout: Option<String>,
+    pub lagging_wal_timeout: Option<String>,
+    pub max_lsn_wal_lag: Option<NonZeroU64>,
+    pub trace_read_requests: Option<bool>,
+    pub eviction_policy: Option<serde_json::Value>,
+    pub min_resident_size_override: Option<u64>,
+    pub evictions_low_residence_duration_metric_threshold: Option<String>,
+}
+
+pub trait TenantConfigAccessor {
+    type Output;
+
+    fn access(&self) -> Self::Output;
+}
+
+pub fn project_fields<T: TenantConfigAccessor>(item: &T) -> T::Output {
+    item.access()
+}
+
+impl TenantConfigAccessor for TenantCreateRequest {
+    type Output = TenantConfigProjection;
+
+    fn access(&self) -> Self::Output {
+        TenantConfigProjection {
+            checkpoint_distance: self.checkpoint_distance,
+            checkpoint_timeout: self.checkpoint_timeout.clone(),
+            compaction_target_size: self.compaction_target_size,
+            compaction_period: self.compaction_period.clone(),
+            compaction_threshold: self.compaction_threshold,
+            gc_horizon: self.gc_horizon,
+            gc_period: self.gc_period.clone(),
+            image_creation_threshold: self.image_creation_threshold,
+            pitr_interval: self.pitr_interval.clone(),
+            walreceiver_connect_timeout: self.walreceiver_connect_timeout.clone(),
+            lagging_wal_timeout: self.lagging_wal_timeout.clone(),
+            max_lsn_wal_lag: self.max_lsn_wal_lag,
+            trace_read_requests: self.trace_read_requests,
+            eviction_policy: self.eviction_policy.clone(),
+            min_resident_size_override: self.min_resident_size_override,
+            evictions_low_residence_duration_metric_threshold: self
+                .evictions_low_residence_duration_metric_threshold
+                .clone(),
+        }
+    }
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
@@ -205,6 +261,33 @@ impl TenantConfigRequest {
             eviction_policy: None,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: None,
+        }
+    }
+}
+
+impl TenantConfigAccessor for TenantConfigRequest {
+    type Output = TenantConfigProjection;
+
+    fn access(&self) -> Self::Output {
+        TenantConfigProjection {
+            checkpoint_distance: self.checkpoint_distance,
+            checkpoint_timeout: self.checkpoint_timeout.clone(),
+            compaction_target_size: self.compaction_target_size,
+            compaction_period: self.compaction_period.clone(),
+            compaction_threshold: self.compaction_threshold,
+            gc_horizon: self.gc_horizon,
+            gc_period: self.gc_period.clone(),
+            image_creation_threshold: self.image_creation_threshold,
+            pitr_interval: self.pitr_interval.clone(),
+            walreceiver_connect_timeout: self.walreceiver_connect_timeout.clone(),
+            lagging_wal_timeout: self.lagging_wal_timeout.clone(),
+            max_lsn_wal_lag: self.max_lsn_wal_lag,
+            trace_read_requests: self.trace_read_requests,
+            eviction_policy: self.eviction_policy.clone(),
+            min_resident_size_override: self.min_resident_size_override,
+            evictions_low_residence_duration_metric_threshold: self
+                .evictions_low_residence_duration_metric_threshold
+                .clone(),
         }
     }
 }
