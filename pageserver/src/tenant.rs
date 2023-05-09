@@ -459,33 +459,6 @@ struct RemoteStartupData {
     remote_metadata: TimelineMetadata,
 }
 
-#[derive(Debug)]
-pub(crate) enum AttachMarkerFilePresence {
-    Absent,
-    Present,
-}
-
-impl AttachMarkerFilePresence {
-    /// Returns that the claim made about marker file presence in `self`
-    /// corresponds to reality.
-    fn verify(
-        &self,
-        conf: &'static PageServerConf,
-        tenant_id: TenantId,
-    ) -> anyhow::Result<Result<(), ()>> {
-        let marker_file = conf.tenant_attaching_mark_file_path(&tenant_id);
-        let exists = marker_file
-            .try_exists()
-            .context("check existence of attach marker file")?;
-        Ok(match (self, exists) {
-            (AttachMarkerFilePresence::Absent, false) => Ok(()),
-            (AttachMarkerFilePresence::Present, true) => Ok(()),
-            (AttachMarkerFilePresence::Absent, true) => Err(()),
-            (AttachMarkerFilePresence::Present, false) => Err(()),
-        })
-    }
-}
-
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -621,13 +594,35 @@ impl Tenant {
     pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        marker_file_presence: AttachMarkerFilePresence,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         // XXX: Attach should provide the config, especially during tenant migration.
         //      See https://github.com/neondatabase/neon/issues/1555
         let tenant_conf = TenantConfOpt::default();
+
+        // Create directory with marker file to indicate attaching state.
+        // The load_local_tenants() function in tenant::mgr relies on the marker file
+        // to determine whether a tenant has finished attaching.
+        let tenant_dir = self.conf.tenant_path(&self.tenant_id);
+        let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
+        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
+        if tenant_dir.exists() {
+            if !marker_file.is_file() {
+                anyhow::bail!(
+                    "calling Tenant::attach with a tenant directory that doesn't have the attaching marker file:\ntenant_dir: {}\nmarker_file: {}",
+                    tenant_dir.display(), marker_file.display());
+            }
+        } else {
+            // TODO: use tokio::fs here, but, then we need to think about cancel safety
+            // because this runs straight from an HTTP handler.
+            crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
+            fs::File::create(&marker_file).context("create tenant attaching marker file")?;
+            crashsafe::fsync_file_and_parent(&marker_file)
+                .context("fsync tenant attaching marker file and parent")?;
+        }
+        debug_assert!(tenant_dir.is_dir());
+        debug_assert!(marker_file.is_file());
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -651,40 +646,11 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
-                let mut marker_file_presence = marker_file_presence;
-                match tenant_clone.attach(&mut marker_file_presence, ctx).await {
-                    Ok(_) => {
-                        info!(?marker_file_presence, "tenant attached");
-                        assert!(matches!(
-                            marker_file_presence,
-                            AttachMarkerFilePresence::Absent
-                        ));
-                    }
+                match tenant_clone.attach(ctx).await {
+                    Ok(_) => {}
                     Err(e) => {
-                        error!(?marker_file_presence, "error attaching tenant: {:?}", e);
-                        match marker_file_presence {
-                            AttachMarkerFilePresence::Absent => {
-                                // We can reach here if we fail to create the marker file.
-                                //
-                                // The tenant may or may not be in the tenant map already,
-                                // it depends on our caller.
-                                //
-                                // There is no on-disk state for this tenant (empty tenant dir doesn't count.)
-                                //
-                                // It is crucial to not report the tenant attachment status as Attached.
-                                // So, we must not transition into Broken state.
-                                // It would be best to just delete the tenant object from the tenants
-                                // map, but, we're not in control of that here.
-                                todo!("find a solution")
-                            }
-                            AttachMarkerFilePresence::Present => {
-                                // If the marker is present, it's ok to transition into Broken.
-                                // We will report AttachmentStatus::Attached from then on.
-                                // That's accurate because we will try to attach the tenant again
-                                // on pageserver restart.
-                                tenant_clone.set_broken(e.to_string());
-                            }
-                        }
+                        tenant_clone.set_broken(e.to_string());
+                        error!("error attaching tenant: {:?}", e);
                     }
                 }
                 Ok(())
@@ -697,32 +663,13 @@ impl Tenant {
     /// Background task that downloads all data for a tenant and brings it to Active state.
     ///
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
-    async fn attach(
-        self: &Arc<Tenant>,
-        marker_file_presence: &mut AttachMarkerFilePresence,
-        ctx: RequestContext,
-    ) -> anyhow::Result<()> {
-        // Create directory with marker file to indicate attaching state.
-        // The load_local_tenants() function in tenant::mgr relies on the marker file
-        // to determine whether a tenant has finished attaching.
-        let tenant_dir = self.conf.tenant_path(&self.tenant_id);
+    async fn attach(self: &Arc<Tenant>, ctx: RequestContext) -> anyhow::Result<()> {
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
-        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
-        if tenant_dir.exists() {
-            if !marker_file.is_file() {
-                anyhow::bail!(
-                    "calling Tenant::attach with a tenant directory that doesn't have the attaching marker file:\ntenant_dir: {}\nmarker_file: {}",
-                    tenant_dir.display(), marker_file.display());
-            }
-        } else {
-            crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
-            fs::File::create(&marker_file).context("create tenant attaching marker file")?;
-            crashsafe::fsync_file_and_parent(&marker_file)
-                .context("fsync tenant attaching marker file and parent")?;
+        if !tokio::fs::try_exists(marker_file).context("check for existence of marker file")? {
+            anyhow::bail!(
+                "implementation error: marker file should exist at beginning of this function"
+            );
         }
-        debug_assert!(tenant_dir.is_dir());
-        debug_assert!(marker_file.is_file());
-        *marker_file_presence = AttachMarkerFilePresence::Present;
 
         // Get list of remote timelines
         // download index files for every tenant timeline
@@ -817,7 +764,6 @@ impl Tenant {
             .with_context(|| format!("unlink attach marker file {}", marker_file.display()))?;
         crashsafe::fsync(marker_file.parent().expect("marker file has parent dir"))
             .context("fsync tenant directory after unlinking attach marker file")?;
-        *marker_file_presence = AttachMarkerFilePresence::Absent;
 
         utils::failpoint_sleep_millis_async!("attach-before-activate");
 

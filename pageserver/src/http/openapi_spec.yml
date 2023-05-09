@@ -358,10 +358,11 @@ paths:
 
         There is no way to cancel an in-flight request.
 
-        In any case, it must
-        * NOT ASSUME that the /attach request has been lost in the network,
-        * NOT ASSUME that the request has been lost based on a subsequent
-          tenant status request returning 404. (The request may still be in flight!)
+        In any case, the client
+        * MUST NOT ASSUME that the /attach request has been lost in the network,
+        * MUST NOT ASSUME that the request has been lost, based on the observation
+          that a subsequent tenant status request returns 404. The request may
+          still be in flight.
       responses:
         "202":
           description: Tenant attaching scheduled

@@ -51,6 +51,11 @@ impl TenantState {
     pub fn attachment_status(&self) -> TenantAttachmentStatus {
         use TenantAttachmentStatus::*;
         match self {
+            // The attach procedure writes the marker file before adding the Attaching tenant to the layer map.
+            // So, technically, we can return Attached here.
+            // However, as soon as Console observes Attached, it will proceed with the Postgres-level health check.
+            // But, our attach task might still we might still be fetching the remote timelines, etc.
+            // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
             Self::Attaching => Maybe,
             // tenant mgr startup distinguishes attaching from loading via marker file.
             // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
@@ -58,14 +63,13 @@ impl TenantState {
             // We only reach Active after successful load / attach.
             // So, call atttachment status Attached.
             Self::Active => Attached,
-            // The attach procedure only transitions the tenant from Attaching to Broken
-            // AFTER it has written the marker file. So, we return Maybe until we've written
-            // the marker file. After that, we want to return Attached so that a transiently
-            // failing Attach will not leave the contorl plane operation retrying forever.
-            // The control plane's attach procedure (tenant relocation) does a health check after
-            // observing `Attached` anyway, so, it's fine.
-            //
-            // See OpenAPI docs for more context.
+            // If the (initial or resumed) attach procedure fails, the tenant becomes Broken.
+            // However, it also becomes Broken if the regular load fails.
+            // We would need a separate TenantState variant to distinguish these cases.
+            // However, there's no practical difference from Console's perspective.
+            // It will run a Postgres-level health check as soon as it observes Attached.
+            // That will fail on Broken tenants.
+            // Console can then rollback the attach, or, wait for operator to fix the Broken tenant.
             Self::Broken { .. } => Attached,
             // Why is Stopping a Maybe case? Because, during pageserver shutdown,
             // we set the Stopping state irrespective of whether the tenant
