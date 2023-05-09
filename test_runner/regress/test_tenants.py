@@ -267,6 +267,7 @@ def test_pageserver_metrics_removed_after_detach(
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
                 assert cur.fetchone() == (5000050000,)
+        endpoint.stop()
 
     def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
         ps_metrics = env.pageserver.http_client().get_metrics()

@@ -106,26 +106,38 @@ pub struct ParsedSpec {
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
+        // Extract the options from the spec file that are needed to connect to
+        // the storage system.
+        //
+        // For backwards-compatibility, the top-level fields in the spec file
+        // may be empty. In that case, we need to dig them from the GUCs in the
+        // cluster.settings field.
         let pageserver_connstr = spec
-            .cluster
-            .settings
-            .find("neon.pageserver_connstring")
+            .pageserver_connstring
+            .clone()
+            .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
             .ok_or("pageserver connstr should be provided")?;
         let storage_auth_token = spec.storage_auth_token.clone();
-        let tenant_id: TenantId = spec
-            .cluster
-            .settings
-            .find("neon.tenant_id")
-            .ok_or("tenant id should be provided")
-            .map(|s| TenantId::from_str(&s))?
-            .or(Err("invalid tenant id"))?;
-        let timeline_id: TimelineId = spec
-            .cluster
-            .settings
-            .find("neon.timeline_id")
-            .ok_or("timeline id should be provided")
-            .map(|s| TimelineId::from_str(&s))?
-            .or(Err("invalid timeline id"))?;
+        let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
+            tenant_id
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.tenant_id")
+                .ok_or("tenant id should be provided")
+                .map(|s| TenantId::from_str(&s))?
+                .or(Err("invalid tenant id"))?
+        };
+        let timeline_id: TimelineId = if let Some(timeline_id) = spec.timeline_id {
+            timeline_id
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.timeline_id")
+                .ok_or("timeline id should be provided")
+                .map(|s| TimelineId::from_str(&s))?
+                .or(Err("invalid timeline id"))?
+        };
 
         Ok(ParsedSpec {
             spec,
