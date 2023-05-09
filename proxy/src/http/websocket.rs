@@ -6,6 +6,7 @@ use crate::{
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt, TryStreamExt};
 use tokio_postgres::Row;
+use tokio_postgres::error::DbError;
 use std::collections::HashMap;
 use hyper::{
     server::{accept, conn::AddrIncoming},
@@ -16,7 +17,7 @@ use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use percent_encoding::percent_decode;
 use pin_project_lite::pin_project;
 use pq_proto::StartupMessageParams;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use tokio_postgres::types::{ToSql};
@@ -196,16 +197,32 @@ async fn ws_handler(
         Ok(response)
 
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        match handle_sql(config, request).await {
-            Ok(resp) => json_response(StatusCode::OK, resp).map(|mut r| {
-                r.headers_mut().insert(
-                    "Access-Control-Allow-Origin",
-                    hyper::http::HeaderValue::from_static("*"),
-                );
-                r
-            }),
-            Err(e) => json_response(StatusCode::BAD_REQUEST, format!("error: {e:?}")),
-        }
+        let result = handle_sql(config, request).await;
+        let status_code = match result {
+            Ok(_) => StatusCode::OK,
+            Err(_) => StatusCode::BAD_REQUEST
+        };
+        let json = match result {
+            Ok(r) => serde_json::to_value(r).unwrap(),
+            Err(e) => {
+                let message = format!("{:?}", e);
+                let code = match e.downcast_ref::<tokio_postgres::Error>() {
+                    Some(e) => match e.code() {
+                        Some(e) => serde_json::to_value(e.code()).unwrap(),
+                        None => Value::Null
+                    },
+                    None => Value::Null
+                };
+                json!({ "message": message, "code": code })
+            }   
+        };
+        json_response(status_code, json).map(|mut r| {
+            r.headers_mut().insert(
+                "Access-Control-Allow-Origin",
+                hyper::http::HeaderValue::from_static("*"),
+            );
+            r
+        })
 
     } else if request.uri().path() == "/sleep" {
         // sleep 15ms
@@ -215,6 +232,21 @@ async fn ws_handler(
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }
+}
+
+fn boxed_from_json(json: Vec<Value>) -> Result<Vec<Box<dyn ToSql + Sync + Send>>, anyhow::Error> {
+    json.iter().map(|value| {
+        let boxed: Result<Box<dyn ToSql + Sync + Send>, anyhow::Error> = match value {
+            Value::Bool(b) => Ok(Box::new(b.clone())),
+            Value::Number(n) => Ok(Box::new(n.as_f64().unwrap())),
+            Value::String(s) => Ok(Box::new(s.clone())),
+            // TODO: support null (not like this: `Value::Null => Ok(Box::new(None::<bool>)),`)
+            // TODO: support arrays            
+            x => Err(anyhow::anyhow!("unsupported param {:?}", x))
+        };
+        boxed
+    })
+    .collect::<Result<Vec<_>, anyhow::Error>>()
 }
 
 // XXX: return different error codes
@@ -231,6 +263,11 @@ async fn handle_sql(
         .to_str()?;
 
     let connection_url = Url::parse(connection_string)?;
+
+    let protocol = connection_url.scheme();
+    if protocol != "postgres" && protocol != "postgresql" {
+        return Err(anyhow::anyhow!("connection string must start with postgres: or postgresql:"))
+    }
 
     let mut url_path = connection_url
         .path_segments()
@@ -320,17 +357,9 @@ async fn handle_sql(
     });
 
     let query = &query_data.query;
-    let query_params = query_data.params.iter().map(|value| {
-        let boxed: Box<dyn ToSql + Sync + Send> = match value {
-            Value::Null => Box::new(None::<bool>),
-            Value::Bool(b) => Box::new(b.clone()),
-            Value::Number(n) => Box::new(n.as_f64().unwrap()),
-            Value::String(s) => Box::new(s.clone()),
-            _ => panic!("wrong parameter type")
-        };
-        boxed
-    }).collect::<Vec<_>>();
+    let query_params = boxed_from_json(query_data.params)?;
 
+    // TODO: find a way to catch the panic and return an error if the number of params is wrong
     let pg_rows: Vec<Row> = client
         .query_raw(query, query_params)
         .await?
