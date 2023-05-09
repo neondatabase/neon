@@ -596,33 +596,13 @@ impl Tenant {
         tenant_id: TenantId,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
-    ) -> Arc<Tenant> {
+    ) -> anyhow::Result<Arc<Tenant>> {
         // XXX: Attach should provide the config, especially during tenant migration.
         //      See https://github.com/neondatabase/neon/issues/1555
         let tenant_conf = TenantConfOpt::default();
 
-        // Create directory with marker file to indicate attaching state.
-        // The load_local_tenants() function in tenant::mgr relies on the marker file
-        // to determine whether a tenant has finished attaching.
-        let tenant_dir = self.conf.tenant_path(&self.tenant_id);
-        let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
-        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
-        if tenant_dir.exists() {
-            if !marker_file.is_file() {
-                anyhow::bail!(
-                    "calling Tenant::attach with a tenant directory that doesn't have the attaching marker file:\ntenant_dir: {}\nmarker_file: {}",
-                    tenant_dir.display(), marker_file.display());
-            }
-        } else {
-            // TODO: use tokio::fs here, but, then we need to think about cancel safety
-            // because this runs straight from an HTTP handler.
-            crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
-            fs::File::create(&marker_file).context("create tenant attaching marker file")?;
-            crashsafe::fsync_file_and_parent(&marker_file)
-                .context("fsync tenant attaching marker file and parent")?;
-        }
-        debug_assert!(tenant_dir.is_dir());
-        debug_assert!(marker_file.is_file());
+        Self::attach_idempotent_create_marker_file(conf, tenant_id)
+            .context("create attach marker file")?;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -656,7 +636,42 @@ impl Tenant {
                 Ok(())
             },
         );
-        tenant
+        Ok(tenant)
+    }
+
+    fn attach_idempotent_create_marker_file(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+    ) -> anyhow::Result<()> {
+        // Create directory with marker file to indicate attaching state.
+        // The load_local_tenants() function in tenant::mgr relies on the marker file
+        // to determine whether a tenant has finished attaching.
+        let tenant_dir = conf.tenant_path(&tenant_id);
+        let marker_file = conf.tenant_attaching_mark_file_path(&tenant_id);
+        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
+        // TODO: should use tokio::fs here, but
+        // 1. caller is not async, for good reason (it holds tenants map lock)
+        // 2. we'd need to think about cancel safety. Turns out dropping a tokio::fs future
+        //    doesn't wait for the activity in the fs thread pool.
+        crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
+        match fs::OpenOptions::new().create_new(true).open(&marker_file) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Either this is a retry of attach or there is a concurrent task also doing attach for this tenant.
+                // We cannot distinguish this here.
+                // The caller is responsible for ensuring there's no concurrent attach for a tenant.
+                {} // fsync again, we don't know if that already happened
+            }
+            err => {
+                err.context("create tenant attaching marker file")?;
+                unreachable!("we covered the Ok() case above");
+            }
+        }
+        crashsafe::fsync_file_and_parent(&marker_file)
+            .context("fsync tenant attaching marker file and parent")?;
+        debug_assert!(tenant_dir.is_dir());
+        debug_assert!(marker_file.is_file());
+        Ok(())
     }
 
     ///
@@ -665,7 +680,10 @@ impl Tenant {
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     async fn attach(self: &Arc<Tenant>, ctx: RequestContext) -> anyhow::Result<()> {
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
-        if !tokio::fs::try_exists(marker_file).context("check for existence of marker file")? {
+        if !tokio::fs::try_exists(&marker_file)
+            .await
+            .context("check for existence of marker file")?
+        {
             anyhow::bail!(
                 "implementation error: marker file should exist at beginning of this function"
             );
@@ -840,11 +858,15 @@ impl Tenant {
     }
 
     /// Create a placeholder Tenant object for a broken tenant
-    pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
+    pub fn create_broken_tenant(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        reason: String,
+    ) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         Arc::new(Tenant::new(
             TenantState::Broken {
-                reason: "create_broken_tenant".into(),
+                reason,
                 backtrace: String::new(),
             },
             conf,
@@ -877,7 +899,7 @@ impl Tenant {
             Ok(conf) => conf,
             Err(e) => {
                 error!("load tenant config failed: {:?}", e);
-                return Tenant::create_broken_tenant(conf, tenant_id);
+                return Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"));
             }
         };
 

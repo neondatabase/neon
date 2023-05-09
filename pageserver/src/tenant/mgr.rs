@@ -186,10 +186,20 @@ pub fn schedule_local_tenant_processing(
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
         if let Some(remote_storage) = remote_storage {
-            Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx)
+            match Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx) {
+                Ok(tenant) => tenant,
+                Err(e) => {
+                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
+                }
+            }
         } else {
             warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
-            Tenant::create_broken_tenant(conf, tenant_id)
+            Tenant::create_broken_tenant(
+                conf,
+                tenant_id,
+                "attaching mark file present but no remote storage configured".to_string(),
+            )
         }
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
@@ -466,7 +476,8 @@ pub async fn attach_tenant(
             "Cannot attach tenant {tenant_id}, local tenant directory already exists"
         );
 
-        let tenant = Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx);
+        let tenant =
+            Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx).context("spawn_attach")?;
         vacant_entry.insert(tenant);
         Ok(())
     })
