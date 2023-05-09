@@ -22,7 +22,7 @@ use std::{
 
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -276,6 +276,7 @@ impl Timeline {
         ControlFlow::Continue(())
     }
 
+    #[instrument(skip_all)]
     async fn imitate_layer_accesses(
         &self,
         p: &EvictionPolicyLayerAccessThreshold,
@@ -324,6 +325,7 @@ impl Timeline {
     }
 
     /// Recompute the values which would cause on-demand downloads during restart.
+    #[instrument(skip_all)]
     async fn imitate_timeline_cached_layer_accesses(
         &self,
         cancel: &CancellationToken,
@@ -332,7 +334,10 @@ impl Timeline {
         let lsn = self.get_last_record_lsn();
 
         // imitiate on-restart initial logical size
-        let size = self.calculate_logical_size(lsn, cancel.clone(), ctx).await;
+        let size = self
+            .calculate_logical_size(lsn, cancel.clone(), ctx)
+            .instrument(info_span!("calculate_logical_size"))
+            .await;
 
         match &size {
             Ok(_size) => {
@@ -347,7 +352,11 @@ impl Timeline {
         }
 
         // imitiate repartiting on first compactation
-        if let Err(e) = self.collect_keyspace(lsn, ctx).await {
+        if let Err(e) = self
+            .collect_keyspace(lsn, ctx)
+            .instrument(info_span!("collect_keyspace"))
+            .await
+        {
             // if this failed, we probably failed logical size because these use the same keys
             if size.is_err() {
                 // ignore, see above comment
@@ -360,6 +369,7 @@ impl Timeline {
     }
 
     // Imitate the synthetic size calculation done by the consumption_metrics module.
+    #[instrument(skip_all)]
     async fn imitate_synthetic_size_calculation_worker(
         &self,
         tenant: &Arc<Tenant>,
@@ -398,7 +408,8 @@ impl Timeline {
 
         let mut throwaway_cache = HashMap::new();
         let gather =
-            crate::tenant::size::gather_inputs(tenant, limit, None, &mut throwaway_cache, ctx);
+            crate::tenant::size::gather_inputs(tenant, limit, None, &mut throwaway_cache, ctx)
+                .instrument(info_span!("gather_inputs"));
 
         tokio::select! {
             _ = cancel.cancelled() => {}
