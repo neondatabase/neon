@@ -654,7 +654,11 @@ impl Tenant {
         // 2. we'd need to think about cancel safety. Turns out dropping a tokio::fs future
         //    doesn't wait for the activity in the fs thread pool.
         crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
-        match fs::OpenOptions::new().create_new(true).open(&marker_file) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker_file)
+        {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // Either this is a retry of attach or there is a concurrent task also doing attach for this tenant.
