@@ -449,8 +449,6 @@ pub enum DeleteTimelineError {
     NotFound,
     #[error("HasChildren")]
     HasChildren,
-    #[error("stop upload queue: {0:#}")]
-    StopUploadQueue(remote_timeline_client::StopError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -1413,8 +1411,11 @@ impl Tenant {
                 Ok(()) => {}
                 Err(e) => match e {
                     remote_timeline_client::StopError::QueueUninitialized => {
-                        // This could happen if the timeline is Broken, e.g., because it failed to fetch IndexPart when it was loaded.
-                        return Err(DeleteTimelineError::StopUploadQueue(e));
+                        // This case shouldn't happen currently because the
+                        // load and attach code bails out if _any_ of the timeline fails to fetch its IndexPart.
+                        // That is, before we declare the Tenant as Active.
+                        // But we only allow calls to delete_timeline on Active tenants.
+                        return Err(DeleteTimelineError::Other(anyhow::anyhow!("upload queue is uninitialized, likely the timeline was in Broken state prior to this call because it failed to fetch IndexPart during load or attach, check the logs")));
                     }
                 },
             }
