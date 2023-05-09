@@ -630,6 +630,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
 
@@ -715,6 +716,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
@@ -767,6 +769,7 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-node
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
@@ -932,42 +935,6 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-  deploy-pr-test-new:
-    runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
-    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ promote-images, tag, regress-tests ]
-    if: |
-      contains(github.event.pull_request.labels.*.name, 'deploy-test-storage') &&
-      github.event_name != 'workflow_dispatch'
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      matrix:
-        target_region: [ eu-west-1 ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Redeploy
-        run: |
-          export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          cd "$(pwd)/.github/ansible"
-
-          ./get_binaries.sh
-
-          ansible-galaxy collection install sivel.toiletwater
-          ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{ secrets.NEON_STAGING_API_KEY }} -e SENTRY_URL_PAGESERVER=${{ secrets.SENTRY_URL_PAGESERVER }} -e SENTRY_URL_SAFEKEEPER=${{ secrets.SENTRY_URL_SAFEKEEPER }}
-          rm -f neon_install.tar.gz .neon_current_version
-
-      - name: Cleanup ansible folder
-        run: rm -rf ~/.ansible
-
   deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
@@ -992,12 +959,12 @@ jobs:
 
       - name: Trigger deploy workflow
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            gh workflow run deploy-dev.yml --ref main -f branch=${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}}
+            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            gh workflow run deploy-prod.yml --ref release -f branch=${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}} -f disclamerAcknowledged=true
+            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f disclamerAcknowledged=true
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1

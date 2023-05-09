@@ -1,3 +1,5 @@
+[![Neon](https://user-images.githubusercontent.com/13738772/236813940-dcfdcb5b-69d3-449b-a686-013febe834d4.png)](https://neon.tech)
+
 # Neon
 
 Neon is a serverless open-source alternative to AWS Aurora Postgres. It separates storage and compute and substitutes the PostgreSQL storage layer by redistributing data across a cluster of nodes.
