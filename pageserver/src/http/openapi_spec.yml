@@ -351,8 +351,8 @@ paths:
         attachment status.
 
         After the client has received a 202, it MUST poll the tenant's
-        attachment status (field `attachement_status`) to reach state `attached`.
-        If the `attachement_status` is missing, the client MUST retry the `/attach`
+        attachment status (field `attachment_status`) to reach state `attached`.
+        If the `attachment_status` is missing, the client MUST retry the `/attach`
         request (goto previous paragraph). This is a robustness measure in case the tenant
         status endpoint is buggy, but the attach operation is ongoing.
 
