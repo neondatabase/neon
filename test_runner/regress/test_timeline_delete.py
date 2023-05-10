@@ -462,9 +462,16 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     # ok, retry without failpoint, it should succeed
     ps_http.configure_failpoints((failpoint_name, "off"))
 
-    # this should succeed
-    ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
-    # the second call will try to transition the timeline into Stopping state, but it's already in that state
-    env.pageserver.allowed_errors.append(
-        f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
-    )
+    try:
+        ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
+        env.pageserver.allowed_errors.append(
+            f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+        )
+    except PageserverApiException as e:
+        if e.status_code != 404:
+            raise e
+        else:
+            # mock_s3 was fast enough to delete before we got the request in
+            env.pageserver.allowed_errors.append(
+                f".*{child_timeline_id}.*Error processing HTTP request: NotFound: timeline not found"
+            )
