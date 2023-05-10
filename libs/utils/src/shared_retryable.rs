@@ -472,7 +472,7 @@ mod tests {
         let shr = SharedRetryable::<Result<u8, InnerError>>::default();
 
         let res = shr
-            .try_restart_spawn(|| async move { todo!("really unlucky") })
+            .try_restart_spawn(|| async move { panic!("really unlucky") })
             .await;
 
         assert!(matches!(res, Err(OuterError::AttemptPanicked)));
