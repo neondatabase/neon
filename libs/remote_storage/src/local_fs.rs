@@ -128,6 +128,15 @@ impl RemoteStorage for LocalFs {
         // We need this dance with sort of durable rename (without fsyncs)
         // to prevent partial uploads. This was really hit when pageserver shutdown
         // cancelled the upload and partial file was left on the fs
+        // NOTE: Because temp file suffix always the same this operation is racy.
+        // Two concurrent operations can lead to the following sequence:
+        // T1: write(temp)
+        // T2: write(temp) -> overwrites the content
+        // T1: rename(temp, dst) -> succeeds
+        // T2: rename(temp, dst) -> fails, temp no longet exists
+        // This can be solved by supplying unique temp suffix every time, but this situation
+        // is not normal in the first place, the error can help (and helped at least once)
+        // to discover bugs in upper level synchronization.
         let temp_file_path =
             path_with_suffix_extension(&target_file_path, LOCAL_FS_TEMP_FILE_SUFFIX);
         let mut destination = io::BufWriter::new(
