@@ -9,6 +9,28 @@ refactoring, additional comments, and so forth. Let's try to raise the
 bar, and clean things up as we go. Try to leave code in a better shape
 than it was before.
 
+## Rust pitfalls, async or not
+
+Please be aware of at least these common problems:
+
+1. Async and Cancellation
+
+  Any future can be cancelled at every await point unless it's a top
+level spawned future. Most common reasons to be cancelled or
+dropped is that a future is polled or raced within `tokio::select!`
+with a cancellation token or the HTTP client drops the connection,
+causing a cancellation or drop on a handler future.
+
+2. When using `scopeguard` or generally within `Drop::drop`, the code
+must not panic.
+
+  `scopeguard` can be handy for simple operations, such as
+decrementing a metric, but it can easily obscure that the code will
+run on `Drop::drop`. Should a panic happen and the implemented drop
+also panic when unwinding, the rust runtime will abort the process.
+Within a multi-tenant system, we don't want to abort, at least for
+accidental `unwrap` within a `Drop::drop`.
+
 ## Submitting changes
 
 1. Get at least one +1 on your PR before you push.
