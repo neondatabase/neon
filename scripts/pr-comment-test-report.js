@@ -69,7 +69,7 @@ module.exports = async ({ github, context, fetch, reports }) => {
                     if (test.retriesCount > 0) {
                         retriedTests.push(test);
 
-                        if (test.retriedStatusChangedTests) {
+                        if (test.retriesStatusChange) {
                             retriedStatusChangedTests.push(test);
                         }
                     }
