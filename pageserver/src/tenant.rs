@@ -1657,26 +1657,11 @@ impl Tenant {
                     }));
 
                 match removed_timeline {
-                    Ok(None) => {
-                        // This can legitimately happen if there's a concurrent call to this function.
-                        //   T1                                             T2
-                        //   lock
-                        //   unlock
-                        //                                                  lock
-                        //                                                  unlock
-                        //                                                  remove files
-                        //                                                  lock
-                        //                                                  remove from map
-                        //                                                  unlock
-                        //                                                  return
-                        //   remove files
-                        //   lock
-                        //   remove from map observes empty map
-                        //   unlock
-                        //   return
-                        debug!("concurrent call to this function won the race");
-                    }
                     Ok(Some(_)) => {}
+                    Ok(None) => {
+                        // with SharedRetryable this should no longer happen
+                        warn!("no other task should had dropped the Timeline");
+                    }
                     Err(_panic) => return Err(InnerDeleteTimelineError::DeletedGrewChildren),
                 }
 
