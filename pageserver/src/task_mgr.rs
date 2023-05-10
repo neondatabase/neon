@@ -272,6 +272,9 @@ pub enum TaskKind {
 
     #[cfg(test)]
     UnitTest,
+
+    /// Task which is the only task to delete this particular timeline
+    DeleteTimeline,
 }
 
 #[derive(Default)]
