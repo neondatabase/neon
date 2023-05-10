@@ -150,7 +150,7 @@ pub async fn collect_metrics_iteration(
         let mut tenant_resident_size = 0;
 
         // iterate through list of timelines in tenant
-        for timeline in tenant.list_timelines().iter() {
+        for timeline in tenant.list_timelines().await.iter() {
             // collect per-timeline metrics only for active timelines
             if timeline.is_active() {
                 let timeline_written_size = u64::from(timeline.get_last_record_lsn());

@@ -135,7 +135,7 @@ pub(super) async fn gather_inputs(
         .context("Failed to refresh gc_info before gathering inputs")?;
 
     // Collect information about all the timelines
-    let mut timelines = tenant.list_timelines();
+    let mut timelines = tenant.list_timelines().await;
 
     if timelines.is_empty() {
         // perhaps the tenant has just been created, and as such doesn't have any data yet

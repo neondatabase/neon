@@ -300,7 +300,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
 
     let response_data = async {
         let tenant = mgr::get_tenant(tenant_id, true).await?;
-        let timelines = tenant.list_timelines();
+        let timelines = tenant.list_timelines().await;
 
         let mut response_data = Vec::with_capacity(timelines.len());
         for timeline in timelines {
@@ -339,6 +339,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
+            .await
             .map_err(ApiError::NotFound)?;
 
         let timeline_info = build_timeline_info(
@@ -490,7 +491,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
 
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
-        for timeline in tenant.list_timelines().iter() {
+        for timeline in tenant.list_timelines().await.iter() {
             current_physical_size += timeline.layer_size_sum();
         }
 
@@ -932,6 +933,7 @@ async fn active_timeline_of_active_tenant(
     let tenant = mgr::get_tenant(tenant_id, true).await?;
     tenant
         .get_timeline(timeline_id, true)
+        .await
         .map_err(ApiError::NotFound)
 }
 
