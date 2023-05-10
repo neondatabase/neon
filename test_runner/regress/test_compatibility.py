@@ -40,7 +40,13 @@ check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
     reason="CHECK_ONDISK_DATA_COMPATIBILITY env is not set",
 )
 
+skip_on_postgres15 = pytest.mark.skipif(
+    PgVersion(os.environ.get("DEFAULT_PG_VERSION", "14")) != PgVersion.V14,
+    reason="Test support only Postgres 14 yet",
+)
 
+
+@skip_on_postgres15
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
 def test_create_snapshot(
@@ -95,6 +101,7 @@ def test_create_snapshot(
     shutil.copytree(test_output_dir, compatibility_snapshot_dir)
 
 
+@skip_on_postgres15
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
@@ -153,6 +160,7 @@ def test_backward_compatibility(
     ), "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
+@skip_on_postgres15
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
