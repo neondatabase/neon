@@ -67,7 +67,7 @@ macro_rules! failpoint_sleep_millis_async {
         let should_sleep: Option<std::time::Duration> = (|| {
             fail::fail_point!($name, |v: Option<_>| {
                 let millis = v.unwrap().parse::<u64>().unwrap();
-                Some(Duration::from_millis(millis))
+                Some(std::time::Duration::from_millis(millis))
             });
             None
         })();
