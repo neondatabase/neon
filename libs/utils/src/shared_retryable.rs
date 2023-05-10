@@ -11,7 +11,10 @@ use std::sync::Arc;
 ///      request handler 1 ---->|--X
 ///      request handler 2 ---->|-------|
 ///      request handler 3 ---->|-------|
-///                             \------>/
+///                             |       |
+///                             v       |
+///       one spawned task      \------>/
+///
 /// (X = cancelled during await)
 /// ```
 ///
