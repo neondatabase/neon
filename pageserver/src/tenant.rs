@@ -1621,56 +1621,63 @@ impl Tenant {
 
                     debug!(tenant_id = %self.tenant_id, "Activating tenant");
 
-                    let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+                    let span = tracing::Span::current();
+                    std::thread::scope(move |scope| {
+                        scope.spawn(move || {
+                            let _entered = span.enter();
+                            let timelines_accessor = self.timelines.lock().unwrap();
+                            let not_broken_timelines =
+                                timelines_accessor.values().filter(|timeline| {
+                                    timeline.current_state() != TimelineState::Broken
+                                });
 
-                    // Spawn gc and compaction loops. The loops will shut themselves
-                    // down when they notice that the tenant is inactive.
-                    tasks::start_background_loops(self.tenant_id);
+                            // Spawn gc and compaction loops. The loops will shut themselves
+                            // down when they notice that the tenant is inactive.
+                            tasks::start_background_loops(self.tenant_id);
 
-                    let mut activated_timelines = 0;
-                    let mut timelines_broken_during_activation = 0;
+                            let mut activated_timelines = 0;
+                            let mut timelines_broken_during_activation = 0;
 
-                    for timeline in not_broken_timelines {
-                        match timeline
-                            .activate(ctx)
-                            .context("timeline activation for activating tenant")
-                        {
-                            Ok(()) => {
-                                activated_timelines += 1;
+                            for timeline in not_broken_timelines {
+                                match timeline
+                                    .activate(ctx)
+                                    .context("timeline activation for activating tenant")
+                                {
+                                    Ok(()) => {
+                                        activated_timelines += 1;
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Failed to activate timeline {}: {:#}",
+                                            timeline.timeline_id, e
+                                        );
+                                        timeline.set_state(TimelineState::Broken);
+                                        *current_state = TenantState::broken_from_reason(format!(
+                                            "failed to activate timeline {}: {}",
+                                            timeline.timeline_id, e
+                                        ));
+
+                                        timelines_broken_during_activation += 1;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                error!(
-                                    "Failed to activate timeline {}: {:#}",
-                                    timeline.timeline_id, e
-                                );
-                                timeline.set_state(TimelineState::Broken);
-                                *current_state = TenantState::broken_from_reason(format!(
-                                    "failed to activate timeline {}: {}",
-                                    timeline.timeline_id, e
-                                ));
 
-                                timelines_broken_during_activation += 1;
-                            }
-                        }
-                    }
+                            let elapsed = self.loading_started_at.elapsed();
+                            let total_timelines = timelines_accessor.len();
 
-                    let elapsed = self.loading_started_at.elapsed();
-                    let total_timelines = timelines_accessor.len();
-
-                    // log a lot of stuff, because some tenants sometimes suffer from user-visible
-                    // times to activate. see https://github.com/neondatabase/neon/issues/4025
-                    info!(
-                        since_creation_millis = elapsed.as_millis(),
-                        tenant_id = %self.tenant_id,
-                        activated_timelines,
-                        timelines_broken_during_activation,
-                        total_timelines,
-                        post_state = <&'static str>::from(&*current_state),
-                        "activation attempt finished"
-                    );
+                            // log a lot of stuff, because some tenants sometimes suffer from user-visible
+                            // times to activate. see https://github.com/neondatabase/neon/issues/4025
+                            info!(
+                                since_creation_millis = elapsed.as_millis(),
+                                tenant_id = %self.tenant_id,
+                                activated_timelines,
+                                timelines_broken_during_activation,
+                                total_timelines,
+                                post_state = <&'static str>::from(&*current_state),
+                                "activation attempt finished"
+                            );
+                        });
+                    });
                 }
             }
         });
