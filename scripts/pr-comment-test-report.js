@@ -78,6 +78,27 @@ module.exports = async ({ github, context, fetch, report }) => {
         }
     }
 
+    // Put tests with the most recent Postgres version first.
+    // Sort alphabetically within the same version
+    const compareFn = (testA, testB) => {
+        const pgVersionA = Number(testA.pytestName.match(/[\[-]pg(?<pgVersion>\d+)[-\]]/).groups["pgVersion"] || "0" )
+        const pgVersionB = Number(testB.pytestName.match(/[\[-]pg(?<pgVersion>\d+)[-\]]/).groups["pgVersion"] || "0" )
+
+        if (pgVersionA < pgVersionB ) {
+            return 1
+        }
+
+        if (pgVersionA > pgVersionB) {
+            return -1
+        }
+
+        return testA.pytestName.localeCompare(testB.pytestName)
+    }
+
+    failedTests.sort(compareFn)
+    retriedTests.sort(compareFn)
+    retriedStatusChangedTests.sort(compareFn)
+
     const totalTestsCount = failedTests.length + passedTests.length + skippedTests.length
     commentBody += `### ${totalTestsCount} tests run: ${passedTests.length} passed, ${failedTests.length} failed, ${skippedTests.length} skipped ([full report](${reportUrl}) for ${commitUrl})\n___\n`
     if (failedTests.length > 0) {
