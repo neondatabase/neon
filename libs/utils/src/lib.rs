@@ -60,6 +60,10 @@ pub mod tracing_span_assert;
 
 pub mod rate_limit;
 
+/// Primitive for coalescing operations into a single task which will not be cancelled by for
+/// example external http client closing the connection.
+pub mod shared_retryable;
+
 /// use with fail::cfg("$name", "return(2000)")
 #[macro_export]
 macro_rules! failpoint_sleep_millis_async {
