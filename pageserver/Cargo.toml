@@ -75,7 +75,8 @@ enum-map.workspace = true
 enumset.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
-parking_lot.workspace = true
+# feature "send_guard" markes it so that lock guards are Send
+parking_lot = { workspace = true, default-features = false, features = [ "send_guard" ] }
 
 [dev-dependencies]
 criterion.workspace = true
