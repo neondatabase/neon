@@ -1508,6 +1508,12 @@ impl Tenant {
         // FIXME: simplify uploading
         // if we have concurrent requests, we will only execute one version of following future;
         // initially it did not have any means to be cancelled.
+        //
+        // NOTE: Unlike "the usual" futures, this one will log any errors instead of just propagating
+        // them to the caller. This is because this one future produces a value, which will need to
+        // be cloneable to everyone interested, and normal `std::error::Error` are not clonable.
+        // Also, it wouldn't make sense to log the same failure multiple times, it would look like
+        // multiple failures to anyone reading the logs.
         let factory = || {
             let tenant = self.clone();
             let tenant_id = self.tenant_id;
@@ -1541,8 +1547,6 @@ impl Tenant {
                 }
 
                 // Stop & wait for the remaining timeline tasks, including upload tasks.
-                // NB: This and other delete_timeline calls do not run as a task_mgr task,
-                //     so, they are not affected by this shutdown_tasks() call.
                 info!("waiting for timeline tasks to shutdown");
                 task_mgr::shutdown_tasks(None, Some(tenant_id), Some(timeline_id)).await;
 
