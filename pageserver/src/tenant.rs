@@ -1540,6 +1540,7 @@ impl Tenant {
                                 // load and attach code bails out if _any_ of the timeline fails to fetch its IndexPart.
                                 // That is, before we declare the Tenant as Active.
                                 // But we only allow calls to delete_timeline on Active tenants.
+                                warn!("failed to stop RemoteTimelineClient due to uninitialized queue");
                                 return Err(InnerDeleteTimelineError::QueueUninitialized);
                             }
                         },
