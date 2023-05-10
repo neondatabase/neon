@@ -60,6 +60,10 @@ pub mod tracing_span_assert;
 
 pub mod rate_limit;
 
+/// Primitive for coalescing operations into a single task which will not be cancelled by for
+/// example external http client closing the connection.
+pub mod shared_retryable;
+
 mod failpoint_macro_helpers {
 
     /// use with fail::cfg("$name", "return(2000)")
@@ -96,6 +100,7 @@ mod failpoint_macro_helpers {
         tracing::info!("failpoint {:?}: sleep done", name);
     }
 }
+
 pub use failpoint_macro_helpers::failpoint_sleep_helper;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
