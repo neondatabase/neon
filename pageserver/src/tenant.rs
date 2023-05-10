@@ -39,8 +39,7 @@ use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::MutexGuard;
-use std::sync::{Mutex, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use self::config::TenantConf;
@@ -133,7 +132,7 @@ pub struct Tenant {
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     tenant_id: TenantId,
-    timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
+    timelines: parking_lot::Mutex<HashMap<TimelineId, Arc<Timeline>>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration
@@ -184,7 +183,7 @@ impl UninitializedTimeline<'_> {
     /// The new timeline is initialized in Active state, and its background jobs are
     /// started
     pub fn initialize(self, ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
-        let mut timelines = self.owning_tenant.timelines.lock().unwrap();
+        let mut timelines = self.owning_tenant.timelines.lock();
         self.initialize_with_lock(ctx, &mut timelines, true, true)
     }
 
@@ -275,7 +274,7 @@ impl UninitializedTimeline<'_> {
 
         // Initialize without loading the layer map. We started with an empty layer map, and already
         // updated it for the layers that we created during the import.
-        let mut timelines = self.owning_tenant.timelines.lock().unwrap();
+        let mut timelines = self.owning_tenant.timelines.lock();
         self.initialize_with_lock(ctx, &mut timelines, false, true)
     }
 
@@ -494,7 +493,7 @@ impl Tenant {
 
         let timeline = {
             // avoiding holding it across awaits
-            let mut timelines_accessor = self.timelines.lock().unwrap();
+            let mut timelines_accessor = self.timelines.lock();
             if timelines_accessor.contains_key(&timeline_id) {
                 anyhow::bail!(
                     "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
@@ -806,7 +805,7 @@ impl Tenant {
             .context("Failed to create new timeline directory")?;
 
         let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
-            let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock();
             Some(Arc::clone(timelines.get(&ancestor_id).ok_or_else(
                 || {
                     anyhow::anyhow!(
@@ -1141,7 +1140,7 @@ impl Tenant {
         timeline_id: TimelineId,
         active_only: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let timelines_accessor = self.timelines.lock().unwrap();
+        let timelines_accessor = self.timelines.lock();
         let timeline = timelines_accessor.get(&timeline_id).with_context(|| {
             format!("Timeline {}/{} was not found", self.tenant_id, timeline_id)
         })?;
@@ -1161,12 +1160,7 @@ impl Tenant {
     /// Lists timelines the tenant contains.
     /// Up to tenant's implementation to omit certain timelines that ar not considered ready for use.
     pub fn list_timelines(&self) -> Vec<Arc<Timeline>> {
-        self.timelines
-            .lock()
-            .unwrap()
-            .values()
-            .map(Arc::clone)
-            .collect()
+        self.timelines.lock().values().map(Arc::clone).collect()
     }
 
     /// This is used to create the initial 'main' timeline during bootstrapping,
@@ -1184,7 +1178,7 @@ impl Tenant {
             "Cannot create empty timelines on inactive tenant"
         );
 
-        let timelines = self.timelines.lock().unwrap();
+        let timelines = self.timelines.lock();
         let timeline_uninit_mark = self.create_timeline_uninit_mark(new_timeline_id, &timelines)?;
         drop(timelines);
 
@@ -1316,7 +1310,7 @@ impl Tenant {
         // compactions.  We don't want to block everything else while the
         // compaction runs.
         let timelines_to_compact = {
-            let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock();
             let timelines_to_compact = timelines
                 .iter()
                 .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
@@ -1345,7 +1339,7 @@ impl Tenant {
         // flushing. We don't want to block everything else while the
         // flushing is performed.
         let timelines_to_flush = {
-            let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock();
             timelines
                 .iter()
                 .map(|(_id, timeline)| Arc::clone(timeline))
@@ -1370,7 +1364,7 @@ impl Tenant {
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
         let timeline = {
-            let mut timelines = self.timelines.lock().unwrap();
+            let mut timelines = self.timelines.lock();
 
             // Ensure that there are no child timelines **attached to that pageserver**,
             // because detach removes files, which will break child branches
@@ -1517,7 +1511,7 @@ impl Tenant {
         });
 
         // Remove the timeline from the map.
-        let mut timelines = self.timelines.lock().unwrap();
+        let mut timelines = self.timelines.lock();
         let children_exist = timelines
             .iter()
             .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
@@ -1585,7 +1579,7 @@ impl Tenant {
 
                     debug!(tenant_id = %self.tenant_id, "Activating tenant");
 
-                    let timelines_accessor = self.timelines.lock().unwrap();
+                    let timelines_accessor = self.timelines.lock();
                     let not_broken_timelines = timelines_accessor
                         .values()
                         .filter(|timeline| timeline.current_state() != TimelineState::Broken);
@@ -1652,7 +1646,7 @@ impl Tenant {
                     // might be created after this. That's harmless, as the Timelines
                     // won't be accessible to anyone, when the Tenant is in Stopping
                     // state.
-                    let timelines_accessor = self.timelines.lock().unwrap();
+                    let timelines_accessor = self.timelines.lock();
                     let not_broken_timelines = timelines_accessor
                         .values()
                         .filter(|timeline| timeline.current_state() != TimelineState::Broken);
@@ -1945,7 +1939,7 @@ impl Tenant {
             // activation times.
             loading_started_at: Instant::now(),
             tenant_conf: Arc::new(RwLock::new(tenant_conf)),
-            timelines: Mutex::new(HashMap::new()),
+            timelines: parking_lot::Mutex::new(HashMap::new()),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
@@ -2173,7 +2167,7 @@ impl Tenant {
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
         let (all_branchpoints, timeline_ids): (BTreeSet<(TimelineId, Lsn)>, _) = {
-            let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock();
             let mut all_branchpoints = BTreeSet::new();
             let timeline_ids = {
                 if let Some(target_timeline_id) = target_timeline_id.as_ref() {
@@ -2273,7 +2267,7 @@ impl Tenant {
         // Create a placeholder for the new branch. This will error
         // out if the new timeline ID is already in use.
         let timeline_uninit_mark = {
-            let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock();
             self.create_timeline_uninit_mark(dst_id, &timelines)?
         };
 
@@ -2338,7 +2332,7 @@ impl Tenant {
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
-        let mut timelines = self.timelines.lock().unwrap();
+        let mut timelines = self.timelines.lock();
         let new_timeline = self
             .prepare_timeline(
                 dst_id,
@@ -2375,7 +2369,7 @@ impl Tenant {
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_uninit_mark = {
-            let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock();
             self.create_timeline_uninit_mark(timeline_id, &timelines)?
         };
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
@@ -2461,7 +2455,7 @@ impl Tenant {
         // Initialize the timeline without loading the layer map, because we already updated the layer
         // map above, when we imported the datadir.
         let timeline = {
-            let mut timelines = self.timelines.lock().unwrap();
+            let mut timelines = self.timelines.lock();
             raw_timeline.initialize_with_lock(ctx, &mut timelines, false, true)?
         };
 
@@ -2564,7 +2558,7 @@ impl Tenant {
     fn create_timeline_uninit_mark(
         &self,
         timeline_id: TimelineId,
-        timelines: &MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        timelines: &parking_lot::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
     ) -> anyhow::Result<TimelineUninitMark> {
         let tenant_id = self.tenant_id;
 

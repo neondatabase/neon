@@ -2727,6 +2727,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pageserver_api",
+ "parking_lot",
  "pin-project-lite",
  "postgres",
  "postgres-protocol",
