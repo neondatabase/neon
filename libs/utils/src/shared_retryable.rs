@@ -219,6 +219,8 @@ where
         }
     }
 
+    /// Returns a Ok if the previous attempt had resulted in a terminal result. Err is returned
+    /// when an attempt can be joined and possibly needs to be spawned.
     async fn decide_to_retry_or_join<F, Fut, E2>(
         &self,
         retry_with: F,
