@@ -273,10 +273,10 @@ where
         Err((rx, maybe_fut))
     }
 
-    /// Spawn and configure a new attempt.
+    /// Configure a new attempt, but leave spawning it to the caller.
     ///
     /// Returns an `Arc<Receiver<V>>` which is valid until the attempt completes, and the future
-    /// which will run to completion outside the lifecycle of the caller.
+    /// which will need to run to completion outside the lifecycle of the caller.
     fn make_run_and_complete<Fut>(
         &self,
         fut: Fut,
@@ -373,7 +373,7 @@ where
                 }
             };
 
-            // see try_restart for important notes
+            // see decide_to_retry_or_join for important notes
             let rx = strong.resubscribe();
             drop(strong);
             (rx, maybe_fut)
@@ -394,7 +394,7 @@ where
     ///
     /// Forgetting the returned future is outside of scope of any correctness guarantees; all of
     /// the waiters will then be deadlocked, and the MaybeDone will forever be pending. Dropping
-    /// and not running the future will lead to busy looping behaviour.
+    /// and not running the future will then require a new attempt.
     ///
     /// Also returns an `Arc<Receiver<V>>` which is valid until the attempt completes.
     fn make_run_and_complete_any<Fut>(
@@ -450,7 +450,7 @@ where
 
             // make the weak un-upgradeable by dropping the final alive
             // reference to it. it is final Arc because the Arc never escapes
-            // the critical section.
+            // the critical section in `decide_to_retry_or_join` or `attempt_spawn`.
             Arc::try_unwrap(strong).expect("expected this to be the only Arc<Receiver<V>>");
         }
 
@@ -496,7 +496,7 @@ pub enum MaybeDone<V> {
 impl<V: std::fmt::Debug> MaybeDone<V> {
     fn complete(
         this: &mut Option<MaybeDone<V>>,
-        _expected_rx: &Arc<tokio::sync::broadcast::Receiver<V>>,
+        _strong: &Arc<tokio::sync::broadcast::Receiver<V>>,
         outcome: V,
     ) {
         #[cfg(debug_assertions)]
@@ -505,7 +505,7 @@ impl<V: std::fmt::Debug> MaybeDone<V> {
                 let same = weak
                     .upgrade()
                     // we don't yet have Receiver::same_channel
-                    .map(|rx| Arc::ptr_eq(_expected_rx, &rx))
+                    .map(|rx| Arc::ptr_eq(_strong, &rx))
                     .unwrap_or(false);
                 assert!(same, "different channel had been replaced or dropped");
             }
