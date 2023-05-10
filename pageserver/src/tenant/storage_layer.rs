@@ -23,6 +23,7 @@ use pageserver_api::models::{
 };
 use std::ops::Range;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -337,6 +338,13 @@ impl LayerAccessStats {
     }
 }
 
+pub(crate) type GetValueReconstructFuture = Pin<
+    Box<
+        dyn Send
+            + std::future::Future<Output = Result<(ValueReconstructState, ValueReconstructResult)>>,
+    >,
+>;
+
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
 ///
@@ -374,12 +382,12 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
     fn get_value_reconstruct_data(
-        &self,
+        self: Arc<Self>,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult>;
+        reconstruct_data: ValueReconstructState,
+        ctx: RequestContext,
+    ) -> GetValueReconstructFuture;
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
     fn short_id(&self) -> String;
@@ -513,12 +521,12 @@ impl Layer for LayerDescriptor {
     }
 
     fn get_value_reconstruct_data(
-        &self,
+        self: Arc<Self>,
         _key: Key,
         _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-        _ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
+        _reconstruct_data: ValueReconstructState,
+        _ctx: RequestContext,
+    ) -> GetValueReconstructFuture {
         todo!("This method shouldn't be part of the Layer trait")
     }
 
