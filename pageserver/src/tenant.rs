@@ -1440,7 +1440,6 @@ impl Tenant {
 
         let span = tracing::Span::current();
 
-        // FIXME: simplify uploading
         // if we have concurrent requests, we will only execute one version of following future;
         // initially it did not have any means to be cancelled.
         //
