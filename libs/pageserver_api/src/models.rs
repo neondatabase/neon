@@ -51,10 +51,10 @@ impl TenantState {
     pub fn attachment_status(&self) -> TenantAttachmentStatus {
         use TenantAttachmentStatus::*;
         match self {
-            // The attach procedure writes the marker file before adding the Attaching tenant to the layer map.
+            // The attach procedure writes the marker file before adding the Attaching tenant to the tenants map.
             // So, technically, we can return Attached here.
             // However, as soon as Console observes Attached, it will proceed with the Postgres-level health check.
-            // But, our attach task might still we might still be fetching the remote timelines, etc.
+            // But, our attach task might still be fetching the remote timelines, etc.
             // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
             Self::Attaching => Maybe,
             // tenant mgr startup distinguishes attaching from loading via marker file.

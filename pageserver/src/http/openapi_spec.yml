@@ -362,7 +362,7 @@ paths:
         * MUST NOT ASSUME that the /attach request has been lost in the network,
         * MUST NOT ASSUME that the request has been lost, based on the observation
           that a subsequent tenant status request returns 404. The request may
-          still be in flight.
+          still be in flight. It must be retried.
       responses:
         "202":
           description: Tenant attaching scheduled
