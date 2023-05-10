@@ -227,6 +227,9 @@ pub struct Timeline {
     state: watch::Sender<TimelineState>,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
+
+    pub(super) delete_self:
+        utils::shared_retryable::SharedRetryable<Result<(), super::InnerDeleteTimelineError>>,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -1379,6 +1382,8 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
+
+                delete_self: utils::shared_retryable::SharedRetryable::default(),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
