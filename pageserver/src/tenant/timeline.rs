@@ -3245,7 +3245,6 @@ impl Timeline {
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
-        drop(layers);
 
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
@@ -3366,7 +3365,6 @@ impl Timeline {
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
-        let layers = self.layers.read().unwrap(); // Is'n it better to hold original layers lock till here?
         let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
 
