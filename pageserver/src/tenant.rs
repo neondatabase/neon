@@ -97,6 +97,7 @@ mod timeline;
 
 pub mod size;
 
+pub(crate) use timeline::debug_assert_current_span_has_tenant_and_timeline_id;
 pub use timeline::{LocalLayerInfoForDiskUsageEviction, PageReconstructError, Timeline};
 
 // re-export this function so that page_cache.rs can use it.

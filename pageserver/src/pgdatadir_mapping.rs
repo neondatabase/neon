@@ -500,6 +500,8 @@ impl Timeline {
         cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
+        crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await.context("read dbdir")?;
         let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;

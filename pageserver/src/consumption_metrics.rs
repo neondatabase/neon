@@ -164,7 +164,8 @@ pub async fn collect_metrics_iteration(
                     timeline_written_size,
                 ));
 
-                match timeline.get_current_logical_size(ctx) {
+                let span = info_span!("collect_metrics_iteration", tenant_id = %timeline.tenant_id, timeline_id = %timeline.timeline_id);
+                match span.in_scope(|| timeline.get_current_logical_size(ctx)) {
                     // Only send timeline logical size when it is fully calculated.
                     Ok((size, is_exact)) if is_exact => {
                         current_metrics.push((
