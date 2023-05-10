@@ -20,6 +20,10 @@ Please be aware of at least these common problems:
     dropped is that a future is polled or raced within `tokio::select!`
     with a cancellation token or the HTTP client drops the connection,
     causing a cancellation or drop on a handler future.
+    
+    Additionally please note that blocking tasks spawned with
+    `tokio::spawn_blocking` directly or indirectly will not be
+    cancelled with the spawning future.
 
 2. When using `scopeguard` or generally within `Drop::drop`, the code
 must not panic
