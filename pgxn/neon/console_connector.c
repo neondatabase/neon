@@ -138,7 +138,7 @@ static void SendDeltasToConsole()
         return;
     if(!ConsoleURL)
     {
-        elog(LOG, "ConsoleURL not set, skipping forwarded");
+        elog(LOG, "ConsoleURL not set, skipping forwarding");
         return;
     }
     if(!ForwardDDL)
@@ -160,7 +160,18 @@ static void SendDeltasToConsole()
         pg_usleep(1000 * 1000);
     }
     if(curl_status != 0)
+    {
         elog(ERROR, "Failed to perform curl request");
+    }
+    else
+    {
+        long response_code;
+        curl_easy_getinfo(CurlHandle, CURLINFO_RESPONSE_CODE, &response_code);
+        if(response_code != 200)
+        {
+            elog(ERROR, "Received HTTP code %ld from console", response_code);
+        }
+    }
 }
 
 static void InitDbTableIfNeeded()
