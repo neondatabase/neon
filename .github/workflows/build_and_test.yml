@@ -330,6 +330,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
+        pg_version: [ v14, v15 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -350,11 +351,12 @@ jobs:
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
           rerun_flaky: true
         env:
+          DEFAULT_PG_VERSION: ${{ matrix.pg_version }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
 
       - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug'
+        if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
