@@ -503,7 +503,7 @@ impl<V: std::fmt::Debug> MaybeDone<V> {
                 let same = weak
                     .upgrade()
                     // we don't yet have Receiver::same_channel
-                    .map(|rx| Arc::ptr_eq(&_expected_rx, &rx))
+                    .map(|rx| Arc::ptr_eq(_expected_rx, &rx))
                     .unwrap_or(false);
                 assert!(same, "different channel had been replaced or dropped");
             }
