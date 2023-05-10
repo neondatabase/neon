@@ -560,7 +560,6 @@ impl Tenant {
                 || timeline
                     .layers
                     .read()
-                    .unwrap()
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -2502,8 +2501,7 @@ impl Tenant {
         ) {
             Ok(new_timeline) => {
                 if init_layers {
-                    new_timeline.layers.write().unwrap().next_open_layer_at =
-                        Some(new_timeline.initdb_lsn);
+                    new_timeline.layers.write().next_open_layer_at = Some(new_timeline.initdb_lsn);
                 }
                 debug!(
                     "Successfully created initial files for timeline {tenant_id}/{new_timeline_id}"
