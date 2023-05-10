@@ -159,7 +159,7 @@ where
 {
     /// Restart a previously failed operation unless it already completed with a terminal result.
     ///
-    /// Many tasks can call this function and and get the terminal result from an earlier attempt
+    /// Many futures can call this function and and get the terminal result from an earlier attempt
     /// or start a new attempt, or join an existing one.
     ///
     /// Compared to `Self::try_restart`, this method also spawns the future to run, which would
@@ -182,7 +182,7 @@ where
 
     /// Restart a previously failed operation unless it already completed with a terminal result.
     ///
-    /// Many tasks can call this function and get the terminal result from an earlier attempt or
+    /// Many futures can call this function and get the terminal result from an earlier attempt or
     /// start a new attempt, or join an existing one.
     ///
     /// If a task calling this method is cancelled, at worst, a new attempt which is immediatedly
