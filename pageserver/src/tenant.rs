@@ -1264,11 +1264,20 @@ impl Tenant {
             "Cannot create timelines on inactive tenant"
         );
 
-        if self.get_timeline(new_timeline_id, false).is_ok() {
+        if let Ok(existing) = self.get_timeline(new_timeline_id, false) {
             debug!("timeline {new_timeline_id} already exists");
-            // FIXME: in this case we should probably still await that the index_part.json upload
-            // complete to be retryable, assuming timeout happened with `branch_timeline` waiting
-            // for upload part; cannot see any good candidates
+
+            if let Some(remote_client) = existing.remote_client.as_ref() {
+                // wait for uploads to complete even if this is a random old/very active timeline
+                // because if we get shutdown while waiting for the uploads on creation path (later
+                // in this method), the request will be retried and during startup we already
+                // scheduled the uploads so they have either completed or are completing right now.
+                remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for timeline uploads to complete")?;
+            }
+
             return Ok(None);
         }
 
