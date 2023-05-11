@@ -633,7 +633,7 @@ void InitConsoleConnector()
         NULL,
         &ConsoleURL,
         NULL,
-        PGC_SUSET,
+        PGC_POSTMASTER,
         0,
         NULL,
         NULL,
