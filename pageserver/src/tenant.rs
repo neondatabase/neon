@@ -1310,6 +1310,18 @@ impl Tenant {
             }
         };
 
+        if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
+            // failing the await for uploads to complete will mean that the tenant is
+            // non-relocatable, however with erroring out it is clear to control plane that the
+            // request needs to be retried, and next time after restart they will get 409.
+            let kind = ancestor_timeline_id
+                .map(|_| "branched")
+                .unwrap_or("bootstrapped");
+            remote_client.wait_completion().await.with_context(|| {
+                format!("wait for {} timeline initial uploads to complete", kind)
+            })?;
+        }
+
         Ok(Some(loaded_timeline))
     }
 
@@ -2401,11 +2413,6 @@ impl Tenant {
             remote_client
                 .schedule_index_upload_for_metadata_update(&metadata)
                 .context("branch initial metadata upload")?;
-
-            remote_client
-                .wait_completion()
-                .await
-                .context("wait for branch initial index_part.json to upload")?;
         }
 
         info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
