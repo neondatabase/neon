@@ -191,7 +191,7 @@ impl Layer for InMemoryLayer {
     }
 
     /// Look up given value in the layer.
-    async fn get_value_reconstruct_data(
+    fn get_value_reconstruct_data_blocking(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,

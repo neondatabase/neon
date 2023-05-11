@@ -374,13 +374,38 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     /// is available. If this returns ValueReconstructResult::Continue, look up
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
-    async fn get_value_reconstruct_data(
+    fn get_value_reconstruct_data_blocking(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> Result<ValueReconstructResult>;
+
+    /// CANCEL SAFETY: if the returned future is dropped,
+    /// the wrapped closure still run to completion and the return value discarded.
+    /// For the case of get_value_reconstruct_data, we expect the closure to not
+    /// have any side effects, as it only attempts to read a layer (and stuff like
+    /// page cache isn't considered a real side effect).
+    /// But, ...
+    /// TRACING:
+    /// If the returned future is cancelled, the spawn_blocking span can outlive
+    /// the caller's span.
+    /// So, technically, we should be using `parent: None` and `follows_from: current`
+    /// instead. However, in practice, the advantage of maintaining the span stack
+    /// in logs outweighs the disadvantage of having a dangling span in a case that
+    /// is not expected to happen because in pageserver we generally don't drop pending futures.
+    async fn get_value_reconstruct_data(
+        &self,
+        key: Key,
+        lsn_range: Range<Lsn>,
+        reconstruct_data: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<ValueReconstructResult> {
+        tokio::task::block_in_place(move || {
+            self.get_value_reconstruct_data_blocking(key, lsn_range, reconstruct_data, ctx)
+        })
+    }
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
     fn short_id(&self) -> String;
@@ -514,7 +539,7 @@ impl Layer for LayerDescriptor {
         self.is_incremental
     }
 
-    async fn get_value_reconstruct_data(
+    fn get_value_reconstruct_data_blocking(
         &self,
         _key: Key,
         _lsn_range: Range<Lsn>,

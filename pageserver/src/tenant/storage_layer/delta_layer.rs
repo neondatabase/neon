@@ -295,7 +295,7 @@ impl Layer for DeltaLayer {
         Ok(())
     }
 
-    async fn get_value_reconstruct_data(
+    fn get_value_reconstruct_data_blocking(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
@@ -366,7 +366,7 @@ impl Layer for DeltaLayer {
                             need_image = false;
                             break;
                         }
-                    }
+                    } // release metadata lock and close the file
                 }
             }
             // release metadata lock and close the file
