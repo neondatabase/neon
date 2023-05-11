@@ -660,13 +660,19 @@ def test_empty_branch_remote_storage_upload(
     ), f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
 
 
-# Branches off a root branch, but does not write anything to the new branch, so it has a metadata file only.
-# Ensures the branch is not on the remote storage and restarts the pageserver — the branch should be uploaded after the restart.
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_empty_branch_remote_storage_upload_on_restart(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
+    """
+    Branches off a root branch, but does not write anything to the new branch, so
+    it has a metadata file only.
+
+    Ensures the branch is not on the remote storage and restarts the pageserver
+    — the upload should be scheduled by load, and create_timeline should await
+    for it even though it gets 409 Conflict.
+    """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_empty_branch_remote_storage_upload_on_restart",
@@ -754,8 +760,6 @@ def test_empty_branch_remote_storage_upload_on_restart(
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
     finally:
         create_thread.join()
-
-    raise Exception("check logs")
 
 
 def wait_upload_queue_empty(
