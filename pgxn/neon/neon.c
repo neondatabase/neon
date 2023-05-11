@@ -35,9 +35,12 @@ _PG_init(void)
 {
 	pg_init_libpagestore();
 	pg_init_walproposer();
-
-	EmitWarningsOnPlaceholders("neon");
 	InitConsoleConnector();
+
+        // Important: This must happen after other parts of the extension
+        // are loaded, otherwise any settings to GUCs that were set before
+        // the extension was loaded will be removed.
+	EmitWarningsOnPlaceholders("neon");
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
