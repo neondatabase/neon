@@ -5425,6 +5425,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "parking_lot",
  "prost",
  "rand",
  "regex",
