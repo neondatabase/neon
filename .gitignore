@@ -8,6 +8,7 @@ test_output/
 .idea
 /.neon
 /integration_tests/.neon
+/neon_cli/tmp
 
 # Coverage
 *.profraw
