@@ -1606,7 +1606,7 @@ impl Tenant {
 
                 Ok(())
             }
-            // execute in the *winners* span so we will capture the request id etc.
+            // execute in the *winner's* span so we will capture the request id etc.
             .instrument(span)
         };
 
