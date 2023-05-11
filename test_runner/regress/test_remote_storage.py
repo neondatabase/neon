@@ -629,10 +629,6 @@ def test_empty_branch_remote_storage_upload(
     new_branch_name = "new_branch"
     new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
 
-    # FIXME: unsure why this is done
-    with env.endpoints.create_start(new_branch_name, tenant_id=env.initial_tenant) as endpoint:
-        wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_branch_timeline_id)
-
     timelines_before_detach = set(
         map(
             lambda t: TimelineId(t["timeline_id"]),
