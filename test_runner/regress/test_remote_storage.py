@@ -26,6 +26,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import print_gc_result, query_scalar, wait_until
+from requests import ReadTimeout
 
 
 #
@@ -673,35 +674,59 @@ def test_empty_branch_remote_storage_upload_on_restart(
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
-    new_branch_name = "new_branch"
-    new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+    client.configure_failpoints(("before-upload-index", "return"))
 
-    # again unsure what is the point of this
-    with env.endpoints.create_start(new_branch_name, tenant_id=env.initial_tenant) as endpoint:
-        wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_branch_timeline_id)
+    new_branch_timeline_id = TimelineId.generate()
 
+    with pytest.raises(ReadTimeout):
+        client.timeline_create(
+            tenant_id=env.initial_tenant,
+            ancestor_timeline_id=env.initial_timeline,
+            new_timeline_id=new_branch_timeline_id,
+            pg_version=env.pg_version,
+            timeout=4,
+        )
+    env.pageserver.allowed_errors.append(
+        f"POST path=/v1/tenant/{env.initial_tenant}/timeline .* request was dropped before completing"
+    )
+
+    # index upload is now hitting the failpoint, should not block the shutdown
     env.pageserver.stop()
 
-    # Remove new branch from the remote storage
+    timeline_path = (
+        Path("tenants") / str(env.initial_tenant) / "timelines" / str(new_branch_timeline_id)
+    )
+
+    local_metadata = env.repo_dir / timeline_path / "metadata"
+    assert local_metadata.is_file(), "timeout cancelled timeline branching, not the upload"
+
     assert isinstance(env.remote_storage, LocalFsStorage)
     new_branch_on_remote_storage = (
-        env.remote_storage.root
-        / "tenants"
-        / str(env.initial_tenant)
-        / "timelines"
-        / str(new_branch_timeline_id)
+        env.remote_storage.root / timeline_path / str(new_branch_timeline_id)
     )
     assert (
-        new_branch_on_remote_storage.is_dir()
-    ), f"'{new_branch_on_remote_storage}' path does not exist on the remote storage"
-    shutil.rmtree(new_branch_on_remote_storage)
+        not new_branch_on_remote_storage.exists()
+    ), "failpoint should had prohibited index_part.json upload"
 
+    # during reconciliation we should had scheduled the uploads and on the
+    # retried create_timeline, we will await for those to complete on next
+    # client.timeline_create
     env.pageserver.start()
 
-    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
+    with pytest.raises(expected_exception=PageserverApiException) as conflict_info:
+        client.timeline_create(
+            tenant_id=env.initial_tenant,
+            ancestor_timeline_id=env.initial_timeline,
+            new_timeline_id=new_branch_timeline_id,
+            pg_version=env.pg_version,
+        )
     assert (
-        new_branch_on_remote_storage.is_dir()
-    ), f"New branch should have been reuploaded on pageserver restart to the remote storage path '{new_branch_on_remote_storage}'"
+        conflict_info.value.status_code == 409
+    ), "timeline was created before restart, and uploads scheduled during initial load, so we expect 409 conflict"
+
+    assert (
+        new_branch_on_remote_storage / "index_part.json"
+    ).is_file(), "uploads scheduled during initial load should had been awaited for"
 
 
 def wait_upload_queue_empty(
