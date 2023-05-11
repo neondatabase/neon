@@ -2376,17 +2376,18 @@ impl Tenant {
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
-        let mut timelines = self.timelines.lock().unwrap();
-        let new_timeline = self
-            .prepare_timeline(
+
+        let new_timeline = {
+            let mut timelines = self.timelines.lock().unwrap();
+            self.prepare_timeline(
                 dst_id,
                 &metadata,
                 timeline_uninit_mark,
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
-            .initialize_with_lock(ctx, &mut timelines, true, true)?;
-        drop(timelines);
+            .initialize_with_lock(ctx, &mut timelines, true, true)?
+        };
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
         // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
@@ -2397,6 +2398,11 @@ impl Tenant {
             remote_client
                 .schedule_index_upload_for_metadata_update(&metadata)
                 .context("branch initial metadata upload")?;
+
+            remote_client
+                .wait_completion()
+                .await
+                .context("wait for branch initial index_part.json to upload")?;
         }
 
         info!("branched timeline {dst_id} from {src_id} at {start_lsn}");
