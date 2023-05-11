@@ -120,6 +120,13 @@ impl Timeline {
                 }
                 let elapsed = start.elapsed();
                 crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
+                crate::metrics::EVICTION_ITERATION_DURATION
+                    .get_metric_with_label_values(&[
+                        &format!("{}", p.period.as_secs()),
+                        &format!("{}", p.threshold.as_secs()),
+                    ])
+                    .unwrap()
+                    .observe(elapsed.as_secs_f64());
                 ControlFlow::Continue(start + p.period)
             }
         }

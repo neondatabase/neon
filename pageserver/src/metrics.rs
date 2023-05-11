@@ -186,6 +186,16 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_eviction_iteration_duration_seconds_global",
+        "Time spent on a single eviction iteration",
+        &["period_secs", "threshold_secs"],
+        STORAGE_OP_BUCKETS.into(), // TODO: could use better buckets?
+    )
+    .expect("failed to define a metric")
+});
+
 static EVICTIONS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_evictions",
