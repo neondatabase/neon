@@ -19,9 +19,24 @@
 //       })
 //
 
+// Analog of Python's defaultdict.
+//
+// const dm = new DefaultMap(() => new DefaultMap(() => []))
+// dm["firstKey"]["secondKey"].push("value")
+//
+class DefaultMap extends Map {
+    constructor(getDefaultValue) {
+        return new Proxy({}, {
+            get: (target, name) => name in target ? target[name] : (target[name] = getDefaultValue(name))
+        })
+    }
+}
+
 module.exports = async ({ github, context, fetch, report }) => {
     // Marker to find the comment in the subsequent runs
     const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
+    // Let users know that the comment is updated automatically
+    const autoupdateNotice = `<div align="right"><sub>The comment gets automatically updated with the latest test results :recycle:</sub></div>`
     // GitHub bot id taken from (https://api.github.com/users/github-actions[bot])
     const githubActionsBotId = 41898282
     // The latest commit in the PR URL
@@ -39,6 +54,7 @@ module.exports = async ({ github, context, fetch, report }) => {
 
     if (!reportUrl || !reportJsonUrl) {
         commentBody += `#### No tests were run or test report is not available\n`
+        commentBody += autoupdateNotice
         return
     }
 
@@ -46,82 +62,96 @@ module.exports = async ({ github, context, fetch, report }) => {
 
     // Allure distinguishes "failed" (with an assertion error) and "broken" (with any other error) tests.
     // For this report it's ok to treat them in the same way (as failed).
-    failedTests = []
-    passedTests = []
-    skippedTests = []
+    const failedTests = new DefaultMap(() => new DefaultMap(() => []))
+    const passedTests = new DefaultMap(() => new DefaultMap(() => []))
+    const skippedTests = new DefaultMap(() => new DefaultMap(() => []))
+    const retriedTests = new DefaultMap(() => new DefaultMap(() => []))
+    const flakyTests = new DefaultMap(() => new DefaultMap(() => []))
 
-    retriedTests = []
-    retriedStatusChangedTests = []
+    let failedTestsCount = 0
+    let passedTestsCount = 0
+    let skippedTestsCount = 0
+    let flakyTestsCount = 0
+
+    const pgVersions = new Set()
+    const buildTypes = new Set()
 
     for (const parentSuite of suites.children) {
         for (const suite of parentSuite.children) {
             for (const test of suite.children) {
-                pytestName = `${parentSuite.name.replace(".", "/")}/${suite.name}.py::${test.name}`
-                test.pytestName = pytestName
+                const {groups: {buildType, pgVersion}} = test.name.match(/[\[-](?<buildType>debug|release)-pg(?<pgVersion>\d+)[-\]]/)
+
+                pgVersions.add(pgVersion)
+                buildTypes.add(buildType)
+
+                // Removing build type and PostgreSQL version from the test name to make it shorter
+                const testName = test.name.replace(new RegExp(`${buildType}-pg${pgVersion}-?`), "").replace("[]", "")
+                test.pytestName = `${parentSuite.name.replace(".", "/")}/${suite.name}.py::${testName}`
 
                 if (test.status === "passed") {
-                    passedTests.push(test);
+                    passedTests[pgVersion][buildType].push(test)
+                    passedTestsCount += 1
                 } else if (test.status === "failed" || test.status === "broken") {
-                    failedTests.push(test);
+                    failedTests[pgVersion][buildType].push(test)
+                    failedTestsCount += 1
                 } else if (test.status === "skipped") {
-                    skippedTests.push(test);
+                    skippedTests[pgVersion][buildType].push(test)
+                    skippedTestsCount += 1
                 }
 
                 if (test.retriesCount > 0) {
-                    retriedTests.push(test);
+                    retriedTests[pgVersion][buildType].push(test)
 
                     if (test.retriesStatusChange) {
-                        retriedStatusChangedTests.push(test);
+                        flakyTests[pgVersion][buildType].push(test)
+                        flakyTestsCount += 1
                     }
                 }
             }
         }
     }
 
-    // Put tests with the most recent Postgres version first.
-    // Sort alphabetically within the same version
-    const compareFn = (testA, testB) => {
-        const pgVersionA = Number(testA.pytestName.match(/[\[-]pg(?<pgVersion>\d+)[-\]]/).groups["pgVersion"] || "0" )
-        const pgVersionB = Number(testB.pytestName.match(/[\[-]pg(?<pgVersion>\d+)[-\]]/).groups["pgVersion"] || "0" )
+    const totalTestsCount = failedTestsCount + passedTestsCount + skippedTestsCount
+    commentBody += `### ${totalTestsCount} tests run: ${passedTestsCount} passed, ${failedTestsCount} failed, ${skippedTestsCount} skipped ([full report](${reportUrl}) for ${commitUrl})\n___\n`
 
-        if (pgVersionA < pgVersionB ) {
-            return 1
-        }
+    // Print test resuls from the newest to the oldest PostgreSQL version for release and debug builds.
+    for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
+        for (const buildType of Array.from(buildTypes).sort().reverse()) {
+            if (failedTests[pgVersion][buildType].length > 0) {
+                commentBody += `#### PostgreSQL ${pgVersion} (${buildType} build)\n\n`
+                commentBody += `Failed tests:\n`
+                for (const test of failedTests[pgVersion][buildType]) {
+                    const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}`
 
-        if (pgVersionA > pgVersionB) {
-            return -1
-        }
-
-        return testA.pytestName.localeCompare(testB.pytestName)
-    }
-
-    failedTests.sort(compareFn)
-    retriedTests.sort(compareFn)
-    retriedStatusChangedTests.sort(compareFn)
-
-    const totalTestsCount = failedTests.length + passedTests.length + skippedTests.length
-    commentBody += `### ${totalTestsCount} tests run: ${passedTests.length} passed, ${failedTests.length} failed, ${skippedTests.length} skipped ([full report](${reportUrl}) for ${commitUrl})\n___\n`
-    if (failedTests.length > 0) {
-        commentBody += `Failed tests:\n`
-        for (const test of failedTests) {
-            const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}`
-
-            commentBody += `- [\`${test.pytestName}\`](${allureLink})`
-            if (test.retriesCount > 0) {
-                commentBody += ` (ran [${test.retriesCount + 1} times](${allureLink}/retries))`
+                    commentBody += `- [\`${test.pytestName}\`](${allureLink})`
+                    if (test.retriesCount > 0) {
+                        commentBody += ` (ran [${test.retriesCount + 1} times](${allureLink}/retries))`
+                    }
+                    commentBody += "\n"
+                }
+                commentBody += "\n"
             }
-            commentBody += "\n"
         }
-        commentBody += "\n"
     }
-    if (retriedStatusChangedTests > 0) {
-        commentBody += `Flaky tests:\n`
-        for (const test of retriedStatusChangedTests) {
-            const status = test.status === "passed" ? ":white_check_mark:" : ":x:"
-            commentBody += `- ${status} [\`${test.pytestName}\`](${reportUrl}#suites/${test.parentUid}/${test.uid}/retries)\n`
+
+    if (flakyTestsCount > 0) {
+        commentBody += "<details>\n<summary>Flaky tests</summary>\n\n"
+        for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
+            for (const buildType of Array.from(buildTypes).sort().reverse()) {
+                if (flakyTests[pgVersion][buildType].length > 0) {
+                    commentBody += `#### PostgreSQL ${pgVersion} (${buildType} build)\n\n`
+                    for (const test of flakyTests[pgVersion][buildType]) {
+                        const status = test.status === "passed" ? ":white_check_mark:" : ":x:"
+                        commentBody += `- ${status} [\`${test.pytestName}\`](${reportUrl}#suites/${test.parentUid}/${test.uid}/retries)\n`
+                    }
+                    commentBody += "\n"
+                }
+            }
         }
-        commentBody += "\n"
+        commentBody += "\n</details>\n"
     }
+
+    commentBody += autoupdateNotice
 
     const { data: comments } = await github.rest.issues.listComments({
         issue_number: context.payload.number,
