@@ -391,13 +391,14 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
         # release the pause
         ps_http.configure_failpoints((failpoint_name, "off"))
 
-        # both should had succeeded
+        # both should had succeeded: the second call will coalesce with the already-ongoing first call
         result = delete_results.get()
         assert result == "success"
         result = delete_results.get()
         assert result == "success"
 
         # the second call will try to transition the timeline into Stopping state, but it's already in that state
+        # (the transition to Stopping state is not part of the request coalescing, because Tenant and Timeline states are a mess already)
         env.pageserver.allowed_errors.append(
             f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
         )
