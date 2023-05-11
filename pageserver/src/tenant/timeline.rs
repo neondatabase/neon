@@ -2155,6 +2155,24 @@ impl Timeline {
     ///
     /// This function takes the current timeline's locked LayerMap as an argument,
     /// so callers can avoid potential race conditions.
+    ///
+    // TODO: find a way to not hold the Timeline::layers lock during get_value_reconstruct_data calls.
+    //
+    // Since these calls do local disk IO, they'll be reasonably fast, until come disk IOPS bound.
+    // We have lots of headroom on current pageservers, so, it's going to be fine for now.
+    //
+    // We can't use tokio::sync::RwLock that easily because its guard is not Send, but,
+    // many tasks that access Timeline::layers run inside task_mgr tasks, which are required
+    // to be Send. It has been tried in origin/problame/asyncify-get-reconstruct-data--tokio-sync.
+    //
+    // The solution will probably be to have an immutable + multi-versioned layer map, allowing
+    // us to grab a snapshot of the layer map once and execute this function on the snapshot.
+    //
+    // Or, we could invest time to figure out whether we can drop the layer map lock after
+    // we grabbed the layer, do the IO, re-aquire, and continue the traversal.
+    //
+    // (Why is this allow() not inside the function? Because clippy doesn't respect it then).
+    #[allow(clippy::await_holding_lock)]
     async fn get_reconstruct_data(
         &self,
         key: Key,
