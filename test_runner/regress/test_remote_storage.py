@@ -628,6 +628,7 @@ def test_empty_branch_remote_storage_upload(
 
     new_branch_name = "new_branch"
     new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+    assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
     timelines_before_detach = set(
         map(
@@ -751,6 +752,8 @@ def test_empty_branch_remote_storage_upload_on_restart(
             conflict.status_code == 409
         ), "timeline was created before restart, and uploads scheduled during initial load, so we expect 409 conflict"
 
+        assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
+
         assert (
             new_branch_on_remote_storage / "index_part.json"
         ).is_file(), "uploads scheduled during initial load should had been awaited for"
@@ -804,6 +807,19 @@ def get_queued_count(
     if val is None:
         return val
     return int(val)
+
+
+def assert_nothing_to_upload(
+    client: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+):
+    """
+    Check last_record_lsn == remote_consistent_lsn. Assert works only for empty timelines, which
+    do not have anything to compact or gc.
+    """
+    detail = client.timeline_detail(tenant_id, timeline_id)
+    assert Lsn(detail["last_record_lsn"]) == Lsn(detail["remote_consistent_lsn"])
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.
