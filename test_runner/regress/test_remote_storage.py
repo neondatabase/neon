@@ -627,9 +627,9 @@ def test_empty_branch_remote_storage_upload(
     new_branch_name = "new_branch"
     new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
 
+    # FIXME: unsure why this is done
     with env.endpoints.create_start(new_branch_name, tenant_id=env.initial_tenant) as endpoint:
         wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_branch_timeline_id)
-    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
 
     timelines_before_detach = set(
         map(
@@ -676,9 +676,9 @@ def test_empty_branch_remote_storage_upload_on_restart(
     new_branch_name = "new_branch"
     new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
 
+    # again unsure what is the point of this
     with env.endpoints.create_start(new_branch_name, tenant_id=env.initial_tenant) as endpoint:
         wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_branch_timeline_id)
-    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
 
     env.pageserver.stop()
 
