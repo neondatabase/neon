@@ -204,33 +204,37 @@ impl Layer for ImageLayer {
         ctx: RequestContext,
     ) -> GetValueReconstructFuture {
         Box::pin(async move {
-            assert!(self.key_range.contains(&key));
-            assert!(lsn_range.start >= self.lsn);
-            assert!(lsn_range.end >= self.lsn);
+            tokio::task::spawn_blocking(move || {
+                assert!(self.key_range.contains(&key));
+                assert!(lsn_range.start >= self.lsn);
+                assert!(lsn_range.end >= self.lsn);
 
-            let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
+                let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
 
-            let file = inner.file.as_ref().unwrap();
-            let tree_reader =
-                DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
+                let file = inner.file.as_ref().unwrap();
+                let tree_reader =
+                    DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
 
-            let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-            key.write_to_byte_slice(&mut keybuf);
-            if let Some(offset) = tree_reader.get(&keybuf)? {
-                let blob = file.block_cursor().read_blob(offset).with_context(|| {
-                    format!(
-                        "failed to read value from data file {} at offset {}",
-                        self.path().display(),
-                        offset
-                    )
-                })?;
-                let value = Bytes::from(blob);
+                let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+                key.write_to_byte_slice(&mut keybuf);
+                if let Some(offset) = tree_reader.get(&keybuf)? {
+                    let blob = file.block_cursor().read_blob(offset).with_context(|| {
+                        format!(
+                            "failed to read value from data file {} at offset {}",
+                            self.path().display(),
+                            offset
+                        )
+                    })?;
+                    let value = Bytes::from(blob);
 
-                reconstruct_state.img = Some((self.lsn, value));
-                Ok((reconstruct_state, ValueReconstructResult::Complete))
-            } else {
-                Ok((reconstruct_state, ValueReconstructResult::Missing))
-            }
+                    reconstruct_state.img = Some((self.lsn, value));
+                    Ok((reconstruct_state, ValueReconstructResult::Complete))
+                } else {
+                    Ok((reconstruct_state, ValueReconstructResult::Missing))
+                }
+            })
+            .await
+            .context("spawn_blocking")?
         })
     }
 }

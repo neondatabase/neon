@@ -325,83 +325,86 @@ impl Layer for DeltaLayer {
         ctx: RequestContext,
     ) -> GetValueReconstructFuture {
         Box::pin(async move {
-            ensure!(lsn_range.start >= self.lsn_range.start);
-            let mut need_image = true;
+            tokio::task::spawn_blocking(move || {
+                ensure!(lsn_range.start >= self.lsn_range.start);
+                let mut need_image = true;
 
-            ensure!(self.key_range.contains(&key));
+                ensure!(self.key_range.contains(&key));
 
-            {
-                // Open the file and lock the metadata in memory
-                let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
+                {
+                    // Open the file and lock the metadata in memory
+                    let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
 
-                // Scan the page versions backwards, starting from `lsn`.
-                let file = inner.file.as_ref().unwrap();
-                let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-                    inner.index_start_blk,
-                    inner.index_root_blk,
-                    file,
-                );
-                let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
+                    // Scan the page versions backwards, starting from `lsn`.
+                    let file = inner.file.as_ref().unwrap();
+                    let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
+                        inner.index_start_blk,
+                        inner.index_root_blk,
+                        file,
+                    );
+                    let search_key = DeltaKey::from_key_lsn(&key, Lsn(lsn_range.end.0 - 1));
 
-                let mut offsets: Vec<(Lsn, u64)> = Vec::new();
+                    let mut offsets: Vec<(Lsn, u64)> = Vec::new();
 
-                tree_reader.visit(&search_key.0, VisitDirection::Backwards, |key, value| {
-                    let blob_ref = BlobRef(value);
-                    if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
-                        return false;
-                    }
-                    let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
-                    if entry_lsn < lsn_range.start {
-                        return false;
-                    }
-                    offsets.push((entry_lsn, blob_ref.pos()));
-
-                    !blob_ref.will_init()
-                })?;
-
-                // Ok, 'offsets' now contains the offsets of all the entries we need to read
-                let mut cursor = file.block_cursor();
-                let mut buf = Vec::new();
-                for (entry_lsn, pos) in offsets {
-                    cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
-                        format!(
-                            "Failed to read blob from virtual file {}",
-                            file.file.path.display()
-                        )
-                    })?;
-                    let val = Value::des(&buf).with_context(|| {
-                        format!(
-                            "Failed to deserialize file blob from virtual file {}",
-                            file.file.path.display()
-                        )
-                    })?;
-                    match val {
-                        Value::Image(img) => {
-                            reconstruct_state.img = Some((entry_lsn, img));
-                            need_image = false;
-                            break;
+                    tree_reader.visit(&search_key.0, VisitDirection::Backwards, |key, value| {
+                        let blob_ref = BlobRef(value);
+                        if key[..KEY_SIZE] != search_key.0[..KEY_SIZE] {
+                            return false;
                         }
-                        Value::WalRecord(rec) => {
-                            let will_init = rec.will_init();
-                            reconstruct_state.records.push((entry_lsn, rec));
-                            if will_init {
-                                // This WAL record initializes the page, so no need to go further back
+                        let entry_lsn = DeltaKey::extract_lsn_from_buf(key);
+                        if entry_lsn < lsn_range.start {
+                            return false;
+                        }
+                        offsets.push((entry_lsn, blob_ref.pos()));
+
+                        !blob_ref.will_init()
+                    })?;
+
+                    // Ok, 'offsets' now contains the offsets of all the entries we need to read
+                    let mut cursor = file.block_cursor();
+                    let mut buf = Vec::new();
+                    for (entry_lsn, pos) in offsets {
+                        cursor.read_blob_into_buf(pos, &mut buf).with_context(|| {
+                            format!(
+                                "Failed to read blob from virtual file {}",
+                                file.file.path.display()
+                            )
+                        })?;
+                        let val = Value::des(&buf).with_context(|| {
+                            format!(
+                                "Failed to deserialize file blob from virtual file {}",
+                                file.file.path.display()
+                            )
+                        })?;
+                        match val {
+                            Value::Image(img) => {
+                                reconstruct_state.img = Some((entry_lsn, img));
                                 need_image = false;
                                 break;
                             }
+                            Value::WalRecord(rec) => {
+                                let will_init = rec.will_init();
+                                reconstruct_state.records.push((entry_lsn, rec));
+                                if will_init {
+                                    // This WAL record initializes the page, so no need to go further back
+                                    need_image = false;
+                                    break;
+                                }
+                            }
                         }
                     }
+                    // release metadata lock and close the file
                 }
-                // release metadata lock and close the file
-            }
-
-            // If an older page image is needed to reconstruct the page, let the
-            // caller know.
-            if need_image {
-                Ok((reconstruct_state, ValueReconstructResult::Continue))
-            } else {
-                Ok((reconstruct_state, ValueReconstructResult::Complete))
-            }
+                // If an older page image is needed to reconstruct the page, let the
+                // caller know.
+                if need_image {
+                    Ok((reconstruct_state, ValueReconstructResult::Continue))
+                } else {
+                    Ok((reconstruct_state, ValueReconstructResult::Complete))
+                }
+            })
+            .await
+            .context("spawn_blocking")?
         })
     }
 }

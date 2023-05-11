@@ -12,7 +12,7 @@ use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
 use crate::walrecord;
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use pageserver_api::models::InMemoryLayerInfo;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -198,46 +198,52 @@ impl Layer for InMemoryLayer {
         _ctx: RequestContext,
     ) -> GetValueReconstructFuture {
         Box::pin(async move {
-            ensure!(lsn_range.start >= self.start_lsn);
-            let mut need_image = true;
+            // The in-memory layer isn't actually in-memory. It uses EphemeralFile.
+            // So, this does do IO.
+            tokio::task::spawn_blocking(move || {
+                ensure!(lsn_range.start >= self.start_lsn);
+                let mut need_image = true;
 
-            let inner = self.inner.read().unwrap();
+                let inner = self.inner.read().unwrap();
 
-            let mut reader = inner.file.block_cursor();
+                let mut reader = inner.file.block_cursor();
 
-            // Scan the page versions backwards, starting from `lsn`.
-            if let Some(vec_map) = inner.index.get(&key) {
-                let slice = vec_map.slice_range(lsn_range);
-                for (entry_lsn, pos) in slice.iter().rev() {
-                    let buf = reader.read_blob(*pos)?;
-                    let value = Value::des(&buf)?;
-                    match value {
-                        Value::Image(img) => {
-                            reconstruct_state.img = Some((*entry_lsn, img));
-                            return Ok((reconstruct_state, ValueReconstructResult::Complete));
-                        }
-                        Value::WalRecord(rec) => {
-                            let will_init = rec.will_init();
-                            reconstruct_state.records.push((*entry_lsn, rec));
-                            if will_init {
-                                // This WAL record initializes the page, so no need to go further back
-                                need_image = false;
-                                break;
+                // Scan the page versions backwards, starting from `lsn`.
+                if let Some(vec_map) = inner.index.get(&key) {
+                    let slice = vec_map.slice_range(lsn_range);
+                    for (entry_lsn, pos) in slice.iter().rev() {
+                        let buf = reader.read_blob(*pos)?;
+                        let value = Value::des(&buf)?;
+                        match value {
+                            Value::Image(img) => {
+                                reconstruct_state.img = Some((*entry_lsn, img));
+                                return Ok((reconstruct_state, ValueReconstructResult::Complete));
+                            }
+                            Value::WalRecord(rec) => {
+                                let will_init = rec.will_init();
+                                reconstruct_state.records.push((*entry_lsn, rec));
+                                if will_init {
+                                    // This WAL record initializes the page, so no need to go further back
+                                    need_image = false;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // release lock on 'inner'
+                // release lock on 'inner'
 
-            // If an older page image is needed to reconstruct the page, let the
-            // caller know.
-            if need_image {
-                Ok((reconstruct_state, ValueReconstructResult::Continue))
-            } else {
-                Ok((reconstruct_state, ValueReconstructResult::Complete))
-            }
+                // If an older page image is needed to reconstruct the page, let the
+                // caller know.
+                if need_image {
+                    Ok((reconstruct_state, ValueReconstructResult::Continue))
+                } else {
+                    Ok((reconstruct_state, ValueReconstructResult::Complete))
+                }
+            })
+            .await
+            .context("spawn_blocking")?
         })
     }
 }
