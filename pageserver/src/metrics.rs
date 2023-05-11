@@ -30,6 +30,7 @@ const STORAGE_TIME_OPERATIONS: &[&str] = &[
     "create images",
     "init logical size",
     "logical size",
+    "imitate logical size",
     "load layer map",
     "gc",
 ];
@@ -688,6 +689,7 @@ pub struct TimelineMetrics {
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
+    pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
@@ -720,6 +722,8 @@ impl TimelineMetrics {
         let create_images_time_histo =
             StorageTimeMetrics::new("create images", &tenant_id, &timeline_id);
         let logical_size_histo = StorageTimeMetrics::new("logical size", &tenant_id, &timeline_id);
+        let imitate_logical_size_histo =
+            StorageTimeMetrics::new("imitate logical size", &tenant_id, &timeline_id);
         let load_layer_map_histo =
             StorageTimeMetrics::new("load layer map", &tenant_id, &timeline_id);
         let garbage_collect_histo = StorageTimeMetrics::new("gc", &tenant_id, &timeline_id);
@@ -756,6 +760,7 @@ impl TimelineMetrics {
             compact_time_histo,
             create_images_time_histo,
             logical_size_histo,
+            imitate_logical_size_histo,
             garbage_collect_histo,
             load_layer_map_histo,
             last_record_gauge,

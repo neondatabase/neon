@@ -49,7 +49,7 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
+use crate::metrics::{StorageTimeMetrics, TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
@@ -1938,7 +1938,12 @@ impl Timeline {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(lsn, cancel, &ctx)
+                .calculate_logical_size(
+                    lsn,
+                    &self_calculation.metrics.logical_size_histo,
+                    cancel,
+                    &ctx,
+                )
                 .await
         });
         let timeline_state_cancellation = async {
@@ -1993,6 +1998,7 @@ impl Timeline {
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
+        storage_time_metrics: &StorageTimeMetrics,
         cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
@@ -2026,7 +2032,7 @@ impl Timeline {
         if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
             return Ok(size);
         }
-        let timer = self.metrics.logical_size_histo.start_timer();
+        let timer = storage_time_metrics.start_timer();
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
             .await?;

@@ -335,7 +335,12 @@ impl Timeline {
 
         // imitiate on-restart initial logical size
         let size = self
-            .calculate_logical_size(lsn, cancel.clone(), ctx)
+            .calculate_logical_size(
+                lsn,
+                &self.metrics.imitate_logical_size_histo,
+                cancel.clone(),
+                ctx,
+            )
             .instrument(info_span!("calculate_logical_size"))
             .await;
 
