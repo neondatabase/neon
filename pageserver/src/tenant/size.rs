@@ -373,13 +373,16 @@ async fn fill_logical_sizes(
                 let timeline = Arc::clone(timeline_hash.get(&timeline_id).unwrap());
                 let parallel_size_calcs = Arc::clone(limit);
                 let ctx = ctx.attached_child();
-                joinset.spawn(calculate_logical_size(
-                    parallel_size_calcs,
-                    timeline,
-                    lsn,
-                    ctx,
-                    cancel.child_token(),
-                ));
+                joinset.spawn(
+                    calculate_logical_size(
+                        parallel_size_calcs,
+                        timeline,
+                        lsn,
+                        ctx,
+                        cancel.child_token(),
+                    )
+                    .in_current_span(),
+                );
             }
             e.insert(cached_size);
         }
