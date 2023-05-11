@@ -1266,6 +1266,9 @@ impl Tenant {
 
         if self.get_timeline(new_timeline_id, false).is_ok() {
             debug!("timeline {new_timeline_id} already exists");
+            // FIXME: in this case we should probably still await that the index_part.json upload
+            // complete to be retryable, assuming timeout happened with `branch_timeline` waiting
+            // for upload part; cannot see any good candidates
             return Ok(None);
         }
 
