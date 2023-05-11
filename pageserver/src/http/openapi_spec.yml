@@ -346,23 +346,23 @@ paths:
         starts writing to the tenant's S3 state unless it receives one of the
         distinguished errors below that state otherwise.
 
-        The method to identify whether a request has arrived at the pageserver, and
-        whether it has succeeded, is to poll for the tenant status to reach "Active"
-        or "Broken" state. These values are currently not explicitly documented in
-        the API spec.
-        Polling for `has_in_progress_downloads == false` is INCORRECT because that
-        value can turn `false` during shutdown while the Attach operation is still
-        unfinished.
+        If a client receives a not-distinguished response, e.g., a network timeout,
+        it MUST retry the /attach request and poll again for the tenant's
+        attachment status.
+
+        After the client has received a 202, it MUST poll the tenant's
+        attachment status (field `attachment_status`) to reach state `attached`.
+        If the `attachment_status` is missing, the client MUST retry the `/attach`
+        request (goto previous paragraph). This is a robustness measure in case the tenant
+        status endpoint is buggy, but the attach operation is ongoing.
 
         There is no way to cancel an in-flight request.
 
-        If a client receives a not-distinguished response, e.g., a network timeout,
-        it MUST retry the /attach request and poll again for tenant status.
-
-        In any case, it must
-        * NOT ASSUME that the /attach request has been lost in the network,
-        * NOT ASSUME that the request has been lost based on a subsequent
-          tenant status request returning 404. (The request may still be in flight!)
+        In any case, the client
+        * MUST NOT ASSUME that the /attach request has been lost in the network,
+        * MUST NOT ASSUME that the request has been lost, based on the observation
+          that a subsequent tenant status request returns 404. The request may
+          still be in flight. It must be retried.
       responses:
         "202":
           description: Tenant attaching scheduled
@@ -888,13 +888,27 @@ components:
       type: object
       required:
         - id
+        - attachment_status
       properties:
         id:
           type: string
         current_physical_size:
           type: integer
-        has_in_progress_downloads:
-          type: boolean
+        attachment_status:
+          description: |
+            Status of this tenant's attachment to this pageserver.
+
+            - `maybe` means almost nothing, don't read anything into it
+              except for the fact that the pageserver _might_ be already
+              writing to the tenant's S3 state, so, DO NOT ATTACH the
+              tenant to any other pageserver, or we risk split-brain.
+            - `attached` means that the attach operation has completed,
+              maybe successfully, maybe not. Perform a health check at
+              the Postgres level to determine healthiness of the tenant.
+
+            See the tenant `/attach` endpoint for more information.
+          type: string
+          enum: [ "maybe", "attached" ]
     TenantCreateInfo:
       type: object
       properties:

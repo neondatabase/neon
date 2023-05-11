@@ -48,13 +48,33 @@ pub enum TenantState {
 }
 
 impl TenantState {
-    pub fn has_in_progress_downloads(&self) -> bool {
+    pub fn attachment_status(&self) -> TenantAttachmentStatus {
+        use TenantAttachmentStatus::*;
         match self {
-            Self::Loading => true,
-            Self::Attaching => true,
-            Self::Active => false,
-            Self::Stopping => false,
-            Self::Broken { .. } => false,
+            // The attach procedure writes the marker file before adding the Attaching tenant to the tenants map.
+            // So, technically, we can return Attached here.
+            // However, as soon as Console observes Attached, it will proceed with the Postgres-level health check.
+            // But, our attach task might still be fetching the remote timelines, etc.
+            // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
+            Self::Attaching => Maybe,
+            // tenant mgr startup distinguishes attaching from loading via marker file.
+            // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
+            Self::Loading => Attached,
+            // We only reach Active after successful load / attach.
+            // So, call atttachment status Attached.
+            Self::Active => Attached,
+            // If the (initial or resumed) attach procedure fails, the tenant becomes Broken.
+            // However, it also becomes Broken if the regular load fails.
+            // We would need a separate TenantState variant to distinguish these cases.
+            // However, there's no practical difference from Console's perspective.
+            // It will run a Postgres-level health check as soon as it observes Attached.
+            // That will fail on Broken tenants.
+            // Console can then rollback the attach, or, wait for operator to fix the Broken tenant.
+            Self::Broken { .. } => Attached,
+            // Why is Stopping a Maybe case? Because, during pageserver shutdown,
+            // we set the Stopping state irrespective of whether the tenant
+            // has finished attaching or not.
+            Self::Stopping => Maybe,
         }
     }
 
@@ -209,16 +229,25 @@ impl TenantConfigRequest {
     }
 }
 
+/// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantAttachmentStatus {
+    Maybe,
+    Attached,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
+    // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
-    pub has_in_progress_downloads: Option<bool>,
+    pub attachment_status: TenantAttachmentStatus,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -691,7 +720,7 @@ mod tests {
             id: TenantId::generate(),
             state: TenantState::Active,
             current_physical_size: Some(42),
-            has_in_progress_downloads: Some(false),
+            attachment_status: TenantAttachmentStatus::Attached,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -699,7 +728,7 @@ mod tests {
                 "slug": "Active",
             },
             "current_physical_size": 42,
-            "has_in_progress_downloads": false,
+            "attachment_status": "attached",
         });
 
         let original_broken = TenantInfo {
@@ -709,7 +738,7 @@ mod tests {
                 backtrace: "backtrace info".into(),
             },
             current_physical_size: Some(42),
-            has_in_progress_downloads: Some(false),
+            attachment_status: TenantAttachmentStatus::Attached,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -721,7 +750,7 @@ mod tests {
                 }
             },
             "current_physical_size": 42,
-            "has_in_progress_downloads": false,
+            "attachment_status": "attached",
         });
 
         assert_eq!(
