@@ -17,13 +17,8 @@ logger.setLevel(logging.DEBUG)
 
 BIN_DIR = os.getenv('NEON_BINARIES_DIR', './')
 
-
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
-
-
 if sys.version_info.major != 3 and sys.version_info.minor < 9:
-    eprint('Warning: This script was written on python 3.9, your version is ')
+    logger.warning(f'Warning: This script was written on python 3.9, your version is {sys.version}')
 
 
 def start_broker(args: List[str]):
@@ -77,8 +72,7 @@ def init_compute(pageserver_pg, pageserver_http, pgbin, safekeerpers, spec_path)
     spec = spec.replace('<SAFEKEEPERS>', ','.join(safekeerpers))
     spec = spec.replace('<TENANT_ID>', tenant_id)
 
-    ps_host = pageserver_pg.split(':')[0]
-    ps_port = pageserver_pg.split(':')[1]
+    ps_host, ps_port = pageserver_pg.split(':', 1)
     ps_connstring = f'host={ps_host} port={ps_port}'
     spec = spec.replace('<PAGESERVER_PG_CONNSTRING>', ps_connstring)
 
@@ -171,7 +165,8 @@ def main():
             )
     elif parsed.command == 'help':
         if len(args) == 0:
-            eprint('Please specify a command to get help for: ' + ', '.join(command_parser.choices.keys()))
+            print('Please specify a command to get help for: ' + ', '.join(command_parser.choices.keys()),
+                  file=sys.stderr)
         elif args[0] == 'broker':
             start_broker(['--help'])
         elif args[0] == 'safekeeper':
