@@ -1561,7 +1561,7 @@ impl Tenant {
                         }
                         Err(e) => {
                             warn!(
-                                "failed to remove local timeline directory {}: {e}",
+                                "failed to remove local timeline directory {}: {e:#}",
                                 local_timeline_directory.display()
                             );
                             return Err(
