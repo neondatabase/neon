@@ -191,7 +191,7 @@ pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(||
         "pageserver_eviction_iteration_duration_seconds_global",
         "Time spent on a single eviction iteration",
         &["period_secs", "threshold_secs"],
-        STORAGE_OP_BUCKETS.into(), // TODO: could use better buckets?
+        STORAGE_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
