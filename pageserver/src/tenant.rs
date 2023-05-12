@@ -188,6 +188,7 @@ impl UninitializedTimeline<'_> {
     pub async fn initialize(self, ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
         let mut timelines = self.owning_tenant.timelines.lock().await;
         self.initialize_with_lock(ctx, &mut timelines, true, true)
+            .await
     }
 
     /// Like `initialize`, but the caller is already holding lock on Tenant::timelines.
@@ -195,7 +196,7 @@ impl UninitializedTimeline<'_> {
     /// timeline is initialized in Active state. This is used during tenant load and
     /// attach, where the WAL receivers are launched only after all the timelines have
     /// been initialized.
-    fn initialize_with_lock(
+    async fn initialize_with_lock(
         mut self,
         ctx: &RequestContext,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
@@ -222,6 +223,7 @@ impl UninitializedTimeline<'_> {
                 if load_layer_map {
                     new_timeline
                         .load_layer_map(new_disk_consistent_lsn)
+                        .await
                         .with_context(|| {
                             format!(
                                 "Failed to load layermap for timeline {tenant_id}/{timeline_id}"
@@ -279,6 +281,7 @@ impl UninitializedTimeline<'_> {
         // updated it for the layers that we created during the import.
         let mut timelines = self.owning_tenant.timelines.lock().await;
         self.initialize_with_lock(ctx, &mut timelines, false, true)
+            .await
     }
 
     fn raw_timeline(&self) -> anyhow::Result<&Arc<Timeline>> {
@@ -518,7 +521,10 @@ impl Tenant {
             // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
             // will ingest data which may require looking at the layers which are not yet available locally
-            match timeline.initialize_with_lock(ctx, &mut timelines_accessor, true, false) {
+            match timeline
+                .initialize_with_lock(ctx, &mut timelines_accessor, true, false)
+                .await
+            {
                 Ok(new_timeline) => new_timeline,
                 Err(e) => {
                     error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
@@ -563,7 +569,7 @@ impl Tenant {
                 || timeline
                     .layers
                     .read()
-                    .unwrap()
+                    .await
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -1241,6 +1247,7 @@ impl Tenant {
             true,
             None,
         )
+        .await
     }
 
     /// Create a new timeline.
@@ -2433,8 +2440,10 @@ impl Tenant {
                 timeline_uninit_mark,
                 false,
                 Some(Arc::clone(src_timeline)),
-            )?
-            .initialize_with_lock(ctx, &mut timelines, true, true)?;
+            )
+            .await?
+            .initialize_with_lock(ctx, &mut timelines, true, true)
+            .await?;
         drop(timelines);
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
@@ -2509,8 +2518,9 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let raw_timeline =
-            self.prepare_timeline(timeline_id, &new_metadata, timeline_uninit_mark, true, None)?;
+        let raw_timeline = self
+            .prepare_timeline(timeline_id, &new_metadata, timeline_uninit_mark, true, None)
+            .await?;
 
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
@@ -2549,7 +2559,9 @@ impl Tenant {
         // map above, when we imported the datadir.
         let timeline = {
             let mut timelines = self.timelines.lock().await;
-            raw_timeline.initialize_with_lock(ctx, &mut timelines, false, true)?
+            raw_timeline
+                .initialize_with_lock(ctx, &mut timelines, false, true)
+                .await?
         };
 
         info!(
@@ -2563,7 +2575,7 @@ impl Tenant {
 
     /// Creates intermediate timeline structure and its files, without loading it into memory.
     /// It's up to the caller to import the necesary data and import the timeline into memory.
-    fn prepare_timeline(
+    async fn prepare_timeline(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
@@ -2595,7 +2607,7 @@ impl Tenant {
         ) {
             Ok(new_timeline) => {
                 if init_layers {
-                    new_timeline.layers.write().unwrap().next_open_layer_at =
+                    new_timeline.layers.write().await.next_open_layer_at =
                         Some(new_timeline.initdb_lsn);
                 }
                 debug!(
