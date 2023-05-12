@@ -489,6 +489,15 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
+pub static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_background_loop_period_overrun_count",
+        "Incremented whenever warn_when_period_overrun() logs a warning.",
+        &["task", "period"],
+    )
+    .expect("failed to define a metric")
+});
+
 // walreceiver metrics
 
 pub static WALRECEIVER_STARTED_CONNECTIONS: Lazy<IntCounter> = Lazy::new(|| {
@@ -1231,4 +1240,7 @@ pub fn preinitialize_metrics() {
     // Initialize it eagerly, so that our alert rule can distinguish absence of the metric from metric value 0.
     assert_eq!(UNEXPECTED_ONDEMAND_DOWNLOADS.get(), 0);
     UNEXPECTED_ONDEMAND_DOWNLOADS.reset();
+
+    // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
+    BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
 }
