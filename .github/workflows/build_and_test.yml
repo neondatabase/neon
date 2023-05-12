@@ -330,6 +330,7 @@ jobs:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
+        pg_version: [ v14, v15 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -350,11 +351,12 @@ jobs:
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
           rerun_flaky: true
         env:
+          DEFAULT_PG_VERSION: ${{ matrix.pg_version }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
 
       - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug'
+        if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
@@ -399,21 +401,10 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Create Allure report (debug)
+      - name: Create Allure report
         if: ${{ !cancelled() }}
-        id: create-allure-report-debug
-        uses: ./.github/actions/allure-report
-        with:
-          action: generate
-          build_type: debug
-
-      - name: Create Allure report (release)
-        if: ${{ !cancelled() }}
-        id: create-allure-report-release
-        uses: ./.github/actions/allure-report
-        with:
-          action: generate
-          build_type: release
+        id: create-allure-report
+        uses: ./.github/actions/allure-report-generate
 
       - uses: actions/github-script@v6
         if: >
@@ -423,52 +414,37 @@ jobs:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
           script: |
-            const reports = [{
-              buildType: "debug",
-              reportUrl: "${{ steps.create-allure-report-debug.outputs.report-url }}",
-              jsonUrl:   "${{ steps.create-allure-report-debug.outputs.report-json-url }}",
-            }, {
-              buildType: "release",
-              reportUrl: "${{ steps.create-allure-report-release.outputs.report-url }}",
-              jsonUrl:   "${{ steps.create-allure-report-release.outputs.report-json-url }}",
-            }]
+            const report = {
+              reportUrl:     "${{ steps.create-allure-report.outputs.report-url }}",
+              reportJsonUrl: "${{ steps.create-allure-report.outputs.report-json-url }}",
+            }
 
             const script = require("./scripts/pr-comment-test-report.js")
             await script({
               github,
               context,
               fetch,
-              reports,
+              report,
             })
 
       - name: Store Allure test stat in the DB
-        if: >
-          !cancelled() && (
-            steps.create-allure-report-debug.outputs.report-url ||
-            steps.create-allure-report-release.outputs.report-url
-          )
+        if: ${{ !cancelled() && steps.create-allure-report.outputs.report-json-url }}
         env:
-          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_JSON_URL_DEBUG: ${{ steps.create-allure-report-debug.outputs.report-json-url }}
-          REPORT_JSON_URL_RELEASE: ${{ steps.create-allure-report-release.outputs.report-json-url }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPORT_JSON_URL: ${{ steps.create-allure-report.outputs.report-json-url }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
         run: |
           ./scripts/pysync
 
-          for report_url in $REPORT_JSON_URL_DEBUG $REPORT_JSON_URL_RELEASE; do
-            if [ -z "$report_url" ]; then
-              continue
-            fi
+          curl --fail --output suites.json "${REPORT_JSON_URL}"
+          export BUILD_TYPE=unified
+          export DATABASE_URL="$TEST_RESULT_CONNSTR"
 
-            if [[ "$report_url" == "$REPORT_JSON_URL_DEBUG" ]]; then
-              BUILD_TYPE=debug
-            else
-              BUILD_TYPE=release
-            fi
-
-            curl --fail --output suites.json "${report_url}"
-            DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
-          done
+          poetry run python3 scripts/ingest_regress_test_result.py \
+            --revision ${COMMIT_SHA} \
+            --reference ${GITHUB_REF} \
+            --build-type ${BUILD_TYPE} \
+            --ingest suites.json
 
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]

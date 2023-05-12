@@ -93,10 +93,7 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -283,10 +280,7 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -380,10 +374,7 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -476,10 +467,7 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -566,16 +554,13 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic TPC-H perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: "Periodic User example perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
