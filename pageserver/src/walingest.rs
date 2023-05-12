@@ -324,7 +324,7 @@ impl<'a> WalIngest<'a> {
 
         // Now that this record has been fully handled, including updating the
         // checkpoint data, let the repository know that it is up-to-date to this LSN
-        modification.commit()?;
+        modification.commit().await?;
 
         Ok(())
     }
