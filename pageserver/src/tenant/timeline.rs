@@ -1886,7 +1886,7 @@ impl Timeline {
                 // so that we prevent future callers from spawning this task
                 permit.forget();
                 Ok(())
-            },
+            }.in_current_span(),
         );
     }
 
@@ -1919,18 +1919,21 @@ impl Timeline {
                     .await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
-            },
+            }
+            .in_current_span(),
         );
         receiver
     }
 
-    #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
+    #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
         lsn: Lsn,
         ctx: &RequestContext,
         cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
 
