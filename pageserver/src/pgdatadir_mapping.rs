@@ -1108,7 +1108,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self) -> anyhow::Result<()> {
+    pub async fn flush(&mut self) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1116,7 +1116,7 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let writer = self.tline.writer();
+        let writer = self.tline.writer().await;
 
         let mut layer_map = self.tline.layers.write().unwrap();
 
@@ -1145,8 +1145,8 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> anyhow::Result<()> {
-        let writer = self.tline.writer();
+    pub async fn commit(&mut self) -> anyhow::Result<()> {
+        let writer = self.tline.writer().await;
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
@@ -1596,7 +1596,7 @@ fn is_slru_block_key(key: Key) -> bool {
 }
 
 #[cfg(test)]
-pub fn create_test_timeline(
+pub async fn create_test_timeline(
     tenant: &crate::tenant::Tenant,
     timeline_id: utils::id::TimelineId,
     pg_version: u32,
@@ -1605,7 +1605,7 @@ pub fn create_test_timeline(
     let tline = tenant.create_test_timeline(timeline_id, Lsn(8), pg_version, ctx)?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
-    m.commit()?;
+    m.commit().await?;
     Ok(tline)
 }
 
