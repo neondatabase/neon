@@ -30,7 +30,7 @@ use crate::{
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
-        Tenant,
+        LogicalSizeCalculationCause, Tenant,
     },
 };
 
@@ -344,7 +344,7 @@ impl Timeline {
         let size = self
             .calculate_logical_size(
                 lsn,
-                &self.metrics.imitate_logical_size_histo,
+                LogicalSizeCalculationCause::EvictionTaskImitation,
                 cancel.clone(),
                 ctx,
             )
@@ -419,9 +419,15 @@ impl Timeline {
             .inner();
 
         let mut throwaway_cache = HashMap::new();
-        let gather =
-            crate::tenant::size::gather_inputs(tenant, limit, None, &mut throwaway_cache, ctx)
-                .instrument(info_span!("gather_inputs"));
+        let gather = crate::tenant::size::gather_inputs(
+            tenant,
+            limit,
+            None,
+            &mut throwaway_cache,
+            LogicalSizeCalculationCause::EvictionTaskImitation,
+            ctx,
+        )
+        .instrument(info_span!("gather_inputs"));
 
         tokio::select! {
             _ = cancel.cancelled() => {}

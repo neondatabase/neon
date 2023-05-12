@@ -25,7 +25,7 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::mgr::{TenantMapInsertError, TenantStateError};
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -534,7 +534,11 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     // this can be long operation
     let inputs = tenant
-        .gather_size_inputs(retention_period, &ctx)
+        .gather_size_inputs(
+            retention_period,
+            LogicalSizeCalculationCause::TenantSizeHandler,
+            &ctx,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
