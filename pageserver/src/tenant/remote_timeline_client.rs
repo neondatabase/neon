@@ -1264,9 +1264,13 @@ mod tests {
             let harness = TenantHarness::create(test_name)?;
             let (tenant, ctx) = runtime.block_on(harness.load());
             // create an empty timeline directory
-            let timeline =
-                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-            let _ = timeline.initialize(&ctx).unwrap();
+            runtime.block_on(async {
+                let timeline = tenant
+                    .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+                    .await?;
+                let _ = timeline.initialize(&ctx).await?;
+                anyhow::Ok(())
+            })?;
 
             let remote_fs_dir = harness.conf.workdir.join("remote_fs");
             std::fs::create_dir_all(remote_fs_dir)?;

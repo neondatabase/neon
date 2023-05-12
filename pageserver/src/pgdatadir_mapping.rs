@@ -1594,15 +1594,17 @@ fn is_slru_block_key(key: Key) -> bool {
 }
 
 #[cfg(test)]
-pub fn create_test_timeline(
+pub async fn create_test_timeline(
     tenant: &crate::tenant::Tenant,
     timeline_id: utils::id::TimelineId,
     pg_version: u32,
     ctx: &RequestContext,
 ) -> anyhow::Result<std::sync::Arc<Timeline>> {
     let tline = tenant
-        .create_empty_timeline(timeline_id, Lsn(8), pg_version, ctx)?
-        .initialize(ctx)?;
+        .create_empty_timeline(timeline_id, Lsn(8), pg_version, ctx)
+        .await?
+        .initialize(ctx)
+        .await?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;
@@ -1632,7 +1634,7 @@ mod tests {
     #[test]
     fn test_list_rels_drop() -> Result<()> {
         let repo = RepoHarness::create("test_list_rels_drop")?.load();
-        let tline = create_empty_timeline(repo, TIMELINE_ID)?;
+        let tline = create_empty_timeline(repo, TIMELINE_ID).await?;
         const TESTDB: u32 = 111;
 
         // Import initial dummy checkpoint record, otherwise the get_timeline() call

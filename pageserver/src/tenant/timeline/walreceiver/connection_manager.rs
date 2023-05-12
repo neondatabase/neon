@@ -1334,8 +1334,9 @@ mod tests {
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION, &ctx)
+            .await
             .expect("Failed to create an empty timeline for dummy wal connection manager");
-        let timeline = timeline.initialize(&ctx).unwrap();
+        let timeline = timeline.initialize(&ctx).await.unwrap();
 
         ConnectionManagerState {
             id: TenantTimelineId {
