@@ -1122,7 +1122,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self) -> anyhow::Result<()> {
+    pub async fn flush(&mut self) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1130,7 +1130,7 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let writer = self.tline.writer();
+        let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut result: anyhow::Result<()> = Ok(());
@@ -1157,8 +1157,8 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> anyhow::Result<()> {
-        let writer = self.tline.writer();
+    pub async fn commit(&mut self) -> anyhow::Result<()> {
+        let writer = self.tline.writer().await;
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
