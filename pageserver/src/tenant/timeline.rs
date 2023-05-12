@@ -49,7 +49,7 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
-use crate::metrics::{StorageTimeMetrics, TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
+use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
@@ -435,6 +435,14 @@ impl std::fmt::Display for PageReconstructError {
             Self::WalRedo(err) => err.fmt(f),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum LogicalSizeCalculationCause {
+    Initial,
+    ConsumptionMetricsSyntheticSize,
+    EvictionTaskImitation,
+    TenantSizeHandler,
 }
 
 /// Public interface functions
@@ -1839,7 +1847,7 @@ impl Timeline {
                 // to spawn_ondemand_logical_size_calculation.
                 let cancel = CancellationToken::new();
                 let calculated_size = match self_clone
-                    .logical_size_calculation_task(lsn, &background_ctx, cancel)
+                    .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx, cancel)
                     .await
                 {
                     Ok(s) => s,
@@ -1893,6 +1901,7 @@ impl Timeline {
     pub fn spawn_ondemand_logical_size_calculation(
         self: &Arc<Self>,
         lsn: Lsn,
+        cause: LogicalSizeCalculationCause,
         ctx: RequestContext,
         cancel: CancellationToken,
     ) -> oneshot::Receiver<Result<u64, CalculateLogicalSizeError>> {
@@ -1915,7 +1924,7 @@ impl Timeline {
             false,
             async move {
                 let res = self_clone
-                    .logical_size_calculation_task(lsn, &ctx, cancel)
+                    .logical_size_calculation_task(lsn, cause, &ctx, cancel)
                     .await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
@@ -1929,6 +1938,7 @@ impl Timeline {
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
         lsn: Lsn,
+        cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
         cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
@@ -1941,12 +1951,7 @@ impl Timeline {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(
-                    lsn,
-                    &self_calculation.metrics.logical_size_histo,
-                    cancel,
-                    &ctx,
-                )
+                .calculate_logical_size(lsn, cause, cancel, &ctx)
                 .await
         });
         let timeline_state_cancellation = async {
@@ -2001,7 +2006,7 @@ impl Timeline {
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
-        storage_time_metrics: &StorageTimeMetrics,
+        cause: LogicalSizeCalculationCause,
         cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
@@ -2035,6 +2040,14 @@ impl Timeline {
         if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
             return Ok(size);
         }
+        let storage_time_metrics = match cause {
+            LogicalSizeCalculationCause::Initial
+            | LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize
+            | LogicalSizeCalculationCause::TenantSizeHandler => &self.metrics.logical_size_histo,
+            LogicalSizeCalculationCause::EvictionTaskImitation => {
+                &self.metrics.imitate_logical_size_histo
+            }
+        };
         let timer = storage_time_metrics.start_timer();
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)

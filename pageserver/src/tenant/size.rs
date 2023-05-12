@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::RequestContext;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 
-use super::Tenant;
+use super::{LogicalSizeCalculationCause, Tenant};
 use crate::tenant::Timeline;
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
@@ -126,6 +126,7 @@ pub(super) async fn gather_inputs(
     limit: &Arc<Semaphore>,
     max_retention_period: Option<u64>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
+    cause: LogicalSizeCalculationCause,
     ctx: &RequestContext,
 ) -> anyhow::Result<ModelInputs> {
     // refresh is needed to update gc related pitr_cutoff and horizon_cutoff
@@ -318,7 +319,15 @@ pub(super) async fn gather_inputs(
 
     // We left the 'size' field empty in all of the Segments so far.
     // Now find logical sizes for all of the points that might need or benefit from them.
-    fill_logical_sizes(&timelines, &mut segments, limit, logical_size_cache, ctx).await?;
+    fill_logical_sizes(
+        &timelines,
+        &mut segments,
+        limit,
+        logical_size_cache,
+        cause,
+        ctx,
+    )
+    .await?;
 
     Ok(ModelInputs {
         segments,
@@ -336,6 +345,7 @@ async fn fill_logical_sizes(
     segments: &mut [SegmentMeta],
     limit: &Arc<Semaphore>,
     logical_size_cache: &mut HashMap<(TimelineId, Lsn), u64>,
+    cause: LogicalSizeCalculationCause,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
     let timeline_hash: HashMap<TimelineId, Arc<Timeline>> = HashMap::from_iter(
@@ -378,6 +388,7 @@ async fn fill_logical_sizes(
                         parallel_size_calcs,
                         timeline,
                         lsn,
+                        cause,
                         ctx,
                         cancel.child_token(),
                     )
@@ -485,6 +496,7 @@ async fn calculate_logical_size(
     limit: Arc<tokio::sync::Semaphore>,
     timeline: Arc<crate::tenant::Timeline>,
     lsn: utils::lsn::Lsn,
+    cause: LogicalSizeCalculationCause,
     ctx: RequestContext,
     cancel: CancellationToken,
 ) -> Result<TimelineAtLsnSizeResult, RecvError> {
@@ -493,7 +505,7 @@ async fn calculate_logical_size(
         .expect("global semaphore should not had been closed");
 
     let size_res = timeline
-        .spawn_ondemand_logical_size_calculation(lsn, ctx, cancel)
+        .spawn_ondemand_logical_size_calculation(lsn, cause, ctx, cancel)
         .instrument(info_span!("spawn_ondemand_logical_size_calculation"))
         .await?;
     Ok(TimelineAtLsnSizeResult(timeline, lsn, size_res))
