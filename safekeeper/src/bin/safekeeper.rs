@@ -108,6 +108,9 @@ struct Args {
     /// available to the system.
     #[arg(long)]
     wal_backup_threads: Option<usize>,
+    /// Number of max parallel WAL segments to be offloaded to remote storage.
+    #[arg(long, default_value = "5")]
+    wal_backup_parallel_jobs: usize,
     /// Disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring
     /// WAL backup horizon.
     #[arg(long)]
@@ -182,6 +185,7 @@ fn main() -> anyhow::Result<()> {
         max_offloader_lag_bytes: args.max_offloader_lag,
         backup_runtime_threads: args.wal_backup_threads,
         wal_backup_enabled: !args.disable_wal_backup,
+        backup_parallel_jobs: args.wal_backup_parallel_jobs,
         auth,
     };
 

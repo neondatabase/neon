@@ -197,14 +197,13 @@ runs:
       uses: ./.github/actions/upload
       with:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg14-${{ github.run_id }}
-        # The path includes a test name (test_create_snapshot) and directory that the test creates (compatibility_snapshot_pg14), keep the path in sync with the test
-        path: /tmp/test_output/test_create_snapshot/compatibility_snapshot_pg14/
+        # Directory is created by test_compatibility.py::test_create_snapshot, keep the path in sync with the test
+        path: /tmp/test_output/compatibility_snapshot_pg14/
         prefix: latest
 
-    - name: Create Allure report
+    - name: Upload test results
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
+      uses: ./.github/actions/allure-report-store
       with:
-        action: store
-        build_type: ${{ inputs.build_type }}
-        test_selection: ${{ inputs.test_selection }}
+        report-dir: /tmp/test_output/allure/results
+        unique-key: ${{ inputs.test_selection }}-${{ inputs.build_type }}

@@ -87,7 +87,9 @@ def wait_until_tenant_state(
 
         time.sleep(period)
 
-    raise Exception(f"Tenant {tenant_id} did not become {expected_state} in {iterations} seconds")
+    raise Exception(
+        f"Tenant {tenant_id} did not become {expected_state} within {iterations * period} seconds"
+    )
 
 
 def wait_until_tenant_active(

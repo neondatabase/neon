@@ -204,8 +204,11 @@ mod download;
 pub mod index;
 mod upload;
 
+use anyhow::Context;
+use chrono::{NaiveDateTime, Utc};
 // re-export these
 pub use download::{is_temp_download_file, list_remote_timelines};
+use scopeguard::ScopeGuard;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -213,7 +216,7 @@ use std::sync::{Arc, Mutex};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use std::ops::DerefMut;
 use tokio::runtime::Runtime;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing::{info_span, Instrument};
 use utils::lsn::Lsn;
 
@@ -240,6 +243,7 @@ use utils::id::{TenantId, TimelineId};
 use self::index::IndexPart;
 
 use super::storage_layer::LayerFileName;
+use super::upload_queue::SetDeletedFlagProgress;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -252,6 +256,30 @@ const FAILED_DOWNLOAD_RETRIES: u32 = 10;
 // Similarly log failed uploads and deletions at WARN level, after this many
 // retries. Uploads and deletions are retried forever, though.
 const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+
+pub enum MaybeDeletedIndexPart {
+    IndexPart(IndexPart),
+    Deleted,
+}
+
+/// Errors that can arise when calling [`RemoteTimelineClient::stop`].
+#[derive(Debug, thiserror::Error)]
+pub enum StopError {
+    /// Returned if the upload queue was never initialized.
+    /// See [`RemoteTimelineClient::init_upload_queue`] and [`RemoteTimelineClient::init_upload_queue_for_empty_remote`].
+    #[error("queue is not initialized")]
+    QueueUninitialized,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PersistIndexPartWithDeletedFlagError {
+    #[error("another task is already setting the deleted_flag, started at {0:?}")]
+    AlreadyInProgress(NaiveDateTime),
+    #[error("the deleted_flag was already set, value is {0:?}")]
+    AlreadyDeleted(NaiveDateTime),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 /// A client for accessing a timeline's data in remote storage.
 ///
@@ -367,7 +395,7 @@ impl RemoteTimelineClient {
     //
 
     /// Download index file
-    pub async fn download_index_file(&self) -> Result<IndexPart, DownloadError> {
+    pub async fn download_index_file(&self) -> Result<MaybeDeletedIndexPart, DownloadError> {
         let _unfinished_gauge_guard = self.metrics.call_begin(
             &RemoteOpFileKind::Index,
             &RemoteOpKind::Download,
@@ -376,7 +404,7 @@ impl RemoteTimelineClient {
             },
         );
 
-        download::download_index_part(
+        let index_part = download::download_index_part(
             self.conf,
             &self.storage_impl,
             self.tenant_id,
@@ -389,7 +417,13 @@ impl RemoteTimelineClient {
             RemoteOpKind::Download,
             Arc::clone(&self.metrics),
         )
-        .await
+        .await?;
+
+        if index_part.deleted_at.is_some() {
+            Ok(MaybeDeletedIndexPart::Deleted)
+        } else {
+            Ok(MaybeDeletedIndexPart::IndexPart(index_part))
+        }
     }
 
     /// Download a (layer) file from `path`, into local filesystem.
@@ -624,6 +658,116 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Set the deleted_at field in the remote index file.
+    ///
+    /// This fails if the upload queue has not been `stop()`ed.
+    ///
+    /// The caller is responsible for calling `stop()` AND for waiting
+    /// for any ongoing upload tasks to finish after `stop()` has succeeded.
+    /// Check method [`RemoteTimelineClient::stop`] for details.
+    pub(crate) async fn persist_index_part_with_deleted_flag(
+        self: &Arc<Self>,
+    ) -> Result<(), PersistIndexPartWithDeletedFlagError> {
+        let index_part_with_deleted_at = {
+            let mut locked = self.upload_queue.lock().unwrap();
+
+            // We must be in stopped state because otherwise
+            // we can have inprogress index part upload that can overwrite the file
+            // with missing is_deleted flag that we going to set below
+            let stopped = match &mut *locked {
+                UploadQueue::Uninitialized => {
+                    return Err(anyhow::anyhow!("is not Stopped but Uninitialized").into())
+                }
+                UploadQueue::Initialized(_) => {
+                    return Err(anyhow::anyhow!("is not Stopped but Initialized").into())
+                }
+                UploadQueue::Stopped(stopped) => stopped,
+            };
+
+            match stopped.deleted_at {
+                SetDeletedFlagProgress::NotRunning => (), // proceed
+                SetDeletedFlagProgress::InProgress(at) => {
+                    return Err(PersistIndexPartWithDeletedFlagError::AlreadyInProgress(at));
+                }
+                SetDeletedFlagProgress::Successful(at) => {
+                    return Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(at));
+                }
+            };
+            let deleted_at = Utc::now().naive_utc();
+            stopped.deleted_at = SetDeletedFlagProgress::InProgress(deleted_at);
+
+            let mut index_part = IndexPart::new(
+                stopped.latest_files.clone(),
+                stopped.last_uploaded_consistent_lsn,
+                stopped
+                    .latest_metadata
+                    .to_bytes()
+                    .context("serialize metadata")?,
+            );
+            index_part.deleted_at = Some(deleted_at);
+            index_part
+        };
+
+        let undo_deleted_at = scopeguard::guard(Arc::clone(self), |self_clone| {
+            let mut locked = self_clone.upload_queue.lock().unwrap();
+            let stopped = match &mut *locked {
+                UploadQueue::Uninitialized | UploadQueue::Initialized(_) => unreachable!(
+                    "there's no way out of Stopping, and we checked it's Stopping above: {:?}",
+                    locked.as_str(),
+                ),
+                UploadQueue::Stopped(stopped) => stopped,
+            };
+            stopped.deleted_at = SetDeletedFlagProgress::NotRunning;
+        });
+
+        // Have a failpoint that can use the `pause` failpoint action.
+        // We don't want to block the executor thread, hence, spawn_blocking + await.
+        #[cfg(feature = "testing")]
+        tokio::task::spawn_blocking({
+            let current = tracing::Span::current();
+            move || {
+                let _entered = current.entered();
+                tracing::info!(
+                    "at failpoint persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+                );
+                fail::fail_point!(
+                    "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+                );
+            }
+        })
+        .await
+        .expect("spawn_blocking");
+
+        upload::upload_index_part(
+            self.conf,
+            &self.storage_impl,
+            self.tenant_id,
+            self.timeline_id,
+            &index_part_with_deleted_at,
+        )
+        .await?;
+
+        // all good, disarm the guard and mark as success
+        ScopeGuard::into_inner(undo_deleted_at);
+        {
+            let mut locked = self.upload_queue.lock().unwrap();
+            let stopped = match &mut *locked {
+                UploadQueue::Uninitialized | UploadQueue::Initialized(_) => unreachable!(
+                    "there's no way out of Stopping, and we checked it's Stopping above: {:?}",
+                    locked.as_str(),
+                ),
+                UploadQueue::Stopped(stopped) => stopped,
+            };
+            stopped.deleted_at = SetDeletedFlagProgress::Successful(
+                index_part_with_deleted_at
+                    .deleted_at
+                    .expect("we set it above"),
+            );
+        }
+
+        Ok(())
+    }
+
     ///
     /// Pick next tasks from the queue, and start as many of them as possible without violating
     /// the ordering constraints.
@@ -741,8 +885,13 @@ impl RemoteTimelineClient {
             // upload finishes or times out soon enough.
             if task_mgr::is_shutdown_requested() {
                 info!("upload task cancelled by shutdown request");
+                match self.stop() {
+                    Ok(()) => {}
+                    Err(StopError::QueueUninitialized) => {
+                        unreachable!("we never launch an upload task if the queue is uninitialized, and once it is initialized, we never go back")
+                    }
+                }
                 self.calls_unfinished_metric_end(&task.op);
-                self.stop();
                 return;
             }
 
@@ -946,38 +1095,56 @@ impl RemoteTimelineClient {
         self.metrics.call_end(&file_kind, &op_kind, track_bytes);
     }
 
-    fn stop(&self) {
+    /// Close the upload queue for new operations and cancel queued operations.
+    /// In-progress operations will still be running after this function returns.
+    /// Use `task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id))`
+    /// to wait for them to complete, after calling this function.
+    pub fn stop(&self) -> Result<(), StopError> {
         // Whichever *task* for this RemoteTimelineClient grabs the mutex first will transition the queue
         // into stopped state, thereby dropping all off the queued *ops* which haven't become *tasks* yet.
         // The other *tasks* will come here and observe an already shut down queue and hence simply wrap up their business.
         let mut guard = self.upload_queue.lock().unwrap();
-        match &*guard {
-            UploadQueue::Uninitialized => panic!(
-                "callers are responsible for ensuring this is only called on initialized queue"
-            ),
+        match &mut *guard {
+            UploadQueue::Uninitialized => Err(StopError::QueueUninitialized),
             UploadQueue::Stopped(_) => {
                 // nothing to do
                 info!("another concurrent task already shut down the queue");
+                Ok(())
             }
-            UploadQueue::Initialized(qi) => {
+            UploadQueue::Initialized(UploadQueueInitialized {
+                latest_files,
+                latest_metadata,
+                last_uploaded_consistent_lsn,
+                ..
+            }) => {
                 info!("shutting down upload queue");
 
                 // Replace the queue with the Stopped state, taking ownership of the old
                 // Initialized queue. We will do some checks on it, and then drop it.
                 let qi = {
-                    let last_uploaded_consistent_lsn = qi.last_uploaded_consistent_lsn;
-                    let upload_queue = std::mem::replace(
-                        &mut *guard,
-                        UploadQueue::Stopped(UploadQueueStopped {
-                            last_uploaded_consistent_lsn,
-                        }),
-                    );
+                    // take or clone what we need
+                    let latest_files = std::mem::take(latest_files);
+                    let last_uploaded_consistent_lsn = *last_uploaded_consistent_lsn;
+                    // this could be Copy
+                    let latest_metadata = latest_metadata.clone();
+
+                    let stopped = UploadQueueStopped {
+                        latest_files,
+                        last_uploaded_consistent_lsn,
+                        latest_metadata,
+                        deleted_at: SetDeletedFlagProgress::NotRunning,
+                    };
+
+                    let upload_queue =
+                        std::mem::replace(&mut *guard, UploadQueue::Stopped(stopped));
                     if let UploadQueue::Initialized(qi) = upload_queue {
                         qi
                     } else {
                         unreachable!("we checked in the match above that it is Initialized");
                     }
                 };
+
+                assert!(qi.latest_files.is_empty(), "do not use this anymore");
 
                 // consistency check
                 assert_eq!(
@@ -1002,6 +1169,7 @@ impl RemoteTimelineClient {
 
                 // We're done.
                 drop(guard);
+                Ok(())
             }
         }
     }
@@ -1240,7 +1408,11 @@ mod tests {
         }
 
         // Download back the index.json, and check that the list of files is correct
-        let index_part = runtime.block_on(client.download_index_file())?;
+        let index_part = match runtime.block_on(client.download_index_file())? {
+            MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+            MaybeDeletedIndexPart::Deleted => panic!("unexpectedly got deleted index part"),
+        };
+
         assert_file_list(
             &index_part.timeline_layers,
             &[

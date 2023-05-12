@@ -259,6 +259,7 @@ pub(crate) async fn random_init_delay(
     }
 }
 
+/// Attention: the `task` and `period` beocme labels of a pageserver-wide prometheus metric.
 pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task: &str) {
     // Duration::ZERO will happen because it's the "disable [bgtask]" value.
     if elapsed >= period && period != Duration::ZERO {
@@ -271,5 +272,8 @@ pub(crate) fn warn_when_period_overrun(elapsed: Duration, period: Duration, task
             task,
             "task iteration took longer than the configured period"
         );
+        crate::metrics::BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT
+            .with_label_values(&[task, &format!("{}", period.as_secs())])
+            .inc();
     }
 }

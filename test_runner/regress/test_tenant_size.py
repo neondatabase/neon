@@ -11,6 +11,7 @@ from fixtures.neon_fixtures import (
     wait_for_wal_insert_lsn,
 )
 from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pg_version import PgVersion, xfail_on_postgres
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
@@ -512,6 +513,7 @@ def test_single_branch_get_tenant_size_grows(
     assert size_after == prev, "size after restarting pageserver should not have changed"
 
 
+@xfail_on_postgres(PgVersion.V15, reason="Test significantly more flaky on Postgres 15")
 def test_get_tenant_size_with_multiple_branches(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path
 ):

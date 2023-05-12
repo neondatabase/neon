@@ -437,6 +437,14 @@ impl std::fmt::Display for PageReconstructError {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum LogicalSizeCalculationCause {
+    Initial,
+    ConsumptionMetricsSyntheticSize,
+    EvictionTaskImitation,
+    TenantSizeHandler,
+}
+
 /// Public interface functions
 impl Timeline {
     /// Get the LSN where this branch was created
@@ -1839,7 +1847,7 @@ impl Timeline {
                 // to spawn_ondemand_logical_size_calculation.
                 let cancel = CancellationToken::new();
                 let calculated_size = match self_clone
-                    .logical_size_calculation_task(lsn, &background_ctx, cancel)
+                    .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx, cancel)
                     .await
                 {
                     Ok(s) => s,
@@ -1886,13 +1894,14 @@ impl Timeline {
                 // so that we prevent future callers from spawning this task
                 permit.forget();
                 Ok(())
-            },
+            }.in_current_span(),
         );
     }
 
     pub fn spawn_ondemand_logical_size_calculation(
         self: &Arc<Self>,
         lsn: Lsn,
+        cause: LogicalSizeCalculationCause,
         ctx: RequestContext,
         cancel: CancellationToken,
     ) -> oneshot::Receiver<Result<u64, CalculateLogicalSizeError>> {
@@ -1915,22 +1924,26 @@ impl Timeline {
             false,
             async move {
                 let res = self_clone
-                    .logical_size_calculation_task(lsn, &ctx, cancel)
+                    .logical_size_calculation_task(lsn, cause, &ctx, cancel)
                     .await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
-            },
+            }
+            .in_current_span(),
         );
         receiver
     }
 
-    #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
+    #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
         lsn: Lsn,
+        cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
         cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
 
@@ -1938,7 +1951,7 @@ impl Timeline {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(lsn, cancel, &ctx)
+                .calculate_logical_size(lsn, cause, cancel, &ctx)
                 .await
         });
         let timeline_state_cancellation = async {
@@ -1993,6 +2006,7 @@ impl Timeline {
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
+        cause: LogicalSizeCalculationCause,
         cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
@@ -2026,7 +2040,15 @@ impl Timeline {
         if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
             return Ok(size);
         }
-        let timer = self.metrics.logical_size_histo.start_timer();
+        let storage_time_metrics = match cause {
+            LogicalSizeCalculationCause::Initial
+            | LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize
+            | LogicalSizeCalculationCause::TenantSizeHandler => &self.metrics.logical_size_histo,
+            LogicalSizeCalculationCause::EvictionTaskImitation => {
+                &self.metrics.imitate_logical_size_histo
+            }
+        };
+        let timer = storage_time_metrics.start_timer();
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
             .await?;

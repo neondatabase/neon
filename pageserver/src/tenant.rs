@@ -58,6 +58,8 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::metadata::load_metadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
+use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
+use crate::tenant::remote_timeline_client::PersistIndexPartWithDeletedFlagError;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
@@ -95,7 +97,10 @@ mod timeline;
 
 pub mod size;
 
-pub use timeline::{LocalLayerInfoForDiskUsageEviction, PageReconstructError, Timeline};
+pub(crate) use timeline::debug_assert_current_span_has_tenant_and_timeline_id;
+pub use timeline::{
+    LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
+};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -591,15 +596,18 @@ impl Tenant {
     /// finishes. You can use wait_until_active() to wait for the task to
     /// complete.
     ///
-    pub fn spawn_attach(
+    pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
-    ) -> Arc<Tenant> {
+    ) -> anyhow::Result<Arc<Tenant>> {
         // XXX: Attach should provide the config, especially during tenant migration.
         //      See https://github.com/neondatabase/neon/issues/1555
         let tenant_conf = TenantConfOpt::default();
+
+        Self::attach_idempotent_create_marker_file(conf, tenant_id)
+            .context("create attach marker file")?;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -633,7 +641,46 @@ impl Tenant {
                 Ok(())
             },
         );
-        tenant
+        Ok(tenant)
+    }
+
+    fn attach_idempotent_create_marker_file(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+    ) -> anyhow::Result<()> {
+        // Create directory with marker file to indicate attaching state.
+        // The load_local_tenants() function in tenant::mgr relies on the marker file
+        // to determine whether a tenant has finished attaching.
+        let tenant_dir = conf.tenant_path(&tenant_id);
+        let marker_file = conf.tenant_attaching_mark_file_path(&tenant_id);
+        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
+        // TODO: should use tokio::fs here, but
+        // 1. caller is not async, for good reason (it holds tenants map lock)
+        // 2. we'd need to think about cancel safety. Turns out dropping a tokio::fs future
+        //    doesn't wait for the activity in the fs thread pool.
+        crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker_file)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Either this is a retry of attach or there is a concurrent task also doing attach for this tenant.
+                // We cannot distinguish this here.
+                // The caller is responsible for ensuring there's no concurrent attach for a tenant.
+                {} // fsync again, we don't know if that already happened
+            }
+            err => {
+                err.context("create tenant attaching marker file")?;
+                unreachable!("we covered the Ok() case above");
+            }
+        }
+        crashsafe::fsync_file_and_parent(&marker_file)
+            .context("fsync tenant attaching marker file and parent")?;
+        debug_assert!(tenant_dir.is_dir());
+        debug_assert!(marker_file.is_file());
+        Ok(())
     }
 
     ///
@@ -641,26 +688,15 @@ impl Tenant {
     ///
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     async fn attach(self: &Arc<Tenant>, ctx: RequestContext) -> anyhow::Result<()> {
-        // Create directory with marker file to indicate attaching state.
-        // The load_local_tenants() function in tenant::mgr relies on the marker file
-        // to determine whether a tenant has finished attaching.
-        let tenant_dir = self.conf.tenant_path(&self.tenant_id);
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
-        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
-        if tenant_dir.exists() {
-            if !marker_file.is_file() {
-                anyhow::bail!(
-                    "calling Tenant::attach with a tenant directory that doesn't have the attaching marker file:\ntenant_dir: {}\nmarker_file: {}",
-                    tenant_dir.display(), marker_file.display());
-            }
-        } else {
-            crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
-            fs::File::create(&marker_file).context("create tenant attaching marker file")?;
-            crashsafe::fsync_file_and_parent(&marker_file)
-                .context("fsync tenant attaching marker file and parent")?;
+        if !tokio::fs::try_exists(&marker_file)
+            .await
+            .context("check for existence of marker file")?
+        {
+            anyhow::bail!(
+                "implementation error: marker file should exist at beginning of this function"
+            );
         }
-        debug_assert!(tenant_dir.is_dir());
-        debug_assert!(marker_file.is_file());
 
         // Get list of remote timelines
         // download index files for every tenant timeline
@@ -698,16 +734,9 @@ impl Tenant {
                         .await
                         .context("download index file")?;
 
-                    let remote_metadata = index_part.parse_metadata().context("parse metadata")?;
-
                     debug!("finished index part download");
 
-                    Result::<_, anyhow::Error>::Ok((
-                        timeline_id,
-                        client,
-                        index_part,
-                        remote_metadata,
-                    ))
+                    Result::<_, anyhow::Error>::Ok((timeline_id, client, index_part))
                 }
                 .map(move |res| {
                     res.with_context(|| format!("download index part for timeline {timeline_id}"))
@@ -716,17 +745,26 @@ impl Tenant {
             );
         }
         // Wait for all the download tasks to complete & collect results.
-        let mut remote_clients = HashMap::new();
-        let mut index_parts = HashMap::new();
+        let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
         while let Some(result) = part_downloads.join_next().await {
             // NB: we already added timeline_id as context to the error
             let result: Result<_, anyhow::Error> = result.context("joinset task join")?;
-            let (timeline_id, client, index_part, remote_metadata) = result?;
+            let (timeline_id, client, index_part) = result?;
             debug!("successfully downloaded index part for timeline {timeline_id}");
-            timeline_ancestors.insert(timeline_id, remote_metadata);
-            index_parts.insert(timeline_id, index_part);
-            remote_clients.insert(timeline_id, client);
+            match index_part {
+                MaybeDeletedIndexPart::IndexPart(index_part) => {
+                    timeline_ancestors.insert(
+                        timeline_id,
+                        index_part.parse_metadata().context("parse_metadata")?,
+                    );
+                    remote_index_and_client.insert(timeline_id, (index_part, client));
+                }
+                MaybeDeletedIndexPart::Deleted => {
+                    info!("timeline {} is deleted, skipping", timeline_id);
+                    continue;
+                }
+            }
         }
 
         // For every timeline, download the metadata file, scan the local directory,
@@ -734,12 +772,16 @@ impl Tenant {
         // layer file.
         let sorted_timelines = tree_sort_timelines(timeline_ancestors)?;
         for (timeline_id, remote_metadata) in sorted_timelines {
+            let (index_part, remote_client) = remote_index_and_client
+                .remove(&timeline_id)
+                .expect("just put it in above");
+
             // TODO again handle early failure
             self.load_remote_timeline(
                 timeline_id,
-                index_parts.remove(&timeline_id).unwrap(),
+                index_part,
                 remote_metadata,
-                remote_clients.remove(&timeline_id).unwrap(),
+                remote_client,
                 &ctx,
             )
             .await
@@ -831,11 +873,15 @@ impl Tenant {
     }
 
     /// Create a placeholder Tenant object for a broken tenant
-    pub fn create_broken_tenant(conf: &'static PageServerConf, tenant_id: TenantId) -> Arc<Tenant> {
+    pub fn create_broken_tenant(
+        conf: &'static PageServerConf,
+        tenant_id: TenantId,
+        reason: String,
+    ) -> Arc<Tenant> {
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         Arc::new(Tenant::new(
             TenantState::Broken {
-                reason: "create_broken_tenant".into(),
+                reason,
                 backtrace: String::new(),
             },
             conf,
@@ -868,7 +914,7 @@ impl Tenant {
             Ok(conf) => conf,
             Err(e) => {
                 error!("load tenant config failed: {:?}", e);
-                return Tenant::create_broken_tenant(conf, tenant_id);
+                return Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"));
             }
         };
 
@@ -1045,21 +1091,13 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip(self, local_metadata, ctx), fields(timeline_id=%timeline_id))]
+    #[instrument(skip_all, fields(timeline_id))]
     async fn load_local_timeline(
         &self,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
-            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
-            .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
-            Some(ancestor_timeline)
-        } else {
-            None
-        };
-
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
             RemoteTimelineClient::new(
                 remote_storage.clone(),
@@ -1072,6 +1110,29 @@ impl Tenant {
         let remote_startup_data = match &remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
                 Ok(index_part) => {
+                    let index_part = match index_part {
+                        MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+                        MaybeDeletedIndexPart::Deleted => {
+                            // TODO: we won't reach here if remote storage gets de-configured after start of the deletion operation.
+                            // Example:
+                            //  start deletion operation
+                            //  finishes upload of index part
+                            //  pageserver crashes
+                            //  remote storage gets de-configured
+                            //  pageserver starts
+                            //
+                            // We don't really anticipate remote storage to be de-configured, so, for now, this is fine.
+                            // Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
+                            info!("is_deleted is set on remote, resuming removal of local data originally done by timeline deletion handler");
+                            std::fs::remove_dir_all(
+                                self.conf.timeline_path(&timeline_id, &self.tenant_id),
+                            )
+                            .context("remove_dir_all")?;
+
+                            return Ok(());
+                        }
+                    };
+
                     let remote_metadata = index_part.parse_metadata().context("parse_metadata")?;
                     Some(RemoteStartupData {
                         index_part,
@@ -1085,6 +1146,14 @@ impl Tenant {
                 Err(e) => return Err(anyhow::anyhow!(e)),
             },
             None => None,
+        };
+
+        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
+            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
+            .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
+            Some(ancestor_timeline)
+        } else {
+            None
         };
 
         self.timeline_init_and_sync(
@@ -1334,6 +1403,8 @@ impl Tenant {
         timeline_id: TimelineId,
         _ctx: &RequestContext,
     ) -> Result<(), DeleteTimelineError> {
+        timeline::debug_assert_current_span_has_tenant_and_timeline_id();
+
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
         let timeline = {
@@ -1374,8 +1445,43 @@ impl Tenant {
         timeline.walreceiver.stop().await;
         debug!("wal receiver shutdown confirmed");
 
+        // Prevent new uploads from starting.
+        if let Some(remote_client) = timeline.remote_client.as_ref() {
+            let res = remote_client.stop();
+            match res {
+                Ok(()) => {}
+                Err(e) => match e {
+                    remote_timeline_client::StopError::QueueUninitialized => {
+                        // This case shouldn't happen currently because the
+                        // load and attach code bails out if _any_ of the timeline fails to fetch its IndexPart.
+                        // That is, before we declare the Tenant as Active.
+                        // But we only allow calls to delete_timeline on Active tenants.
+                        return Err(DeleteTimelineError::Other(anyhow::anyhow!("upload queue is uninitialized, likely the timeline was in Broken state prior to this call because it failed to fetch IndexPart during load or attach, check the logs")));
+                    }
+                },
+            }
+        }
+
+        // Stop & wait for the remaining timeline tasks, including upload tasks.
+        // NB: This and other delete_timeline calls do not run as a task_mgr task,
+        //     so, they are not affected by this shutdown_tasks() call.
         info!("waiting for timeline tasks to shutdown");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
+
+        // Mark timeline as deleted in S3 so we won't pick it up next time
+        // during attach or pageserver restart.
+        // See comment in persist_index_part_with_deleted_flag.
+        if let Some(remote_client) = timeline.remote_client.as_ref() {
+            match remote_client.persist_index_part_with_deleted_flag().await {
+                // If we (now, or already) marked it successfully as deleted, we can proceed
+                Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
+                // Bail out otherwise
+                Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
+                | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
+                    return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
+                }
+            }
+        }
 
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.
@@ -1400,18 +1506,53 @@ impl Tenant {
             //     by the caller.
 
             let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
-            // XXX make this atomic so that, if we crash-mid-way, the timeline won't be picked up
-            // with some layers missing.
-            std::fs::remove_dir_all(&local_timeline_directory).with_context(|| {
-                format!(
-                    "Failed to remove local timeline directory '{}'",
-                    local_timeline_directory.display()
-                )
-            })?;
+
+            fail::fail_point!("timeline-delete-before-rm", |_| {
+                Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
+            });
+
+            // NB: This need not be atomic because the deleted flag in the IndexPart
+            // will be observed during tenant/timeline load. The deletion will be resumed there.
+            //
+            // For configurations without remote storage, we tolerate that we're not crash-safe here.
+            // The timeline may come up Active but with missing layer files, in such setups.
+            // See https://github.com/neondatabase/neon/pull/3919#issuecomment-1531726720
+            match std::fs::remove_dir_all(&local_timeline_directory) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // This can happen if we're called a second time, e.g.,
+                    // because of a previous failure/cancellation at/after
+                    // failpoint timeline-delete-after-rm.
+                    //
+                    // It can also happen if we race with tenant detach, because,
+                    // it doesn't grab the layer_removal_cs lock.
+                    //
+                    // For now, log and continue.
+                    // warn! level is technically not appropriate for the
+                    // first case because we should expect retries to happen.
+                    // But the error is so rare, it seems better to get attention if it happens.
+                    let tenant_state = self.current_state();
+                    warn!(
+                        timeline_dir=?local_timeline_directory,
+                        ?tenant_state,
+                        "timeline directory not found, proceeding anyway"
+                    );
+                    // continue with the rest of the deletion
+                }
+                res => res.with_context(|| {
+                    format!(
+                        "Failed to remove local timeline directory '{}'",
+                        local_timeline_directory.display()
+                    )
+                })?,
+            }
 
             info!("finished deleting layer files, releasing layer_removal_cs.lock()");
             drop(layer_removal_guard);
         }
+
+        fail::fail_point!("timeline-delete-after-rm", |_| {
+            Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
+        });
 
         // Remove the timeline from the map.
         let mut timelines = self.timelines.lock().unwrap();
@@ -2503,6 +2644,7 @@ impl Tenant {
         // `max_retention_period` overrides the cutoff that is used to calculate the size
         // (only if it is shorter than the real cutoff).
         max_retention_period: Option<u64>,
+        cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
     ) -> anyhow::Result<size::ModelInputs> {
         let logical_sizes_at_once = self
@@ -2524,6 +2666,7 @@ impl Tenant {
             logical_sizes_at_once,
             max_retention_period,
             &mut shared_cache,
+            cause,
             ctx,
         )
         .await
@@ -2533,8 +2676,12 @@ impl Tenant {
     /// This is periodically called by background worker.
     /// result is cached in tenant struct
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
-    pub async fn calculate_synthetic_size(&self, ctx: &RequestContext) -> anyhow::Result<u64> {
-        let inputs = self.gather_size_inputs(None, ctx).await?;
+    pub async fn calculate_synthetic_size(
+        &self,
+        cause: LogicalSizeCalculationCause,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<u64> {
+        let inputs = self.gather_size_inputs(None, cause, ctx).await?;
 
         let size = inputs.calculate()?;
 

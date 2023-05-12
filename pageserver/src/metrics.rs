@@ -30,6 +30,7 @@ const STORAGE_TIME_OPERATIONS: &[&str] = &[
     "create images",
     "init logical size",
     "logical size",
+    "imitate logical size",
     "load layer map",
     "gc",
 ];
@@ -182,6 +183,16 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
         "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
         &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_eviction_iteration_duration_seconds_global",
+        "Time spent on a single eviction iteration",
+        &["period_secs", "threshold_secs"],
+        STORAGE_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -478,6 +489,15 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
+pub static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_background_loop_period_overrun_count",
+        "Incremented whenever warn_when_period_overrun() logs a warning.",
+        &["task", "period"],
+    )
+    .expect("failed to define a metric")
+});
+
 // walreceiver metrics
 
 pub static WALRECEIVER_STARTED_CONNECTIONS: Lazy<IntCounter> = Lazy::new(|| {
@@ -688,6 +708,7 @@ pub struct TimelineMetrics {
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
+    pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
@@ -720,6 +741,8 @@ impl TimelineMetrics {
         let create_images_time_histo =
             StorageTimeMetrics::new("create images", &tenant_id, &timeline_id);
         let logical_size_histo = StorageTimeMetrics::new("logical size", &tenant_id, &timeline_id);
+        let imitate_logical_size_histo =
+            StorageTimeMetrics::new("imitate logical size", &tenant_id, &timeline_id);
         let load_layer_map_histo =
             StorageTimeMetrics::new("load layer map", &tenant_id, &timeline_id);
         let garbage_collect_histo = StorageTimeMetrics::new("gc", &tenant_id, &timeline_id);
@@ -756,6 +779,7 @@ impl TimelineMetrics {
             compact_time_histo,
             create_images_time_histo,
             logical_size_histo,
+            imitate_logical_size_histo,
             garbage_collect_histo,
             load_layer_map_histo,
             last_record_gauge,
@@ -1216,4 +1240,7 @@ pub fn preinitialize_metrics() {
     // Initialize it eagerly, so that our alert rule can distinguish absence of the metric from metric value 0.
     assert_eq!(UNEXPECTED_ONDEMAND_DOWNLOADS.get(), 0);
     UNEXPECTED_ONDEMAND_DOWNLOADS.reset();
+
+    // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
+    BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
 }

@@ -25,7 +25,7 @@ use crate::tenant::config::TenantConfOpt;
 use crate::tenant::mgr::{TenantMapInsertError, TenantStateError};
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -169,6 +169,8 @@ async fn build_timeline_info(
     include_non_incremental_logical_size: bool,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
+    crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+
     let mut info = build_timeline_info_common(timeline, ctx)?;
     if include_non_incremental_logical_size {
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
@@ -191,6 +193,7 @@ fn build_timeline_info_common(
     timeline: &Arc<Timeline>,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
+    crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
     let last_record_lsn = timeline.get_last_record_lsn();
     let (wal_source_connstr, last_received_msg_lsn, last_received_msg_ts) = {
         let guard = timeline.last_received_wal.lock().unwrap();
@@ -263,25 +266,28 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
 
-    let tenant = mgr::get_tenant(tenant_id, true).await?;
-    match tenant.create_timeline(
-        new_timeline_id,
-        request_data.ancestor_timeline_id.map(TimelineId::from),
-        request_data.ancestor_start_lsn,
-        request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
-        &ctx,
-    )
-    .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
-    .await {
-        Ok(Some(new_timeline)) => {
-            // Created. Construct a TimelineInfo for it.
-            let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
-                .map_err(ApiError::InternalServerError)?;
-            json_response(StatusCode::CREATED, timeline_info)
+    async {
+        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        match tenant.create_timeline(
+            new_timeline_id,
+            request_data.ancestor_timeline_id.map(TimelineId::from),
+            request_data.ancestor_start_lsn,
+            request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+            &ctx,
+        )
+        .await {
+            Ok(Some(new_timeline)) => {
+                // Created. Construct a TimelineInfo for it.
+                let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
+                    .map_err(ApiError::InternalServerError)?;
+                json_response(StatusCode::CREATED, timeline_info)
+            }
+            Ok(None) => json_response(StatusCode::CONFLICT, ()), // timeline already exists
+            Err(err) => Err(ApiError::InternalServerError(err)),
         }
-        Ok(None) => json_response(StatusCode::CONFLICT, ()), // timeline already exists
-        Err(err) => Err(ApiError::InternalServerError(err)),
     }
+    .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
+    .await
 }
 
 async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
@@ -303,6 +309,7 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
                 include_non_incremental_logical_size.unwrap_or(false),
                 &ctx,
             )
+            .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
             .await
             .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
             .map_err(ApiError::InternalServerError)?;
@@ -467,7 +474,7 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
             id: *id,
             state: state.clone(),
             current_physical_size: None,
-            has_in_progress_downloads: Some(state.has_in_progress_downloads()),
+            attachment_status: state.attachment_status(),
         })
         .collect::<Vec<TenantInfo>>();
 
@@ -492,7 +499,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
             id: tenant_id,
             state: state.clone(),
             current_physical_size: Some(current_physical_size),
-            has_in_progress_downloads: Some(state.has_in_progress_downloads()),
+            attachment_status: state.attachment_status(),
         })
     }
     .instrument(info_span!("tenant_status_handler", tenant = %tenant_id))
@@ -527,7 +534,11 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     // this can be long operation
     let inputs = tenant
-        .gather_size_inputs(retention_period, &ctx)
+        .gather_size_inputs(
+            retention_period,
+            LogicalSizeCalculationCause::TenantSizeHandler,
+            &ctx,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
