@@ -1132,11 +1132,13 @@ impl<'a> DatadirModification<'a> {
 
         let writer = self.tline.writer();
 
+        let mut layer_map = self.tline.layers.write().unwrap();
+
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut result: anyhow::Result<()> = Ok(());
         self.pending_updates.retain(|&key, value| {
             if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, self.lsn, value);
+                result = writer.put_locked(key, self.lsn, value, &mut layer_map);
                 false
             } else {
                 true
