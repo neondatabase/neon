@@ -121,7 +121,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
+    pub(crate) layers: RwLock<LayerMap<dyn PersistentLayer>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -228,6 +228,8 @@ pub struct Timeline {
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 }
+
+type LayerMapWriteLockGuard<'t> = std::sync::RwLockWriteGuard<'t, LayerMap<dyn PersistentLayer>>;
 
 /// Internal structure to hold all data needed for logical size calculation.
 ///
@@ -2417,7 +2419,14 @@ impl Timeline {
     ///
     fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
         let mut layers = self.layers.write().unwrap();
+        self.get_layer_for_write_locked(lsn, &mut layers)
+    }
 
+    fn get_layer_for_write_locked(
+        &self,
+        lsn: Lsn,
+        layers: &mut LayerMapWriteLockGuard,
+    ) -> anyhow::Result<Arc<InMemoryLayer>> {
         ensure!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -2463,6 +2472,19 @@ impl Timeline {
     fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> anyhow::Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
         let layer = self.get_layer_for_write(lsn)?;
+        layer.put_value(key, lsn, val)?;
+        Ok(())
+    }
+
+    fn put_value_locked(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        val: &Value,
+        pre_locked_layer_map: &mut LayerMapWriteLockGuard,
+    ) -> anyhow::Result<()> {
+        //info!("PUT: key {} at {}", key, lsn);
+        let layer = self.get_layer_for_write_locked(lsn, pre_locked_layer_map)?;
         layer.put_value(key, lsn, val)?;
         Ok(())
     }
@@ -4262,6 +4284,17 @@ impl<'a> TimelineWriter<'a> {
     /// current end-of-file.
     pub fn put(&self, key: Key, lsn: Lsn, value: &Value) -> anyhow::Result<()> {
         self.tl.put_value(key, lsn, value)
+    }
+
+    pub fn put_locked(
+        &self,
+        key: Key,
+        lsn: Lsn,
+        value: &Value,
+        pre_locked_layer_map: &mut LayerMapWriteLockGuard,
+    ) -> anyhow::Result<()> {
+        self.tl
+            .put_value_locked(key, lsn, value, pre_locked_layer_map)
     }
 
     pub fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
