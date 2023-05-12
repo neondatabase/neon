@@ -75,12 +75,12 @@ pub async fn import_timeline_from_postgres_datadir(
             {
                 pg_control = Some(control_file);
             }
-            modification.flush()?;
+            modification.flush().await?;
         }
     }
 
     // We're done importing all the data files.
-    modification.commit()?;
+    modification.commit().await?;
 
     // We expect the Postgres server to be shut down cleanly.
     let pg_control = pg_control.context("pg_control file not found")?;
@@ -359,7 +359,7 @@ pub async fn import_basebackup_from_tar(
                     // We found the pg_control file.
                     pg_control = Some(res);
                 }
-                modification.flush()?;
+                modification.flush().await?;
             }
             tokio_tar::EntryType::Directory => {
                 debug!("directory {:?}", file_path);
@@ -377,7 +377,7 @@ pub async fn import_basebackup_from_tar(
     // sanity check: ensure that pg_control is loaded
     let _pg_control = pg_control.context("pg_control file not found")?;
 
-    modification.commit()?;
+    modification.commit().await?;
     Ok(())
 }
 
@@ -594,7 +594,7 @@ async fn import_file(
         // zenith.signal is not necessarily the last file, that we handle
         // but it is ok to call `finish_write()`, because final `modification.commit()`
         // will update lsn once more to the final one.
-        let writer = modification.tline.writer();
+        let writer = modification.tline.writer().await;
         writer.finish_write(prev_lsn);
 
         debug!("imported zenith signal {}", prev_lsn);

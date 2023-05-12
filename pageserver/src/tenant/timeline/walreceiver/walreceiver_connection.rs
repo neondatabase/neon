@@ -313,12 +313,15 @@ pub(super) async fn handle_walreceiver_connection(
             }
         }
 
-        timeline.check_checkpoint_distance().with_context(|| {
-            format!(
-                "Failed to check checkpoint distance for timeline {}",
-                timeline.timeline_id
-            )
-        })?;
+        timeline
+            .check_checkpoint_distance()
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to check checkpoint distance for timeline {}",
+                    timeline.timeline_id
+                )
+            })?;
 
         if let Some(last_lsn) = status_update {
             let timeline_remote_consistent_lsn =
