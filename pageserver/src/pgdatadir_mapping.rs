@@ -1609,7 +1609,7 @@ pub async fn create_test_timeline(
         .await?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
-    m.commit()?;
+    m.commit().await?;
     Ok(tline)
 }
 

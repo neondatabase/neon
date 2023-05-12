@@ -1191,7 +1191,7 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x10));
         m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
         m.put_relmap_file(0, 111, Bytes::from(""), ctx).await?; // dummy relmapper file
-        m.commit()?;
+        m.commit().await?;
         let walingest = WalIngest::new(tline, Lsn(0x10), ctx).await?;
 
         Ok(walingest)
@@ -1208,22 +1208,22 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
 
@@ -1309,7 +1309,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 2, &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         assert_current_logical_size(&tline, Lsn(0x60));
 
         // Check reported size and contents after truncation
@@ -1351,7 +1351,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 0, &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x68), false, &ctx)
@@ -1364,7 +1364,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x70), false, &ctx)
@@ -1389,7 +1389,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         assert_eq!(
             tline
                 .get_rel_size(TESTREL_A, Lsn(0x80), false, &ctx)
@@ -1426,7 +1426,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
 
         // Check that rel exists and size is correct
         assert_eq!(
@@ -1445,7 +1445,7 @@ mod tests {
         // Drop rel
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest.put_rel_drop(&mut m, TESTREL_A, &ctx).await?;
-        m.commit()?;
+        m.commit().await?;
 
         // Check that rel is not visible anymore
         assert_eq!(
@@ -1463,7 +1463,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"), &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
 
         // Check that rel exists and size is correct
         assert_eq!(
@@ -1500,7 +1500,7 @@ mod tests {
                 .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
                 .await?;
         }
-        m.commit()?;
+        m.commit().await?;
 
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(
@@ -1545,7 +1545,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, 1, &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
 
         // Check reported size and contents after truncation
         assert_eq!(
@@ -1594,7 +1594,7 @@ mod tests {
                 .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
                 .await?;
         }
-        m.commit()?;
+        m.commit().await?;
 
         assert_eq!(
             tline
@@ -1639,7 +1639,7 @@ mod tests {
             walingest
                 .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img, &ctx)
                 .await?;
-            m.commit()?;
+            m.commit().await?;
         }
 
         assert_current_logical_size(&tline, Lsn(lsn));
@@ -1655,7 +1655,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE, &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
             RELSEG_SIZE
@@ -1668,7 +1668,7 @@ mod tests {
         walingest
             .put_rel_truncation(&mut m, TESTREL_A, RELSEG_SIZE - 1, &ctx)
             .await?;
-        m.commit()?;
+        m.commit().await?;
         assert_eq!(
             tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
             RELSEG_SIZE - 1
@@ -1684,7 +1684,7 @@ mod tests {
             walingest
                 .put_rel_truncation(&mut m, TESTREL_A, size as BlockNumber, &ctx)
                 .await?;
-            m.commit()?;
+            m.commit().await?;
             assert_eq!(
                 tline.get_rel_size(TESTREL_A, Lsn(lsn), false, &ctx).await?,
                 size as BlockNumber
