@@ -25,7 +25,10 @@ class PgVersion(str, enum.Enum):
 
     # Make it less confusing in logs
     def __repr__(self) -> str:
-        return f"'{self.value}'"
+        return f"{self.value}"
+
+    def __str__(self) -> str:
+        return repr(self)
 
     # In GitHub workflows we use Postgres version with v-prefix (e.g. v14 instead of just 14),
     # sometime we need to do so in tests.
@@ -78,11 +81,11 @@ def pytest_addoption(parser: Parser):
 @pytest.fixture(scope="session")
 def pg_version(request: FixtureRequest) -> Iterator[PgVersion]:
     if v := request.config.getoption("--pg-version"):
-        version, source = v, "from --pg-version commad-line argument"
+        version, source = v, "from --pg-version command-line argument"
     elif v := os.environ.get("DEFAULT_PG_VERSION"):
         version, source = PgVersion(v), "from DEFAULT_PG_VERSION environment variable"
     else:
-        version, source = DEFAULT_VERSION, "default verson"
+        version, source = DEFAULT_VERSION, "default version"
 
     log.info(f"pg_version is {version} ({source})")
     yield version
