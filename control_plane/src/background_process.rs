@@ -30,12 +30,12 @@ use utils::pid_file::{self, PidFileRead};
 
 // These constants control the loop used to poll for process start / stop.
 //
-// The loop waits for at most 10 seconds, polling every 100 ms.
+// The loop waits for at most 20 seconds, polling every 100 ms.
 // Once a second, it prints a dot ("."), to give the user an indication that
 // it's waiting. If the process hasn't started/stopped after 5 seconds,
 // it prints a notice that it's taking long, but keeps waiting.
 //
-const RETRY_UNTIL_SECS: u64 = 10;
+const RETRY_UNTIL_SECS: u64 = 20;
 const RETRIES: u64 = (RETRY_UNTIL_SECS * 1000) / RETRY_INTERVAL_MILLIS;
 const RETRY_INTERVAL_MILLIS: u64 = 100;
 const DOT_EVERY_RETRIES: u64 = 10;
