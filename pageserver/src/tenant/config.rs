@@ -293,6 +293,7 @@ fn bad_duration<'a>(field_name: &'static str, value: &'a str) -> impl 'a + Fn() 
 }
 
 impl TenantConfOpt {
+    #[allow(clippy::too_many_arguments)]
     fn from_request(
         checkpoint_distance: Option<u64>,
         checkpoint_timeout: &Option<String>,
