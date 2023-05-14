@@ -538,7 +538,7 @@ RUN make -j $(getconf _NPROCESSORS_ONLN) \
     make -j $(getconf _NPROCESSORS_ONLN) \
         PG_CONFIG=/usr/local/pgsql/bin/pg_config \
         -C pgxn/neon_utils \
-        -s install
+        -s install \
     make -j $(getconf _NPROCESSORS_ONLN) \
         PG_CONFIG=/usr/local/pgsql/bin/pg_config \
         -C pgxn/hnsw \
