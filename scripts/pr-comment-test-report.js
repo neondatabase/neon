@@ -36,11 +36,9 @@ module.exports = async ({ github, context, fetch, report }) => {
     // Marker to find the comment in the subsequent runs
     const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
     // Let users know that the comment is updated automatically
-    const autoupdateNotice = `<div align="right"><sub>The comment gets automatically updated with the latest test results :recycle:</sub></div>`
+    const autoupdateNotice = `<div align="right"><sub>The comment gets automatically updated with the latest test results<br>${context.payload.pull_request.head.sha} at ${new Date().toISOString()} :recycle:</sub></div>`
     // GitHub bot id taken from (https://api.github.com/users/github-actions[bot])
     const githubActionsBotId = 41898282
-    // The latest commit in the PR URL
-    const commitUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/pull/${context.payload.number}/commits/${context.payload.pull_request.head.sha}`
     // Commend body itself
     let commentBody = `${startMarker}\n`
 
@@ -122,7 +120,7 @@ module.exports = async ({ github, context, fetch, report }) => {
     }
 
     const totalTestsCount = failedTestsCount + passedTestsCount + skippedTestsCount
-    commentBody += `### ${totalTestsCount} tests run: ${passedTestsCount} passed, ${failedTestsCount} failed, ${skippedTestsCount} skipped ([full report](${reportUrl}) for ${commitUrl})\n___\n`
+    commentBody += `### ${totalTestsCount} tests run: ${passedTestsCount} passed, ${failedTestsCount} failed, ${skippedTestsCount} skipped ([full report](${reportUrl}))\n___\n`
 
     // Print test resuls from the newest to the oldest PostgreSQL version for release and debug builds.
     for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
@@ -145,7 +143,7 @@ module.exports = async ({ github, context, fetch, report }) => {
     }
 
     if (flakyTestsCount > 0) {
-        commentBody += "<details>\n<summary>Flaky tests</summary>\n\n"
+        commentBody += `<details>\n<summary>Flaky tests (${flakyTestsCount})</summary>\n\n`
         for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
             for (const buildType of Array.from(buildTypes).sort().reverse()) {
                 if (flakyTests[pgVersion][buildType].length > 0) {
