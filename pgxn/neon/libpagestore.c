@@ -367,7 +367,7 @@ pageserver_flush(void)
 	}
 	else if (PQflush(pageserver_conn))
 	{
-		char	   *msg = PQerrorMessage(pageserver_conn);
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to flush page requests: %s", msg);
