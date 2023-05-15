@@ -72,7 +72,6 @@ module.exports = async ({ github, context, fetch, report }) => {
     let flakyTestsCount = 0
 
     const pgVersions = new Set()
-    const buildTypes = new Set()
 
     for (const parentSuite of suites.children) {
         for (const suite of parentSuite.children) {
@@ -90,28 +89,29 @@ module.exports = async ({ github, context, fetch, report }) => {
                 }
 
                 pgVersions.add(pgVersion)
-                buildTypes.add(buildType)
 
                 // Removing build type and PostgreSQL version from the test name to make it shorter
                 const testName = test.name.replace(new RegExp(`${buildType}-pg${pgVersion}-?`), "").replace("[]", "")
                 test.pytestName = `${parentSuite.name.replace(".", "/")}/${suite.name}.py::${testName}`
+                test.pgVersion = pgVersion
+                test.buildType = buildType
 
                 if (test.status === "passed") {
-                    passedTests[pgVersion][buildType].push(test)
+                    passedTests[pgVersion][testName].push(test)
                     passedTestsCount += 1
                 } else if (test.status === "failed" || test.status === "broken") {
-                    failedTests[pgVersion][buildType].push(test)
+                    failedTests[pgVersion][testName].push(test)
                     failedTestsCount += 1
                 } else if (test.status === "skipped") {
-                    skippedTests[pgVersion][buildType].push(test)
+                    skippedTests[pgVersion][testName].push(test)
                     skippedTestsCount += 1
                 }
 
                 if (test.retriesCount > 0) {
-                    retriedTests[pgVersion][buildType].push(test)
+                    retriedTests[pgVersion][testName].push(test)
 
                     if (test.retriesStatusChange) {
-                        flakyTests[pgVersion][buildType].push(test)
+                        flakyTests[pgVersion][testName].push(test)
                         flakyTestsCount += 1
                     }
                 }
@@ -124,20 +124,16 @@ module.exports = async ({ github, context, fetch, report }) => {
 
     // Print test resuls from the newest to the oldest PostgreSQL version for release and debug builds.
     for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
-        for (const buildType of Array.from(buildTypes).sort().reverse()) {
-            if (failedTests[pgVersion][buildType].length > 0) {
-                commentBody += `#### PostgreSQL ${pgVersion} (${buildType} build)\n\n`
-                commentBody += `Failed tests:\n`
-                for (const test of failedTests[pgVersion][buildType]) {
+        if (Object.keys(failedTests[pgVersion]).length > 0) {
+            commentBody += `#### PostgreSQL ${pgVersion}\n\n`
+            commentBody += `Failed tests:\n`
+            for (const [testName, tests] of Object.entries(failedTests[pgVersion])) {
+                const links = []
+                for (const test of tests) {
                     const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}`
-
-                    commentBody += `- [\`${test.pytestName}\`](${allureLink})`
-                    if (test.retriesCount > 0) {
-                        commentBody += ` (ran [${test.retriesCount + 1} times](${allureLink}/retries))`
-                    }
-                    commentBody += "\n"
+                    links.push(`[${test.buildType}](${allureLink})`)
                 }
-                commentBody += "\n"
+                commentBody += `- \`${testName}\`: ${links.join(", ")}\n`
             }
         }
     }
@@ -145,14 +141,16 @@ module.exports = async ({ github, context, fetch, report }) => {
     if (flakyTestsCount > 0) {
         commentBody += `<details>\n<summary>Flaky tests (${flakyTestsCount})</summary>\n\n`
         for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
-            for (const buildType of Array.from(buildTypes).sort().reverse()) {
-                if (flakyTests[pgVersion][buildType].length > 0) {
-                    commentBody += `#### PostgreSQL ${pgVersion} (${buildType} build)\n\n`
-                    for (const test of flakyTests[pgVersion][buildType]) {
+            if (Object.keys(flakyTests[pgVersion]).length > 0) {
+                commentBody += `#### PostgreSQL ${pgVersion}\n\n`
+                for (const [testName, tests] of Object.entries(flakyTests[pgVersion])) {
+                    const links = []
+                    for (const test of tests) {
+                        const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}/retries`
                         const status = test.status === "passed" ? ":white_check_mark:" : ":x:"
-                        commentBody += `- ${status} [\`${test.pytestName}\`](${reportUrl}#suites/${test.parentUid}/${test.uid}/retries)\n`
+                        links.push(`[${status} ${test.buildType}](${allureLink})`)
                     }
-                    commentBody += "\n"
+                    commentBody += `- \`${testName}\`: ${links.join(", ")}\n`
                 }
             }
         }
