@@ -19,7 +19,7 @@ use super::models::{
 };
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::disk_usage_eviction_task;
-use crate::metrics::STORAGE_TIME_GLOBAL;
+use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
@@ -710,7 +710,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, None)?;
 
     let _timer = STORAGE_TIME_GLOBAL
-        .get_metric_with_label_values(&["create tenant"])
+        .get_metric_with_label_values(&[StorageTimeOperation::CreateTenant.into()])
         .expect("bug")
         .start_timer();
 
