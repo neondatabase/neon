@@ -1264,8 +1264,24 @@ impl Tenant {
             "Cannot create timelines on inactive tenant"
         );
 
-        if self.get_timeline(new_timeline_id, false).is_ok() {
+        if let Ok(existing) = self.get_timeline(new_timeline_id, false) {
             debug!("timeline {new_timeline_id} already exists");
+
+            if let Some(remote_client) = existing.remote_client.as_ref() {
+                // Wait for uploads to complete, so that when we return Ok, the timeline
+                // is known to be durable on remote storage. Just like we do at the end of
+                // this function, after we have created the timeline ourselves.
+                //
+                // We only really care that the initial version of `index_part.json` has
+                // been uploaded. That's enough to remember that the timeline
+                // exists. However, there is no function to wait specifically for that so
+                // we just wait for all in-progress uploads to finish.
+                remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for timeline uploads to complete")?;
+            }
+
             return Ok(None);
         }
 
@@ -1306,6 +1322,17 @@ impl Tenant {
                     .await?
             }
         };
+
+        if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
+            // Wait for the upload of the 'index_part.json` file to finish, so that when we return
+            // Ok, the timeline is durable in remote storage.
+            let kind = ancestor_timeline_id
+                .map(|_| "branched")
+                .unwrap_or("bootstrapped");
+            remote_client.wait_completion().await.with_context(|| {
+                format!("wait for {} timeline initial uploads to complete", kind)
+            })?;
+        }
 
         Ok(Some(loaded_timeline))
     }
@@ -2376,17 +2403,18 @@ impl Tenant {
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
-        let mut timelines = self.timelines.lock().unwrap();
-        let new_timeline = self
-            .prepare_timeline(
+
+        let new_timeline = {
+            let mut timelines = self.timelines.lock().unwrap();
+            self.prepare_timeline(
                 dst_id,
                 &metadata,
                 timeline_uninit_mark,
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
-            .initialize_with_lock(ctx, &mut timelines, true, true)?;
-        drop(timelines);
+            .initialize_with_lock(ctx, &mut timelines, true, true)?
+        };
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
         // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.

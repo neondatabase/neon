@@ -23,7 +23,6 @@ from fixtures.pageserver.utils import (
     tenant_exists,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_for_upload_queue_empty,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
@@ -546,7 +545,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     # - A logical replication message between the inserts, so that we can conveniently
     #   pause the WAL ingestion between the two inserts.
     # - Child branch, created after the inserts
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, _ = env.neon_cli.create_tenant()
 
     main_endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with main_endpoint.cursor() as cur:
@@ -559,14 +558,7 @@ def test_emergency_relocate_with_branches_slow_replay(
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
     main_endpoint.stop()
-    child_timeline_id = env.neon_cli.create_branch(
-        "child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn
-    )
-
-    # Wait for the index_part.json file of both branches to be uploaded to remote storage.
-    # This is a work around for issue https://github.com/neondatabase/neon/issues/3865.
-    wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
-    wait_for_upload_queue_empty(pageserver_http, tenant_id, child_timeline_id)
+    env.neon_cli.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
 
     # Now kill the pageserver, remove the tenant directory, and restart. This simulates
     # the scenario that a pageserver dies unexpectedly and cannot be recovered, so we relocate
@@ -704,7 +696,7 @@ def test_emergency_relocate_with_branches_createdb(
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, _ = env.neon_cli.create_tenant()
 
     main_endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with main_endpoint.cursor() as cur:
@@ -712,9 +704,7 @@ def test_emergency_relocate_with_branches_createdb(
 
         cur.execute("CREATE DATABASE neondb")
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
-    child_timeline_id = env.neon_cli.create_branch(
-        "child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn
-    )
+    env.neon_cli.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
 
     with main_endpoint.cursor(dbname="neondb") as cur:
         cur.execute("CREATE TABLE test_migrate_one AS SELECT generate_series(1,100)")
@@ -724,11 +714,6 @@ def test_emergency_relocate_with_branches_createdb(
     with child_endpoint.cursor(dbname="neondb") as cur:
         cur.execute("CREATE TABLE test_migrate_one AS SELECT generate_series(1,200)")
     child_endpoint.stop()
-
-    # Wait for the index_part.json file of both branches to be uploaded to remote storage.
-    # This is a work around for issue https://github.com/neondatabase/neon/issues/3865.
-    wait_for_upload_queue_empty(pageserver_http, tenant_id, timeline_id)
-    wait_for_upload_queue_empty(pageserver_http, tenant_id, child_timeline_id)
 
     # Kill the pageserver, remove the tenant directory, and restart
     env.pageserver.stop(immediate=True)
