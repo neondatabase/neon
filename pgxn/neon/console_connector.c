@@ -645,7 +645,7 @@ void InitConsoleConnector()
         NULL,
         &ForwardDDL,
         true,
-        PGC_USERSET,
+        PGC_SUSET,
         0,
         NULL,
         NULL,
