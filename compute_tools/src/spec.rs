@@ -13,7 +13,7 @@ use crate::params::PG_HBA_ALL_MD5;
 use crate::pg_helpers::*;
 
 use compute_api::responses::{ControlPlaneComputeStatus, ControlPlaneSpecResponse};
-use compute_api::spec::{ComputeSpec, Database, GenericOption, PgIdent, Role};
+use compute_api::spec::{ComputeSpec, Database, PgIdent, Role};
 
 // Do control plane request and return response if any. In case of error it
 // returns a bool flag indicating whether it makes sense to retry the request
