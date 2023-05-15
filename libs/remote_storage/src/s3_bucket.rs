@@ -140,7 +140,9 @@ impl S3Bucket {
             .credentials_provider(credentials_provider);
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
-            config_builder.set_endpoint_url(Some(custom_endpoint));
+            config_builder = config_builder
+                .endpoint_url(custom_endpoint)
+                .force_path_style(true);
         }
         let client = Client::from_conf(config_builder.build());
 
