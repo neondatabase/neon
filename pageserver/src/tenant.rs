@@ -1268,10 +1268,14 @@ impl Tenant {
             debug!("timeline {new_timeline_id} already exists");
 
             if let Some(remote_client) = existing.remote_client.as_ref() {
-                // wait for uploads to complete even if this is a random old/very active timeline
-                // because if we get shutdown while waiting for the uploads on creation path (later
-                // in this method), the request will be retried and during startup we already
-                // scheduled the uploads so they have either completed or are completing right now.
+                // Wait for uploads to complete, so that when we return Ok, the timeline
+                // is known to be durable on remote storage. Just like we do at the end of
+                // this function, after we have created the timeline ourselves.
+                //
+                // We only really care that the initial version of `index_part.json` has
+                // been uploaded. That's enough to remember that the timeline
+                // exists. However, there is no function to wait specifically for that so
+                // we just wait for all in-progress uploads to finish.
                 remote_client
                     .wait_completion()
                     .await
@@ -1320,9 +1324,8 @@ impl Tenant {
         };
 
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
-            // failing the await for uploads to complete will mean that the tenant is
-            // non-relocatable, however with erroring out it is clear to control plane that the
-            // request needs to be retried, and next time after restart they will get 409.
+            // Wait for the upload of the 'index_part.json` file to finish, so that when we return
+            // Ok, the timeline is durable in remote storage.
             let kind = ancestor_timeline_id
                 .map(|_| "branched")
                 .unwrap_or("bootstrapped");
