@@ -206,4 +206,4 @@ runs:
       uses: ./.github/actions/allure-report-store
       with:
         report-dir: /tmp/test_output/allure/results
-        unique-key: ${{ inputs.test_selection }}-${{ inputs.build_type }}
+        unique-key: ${{ inputs.build_type }}
