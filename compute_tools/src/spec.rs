@@ -88,20 +88,7 @@ pub fn get_spec_from_control_plane(
             Ok(spec_resp) => match spec_resp.status {
                 ControlPlaneComputeStatus::Empty => Ok(None),
                 ControlPlaneComputeStatus::Attached => {
-                    if let Some(mut spec) = spec_resp.spec {
-                        let ddl_address = format!(
-                            "{base_uri}/management/api/v2/computes/{compute_id}/dbs_and_roles"
-                        );
-                        let console_url_option = GenericOption {
-                            name: "neon.console_url".to_string(),
-                            value: Some(ddl_address),
-                            vartype: "string".to_string(),
-                        };
-                        if let Some(ref mut settings) = spec.cluster.settings {
-                            settings.push(console_url_option)
-                        } else {
-                            spec.cluster.settings = Some(vec![console_url_option]);
-                        }
+                    if let Some(spec) = spec_resp.spec {
                         Ok(Some(spec))
                     } else {
                         bail!("compute is attached, but spec is empty")
