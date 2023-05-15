@@ -600,12 +600,9 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
-        // XXX: Attach should provide the config, especially during tenant migration.
-        //      See https://github.com/neondatabase/neon/issues/1555
-        let tenant_conf = TenantConfOpt::default();
-
-        Self::attach_idempotent_create_marker_file(conf, tenant_id)
-            .context("create attach marker file")?;
+        // TODO dedup with spawn_load
+        let tenant_conf =
+            Self::load_tenant_config(conf, tenant_id).context("load tenant config")?;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -640,45 +637,6 @@ impl Tenant {
             },
         );
         Ok(tenant)
-    }
-
-    fn attach_idempotent_create_marker_file(
-        conf: &'static PageServerConf,
-        tenant_id: TenantId,
-    ) -> anyhow::Result<()> {
-        // Create directory with marker file to indicate attaching state.
-        // The load_local_tenants() function in tenant::mgr relies on the marker file
-        // to determine whether a tenant has finished attaching.
-        let tenant_dir = conf.tenant_path(&tenant_id);
-        let marker_file = conf.tenant_attaching_mark_file_path(&tenant_id);
-        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
-        // TODO: should use tokio::fs here, but
-        // 1. caller is not async, for good reason (it holds tenants map lock)
-        // 2. we'd need to think about cancel safety. Turns out dropping a tokio::fs future
-        //    doesn't wait for the activity in the fs thread pool.
-        crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker_file)
-        {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Either this is a retry of attach or there is a concurrent task also doing attach for this tenant.
-                // We cannot distinguish this here.
-                // The caller is responsible for ensuring there's no concurrent attach for a tenant.
-                {} // fsync again, we don't know if that already happened
-            }
-            err => {
-                err.context("create tenant attaching marker file")?;
-                unreachable!("we covered the Ok() case above");
-            }
-        }
-        crashsafe::fsync_file_and_parent(&marker_file)
-            .context("fsync tenant attaching marker file and parent")?;
-        debug_assert!(tenant_dir.is_dir());
-        debug_assert!(marker_file.is_file());
-        Ok(())
     }
 
     ///
@@ -2089,6 +2047,7 @@ impl Tenant {
             // enough to just fsync it always.
 
             crashsafe::fsync(target_config_parent)?;
+            // XXX we're not fsyncing the parent dir, need to do that in case `creating_tenant`
             Ok(())
         };
 
@@ -2725,10 +2684,16 @@ fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> a
     Ok(())
 }
 
+pub(crate) enum CreateTenantFilesMode {
+    Create,
+    Attach,
+}
+
 pub(crate) fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    mode: CreateTenantFilesMode,
 ) -> anyhow::Result<PathBuf> {
     let target_tenant_directory = conf.tenant_path(&tenant_id);
     anyhow::ensure!(
@@ -2755,6 +2720,7 @@ pub(crate) fn create_tenant_files(
         conf,
         tenant_conf,
         tenant_id,
+        mode,
         &temporary_tenant_dir,
         &target_tenant_directory,
     );
@@ -2779,9 +2745,28 @@ fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    mode: CreateTenantFilesMode,
     temporary_tenant_dir: &Path,
     target_tenant_directory: &Path,
 ) -> Result<(), anyhow::Error> {
+    match mode {
+        CreateTenantFilesMode::Create => {} // needs no attach marker, writing tenant conf + atomic rename of dir is good enough
+        CreateTenantFilesMode::Attach => {
+            let attach_marker_path = temporary_tenant_dir.join(TENANT_ATTACHING_MARKER_FILENAME);
+            let file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&attach_marker_path)
+                .with_context(|| {
+                    format!("could not create attach marker file {attach_marker_path:?}")
+                })?;
+            file.sync_all().with_context(|| {
+                format!("could not sync attach marker file: {attach_marker_path:?}")
+            })?;
+            // fsync of the directory in which the file resides comes later in this function
+        }
+    }
+
     let temporary_tenant_timelines_dir = rebase_directory(
         &conf.timelines_path(&tenant_id),
         target_tenant_directory,
@@ -2807,6 +2792,11 @@ fn try_create_target_tenant_dir(
     fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
         anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
     });
+
+    // Make sure the current tenant directory entries are durable before renaming.
+    // Without this, a crash may reorder any of the directory entry creations above.
+    crashsafe::fsync(temporary_tenant_dir)
+        .with_context(|| format!("sync temporary tenant directory {temporary_tenant_dir:?}"))?;
 
     fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
