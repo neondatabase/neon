@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
@@ -19,6 +20,7 @@ use super::models::{
 };
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::disk_usage_eviction_task;
+use crate::metrics::STORAGE_TIME_GLOBAL;
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
@@ -708,6 +710,11 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
+    let start = Instant::now();
+    let histo = STORAGE_TIME_GLOBAL
+        .get_metric_with_label_values(&["create tenant"])
+        .expect("bug");
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
@@ -743,6 +750,9 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         res.context("created tenant failed to become active")
             .map_err(ApiError::InternalServerError)?;
     }
+
+    histo.observe(start.elapsed().as_secs_f64());
+
     json_response(
         StatusCode::CREATED,
         TenantCreateResponse(new_tenant.tenant_id()),
