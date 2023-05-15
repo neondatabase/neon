@@ -20,6 +20,7 @@ from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_for_upload_queue_empty,
     wait_until_tenant_state,
 )
 from fixtures.types import Lsn
@@ -149,6 +150,7 @@ def test_ondemand_download_timetravel(
 
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
 
     # Override defaults, to create more layers
     tenant, _ = env.neon_cli.create_tenant(
@@ -225,7 +227,8 @@ def test_ondemand_download_timetravel(
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
     # Wait until generated image layers are uploaded to S3
-    time.sleep(5)
+    if remote_storage_kind is not None:
+        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
 
     env.pageserver.stop()
 
