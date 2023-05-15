@@ -139,16 +139,8 @@ impl S3Bucket {
             .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider);
 
-        #[allow(deprecated)]
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
-            use aws_config::endpoint::Endpoint;
-            let endpoint = Endpoint::immutable_uri(
-                custom_endpoint
-                    .parse()
-                    .expect("Failed to parse S3 custom endpoint"),
-            )
-            .expect("failed to create endpoint");
-            config_builder.set_endpoint_resolver(Some(Arc::new(endpoint)));
+            config_builder.set_endpoint_url(Some(custom_endpoint));
         }
         let client = Client::from_conf(config_builder.build());
 
