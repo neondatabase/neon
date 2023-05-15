@@ -135,6 +135,14 @@ module.exports = async ({ github, context, fetch, report }) => {
                 }
                 commentBody += `- \`${testName}\`: ${links.join(", ")}\n`
             }
+
+            const testsToRerun = Object.values(failedTests[pgVersion]).map(x => x[0].name)
+            const command = `DEFAULT_PG_VERSION=${pgVersion} scripts/pytest -k "${testsToRerun.join(" or ")}"`
+
+            commentBody += "```\n"
+            commentBody += "# Run failed tests locally:\n"
+            commentBody += `${command}\n`
+            commentBody += "```\n"
         }
     }
 
