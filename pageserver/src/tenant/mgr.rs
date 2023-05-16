@@ -296,6 +296,11 @@ pub async fn create_tenant(
         let created_tenant =
             schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
 
+        fail::fail_point!("tenant-create-fail", |_| {
+            created_tenant.set_stopping(); // add this to all possible error paths
+            anyhow::bail!("tenant-create-fail");
+        });
+
         let crated_tenant_id = created_tenant.tenant_id();
         if tenant_id != crated_tenant_id {
             created_tenant.set_stopping();

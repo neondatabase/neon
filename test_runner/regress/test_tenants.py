@@ -397,3 +397,34 @@ def test_pageserver_with_empty_tenants(
     assert (
         tenant_broken_count == 1
     ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"
+
+# Check that empty tenants work with or without the remote storage
+@pytest.mark.parametrize(
+    "remote_storage_kind", available_remote_storages() + [RemoteStorageKind.NOOP]
+)
+def test_pageserver_create_tenants_fail(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_pageserver_create_tenants_fail",
+    )
+
+    env = neon_env_builder.init_start()
+
+    env.pageserver.allowed_errors.append(
+        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+    )
+    env.pageserver.allowed_errors.append(
+        ".*could not load tenant.*Failed to list timelines directory.*"
+    )
+
+    pageserver_http = env.pageserver.http_client()
+    pageserver_http.configure_failpoints(("tenant-create-fail", "return"))
+
+    client = env.pageserver.http_client()
+
+    dir = client.tenant_create()
+
+    path = Path(env.repo_dir) / "tenants" / str(dir)
+    assert not path.exists()
