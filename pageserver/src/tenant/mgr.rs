@@ -1,6 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
+use std::cell::Cell;
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -279,24 +280,32 @@ pub async fn create_tenant(
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, |vacant_entry| {
+        let succeed = Cell::new(false);
+
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
         let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Create)?;
-        // TODO: tenant directory remains on disk if we bail out from here on.
-        //       See https://github.com/neondatabase/neon/issues/4233
+
+        scopeguard::defer! {
+            if !succeed.get() {
+                std::fs::remove_dir_all(&tenant_directory).ok(); // ignore the error
+            }
+        }
 
         let created_tenant =
             schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
-        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-        //      See https://github.com/neondatabase/neon/issues/4233
 
         let crated_tenant_id = created_tenant.tenant_id();
-        anyhow::ensure!(
-                tenant_id == crated_tenant_id,
-                "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
-            );
+        if tenant_id != crated_tenant_id {
+            created_tenant.set_stopping();
+            anyhow::bail!("loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})");    
+        }
+
         vacant_entry.insert(Arc::clone(&created_tenant));
+
+        succeed.set(true);
+
         Ok(created_tenant)
     }).await
 }
