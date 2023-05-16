@@ -122,11 +122,10 @@ module.exports = async ({ github, context, fetch, report }) => {
     const totalTestsCount = failedTestsCount + passedTestsCount + skippedTestsCount
     commentBody += `### ${totalTestsCount} tests run: ${passedTestsCount} passed, ${failedTestsCount} failed, ${skippedTestsCount} skipped ([full report](${reportUrl}))\n___\n`
 
-    // Print test resuls from the newest to the oldest PostgreSQL version for release and debug builds.
+    // Print test resuls from the newest to the oldest Postgres version for release and debug builds.
     for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
         if (Object.keys(failedTests[pgVersion]).length > 0) {
-            commentBody += `#### PostgreSQL ${pgVersion}\n\n`
-            commentBody += `Failed tests:\n`
+            commentBody += `#### Failures on Posgres ${pgVersion}\n\n`
             for (const [testName, tests] of Object.entries(failedTests[pgVersion])) {
                 const links = []
                 for (const test of tests) {
@@ -140,7 +139,7 @@ module.exports = async ({ github, context, fetch, report }) => {
             const command = `DEFAULT_PG_VERSION=${pgVersion} scripts/pytest -k "${testsToRerun.join(" or ")}"`
 
             commentBody += "```\n"
-            commentBody += "# Run failed tests locally:\n"
+            commentBody += `# Run failed on Postgres ${pgVersion} tests locally:\n`
             commentBody += `${command}\n`
             commentBody += "```\n"
         }
@@ -150,7 +149,7 @@ module.exports = async ({ github, context, fetch, report }) => {
         commentBody += `<details>\n<summary>Flaky tests (${flakyTestsCount})</summary>\n\n`
         for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
             if (Object.keys(flakyTests[pgVersion]).length > 0) {
-                commentBody += `#### PostgreSQL ${pgVersion}\n\n`
+                commentBody += `#### Postgres ${pgVersion}\n\n`
                 for (const [testName, tests] of Object.entries(flakyTests[pgVersion])) {
                     const links = []
                     for (const test of tests) {
