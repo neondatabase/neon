@@ -9,7 +9,8 @@ use std::{io, result};
 
 use anyhow::{bail, Context};
 use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
+    TenantConfigRequest, TenantConfigRequestConfig, TenantCreateRequest, TenantCreateRequestConfig,
+    TenantInfo, TimelineCreateRequest, TimelineInfo,
 };
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
@@ -316,8 +317,8 @@ impl PageServerNode {
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
-        let request = TenantCreateRequest {
-            new_tenant_id,
+
+        let config = TenantCreateRequestConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -372,6 +373,10 @@ impl PageServerNode {
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
         };
+        let request = TenantCreateRequest {
+            new_tenant_id,
+            config,
+        };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
         }
@@ -392,9 +397,9 @@ impl PageServerNode {
     }
 
     pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
-        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
-            .json(&TenantConfigRequest {
-                tenant_id,
+        let config = {
+            // Braces to make the diff easier to read
+            TenantConfigRequestConfig {
                 checkpoint_distance: settings
                     .get("checkpoint_distance")
                     .map(|x| x.parse::<u64>())
@@ -451,7 +456,11 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .get("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-            })
+            }
+        };
+
+        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
+            .json(&TenantConfigRequest { tenant_id, config })
             .send()?
             .error_from_body()?;
 
