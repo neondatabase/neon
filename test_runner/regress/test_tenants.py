@@ -423,5 +423,4 @@ def test_pageserver_create_tenants_fail(
     with pytest.raises(PageserverApiException, match=f"failpoint: tenant-create-fail"):
         client.tenant_create(tenant_id)
 
-    path = Path(env.repo_dir) / "tenants" / str(tenant_id)
-    assert not path.exists()
+    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
