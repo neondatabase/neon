@@ -834,6 +834,8 @@ impl Tenant {
         remote_client: RemoteTimelineClient,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
@@ -1098,6 +1100,8 @@ impl Tenant {
         local_metadata: TimelineMetadata,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
             RemoteTimelineClient::new(
                 remote_storage.clone(),
