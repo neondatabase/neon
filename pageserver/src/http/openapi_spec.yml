@@ -747,7 +747,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantCreateInfo"
+              $ref: "#/components/schemas/TenantCreateRequest"
       responses:
         "201":
           description: New tenant created successfully
@@ -794,7 +794,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantConfigureArg"
+              $ref: "#/components/schemas/TenantConfigRequest"
       responses:
         "200":
           description: OK
@@ -909,7 +909,7 @@ components:
             See the tenant `/attach` endpoint for more information.
           type: string
           enum: [ "maybe", "attached" ]
-    TenantCreateInfo:
+    TenantCreateRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
         - type: object
@@ -917,7 +917,7 @@ components:
             new_tenant_id:
               type: string
               format: hex
-    TenantConfigureArg:
+    TenantConfigRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
         - type: object
