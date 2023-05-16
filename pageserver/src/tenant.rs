@@ -2697,8 +2697,10 @@ pub(crate) fn create_tenant_files(
 ) -> anyhow::Result<PathBuf> {
     let target_tenant_directory = conf.tenant_path(&tenant_id);
     anyhow::ensure!(
-        !target_tenant_directory.exists(),
-        "cannot create new tenant repo: '{tenant_id}' directory already exists",
+        !target_tenant_directory
+            .try_exists()
+            .context("check existence of tenant directory")?,
+        "tenant directory already exists",
     );
 
     let temporary_tenant_dir =
