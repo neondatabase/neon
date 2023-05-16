@@ -945,7 +945,7 @@ impl Timeline {
 
     pub async fn wait_to_become_active(
         &self,
-        _ctx: &RequestContext, /* Prepare for use by cancellation */
+        _ctx: &RequestContext, // Prepare for use by cancellation
     ) -> Result<(), TimelineState> {
         let mut receiver = self.state.subscribe();
         loop {
