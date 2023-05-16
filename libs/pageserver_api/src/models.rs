@@ -232,6 +232,24 @@ impl TenantConfigRequest {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct TenantAttachRequest {
+    pub config: TenantAttachConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantAttachConfig(TenantConfig);
+
+impl std::ops::Deref for TenantAttachConfig {
+    type Target = TenantConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
