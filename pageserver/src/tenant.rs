@@ -1503,8 +1503,6 @@ impl Tenant {
             timeline
         };
 
-        let span = tracing::Span::current();
-
         // if we have concurrent requests, we will only execute one version of following future;
         // initially it did not have any means to be cancelled.
         //
@@ -1672,7 +1670,7 @@ impl Tenant {
                 Ok(())
             }
             // execute in the *winner's* span so we will capture the request id etc.
-            .instrument(span)
+            .in_current_span()
         };
 
         let (recv, maybe_fut) = timeline.delete_self.try_restart(factory).await;
