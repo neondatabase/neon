@@ -33,6 +33,7 @@ const STORAGE_TIME_OPERATIONS: &[&str] = &[
     "imitate logical size",
     "load layer map",
     "gc",
+    "create tenant",
 ];
 
 pub static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
