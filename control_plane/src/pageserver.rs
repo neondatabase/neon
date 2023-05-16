@@ -315,7 +315,7 @@ impl PageServerNode {
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
 
-        let config = models::TenantCreateRequestConfig {
+        let config = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -396,7 +396,7 @@ impl PageServerNode {
     pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
         let config = {
             // Braces to make the diff easier to read
-            models::TenantConfigRequestConfig {
+            models::TenantConfig {
                 checkpoint_distance: settings
                     .get("checkpoint_distance")
                     .map(|x| x.parse::<u64>())

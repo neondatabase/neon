@@ -137,11 +137,11 @@ pub struct TenantCreateRequest {
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub new_tenant_id: Option<TenantId>,
     #[serde(flatten)]
-    pub config: TenantCreateRequestConfig,
+    pub config: TenantConfig,
 }
 
 impl std::ops::Deref for TenantCreateRequest {
-    type Target = TenantCreateRequestConfig;
+    type Target = TenantConfig;
 
     fn deref(&self) -> &Self::Target {
         &self.config
@@ -149,7 +149,7 @@ impl std::ops::Deref for TenantCreateRequest {
 }
 
 #[derive(Serialize, Deserialize, Default)]
-pub struct TenantCreateRequestConfig {
+pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
@@ -171,8 +171,6 @@ pub struct TenantCreateRequestConfig {
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
 }
-
-pub type TenantConfigRequestConfig = TenantCreateRequestConfig;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -199,11 +197,11 @@ pub struct TenantConfigRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(flatten)]
-    pub config: TenantConfigRequestConfig,
+    pub config: TenantConfig,
 }
 
 impl std::ops::Deref for TenantConfigRequest {
-    type Target = TenantConfigRequestConfig;
+    type Target = TenantConfig;
 
     fn deref(&self) -> &Self::Target {
         &self.config
@@ -212,7 +210,7 @@ impl std::ops::Deref for TenantConfigRequest {
 
 impl TenantConfigRequest {
     pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
-        let config = TenantConfigRequestConfig {
+        let config = TenantConfig {
             checkpoint_distance: None,
             checkpoint_timeout: None,
             compaction_target_size: None,
