@@ -398,6 +398,7 @@ def test_pageserver_with_empty_tenants(
         tenant_broken_count == 1
     ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"
 
+
 # Check that empty tenants work with or without the remote storage
 @pytest.mark.parametrize(
     "remote_storage_kind", available_remote_storages() + [RemoteStorageKind.NOOP]
@@ -412,16 +413,9 @@ def test_pageserver_create_tenants_fail(
 
     env = neon_env_builder.init_start()
 
-    env.pageserver.allowed_errors.append(
-        ".*tenant-create-fail.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*Tenant is already in Broken state.*"
-    )
-    env.pageserver.allowed_errors.append(
-        ".*could not load tenant.*"
-    )
-
+    env.pageserver.allowed_errors.append(".*tenant-create-fail.*")
+    env.pageserver.allowed_errors.append(".*Tenant is already in Broken state.*")
+    env.pageserver.allowed_errors.append(".*could not load tenant.*")
 
     client = env.pageserver.http_client()
     client.configure_failpoints(("tenant-create-fail", "return"))
