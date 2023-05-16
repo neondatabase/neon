@@ -16,12 +16,12 @@ on:
   workflow_dispatch: # adds ability to run this manually
     inputs:
       region_id:
-        description: 'Use a particular region. If not set the default region will be used'
+        description: 'Project region id. If not set, the default region will be used'
         required: false
         default: 'aws-us-east-2'
       save_perf_report:
         type: boolean
-        description: 'Publish perf report or not. If not set, the report is published only for the main branch'
+        description: 'Publish perf report. If not set, the report will be published only for the main branch'
         required: false
 
 defaults:
