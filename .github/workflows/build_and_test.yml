@@ -350,8 +350,8 @@ jobs:
           real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
           rerun_flaky: true
+          pg_version: ${{ matrix.pg_version }}
         env:
-          DEFAULT_PG_VERSION: ${{ matrix.pg_version }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
 
