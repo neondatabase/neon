@@ -14,4 +14,4 @@ opt-level = 1
 
 [alias]
 build_testing = ["build", "--features", "testing"]
-neon = "run --bin neon_local --"
+neon = ["run", "--bin", "neon_local"]
