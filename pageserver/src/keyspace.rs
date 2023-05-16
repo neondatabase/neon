@@ -230,6 +230,7 @@ mod tests {
         let mut ks = KeySpaceRandomAccum::default();
         ks.add_range(kr(0..10));
         ks.add_range(kr(20..30));
+        assert_ks_eq(&ks.to_keyspace(), vec![kr(0..10), kr(20..30)]);
 
         // two separate ranges, added in reverse order
         //
