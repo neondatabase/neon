@@ -419,12 +419,12 @@ def test_pageserver_create_tenants_fail(
 
     client = env.pageserver.http_client()
     client.configure_failpoints(("tenant-create-fail", "return"))
-    tenant_id = "deadbeefdeadbeefdeadbeefdeadbeef"
+    tenant_id = TenantId("deadbeefdeadbeefdeadbeefdeadbeef")
     try:
         client.tenant_create(tenant_id)
     except Exception as e:
         exception_string = str(e)
         assert "tenant-create-fail" in exception_string, "should reach failpoint"
 
-    path = Path(env.repo_dir) / "tenants" / tenant_id
+    path = Path(env.repo_dir) / "tenants" / str(tenant_id)
     assert not path.exists()
