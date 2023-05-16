@@ -21,6 +21,7 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
     available_remote_storages,
 )
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.types import Lsn, TenantId, TimelineId
 from prometheus_client.samples import Sample
 
@@ -420,7 +421,7 @@ def test_pageserver_create_tenants_fail(
     client = env.pageserver.http_client()
     client.configure_failpoints(("tenant-create-fail", "return"))
     tenant_id = TenantId("deadbeefdeadbeefdeadbeefdeadbeef")
-    with pytest.raises(PageserverApiException, match=f"failpoint: tenant-create-fail"):
+    with pytest.raises(PageserverApiException, match="failpoint: tenant-create-fail"):
         client.tenant_create(tenant_id)
 
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()

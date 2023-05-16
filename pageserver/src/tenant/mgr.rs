@@ -301,7 +301,7 @@ pub async fn create_tenant(
 
         fail::fail_point!("tenant-create-fail", |_| {
             destroy(); // add this to all fail paths
-            anyhow::bail!("tenant-create-fail");
+            anyhow::bail!("failpoint: tenant-create-fail");
         });
 
         let crated_tenant_id = created_tenant.tenant_id();
