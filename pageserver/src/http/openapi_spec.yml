@@ -794,7 +794,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantConfigInfo"
+              $ref: "#/components/schemas/TenantConfigureArg"
       responses:
         "200":
           description: OK
@@ -846,7 +846,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TenantConfig"
+                $ref: "#/components/schemas/TenantConfigResponse"
         "400":
           description: Malformed get tenanant config request
           content:
@@ -910,34 +910,26 @@ components:
           type: string
           enum: [ "maybe", "attached" ]
     TenantCreateInfo:
+      allOf:
+        - $ref: '#/components/schemas/TenantConfig'
+        - type: object
+          properties:
+            new_tenant_id:
+              type: string
+              format: hex
+    TenantConfigureArg:
+      allOf:
+        - $ref: '#/components/schemas/TenantConfig'
+        - type: object
+          required:
+            - tenant_id
+          properties:
+            tenant_id:
+              type: string
+              format: hex
+    TenantConfig:
       type: object
       properties:
-        new_tenant_id:
-          type: string
-          format: hex
-        tenant_id:
-          type: string
-          format: hex
-        gc_period:
-          type: string
-        gc_horizon:
-          type: integer
-        pitr_interval:
-          type: string
-        checkpoint_distance:
-          type: integer
-        checkpoint_timeout:
-          type: string
-        compaction_period:
-          type: string
-        compaction_threshold:
-          type: string
-    TenantConfigInfo:
-      type: object
-      properties:
-        tenant_id:
-          type: string
-          format: hex
         gc_period:
           type: string
         gc_horizon:
@@ -964,13 +956,13 @@ components:
           type: integer
         trace_read_requests:
           type: boolean
-    TenantConfig:
+    TenantConfigResponse:
       type: object
       properties:
         tenant_specific_overrides:
-          $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfig"
         effective_config:
-          $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfig"
     TimelineInfo:
       type: object
       required:
