@@ -482,18 +482,21 @@ pub async fn attach_tenant(
         //       See https://github.com/neondatabase/neon/issues/4233
 
         // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
-        let marker_file_exists = conf.tenant_attaching_mark_file_path(&tenant_id).try_exists().context("check for attach marker file existence")?;
-        assert!(marker_file_exists, "create_tenant_files should have created the attach marker file");
+        let marker_file_exists = conf
+            .tenant_attaching_mark_file_path(&tenant_id)
+            .try_exists()
+            .context("check for attach marker file existence")?;
+        anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
         let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, Some(remote_storage), ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
         let attached_tenant_id = attached_tenant.tenant_id();
-                anyhow::ensure!(
-                tenant_id == attached_tenant_id,
-                "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
-            );
+        anyhow::ensure!(
+            tenant_id == attached_tenant_id,
+            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
+        );
         vacant_entry.insert(Arc::clone(&attached_tenant));
         Ok(())
     })
