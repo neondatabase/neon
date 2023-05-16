@@ -9,8 +9,8 @@ use std::{io, result};
 
 use anyhow::{bail, Context};
 use pageserver_api::models::{
-    TenantConfigRequest, TenantConfigRequestConfig, TenantCreateRequest, TenantCreateRequestConfig,
-    TenantInfo, TimelineCreateRequest, TimelineInfo,
+    TenantConfigRequest, TenantCreateRequest, TenantCreateRequestConfig, TenantInfo,
+    TimelineCreateRequest, TimelineInfo, TenantConfigRequestConfig,
 };
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
