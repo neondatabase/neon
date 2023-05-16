@@ -413,18 +413,24 @@ def test_pageserver_create_tenants_fail(
     env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.append(
-        ".*marking .* as locally complete, while it doesnt exist in remote index.*"
+        ".*tenant-create-fail.*"
     )
     env.pageserver.allowed_errors.append(
-        ".*could not load tenant.*Failed to list timelines directory.*"
+        ".*Tenant is already in Broken state.*"
+    )
+    env.pageserver.allowed_errors.append(
+        ".*could not load tenant.*"
     )
 
-    pageserver_http = env.pageserver.http_client()
-    pageserver_http.configure_failpoints(("tenant-create-fail", "return"))
 
     client = env.pageserver.http_client()
+    client.configure_failpoints(("tenant-create-fail", "return"))
+    tenant_id = "deadbeefdeadbeefdeadbeefdeadbeef"
+    try:
+        client.tenant_create(tenant_id)
+    except Exception as e:
+        exception_string = str(e)
+        assert "tenant-create-fail" in exception_string, "should reach failpoint"
 
-    dir = client.tenant_create()
-
-    path = Path(env.repo_dir) / "tenants" / str(dir)
+    path = Path(env.repo_dir) / "tenants" / tenant_id
     assert not path.exists()

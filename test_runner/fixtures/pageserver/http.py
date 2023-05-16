@@ -159,6 +159,8 @@ class PageserverHttpClient(requests.Session):
         self.verbose_error(res)
         if res.status_code == 409:
             raise Exception(f"could not create tenant: already exists for id {new_tenant_id}")
+        if not res.ok:
+            raise Exception(f"could not create tenant: {res.text}")
         new_tenant_id = res.json()
         assert isinstance(new_tenant_id, str)
         return TenantId(new_tenant_id)

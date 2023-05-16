@@ -296,14 +296,17 @@ pub async fn create_tenant(
         let created_tenant =
             schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
 
+        // As we already removed the directory, the tenant should directly go into the broken state.
+        let destroy = || created_tenant.set_broken("failed to create".into());
+
         fail::fail_point!("tenant-create-fail", |_| {
-            created_tenant.set_stopping(); // add this to all possible error paths
+            destroy(); // add this to all fail paths
             anyhow::bail!("tenant-create-fail");
         });
 
         let crated_tenant_id = created_tenant.tenant_id();
         if tenant_id != crated_tenant_id {
-            created_tenant.set_stopping();
+            destroy(); // add this to all fail paths
             anyhow::bail!("loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})");    
         }
 
