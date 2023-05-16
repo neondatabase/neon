@@ -272,6 +272,7 @@ class PageserverHttpClient(requests.Session):
         new_timeline_id: Optional[TimelineId] = None,
         ancestor_timeline_id: Optional[TimelineId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
+        **kwargs,
     ) -> Dict[Any, Any]:
         body: Dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
@@ -281,7 +282,9 @@ class PageserverHttpClient(requests.Session):
         if pg_version != PgVersion.NOT_SET:
             body["pg_version"] = int(pg_version)
 
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body)
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body, **kwargs
+        )
         self.verbose_error(res)
         if res.status_code == 409:
             raise Exception(f"could not create timeline: already exists for id {new_timeline_id}")
@@ -314,9 +317,9 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId):
+    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId, **kwargs):
         res = self.delete(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}", **kwargs
         )
         self.verbose_error(res)
         res_json = res.json()

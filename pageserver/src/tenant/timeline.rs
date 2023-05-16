@@ -396,6 +396,9 @@ pub enum PageReconstructError {
     /// The operation was cancelled
     Cancelled,
 
+    /// The ancestor of this is being stopped
+    AncestorStopping(TimelineId),
+
     /// An error happened replaying WAL records
     #[error(transparent)]
     WalRedo(#[from] crate::walredo::WalRedoError),
@@ -414,6 +417,9 @@ impl std::fmt::Debug for PageReconstructError {
                 )
             }
             Self::Cancelled => write!(f, "cancelled"),
+            Self::AncestorStopping(timeline_id) => {
+                write!(f, "ancestor timeline {timeline_id} is being stopped")
+            }
             Self::WalRedo(err) => err.fmt(f),
         }
     }
@@ -432,9 +438,20 @@ impl std::fmt::Display for PageReconstructError {
                 )
             }
             Self::Cancelled => write!(f, "cancelled"),
+            Self::AncestorStopping(timeline_id) => {
+                write!(f, "ancestor timeline {timeline_id} is being stopped")
+            }
             Self::WalRedo(err) => err.fmt(f),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum LogicalSizeCalculationCause {
+    Initial,
+    ConsumptionMetricsSyntheticSize,
+    EvictionTaskImitation,
+    TenantSizeHandler,
 }
 
 /// Public interface functions
@@ -924,6 +941,31 @@ impl Timeline {
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
         self.state.subscribe()
+    }
+
+    pub async fn wait_to_become_active(
+        &self,
+        _ctx: &RequestContext, /* Prepare for use by cancellation */
+    ) -> Result<(), TimelineState> {
+        let mut receiver = self.state.subscribe();
+        loop {
+            let current_state = *receiver.borrow_and_update();
+            match current_state {
+                TimelineState::Loading => {
+                    receiver
+                        .changed()
+                        .await
+                        .expect("holding a reference to self");
+                }
+                TimelineState::Active { .. } => {
+                    return Ok(());
+                }
+                TimelineState::Broken { .. } | TimelineState::Stopping => {
+                    // There's no chance the timeline can transition back into ::Active
+                    return Err(current_state);
+                }
+            }
+        }
     }
 
     pub fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
@@ -1839,18 +1881,31 @@ impl Timeline {
                 // to spawn_ondemand_logical_size_calculation.
                 let cancel = CancellationToken::new();
                 let calculated_size = match self_clone
-                    .logical_size_calculation_task(lsn, &background_ctx, cancel)
+                    .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx, cancel)
                     .await
                 {
                     Ok(s) => s,
                     Err(CalculateLogicalSizeError::Cancelled) => {
                         // Don't make noise, this is a common task.
-                        // In the unlikely case that there ihs another call to this function, we'll retry
+                        // In the unlikely case that there is another call to this function, we'll retry
                         // because initial_logical_size is still None.
                         info!("initial size calculation cancelled, likely timeline delete / tenant detach");
                         return Ok(());
                     }
-                    x @ Err(_) => x.context("Failed to calculate logical size")?,
+                    Err(CalculateLogicalSizeError::Other(err)) => {
+                        if let Some(e @ PageReconstructError::AncestorStopping(_)) =
+                            err.root_cause().downcast_ref()
+                        {
+                            // This can happen if the timeline parent timeline switches to
+                            // Stopping state while we're still calculating the initial
+                            // timeline size for the child, for example if the tenant is
+                            // being detached or the pageserver is shut down. Like with
+                            // CalculateLogicalSizeError::Cancelled, don't make noise.
+                            info!("initial size calculation failed because the timeline or its ancestor is Stopping, likely because the tenant is being detached: {e:#}");
+                            return Ok(());
+                        }
+                        return Err(err.context("Failed to calculate logical size"));
+                    }
                 };
 
                 // we cannot query current_logical_size.current_size() to know the current
@@ -1886,13 +1941,14 @@ impl Timeline {
                 // so that we prevent future callers from spawning this task
                 permit.forget();
                 Ok(())
-            },
+            }.in_current_span(),
         );
     }
 
     pub fn spawn_ondemand_logical_size_calculation(
         self: &Arc<Self>,
         lsn: Lsn,
+        cause: LogicalSizeCalculationCause,
         ctx: RequestContext,
         cancel: CancellationToken,
     ) -> oneshot::Receiver<Result<u64, CalculateLogicalSizeError>> {
@@ -1915,22 +1971,26 @@ impl Timeline {
             false,
             async move {
                 let res = self_clone
-                    .logical_size_calculation_task(lsn, &ctx, cancel)
+                    .logical_size_calculation_task(lsn, cause, &ctx, cancel)
                     .await;
                 let _ = sender.send(res).ok();
                 Ok(()) // Receiver is responsible for handling errors
-            },
+            }
+            .in_current_span(),
         );
         receiver
     }
 
-    #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
+    #[instrument(skip_all)]
     async fn logical_size_calculation_task(
         self: &Arc<Self>,
         lsn: Lsn,
+        cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
         cancel: CancellationToken,
     ) -> Result<u64, CalculateLogicalSizeError> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
 
@@ -1938,7 +1998,7 @@ impl Timeline {
             let cancel = cancel.child_token();
             let ctx = ctx.attached_child();
             self_calculation
-                .calculate_logical_size(lsn, cancel, &ctx)
+                .calculate_logical_size(lsn, cause, cancel, &ctx)
                 .await
         });
         let timeline_state_cancellation = async {
@@ -1993,6 +2053,7 @@ impl Timeline {
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
+        cause: LogicalSizeCalculationCause,
         cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
@@ -2026,7 +2087,15 @@ impl Timeline {
         if let Some(size) = self.current_logical_size.initialized_size(up_to_lsn) {
             return Ok(size);
         }
-        let timer = self.metrics.logical_size_histo.start_timer();
+        let storage_time_metrics = match cause {
+            LogicalSizeCalculationCause::Initial
+            | LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize
+            | LogicalSizeCalculationCause::TenantSizeHandler => &self.metrics.logical_size_histo,
+            LogicalSizeCalculationCause::EvictionTaskImitation => {
+                &self.metrics.imitate_logical_size_histo
+            }
+        };
+        let timer = storage_time_metrics.start_timer();
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
             .await?;
@@ -2218,6 +2287,46 @@ impl Timeline {
                     Ok(timeline) => timeline,
                     Err(e) => return Err(PageReconstructError::from(e)),
                 };
+
+                // It's possible that the ancestor timeline isn't active yet, or
+                // is active but hasn't yet caught up to the branch point. Wait
+                // for it.
+                //
+                // This cannot happen while the pageserver is running normally,
+                // because you cannot create a branch from a point that isn't
+                // present in the pageserver yet. However, we don't wait for the
+                // branch point to be uploaded to cloud storage before creating
+                // a branch. I.e., the branch LSN need not be remote consistent
+                // for the branching operation to succeed.
+                //
+                // Hence, if we try to load a tenant in such a state where
+                // 1. the existence of the branch was persisted (in IndexPart and/or locally)
+                // 2. but the ancestor state is behind branch_lsn because it was not yet persisted
+                // then we will need to wait for the ancestor timeline to
+                // re-stream WAL up to branch_lsn before we access it.
+                //
+                // How can a tenant get in such a state?
+                // - ungraceful pageserver process exit
+                // - detach+attach => this is a bug, https://github.com/neondatabase/neon/issues/4219
+                //
+                // NB: this could be avoided by requiring
+                //   branch_lsn >= remote_consistent_lsn
+                // during branch creation.
+                match ancestor.wait_to_become_active(ctx).await {
+                    Ok(()) => {}
+                    Err(state) if state == TimelineState::Stopping => {
+                        return Err(PageReconstructError::AncestorStopping(ancestor.timeline_id));
+                    }
+                    Err(state) => {
+                        return Err(PageReconstructError::Other(anyhow::anyhow!(
+                            "Timeline {} will not become active. Current state: {:?}",
+                            ancestor.timeline_id,
+                            &state,
+                        )));
+                    }
+                }
+                ancestor.wait_lsn(timeline.ancestor_lsn, ctx).await?;
+
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);

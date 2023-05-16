@@ -91,7 +91,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
             // the user neither enabled SNI nor resorted to any other method
             // for passing the project name we rely on. We should show them
             // the most helpful error message and point to the documentation.
-            .ok_or(AuthErrorImpl::MissingProjectName)?;
+            .ok_or(AuthErrorImpl::MissingEndpointName)?;
 
         Ok(payload)
     }

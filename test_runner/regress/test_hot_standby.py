@@ -1,7 +1,9 @@
 import pytest
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.pg_version import PgVersion, xfail_on_postgres
 
 
+@xfail_on_postgres(PgVersion.V15, reason="https://github.com/neondatabase/neon/pull/4182")
 @pytest.mark.timeout(1800)
 def test_hot_standby(neon_simple_env: NeonEnv):
     env = neon_simple_env

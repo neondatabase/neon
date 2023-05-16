@@ -46,6 +46,20 @@ class PgVersion(str, enum.Enum):
 DEFAULT_VERSION: PgVersion = PgVersion.V14
 
 
+def skip_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is version,
+        reason=reason,
+    )
+
+
+def xfail_on_postgres(version: PgVersion, reason: str):
+    return pytest.mark.xfail(
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is version,
+        reason=reason,
+    )
+
+
 def pytest_addoption(parser: Parser):
     parser.addoption(
         "--pg-version",

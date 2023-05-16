@@ -30,6 +30,7 @@
 //!             -b /usr/local/bin/postgres
 //! ```
 //!
+use std::collections::HashMap;
 use std::fs::File;
 use std::panic;
 use std::path::Path;
@@ -66,6 +67,54 @@ fn main() -> Result<()> {
         .expect("Postgres connection string is required");
     let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
+
+    // Extract OpenTelemetry context for the startup actions from the
+    // TRACEPARENT and TRACESTATE env variables, and attach it to the current
+    // tracing context.
+    //
+    // This is used to propagate the context for the 'start_compute' operation
+    // from the neon control plane. This allows linking together the wider
+    // 'start_compute' operation that creates the compute container, with the
+    // startup actions here within the container.
+    //
+    // There is no standard for passing context in env variables, but a lot of
+    // tools use TRACEPARENT/TRACESTATE, so we use that convention too. See
+    // https://github.com/open-telemetry/opentelemetry-specification/issues/740
+    //
+    // Switch to the startup context here, and exit it once the startup has
+    // completed and Postgres is up and running.
+    //
+    // If this pod is pre-created without binding it to any particular endpoint
+    // yet, this isn't the right place to enter the startup context. In that
+    // case, the control plane should pass the tracing context as part of the
+    // /configure API call.
+    //
+    // NOTE: This is supposed to only cover the *startup* actions. Once
+    // postgres is configured and up-and-running, we exit this span. Any other
+    // actions that are performed on incoming HTTP requests, for example, are
+    // performed in separate spans.
+    //
+    // XXX: If the pod is restarted, we perform the startup actions in the same
+    // context as the original startup actions, which probably doesn't make
+    // sense.
+    let mut startup_tracing_carrier: HashMap<String, String> = HashMap::new();
+    if let Ok(val) = std::env::var("TRACEPARENT") {
+        startup_tracing_carrier.insert("traceparent".to_string(), val);
+    }
+    if let Ok(val) = std::env::var("TRACESTATE") {
+        startup_tracing_carrier.insert("tracestate".to_string(), val);
+    }
+    let startup_context_guard = if !startup_tracing_carrier.is_empty() {
+        use opentelemetry::propagation::TextMapPropagator;
+        use opentelemetry::sdk::propagation::TraceContextPropagator;
+        let guard = TraceContextPropagator::new()
+            .extract(&startup_tracing_carrier)
+            .attach();
+        info!("startup tracing context attached");
+        Some(guard)
+    } else {
+        None
+    };
 
     let compute_id = matches.get_one::<String>("compute-id");
     let control_plane_uri = matches.get_one::<String>("control-plane-uri");
@@ -148,8 +197,6 @@ fn main() -> Result<()> {
 
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
-    let pspec = state.pspec.as_ref().expect("spec must be set");
-    let startup_tracing_context = pspec.spec.startup_tracing_context.clone();
 
     // Record for how long we slept waiting for the spec.
     state.metrics.wait_for_spec_ms = Utc::now()
@@ -164,29 +211,6 @@ fn main() -> Result<()> {
     state.status = ComputeStatus::Init;
     compute.state_changed.notify_all();
     drop(state);
-
-    // Extract OpenTelemetry context for the startup actions from the spec, and
-    // attach it to the current tracing context.
-    //
-    // This is used to propagate the context for the 'start_compute' operation
-    // from the neon control plane. This allows linking together the wider
-    // 'start_compute' operation that creates the compute container, with the
-    // startup actions here within the container.
-    //
-    // Switch to the startup context here, and exit it once the startup has
-    // completed and Postgres is up and running.
-    //
-    // NOTE: This is supposed to only cover the *startup* actions. Once
-    // postgres is configured and up-and-running, we exit this span. Any other
-    // actions that are performed on incoming HTTP requests, for example, are
-    // performed in separate spans.
-    let startup_context_guard = if let Some(ref carrier) = startup_tracing_context {
-        use opentelemetry::propagation::TextMapPropagator;
-        use opentelemetry::sdk::propagation::TraceContextPropagator;
-        Some(TraceContextPropagator::new().extract(carrier).attach())
-    } else {
-        None
-    };
 
     // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");

@@ -146,6 +146,10 @@ pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = (1 << 1) as u8;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 
+// From replication/message.h
+pub const XLOG_LOGICAL_MESSAGE: u8 = 0x00;
+
+// From rmgrlist.h
 pub const RM_XLOG_ID: u8 = 0;
 pub const RM_XACT_ID: u8 = 1;
 pub const RM_SMGR_ID: u8 = 2;
@@ -157,6 +161,7 @@ pub const RM_RELMAP_ID: u8 = 7;
 pub const RM_STANDBY_ID: u8 = 8;
 pub const RM_HEAP2_ID: u8 = 9;
 pub const RM_HEAP_ID: u8 = 10;
+pub const RM_LOGICALMSG_ID: u8 = 21;
 
 // from xlogreader.h
 pub const XLR_INFO_MASK: u8 = 0x0F;
