@@ -3410,6 +3410,13 @@ impl Timeline {
                             &w.lsn_range(),
                             false, // not an image layer
                         ) {
+                            info!(
+                                "Skip generation of duplicate layer {}_{}__{}_{}",
+                                w.key_start(),
+                                end_key,
+                                w.lsn_range().start,
+                                w.lsn_range().end
+                            );
                             drop(w);
                         } else {
                             let new_layer = w.finish(end_key)?;
