@@ -29,6 +29,7 @@ use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline}
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
+    cancel_log::CancelationLoggingExt,
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
@@ -186,6 +187,7 @@ async fn build_timeline_info(
                     CancellationToken::new(),
                     ctx,
                 )
+                .log_being_canceled("get_current_logical_size_non_incremental")
                 .await?,
         );
     }
@@ -338,7 +340,9 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
 
     let timeline_info = async {
-        let tenant = mgr::get_tenant(tenant_id, true).await?;
+        let tenant = mgr::get_tenant(tenant_id, true)
+            .log_being_canceled("get_tenant")
+            .await?;
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
@@ -349,6 +353,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
             include_non_incremental_logical_size.unwrap_or(false),
             &ctx,
         )
+        .log_being_canceled("build_timeline_info")
         .await
         .context("get local timeline info")
         .map_err(ApiError::InternalServerError)?;
@@ -356,6 +361,7 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
         Ok::<_, ApiError>(timeline_info)
     }
     .instrument(info_span!("timeline_detail", tenant = %tenant_id, timeline = %timeline_id))
+    .log_being_canceled("whole response")
     .await?;
 
     json_response(StatusCode::OK, timeline_info)

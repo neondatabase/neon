@@ -147,3 +147,56 @@ macro_rules! const_assert {
         const _: () = assert!($($args)*);
     };
 }
+
+pub mod cancel_log {
+    pub trait CancelationLoggingExt {
+        fn log_being_canceled(self, step: &'static str) -> LogCancelation<Self>
+        where
+            Self: Sized;
+    }
+
+    impl<Fut: std::future::Future> CancelationLoggingExt for Fut {
+        fn log_being_canceled(self, step: &'static str) -> LogCancelation<Self>
+        where
+            Self: Sized,
+        {
+            LogCancelation {
+                inner: self,
+                name: Some(step),
+                span: tracing::Span::current(),
+            }
+        }
+    }
+
+    #[pin_project::pin_project(PinnedDrop)]
+    pub struct LogCancelation<Fut> {
+        #[pin]
+        inner: Fut,
+        name: Option<&'static str>,
+        span: tracing::Span,
+    }
+
+    impl<Fut: std::future::Future> std::future::Future for LogCancelation<Fut> {
+        type Output = Fut::Output;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            let this = self.project();
+            let ready = std::task::ready!(this.inner.poll(cx));
+            this.name.take();
+            std::task::Poll::Ready(ready)
+        }
+    }
+
+    #[pin_project::pinned_drop]
+    impl<Fut> PinnedDrop for LogCancelation<Fut> {
+        fn drop(self: std::pin::Pin<&mut Self>) {
+            if let Some(name) = self.name {
+                let _g = self.span.enter();
+                tracing::info!("canceled while waiting for {name}");
+            }
+        }
+    }
+}
