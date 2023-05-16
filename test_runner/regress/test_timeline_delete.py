@@ -420,11 +420,7 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
 
 def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     """
-    If the client hangs up before we start the index part upload but after we mark it
-    deleted in local memory, a subsequent delete_timeline call should be able to do
-    another delete timeline operation.
-
-    This tests cancel safety up to the given failpoint.
+    Make sure the timeline_delete runs to completion even if first request is cancelled because of a timeout.
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
@@ -461,19 +457,18 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     wait_until(50, 0.1, got_hangup_log_message)
 
-    # ok, retry without failpoint, it should succeed
+    # after disabling the failpoint pause, the original attempt should complete eventually
     ps_http.configure_failpoints((failpoint_name, "off"))
 
-    try:
-        ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
-        env.pageserver.allowed_errors.append(
-            f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
-        )
-    except PageserverApiException as e:
-        if e.status_code != 404:
-            raise e
-        else:
-            # mock_s3 was fast enough to delete before we got the request in
-            env.pageserver.allowed_errors.append(
-                f".*{child_timeline_id}.*Error processing HTTP request: NotFound: timeline not found"
-            )
+    def timeline_goes_away():
+        try:
+            ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
+            assert False, "expected a 404"
+        except PageserverApiException as e:
+            if e.status_code != 404:
+                raise e
+            else:
+                # 404 received, timeline delete is now complete
+                pass
+
+    wait_until(50, 0.5, timeline_goes_away)
