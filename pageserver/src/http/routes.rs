@@ -398,9 +398,17 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     let state = get_state(&request);
 
     if let Some(remote_storage) = &state.remote_storage {
-        mgr::attach_tenant(state.conf, tenant_id, remote_storage.clone(), &ctx)
-            .instrument(info_span!("tenant_attach", tenant = %tenant_id))
-            .await?;
+        mgr::attach_tenant(
+            state.conf,
+            tenant_id,
+            // XXX: Attach should provide the config, especially during tenant migration.
+            //      See https://github.com/neondatabase/neon/issues/1555
+            TenantConfOpt::default(),
+            remote_storage.clone(),
+            &ctx,
+        )
+        .instrument(info_span!("tenant_attach", tenant = %tenant_id))
+        .await?;
     } else {
         return Err(ApiError::BadRequest(anyhow!(
             "attach_tenant is not possible because pageserver was configured without remote storage"
