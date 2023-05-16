@@ -492,37 +492,43 @@ jobs:
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
-      - name: Build and upload coverage report
+      - name: Build coverage report
+        env:
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
-          COMMIT_URL=https://github.com/${{ github.repository }}/commit/$COMMIT_SHA
-
           scripts/coverage \
             --dir=/tmp/coverage report \
             --input-objects=/tmp/coverage/binaries.list \
-            --commit-url=$COMMIT_URL \
+            --commit-url=${COMMIT_URL} \
             --format=github
 
-          REPORT_URL=https://${{ github.repository_owner }}.github.io/zenith-coverage-data/$COMMIT_SHA
+      - name: Upload coverage report
+        id: upload-coverage-report
+        env:
+          BUCKET: neon-github-public-dev
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://neon-github-public-dev/code-coverage/${COMMIT_SHA}
 
-          scripts/git-upload \
-            --repo=https://${{ secrets.VIP_VAP_ACCESS_TOKEN }}@github.com/${{ github.repository_owner }}/zenith-coverage-data.git \
-            --message="Add code coverage for $COMMIT_URL" \
-            copy /tmp/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
+          echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
-          # Add link to the coverage report to the commit
-          curl -f -X POST \
-          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
-          -H "Accept: application/vnd.github.v3+json" \
-          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-          --data \
-            "{
-              \"state\": \"success\",
-              \"context\": \"neon-coverage\",
-              \"description\": \"Coverage report is ready\",
-              \"target_url\": \"$REPORT_URL\"
-            }"
+      - uses: actions/github-script@v6
+        env:
+          REPORT_URL: ${{ steps.upload-coverage-report.outputs.report-url }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        with:
+          script: |
+            const { REPORT_URL, COMMIT_SHA } = process.env
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: `${COMMIT_SHA}`,
+              state: 'success',
+              target_url: `${REPORT_URL}`,
+              context: 'Code coverage report',
+            })
 
   trigger-e2e-tests:
     runs-on: [ self-hosted, gen3, small ]
