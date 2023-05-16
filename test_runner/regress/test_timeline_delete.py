@@ -324,11 +324,7 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
     If we're stuck uploading the index file with the is_delete flag,
     eventually console will hand up and retry.
     If we're still stuck at the retry time, ensure that the retry
-    fails with status 500, signalling to console that it should retry
-    later.
-    Ideally, timeline_delete should return 202 Accepted and require
-    console to poll for completion, but, that would require changing
-    the API contract.
+    eventually completes with the same status.
     """
 
     neon_env_builder.enable_remote_storage(
@@ -342,7 +338,6 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
 
     ps_http = env.pageserver.http_client()
 
-    # make the first call sleep practically forever
     failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
     ps_http.configure_failpoints((failpoint_name, "pause"))
 
