@@ -401,6 +401,13 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
         env.pageserver.allowed_errors.append(
             f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
         )
+
+        def second_call_attempt():
+            assert env.pageserver.log_contains(
+                f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+            )
+
+        wait_until(50, 0.1, second_call_attempt)
     finally:
         log.info("joining 1st thread")
         # in any case, make sure the lifetime of the thread is bounded to this test
