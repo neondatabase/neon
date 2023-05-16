@@ -188,11 +188,31 @@ impl AsyncRead for MyObject {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<(), io::Error>> {
+
         let data = &self.get_mut().data;
+
+        // let len: usize = data.len();
+        // let mut i: usize = 0;
+        // let mut zcount = 0;
+        // while len >= i + 5 {
+        //     let cmd = data[i];
+        //     info!("cmd: {}", cmd);
+        //     if cmd == 0x5a { zcount += 1; }
+        //     let size = u32::from_be_bytes(data[i..(i + 4)].try_into().unwrap());
+        //     i += usize::try_from(size).unwrap();
+        // }
+        // if zcount < 2 {
+        //     Poll::Pending
+        // } else {
+        //     let mut reader = &data[..];
+        //     Pin::new(&mut reader).poll_read(cx, buf)
+        //}
+
         let mut reader = &data[..];
         Pin::new(&mut reader).poll_read(cx, buf)
     }
 }
+
 impl AsyncWrite for MyObject {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -270,7 +290,7 @@ async fn ws_handler(
         }
 
         let mut my_object = MyObject::new(data);
-        let handle = tokio::spawn(async move {
+        let my_object = tokio::spawn(async move {
             let result = handle_ws_client(
                 config,
                 &cancel_map,
@@ -279,8 +299,9 @@ async fn ws_handler(
                 host,
             ).await;
             my_object
-        });
-        let my_object = handle.await.map_err(|e| ApiError::InternalServerError(e.into()))?;
+        })
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
 
         let response = Response::builder()
           .header("Content-Type", "application/octet-stream")
