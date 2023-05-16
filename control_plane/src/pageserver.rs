@@ -8,10 +8,7 @@ use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, Context};
-use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantCreateRequestConfig, TenantInfo,
-    TimelineCreateRequest, TimelineInfo, TenantConfigRequestConfig,
-};
+use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -318,7 +315,7 @@ impl PageServerNode {
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
 
-        let config = TenantCreateRequestConfig {
+        let config = models::TenantCreateRequestConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -373,7 +370,7 @@ impl PageServerNode {
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
         };
-        let request = TenantCreateRequest {
+        let request = models::TenantCreateRequest {
             new_tenant_id,
             config,
         };
@@ -399,7 +396,7 @@ impl PageServerNode {
     pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
         let config = {
             // Braces to make the diff easier to read
-            TenantConfigRequestConfig {
+            models::TenantConfigRequestConfig {
                 checkpoint_distance: settings
                     .get("checkpoint_distance")
                     .map(|x| x.parse::<u64>())
@@ -460,7 +457,7 @@ impl PageServerNode {
         };
 
         self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
-            .json(&TenantConfigRequest { tenant_id, config })
+            .json(&models::TenantConfigRequest { tenant_id, config })
             .send()?
             .error_from_body()?;
 
@@ -492,7 +489,7 @@ impl PageServerNode {
             Method::POST,
             format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
         )?
-        .json(&TimelineCreateRequest {
+        .json(&models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
             ancestor_timeline_id,
