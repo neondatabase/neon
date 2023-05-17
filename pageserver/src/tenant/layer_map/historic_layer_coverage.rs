@@ -398,6 +398,16 @@ pub struct BufferedHistoricLayerCoverage<Value> {
 
     /// All current layers. This is not used for search. Only to make rebuilds easier.
     layers: BTreeMap<LayerKey, Value>,
+
+    /// Redundant layers are ones that are completely covered by a union of other layers.
+    /// If two layers are identical only one of them will be marked as redundant, such that
+    /// it is always safe to remove all redundant layers without seeing any difference in
+    /// results.
+    ///
+    /// Redundant layers can show up if the pageserver dies during compaction, after
+    /// creating some L1 layers but before deleting the L0 layers. In this case we'd rather
+    /// notice the redundant L0 layers than recreate the L1 layer, or do something worse.
+    redundant_layers: BTreeMap<LayerKey, Value>,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for BufferedHistoricLayerCoverage<T> {
@@ -421,6 +431,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
             historic_coverage: HistoricLayerCoverage::<Value>::new(),
             buffer: BTreeMap::new(),
             layers: BTreeMap::new(),
+            redundant_layers: BTreeMap::new(),
         }
     }
 
@@ -501,6 +512,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
                 }
                 None => {
                     self.layers.remove(layer_key);
+                    self.redundant_layers.remove(layer_key);
                 }
             };
             false
@@ -511,8 +523,8 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
         self.historic_coverage.trim(&rebuild_since);
         for (layer_key, layer) in self.layers.range(
             LayerKey {
-                lsn: rebuild_since..0,
-                key: 0..0,
+                lsn: rebuild_since..u64::MAX,
+                key: 0..i128::MAX,
                 is_image: false,
             }..,
         ) {
@@ -521,7 +533,8 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
             num_inserted += 1;
 
             if was_noop {
-                // TODO keep track
+                println!("Redundant layer {:?}", layer_key);
+                self.redundant_layers.insert(layer_key.clone(), layer.clone());
             }
         }
 
