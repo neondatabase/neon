@@ -296,19 +296,23 @@ pub async fn create_tenant(
         let created_tenant =
             schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
 
-        // As we already removed the directory, the tenant should directly go into the broken state.
-        let destroy = || created_tenant.set_broken("failed to create".into());
+        let tenant_cloned = Arc::clone(&created_tenant);
+        scopeguard::defer! {
+            if !succeed.get() {
+                // As we might have removed the directory, the tenant should directly go into the broken state.
+                tenant_cloned.set_broken("failed to create".into());
+            }
+        }
 
         fail::fail_point!("tenant-create-fail", |_| {
-            destroy(); // add this to all fail paths
             anyhow::bail!("failpoint: tenant-create-fail");
         });
 
         let crated_tenant_id = created_tenant.tenant_id();
-        if tenant_id != crated_tenant_id {
-            destroy(); // add this to all fail paths
-            anyhow::bail!("loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})");    
-        }
+        anyhow::ensure!(
+            tenant_id == crated_tenant_id,
+            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
+        );
 
         vacant_entry.insert(Arc::clone(&created_tenant));
 
