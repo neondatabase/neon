@@ -149,11 +149,16 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(self, new_tenant_id: Optional[TenantId] = None) -> TenantId:
+    def tenant_create(
+        self, new_tenant_id: Optional[TenantId] = None, conf: Optional[Dict[str, Any]] = None
+    ) -> TenantId:
+        if conf is not None:
+            assert "new_tenant_id" not in conf.keys()
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
                 "new_tenant_id": str(new_tenant_id) if new_tenant_id else None,
+                **(conf or {}),
             },
         )
         self.verbose_error(res)
