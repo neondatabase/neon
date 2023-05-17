@@ -473,3 +473,6 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
                 pass
 
     wait_until(50, 0.5, timeline_goes_away)
+    env.pageserver.allowed_errors.append(
+        f".*NotFound: Timeline {env.initial_tenant}/{child_timeline_id} was not found"
+    )
