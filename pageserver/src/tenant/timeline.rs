@@ -3764,7 +3764,9 @@ impl Timeline {
 
         let mut layers_to_remove = Vec::new();
         let mut wanted_image_layers = KeySpaceRandomAccum::default();
-        let keyspace = self.collect_keyspace(new_gc_cutoff, ctx).await?;
+        let keyspace = self
+            .collect_keyspace(self.get_last_record_lsn(), ctx)
+            .await?;
 
         // Scan all layers in the timeline (remote or on-disk).
         //
