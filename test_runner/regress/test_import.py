@@ -9,13 +9,12 @@ from pathlib import Path
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
-    Postgres,
-    wait_for_last_record_lsn,
-    wait_for_upload,
 )
+from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 
@@ -61,20 +60,27 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         cwd=unpacked_base,
     )
 
+    # Make copy of base.tar and append some garbage to it.
+    base_plus_garbage_tar = os.path.join(basebackup_dir, "base-plus-garbage.tar")
+    shutil.copyfile(base_tar, base_plus_garbage_tar)
+    with open(base_plus_garbage_tar, "a") as f:
+        f.write("trailing garbage")
+
     # Get start_lsn and end_lsn
     with open(os.path.join(basebackup_dir, "backup_manifest")) as f:
         manifest = json.load(f)
         start_lsn = manifest["WAL-Ranges"][0]["Start-LSN"]
         end_lsn = manifest["WAL-Ranges"][0]["End-LSN"]
 
-    node_name = "import_from_vanilla"
+    endpoint_id = "ep-import_from_vanilla"
     tenant = TenantId.generate()
     timeline = TimelineId.generate()
 
     # Set up pageserver for import
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
-    env.pageserver.http_client().tenant_create(tenant)
+    client = env.pageserver.http_client()
+    client.tenant_create(tenant)
 
     env.pageserver.allowed_errors.extend(
         [
@@ -85,6 +91,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
             ".*InternalServerError.*Tenant .* not found.*",
             ".*InternalServerError.*Timeline .* not found.*",
             ".*InternalServerError.*Cannot delete timeline which has child timelines.*",
+            ".*ignored .* unexpected bytes after the tar archive.*",
         ]
     )
 
@@ -106,7 +113,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
                 "--timeline-id",
                 str(timeline),
                 "--node-name",
-                node_name,
+                endpoint_id,
                 "--base-lsn",
                 start_lsn,
                 "--base-tarfile",
@@ -130,17 +137,26 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     with pytest.raises(Exception):
         import_tar(corrupt_base_tar, wal_tar)
 
+    # A tar with trailing garbage is currently accepted. It prints a warnings
+    # to the pageserver log, however. Check that.
+    import_tar(base_plus_garbage_tar, wal_tar)
+    assert env.pageserver.log_contains(
+        ".*WARN.*ignored .* unexpected bytes after the tar archive.*"
+    )
+
+    # NOTE: delete can easily come before upload operations are completed
+    client.timeline_delete(tenant, timeline)
+
     # Importing correct backup works
     import_tar(base_tar, wal_tar)
 
     # Wait for data to land in s3
-    client = env.pageserver.http_client()
     wait_for_last_record_lsn(client, tenant, timeline, Lsn(end_lsn))
     wait_for_upload(client, tenant, timeline, Lsn(end_lsn))
 
     # Check it worked
-    pg = env.postgres.create_start(node_name, tenant_id=tenant)
-    assert pg.safe_psql("select count(*) from t") == [(300000,)]
+    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
 
 
 @pytest.mark.timeout(600)
@@ -154,10 +170,10 @@ def test_import_from_pageserver_small(pg_bin: PgBin, neon_env_builder: NeonEnvBu
     )
 
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_small")
-    pg = env.postgres.create_start("test_import_from_pageserver_small")
+    endpoint = env.endpoints.create_start("test_import_from_pageserver_small")
 
     num_rows = 3000
-    lsn = _generate_data(num_rows, pg)
+    lsn = _generate_data(num_rows, endpoint)
     _import(num_rows, lsn, env, pg_bin, timeline, env.pg_distrib_dir)
 
 
@@ -171,14 +187,14 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     env = neon_env_builder.init_start()
 
     timeline = env.neon_cli.create_branch("test_import_from_pageserver_multisegment")
-    pg = env.postgres.create_start("test_import_from_pageserver_multisegment")
+    endpoint = env.endpoints.create_start("test_import_from_pageserver_multisegment")
 
     # For `test_import_from_pageserver_multisegment`, we want to make sure that the data
     # is large enough to create multi-segment files. Typically, a segment file's size is
     # at most 1GB. A large number of inserted rows (`30000000`) is used to increase the
     # DB size to above 1GB. Related: https://github.com/neondatabase/neon/issues/2097.
     num_rows = 30000000
-    lsn = _generate_data(num_rows, pg)
+    lsn = _generate_data(num_rows, endpoint)
 
     logical_size = env.pageserver.http_client().timeline_detail(env.initial_tenant, timeline)[
         "current_logical_size"
@@ -199,12 +215,12 @@ def test_import_from_pageserver_multisegment(pg_bin: PgBin, neon_env_builder: Ne
     assert cnt_seg_files > 0
 
 
-def _generate_data(num_rows: int, pg: Postgres) -> Lsn:
+def _generate_data(num_rows: int, endpoint: Endpoint) -> Lsn:
     """Generate a table with `num_rows` rows.
 
     Returns:
     the latest insert WAL's LSN"""
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             # data loading may take a while, so increase statement timeout
             cur.execute("SET statement_timeout='300s'")
@@ -249,7 +265,7 @@ def _import(
     tar_output_file = result_basepath + ".stdout"
 
     # Stop the first pageserver instance, erase all its data
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     env.pageserver.stop()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
@@ -264,7 +280,7 @@ def _import(
     tenant = TenantId.generate()
 
     # Import to pageserver
-    node_name = "import_from_pageserver"
+    endpoint_id = "ep-import_from_pageserver"
     client = env.pageserver.http_client()
     client.tenant_create(tenant)
     env.neon_cli.raw_cli(
@@ -276,7 +292,7 @@ def _import(
             "--timeline-id",
             str(timeline),
             "--node-name",
-            node_name,
+            endpoint_id,
             "--base-lsn",
             str(lsn),
             "--base-tarfile",
@@ -291,8 +307,8 @@ def _import(
     wait_for_upload(client, tenant, timeline, lsn)
 
     # Check it worked
-    pg = env.postgres.create_start(node_name, tenant_id=tenant)
-    assert pg.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
+    endpoint = env.endpoints.create_start(endpoint_id, tenant_id=tenant)
+    assert endpoint.safe_psql("select count(*) from tbl") == [(expected_num_rows,)]
 
     # Take another fullbackup
     query = f"fullbackup { tenant} {timeline} {lsn}"

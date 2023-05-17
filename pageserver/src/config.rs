@@ -6,6 +6,7 @@
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use remote_storage::{RemotePath, RemoteStorageConfig};
+use serde::de::IntoDeserializer;
 use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
@@ -21,12 +22,13 @@ use std::time::Duration;
 use toml_edit;
 use toml_edit::{Document, Item};
 
+use postgres_backend::AuthType;
 use utils::{
     id::{NodeId, TenantId, TimelineId},
     logging::LogFormat,
-    postgres_backend::AuthType,
 };
 
+use crate::disk_usage_eviction_task::DiskUsageEvictionTaskConfig;
 use crate::tenant::config::TenantConf;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{TENANT_ATTACHING_MARKER_FILENAME, TIMELINES_SEGMENT_NAME};
@@ -89,6 +91,9 @@ pub mod defaults {
 #cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
 #synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
 
+
+#disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
+
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
@@ -100,6 +105,9 @@ pub mod defaults {
 #gc_horizon = {DEFAULT_GC_HORIZON}
 #image_creation_threshold = {DEFAULT_IMAGE_CREATION_THRESHOLD}
 #pitr_interval = '{DEFAULT_PITR_INTERVAL}'
+
+#min_resident_size_override = .. # in bytes
+#evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 
 # [remote_storage]
 
@@ -117,6 +125,9 @@ pub struct PageServerConf {
     pub listen_pg_addr: String,
     /// Example (default): 127.0.0.1:9898
     pub listen_http_addr: String,
+
+    /// Current availability zone. Used for traffic metrics.
+    pub availability_zone: Option<String>,
 
     // Timeout when waiting for WAL receiver to catch up to an LSN given in a GetPage@LSN call.
     pub wait_lsn_timeout: Duration,
@@ -138,9 +149,15 @@ pub struct PageServerConf {
 
     pub pg_distrib_dir: PathBuf,
 
-    pub auth_type: AuthType,
-
+    // Authentication
+    /// authentication method for the HTTP mgmt API
+    pub http_auth_type: AuthType,
+    /// authentication method for libpq connections from compute
+    pub pg_auth_type: AuthType,
+    /// Path to a file containing public key for verifying JWT tokens.
+    /// Used for both mgmt and compute auth, if enabled.
     pub auth_validation_public_key_path: Option<PathBuf>,
+
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
     pub default_tenant_conf: TenantConf,
@@ -153,6 +170,10 @@ pub struct PageServerConf {
 
     /// Number of concurrent [`Tenant::gather_size_inputs`] allowed.
     pub concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore,
+    /// Limit of concurrent [`Tenant::gather_size_inputs`] issued by module `eviction_task`.
+    /// The number of permits is the same as `concurrent_tenant_size_logical_size_queries`.
+    /// See the comment in `eviction_task` for details.
+    pub eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore,
 
     // How often to collect metrics and send them to the metrics endpoint.
     pub metric_collection_interval: Duration,
@@ -160,6 +181,8 @@ pub struct PageServerConf {
     pub cached_metric_collection_interval: Duration,
     pub metric_collection_endpoint: Option<Url>,
     pub synthetic_size_calculation_interval: Duration,
+
+    pub disk_usage_based_eviction: Option<DiskUsageEvictionTaskConfig>,
 
     pub test_remote_failures: u64,
 
@@ -196,6 +219,8 @@ struct PageServerConfigBuilder {
 
     listen_http_addr: BuilderValue<String>,
 
+    availability_zone: BuilderValue<Option<String>>,
+
     wait_lsn_timeout: BuilderValue<Duration>,
     wal_redo_timeout: BuilderValue<Duration>,
 
@@ -208,7 +233,8 @@ struct PageServerConfigBuilder {
 
     pg_distrib_dir: BuilderValue<PathBuf>,
 
-    auth_type: BuilderValue<AuthType>,
+    http_auth_type: BuilderValue<AuthType>,
+    pg_auth_type: BuilderValue<AuthType>,
 
     //
     auth_validation_public_key_path: BuilderValue<Option<PathBuf>>,
@@ -221,12 +247,14 @@ struct PageServerConfigBuilder {
 
     log_format: BuilderValue<LogFormat>,
 
-    concurrent_tenant_size_logical_size_queries: BuilderValue<ConfigurableSemaphore>,
+    concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
 
     metric_collection_interval: BuilderValue<Duration>,
     cached_metric_collection_interval: BuilderValue<Duration>,
     metric_collection_endpoint: BuilderValue<Option<Url>>,
     synthetic_size_calculation_interval: BuilderValue<Duration>,
+
+    disk_usage_based_eviction: BuilderValue<Option<DiskUsageEvictionTaskConfig>>,
 
     test_remote_failures: BuilderValue<u64>,
 
@@ -240,6 +268,7 @@ impl Default for PageServerConfigBuilder {
         Self {
             listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
             listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
+            availability_zone: Set(None),
             wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
                 .expect("cannot parse default wait lsn timeout")),
             wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
@@ -251,7 +280,8 @@ impl Default for PageServerConfigBuilder {
             pg_distrib_dir: Set(env::current_dir()
                 .expect("cannot access current directory")
                 .join("pg_install")),
-            auth_type: Set(AuthType::Trust),
+            http_auth_type: Set(AuthType::Trust),
+            pg_auth_type: Set(AuthType::Trust),
             auth_validation_public_key_path: Set(None),
             remote_storage_config: Set(None),
             id: NotSet,
@@ -264,7 +294,9 @@ impl Default for PageServerConfigBuilder {
             .expect("cannot parse default keepalive interval")),
             log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
 
-            concurrent_tenant_size_logical_size_queries: Set(ConfigurableSemaphore::default()),
+            concurrent_tenant_size_logical_size_queries: Set(
+                ConfigurableSemaphore::DEFAULT_INITIAL,
+            ),
             metric_collection_interval: Set(humantime::parse_duration(
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
@@ -278,6 +310,8 @@ impl Default for PageServerConfigBuilder {
             )
             .expect("cannot parse default synthetic size calculation interval")),
             metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
+
+            disk_usage_based_eviction: Set(None),
 
             test_remote_failures: Set(0),
 
@@ -293,6 +327,10 @@ impl PageServerConfigBuilder {
 
     pub fn listen_http_addr(&mut self, listen_http_addr: String) {
         self.listen_http_addr = BuilderValue::Set(listen_http_addr)
+    }
+
+    pub fn availability_zone(&mut self, availability_zone: Option<String>) {
+        self.availability_zone = BuilderValue::Set(availability_zone)
     }
 
     pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
@@ -323,8 +361,12 @@ impl PageServerConfigBuilder {
         self.pg_distrib_dir = BuilderValue::Set(pg_distrib_dir)
     }
 
-    pub fn auth_type(&mut self, auth_type: AuthType) {
-        self.auth_type = BuilderValue::Set(auth_type)
+    pub fn http_auth_type(&mut self, auth_type: AuthType) {
+        self.http_auth_type = BuilderValue::Set(auth_type)
+    }
+
+    pub fn pg_auth_type(&mut self, auth_type: AuthType) {
+        self.pg_auth_type = BuilderValue::Set(auth_type)
     }
 
     pub fn auth_validation_public_key_path(
@@ -354,7 +396,7 @@ impl PageServerConfigBuilder {
         self.log_format = BuilderValue::Set(log_format)
     }
 
-    pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: ConfigurableSemaphore) {
+    pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: NonZeroUsize) {
         self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
     }
 
@@ -386,6 +428,10 @@ impl PageServerConfigBuilder {
         self.test_remote_failures = BuilderValue::Set(fail_first);
     }
 
+    pub fn disk_usage_based_eviction(&mut self, value: Option<DiskUsageEvictionTaskConfig>) {
+        self.disk_usage_based_eviction = BuilderValue::Set(value);
+    }
+
     pub fn ondemand_download_behavior_treat_error_as_warn(
         &mut self,
         ondemand_download_behavior_treat_error_as_warn: bool,
@@ -395,6 +441,11 @@ impl PageServerConfigBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<PageServerConf> {
+        let concurrent_tenant_size_logical_size_queries = self
+            .concurrent_tenant_size_logical_size_queries
+            .ok_or(anyhow!(
+                "missing concurrent_tenant_size_logical_size_queries"
+            ))?;
         Ok(PageServerConf {
             listen_pg_addr: self
                 .listen_pg_addr
@@ -402,6 +453,9 @@ impl PageServerConfigBuilder {
             listen_http_addr: self
                 .listen_http_addr
                 .ok_or(anyhow!("missing listen_http_addr"))?,
+            availability_zone: self
+                .availability_zone
+                .ok_or(anyhow!("missing availability_zone"))?,
             wait_lsn_timeout: self
                 .wait_lsn_timeout
                 .ok_or(anyhow!("missing wait_lsn_timeout"))?,
@@ -419,7 +473,10 @@ impl PageServerConfigBuilder {
             pg_distrib_dir: self
                 .pg_distrib_dir
                 .ok_or(anyhow!("missing pg_distrib_dir"))?,
-            auth_type: self.auth_type.ok_or(anyhow!("missing auth_type"))?,
+            http_auth_type: self
+                .http_auth_type
+                .ok_or(anyhow!("missing http_auth_type"))?,
+            pg_auth_type: self.pg_auth_type.ok_or(anyhow!("missing pg_auth_type"))?,
             auth_validation_public_key_path: self
                 .auth_validation_public_key_path
                 .ok_or(anyhow!("missing auth_validation_public_key_path"))?,
@@ -436,11 +493,12 @@ impl PageServerConfigBuilder {
                 .broker_keepalive_interval
                 .ok_or(anyhow!("No broker keepalive interval provided"))?,
             log_format: self.log_format.ok_or(anyhow!("missing log_format"))?,
-            concurrent_tenant_size_logical_size_queries: self
-                .concurrent_tenant_size_logical_size_queries
-                .ok_or(anyhow!(
-                    "missing concurrent_tenant_size_logical_size_queries"
-                ))?,
+            concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
+                concurrent_tenant_size_logical_size_queries,
+            ),
+            eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
+                concurrent_tenant_size_logical_size_queries,
+            ),
             metric_collection_interval: self
                 .metric_collection_interval
                 .ok_or(anyhow!("missing metric_collection_interval"))?,
@@ -453,6 +511,9 @@ impl PageServerConfigBuilder {
             synthetic_size_calculation_interval: self
                 .synthetic_size_calculation_interval
                 .ok_or(anyhow!("missing synthetic_size_calculation_interval"))?,
+            disk_usage_based_eviction: self
+                .disk_usage_based_eviction
+                .ok_or(anyhow!("missing disk_usage_based_eviction"))?,
             test_remote_failures: self
                 .test_remote_failures
                 .ok_or(anyhow!("missing test_remote_failuers"))?,
@@ -599,6 +660,7 @@ impl PageServerConf {
             match key {
                 "listen_pg_addr" => builder.listen_pg_addr(parse_toml_string(key, item)?),
                 "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
+                "availability_zone" => builder.availability_zone(Some(parse_toml_string(key, item)?)),
                 "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
                 "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
                 "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
@@ -612,7 +674,8 @@ impl PageServerConf {
                 "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
                     PathBuf::from(parse_toml_string(key, item)?),
                 )),
-                "auth_type" => builder.auth_type(parse_toml_from_str(key, item)?),
+                "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
+                "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
                 "remote_storage" => {
                     builder.remote_storage_config(RemoteStorageConfig::from_toml(item)?)
                 }
@@ -628,8 +691,7 @@ impl PageServerConf {
                 "concurrent_tenant_size_logical_size_queries" => builder.concurrent_tenant_size_logical_size_queries({
                     let input = parse_toml_string(key, item)?;
                     let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
-                    let permits = NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?;
-                    ConfigurableSemaphore::new(permits)
+                    NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
                 }),
                 "metric_collection_interval" => builder.metric_collection_interval(parse_toml_duration(key, item)?),
                 "cached_metric_collection_interval" => builder.cached_metric_collection_interval(parse_toml_duration(key, item)?),
@@ -640,6 +702,13 @@ impl PageServerConf {
                 "synthetic_size_calculation_interval" =>
                     builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
                 "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
+                "disk_usage_based_eviction" => {
+                    tracing::info!("disk_usage_based_eviction: {:#?}", &item);
+                    builder.disk_usage_based_eviction(
+                        deserialize_from_item("disk_usage_based_eviction", item)
+                            .context("parse disk_usage_based_eviction")?
+                    )
+                },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
@@ -647,7 +716,7 @@ impl PageServerConf {
 
         let mut conf = builder.build().context("invalid config")?;
 
-        if conf.auth_type == AuthType::NeonJWT {
+        if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
                 .auth_validation_public_key_path
                 .get_or_insert_with(|| workdir.join("auth_public_key.pem"));
@@ -698,6 +767,12 @@ impl PageServerConf {
                 Some(parse_toml_u64("compaction_threshold", compaction_threshold)?.try_into()?);
         }
 
+        if let Some(image_creation_threshold) = item.get("image_creation_threshold") {
+            t_conf.image_creation_threshold = Some(
+                parse_toml_u64("image_creation_threshold", image_creation_threshold)?.try_into()?,
+            );
+        }
+
         if let Some(gc_horizon) = item.get("gc_horizon") {
             t_conf.gc_horizon = Some(parse_toml_u64("gc_horizon", gc_horizon)?);
         }
@@ -731,6 +806,27 @@ impl PageServerConf {
                 })?);
         }
 
+        if let Some(eviction_policy) = item.get("eviction_policy") {
+            t_conf.eviction_policy = Some(
+                deserialize_from_item("eviction_policy", eviction_policy)
+                    .context("parse eviction_policy")?,
+            );
+        }
+
+        if let Some(item) = item.get("min_resident_size_override") {
+            t_conf.min_resident_size_override = Some(
+                deserialize_from_item("min_resident_size_override", item)
+                    .context("parse min_resident_size_override")?,
+            );
+        }
+
+        if let Some(item) = item.get("evictions_low_residence_duration_metric_threshold") {
+            t_conf.evictions_low_residence_duration_metric_threshold = Some(parse_toml_duration(
+                "evictions_low_residence_duration_metric_threshold",
+                item,
+            )?);
+        }
+
         Ok(t_conf)
     }
 
@@ -750,10 +846,12 @@ impl PageServerConf {
             max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            availability_zone: None,
             superuser: "cloud_admin".to_string(),
             workdir: repo_dir,
             pg_distrib_dir,
-            auth_type: AuthType::Trust,
+            http_auth_type: AuthType::Trust,
+            pg_auth_type: AuthType::Trust,
             auth_validation_public_key_path: None,
             remote_storage_config: None,
             default_tenant_conf: TenantConf::default(),
@@ -761,10 +859,13 @@ impl PageServerConf {
             broker_keepalive_interval: Duration::from_secs(5000),
             log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
             concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+            eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
+            ),
             metric_collection_interval: Duration::from_secs(60),
             cached_metric_collection_interval: Duration::from_secs(60 * 60),
             metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
             synthetic_size_calculation_interval: Duration::from_secs(60),
+            disk_usage_based_eviction: None,
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
         }
@@ -821,6 +922,18 @@ where
     })
 }
 
+fn deserialize_from_item<T>(name: &str, item: &Item) -> anyhow::Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    // ValueDeserializer::new is not public, so use the ValueDeserializer's documented way
+    let deserializer = match item.clone().into_value() {
+        Ok(value) => value.into_deserializer(),
+        Err(item) => anyhow::bail!("toml_edit::Item '{item}' is not a toml_edit::Value"),
+    };
+    T::deserialize(deserializer).with_context(|| format!("deserializing item for node {name}"))
+}
+
 /// Configurable semaphore permits setting.
 ///
 /// Does not allow semaphore permits to be zero, because at runtime initially zero permits and empty
@@ -848,6 +961,11 @@ impl ConfigurableSemaphore {
             initial_permits,
             inner: std::sync::Arc::new(tokio::sync::Semaphore::new(initial_permits.get())),
         }
+    }
+
+    /// Returns the configured amount of permits.
+    pub fn initial_permits(&self) -> NonZeroUsize {
+        self.initial_permits
     }
 }
 
@@ -882,9 +1000,10 @@ mod tests {
 
     use remote_storage::{RemoteStorageKind, S3Config};
     use tempfile::{tempdir, TempDir};
+    use utils::serde_percent::Percent;
 
     use super::*;
-    use crate::DEFAULT_PG_VERSION;
+    use crate::{tenant::config::EvictionPolicy, DEFAULT_PG_VERSION};
 
     const ALL_BASE_VALUES_TOML: &str = r#"
 # Initial configuration file created by 'pageserver --init'
@@ -906,6 +1025,7 @@ metric_collection_interval = '222 s'
 cached_metric_collection_interval = '22200 s'
 metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
+
 log_format = 'json'
 
 "#;
@@ -931,6 +1051,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
                 listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+                availability_zone: None,
                 wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
                 wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
                 superuser: defaults::DEFAULT_SUPERUSER.to_string(),
@@ -938,7 +1059,8 @@ log_format = 'json'
                 max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
                 workdir,
                 pg_distrib_dir,
-                auth_type: AuthType::Trust,
+                http_auth_type: AuthType::Trust,
+                pg_auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
                 default_tenant_conf: TenantConf::default(),
@@ -948,6 +1070,8 @@ log_format = 'json'
                 )?,
                 log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                eviction_task_immitated_concurrent_logical_size_queries:
+                    ConfigurableSemaphore::default(),
                 metric_collection_interval: humantime::parse_duration(
                     defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
                 )?,
@@ -958,6 +1082,7 @@ log_format = 'json'
                 synthetic_size_calculation_interval: humantime::parse_duration(
                     defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
                 )?,
+                disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
             },
@@ -988,6 +1113,7 @@ log_format = 'json'
                 id: NodeId(10),
                 listen_pg_addr: "127.0.0.1:64000".to_string(),
                 listen_http_addr: "127.0.0.1:9898".to_string(),
+                availability_zone: None,
                 wait_lsn_timeout: Duration::from_secs(111),
                 wal_redo_timeout: Duration::from_secs(111),
                 superuser: "zzzz".to_string(),
@@ -995,7 +1121,8 @@ log_format = 'json'
                 max_file_descriptors: 333,
                 workdir,
                 pg_distrib_dir,
-                auth_type: AuthType::Trust,
+                http_auth_type: AuthType::Trust,
+                pg_auth_type: AuthType::Trust,
                 auth_validation_public_key_path: None,
                 remote_storage_config: None,
                 default_tenant_conf: TenantConf::default(),
@@ -1003,10 +1130,13 @@ log_format = 'json'
                 broker_keepalive_interval: Duration::from_secs(5),
                 log_format: LogFormat::Json,
                 concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
+                eviction_task_immitated_concurrent_logical_size_queries:
+                    ConfigurableSemaphore::default(),
                 metric_collection_interval: Duration::from_secs(222),
                 cached_metric_collection_interval: Duration::from_secs(22200),
                 metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
                 synthetic_size_calculation_interval: Duration::from_secs(333),
+                disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
             },
@@ -1133,6 +1263,7 @@ broker_endpoint = '{broker_endpoint}'
                         prefix_in_bucket: Some(prefix_in_bucket.clone()),
                         endpoint: Some(endpoint.clone()),
                         concurrency_limit: s3_concurrency_limit,
+                        max_keys_per_list_response: None,
                     }),
                 },
                 "Remote storage config should correctly parse the S3 config"
@@ -1166,6 +1297,71 @@ trace_read_requests = {trace_read_requests}"#,
             conf.default_tenant_conf.trace_read_requests, trace_read_requests,
             "Tenant config from pageserver config file should be parsed and udpated values used as defaults for all tenants",
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn eviction_pageserver_config_parse() -> anyhow::Result<()> {
+        let tempdir = tempdir()?;
+        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
+
+        let pageserver_conf_toml = format!(
+            r#"pg_distrib_dir = "{}"
+metric_collection_endpoint = "http://sample.url"
+metric_collection_interval = "10min"
+id = 222
+
+[disk_usage_based_eviction]
+max_usage_pct = 80
+min_avail_bytes = 0
+period = "10s"
+
+[tenant_config]
+evictions_low_residence_duration_metric_threshold = "20m"
+
+[tenant_config.eviction_policy]
+kind = "LayerAccessThreshold"
+period = "20m"
+threshold = "20m"
+"#,
+            pg_distrib_dir.display(),
+        );
+        let toml: Document = pageserver_conf_toml.parse()?;
+        let conf = PageServerConf::parse_and_validate(&toml, &workdir)?;
+
+        assert_eq!(conf.pg_distrib_dir, pg_distrib_dir);
+        assert_eq!(
+            conf.metric_collection_endpoint,
+            Some("http://sample.url".parse().unwrap())
+        );
+        assert_eq!(
+            conf.metric_collection_interval,
+            Duration::from_secs(10 * 60)
+        );
+        assert_eq!(
+            conf.default_tenant_conf
+                .evictions_low_residence_duration_metric_threshold,
+            Duration::from_secs(20 * 60)
+        );
+        assert_eq!(conf.id, NodeId(222));
+        assert_eq!(
+            conf.disk_usage_based_eviction,
+            Some(DiskUsageEvictionTaskConfig {
+                max_usage_pct: Percent::new(80).unwrap(),
+                min_avail_bytes: 0,
+                period: Duration::from_secs(10),
+                #[cfg(feature = "testing")]
+                mock_statvfs: None,
+            })
+        );
+        match &conf.default_tenant_conf.eviction_policy {
+            EvictionPolicy::NoEviction => panic!("Unexpected eviction opolicy tenant settings"),
+            EvictionPolicy::LayerAccessThreshold(eviction_thresold) => {
+                assert_eq!(eviction_thresold.period, Duration::from_secs(20 * 60));
+                assert_eq!(eviction_thresold.threshold, Duration::from_secs(20 * 60));
+            }
+        }
 
         Ok(())
     }

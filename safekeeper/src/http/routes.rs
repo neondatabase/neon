@@ -1,20 +1,23 @@
 use hyper::{Body, Request, Response, StatusCode, Uri};
 
-use anyhow::Context;
 use once_cell::sync::Lazy;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::SkTimelineInfo;
-use serde::Serialize;
-use serde::Serializer;
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::task::JoinError;
 
 use crate::safekeeper::ServerInfo;
 use crate::safekeeper::Term;
+use crate::{debug_dump, pull_timeline};
 
 use crate::timelines_global_map::TimelineDeleteForceResult;
 use crate::GlobalTimelines;
@@ -54,55 +57,48 @@ fn get_conf(request: &Request<Body>) -> &SafeKeeperConf {
         .as_ref()
 }
 
-/// Serialize through Display trait.
-fn display_serialize<S, F>(z: &F, s: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-    F: Display,
-{
-    s.serialize_str(&format!("{}", z))
-}
-
 /// Same as TermSwitchEntry, but serializes LSN using display serializer
 /// in Postgres format, i.e. 0/FFFFFFFF. Used only for the API response.
-#[derive(Debug, Serialize)]
-struct TermSwitchApiEntry {
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TermSwitchApiEntry {
     pub term: Term,
-    #[serde(serialize_with = "display_serialize")]
+    #[serde_as(as = "DisplayFromStr")]
     pub lsn: Lsn,
 }
 
 /// Augment AcceptorState with epoch for convenience
-#[derive(Debug, Serialize)]
-struct AcceptorStateStatus {
-    term: Term,
-    epoch: Term,
-    term_history: Vec<TermSwitchApiEntry>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AcceptorStateStatus {
+    pub term: Term,
+    pub epoch: Term,
+    pub term_history: Vec<TermSwitchApiEntry>,
 }
 
 /// Info about timeline on safekeeper ready for reporting.
-#[derive(Debug, Serialize)]
-struct TimelineStatus {
-    #[serde(serialize_with = "display_serialize")]
-    tenant_id: TenantId,
-    #[serde(serialize_with = "display_serialize")]
-    timeline_id: TimelineId,
-    acceptor_state: AcceptorStateStatus,
-    pg_info: ServerInfo,
-    #[serde(serialize_with = "display_serialize")]
-    flush_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    timeline_start_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    local_start_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    commit_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    backup_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    peer_horizon_lsn: Lsn,
-    #[serde(serialize_with = "display_serialize")]
-    remote_consistent_lsn: Lsn,
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimelineStatus {
+    #[serde_as(as = "DisplayFromStr")]
+    pub tenant_id: TenantId,
+    #[serde_as(as = "DisplayFromStr")]
+    pub timeline_id: TimelineId,
+    pub acceptor_state: AcceptorStateStatus,
+    pub pg_info: ServerInfo,
+    #[serde_as(as = "DisplayFromStr")]
+    pub flush_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub timeline_start_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub local_start_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub commit_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub backup_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_horizon_lsn: Lsn,
+    #[serde_as(as = "DisplayFromStr")]
+    pub remote_consistent_lsn: Lsn,
 }
 
 fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Result<(), ApiError> {
@@ -119,12 +115,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
     );
     check_permission(&request, Some(ttid.tenant_id))?;
 
-    let tli = GlobalTimelines::get(ttid)
-        // FIXME: Currently, the only errors from `GlobalTimelines::get` will be client errors
-        // because the provided timeline isn't there. However, the method can in theory change and
-        // fail from internal errors later. Remove this comment once it the method returns
-        // something other than `anyhow::Result`.
-        .map_err(ApiError::InternalServerError)?;
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
     let (inmem, state) = tli.get_state();
     let flush_lsn = tli.get_flush_lsn();
 
@@ -157,7 +148,7 @@ async fn timeline_status_handler(request: Request<Body>) -> Result<Response<Body
         commit_lsn: inmem.commit_lsn,
         backup_lsn: inmem.backup_lsn,
         peer_horizon_lsn: inmem.peer_horizon_lsn,
-        remote_consistent_lsn: inmem.remote_consistent_lsn,
+        remote_consistent_lsn: tli.get_walsenders().get_remote_consistent_lsn(),
     };
     json_response(StatusCode::OK, status)
 }
@@ -181,14 +172,54 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             .commit_lsn
             .segment_lsn(server_info.wal_seg_size as usize)
     });
-    tokio::task::spawn_blocking(move || {
-        GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
-    })
-    .await
-    .map_err(|e| ApiError::InternalServerError(e.into()))?
-    .map_err(ApiError::InternalServerError)?;
+    GlobalTimelines::create(ttid, server_info, request_data.commit_lsn, local_start_lsn)
+        .await
+        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
+}
+
+/// Pull timeline from peer safekeeper instances.
+async fn timeline_pull_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+
+    let data: pull_timeline::Request = json_request(&mut request).await?;
+
+    let resp = pull_timeline::handle_request(data)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, resp)
+}
+
+/// Download a file from the timeline directory.
+// TODO: figure out a better way to copy files between safekeepers
+async fn timeline_files_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let filename: String = parse_request_param(&request, "filename")?;
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+
+    let filepath = tli.timeline_dir.join(filename);
+    let mut file = File::open(&filepath)
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    let mut content = Vec::new();
+    // TODO: don't store files in memory
+    file.read_to_end(&mut content)
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.into()))?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .body(Body::from(content))
+        .map_err(|e| ApiError::InternalServerError(e.into()))
 }
 
 /// Deactivates the timeline and removes its data directory.
@@ -258,22 +289,78 @@ async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<B
         safekeeper_connstr: sk_info.safekeeper_connstr.unwrap_or_else(|| "".to_owned()),
         backup_lsn: sk_info.backup_lsn.0,
         local_start_lsn: sk_info.local_start_lsn.0,
+        availability_zone: None,
     };
 
-    let tli = GlobalTimelines::get(ttid)
-        // `GlobalTimelines::get` returns an error when it can't find the timeline.
-        .with_context(|| {
-            format!(
-                "Couldn't get timeline {} for tenant {}",
-                ttid.timeline_id, ttid.tenant_id
-            )
-        })
-        .map_err(ApiError::NotFound)?;
-    tli.record_safekeeper_info(&proto_sk_info)
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    tli.record_safekeeper_info(proto_sk_info)
         .await
         .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
+}
+
+fn parse_kv_str<E: fmt::Display, T: FromStr<Err = E>>(k: &str, v: &str) -> Result<T, ApiError> {
+    v.parse()
+        .map_err(|e| ApiError::BadRequest(anyhow::anyhow!("cannot parse {k}: {e}")))
+}
+
+/// Dump debug info about all available safekeeper state.
+async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permission(&request, None)?;
+    ensure_no_body(&mut request).await?;
+
+    let mut dump_all: Option<bool> = None;
+    let mut dump_control_file: Option<bool> = None;
+    let mut dump_memory: Option<bool> = None;
+    let mut dump_disk_content: Option<bool> = None;
+    let mut dump_term_history: Option<bool> = None;
+    let mut tenant_id: Option<TenantId> = None;
+    let mut timeline_id: Option<TimelineId> = None;
+
+    let query = request.uri().query().unwrap_or("");
+    let mut values = url::form_urlencoded::parse(query.as_bytes());
+
+    for (k, v) in &mut values {
+        match k.as_ref() {
+            "dump_all" => dump_all = Some(parse_kv_str(&k, &v)?),
+            "dump_control_file" => dump_control_file = Some(parse_kv_str(&k, &v)?),
+            "dump_memory" => dump_memory = Some(parse_kv_str(&k, &v)?),
+            "dump_disk_content" => dump_disk_content = Some(parse_kv_str(&k, &v)?),
+            "dump_term_history" => dump_term_history = Some(parse_kv_str(&k, &v)?),
+            "tenant_id" => tenant_id = Some(parse_kv_str(&k, &v)?),
+            "timeline_id" => timeline_id = Some(parse_kv_str(&k, &v)?),
+            _ => Err(ApiError::BadRequest(anyhow::anyhow!(
+                "Unknown query parameter: {}",
+                k
+            )))?,
+        }
+    }
+
+    let dump_all = dump_all.unwrap_or(false);
+    let dump_control_file = dump_control_file.unwrap_or(dump_all);
+    let dump_memory = dump_memory.unwrap_or(dump_all);
+    let dump_disk_content = dump_disk_content.unwrap_or(dump_all);
+    let dump_term_history = dump_term_history.unwrap_or(true);
+
+    let args = debug_dump::Args {
+        dump_all,
+        dump_control_file,
+        dump_memory,
+        dump_disk_content,
+        dump_term_history,
+        tenant_id,
+        timeline_id,
+    };
+
+    let resp = tokio::task::spawn_blocking(move || {
+        debug_dump::build(args).map_err(ApiError::InternalServerError)
+    })
+    .await
+    .map_err(|e: JoinError| ApiError::InternalServerError(e.into()))??;
+
+    // TODO: use streaming response
+    json_response(StatusCode::OK, resp)
 }
 
 /// Safekeeper http router.
@@ -311,11 +398,17 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
             timeline_delete_force_handler,
         )
         .delete("/v1/tenant/:tenant_id", tenant_delete_force_handler)
+        .post("/v1/pull_timeline", timeline_pull_handler)
+        .get(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/file/:filename",
+            timeline_files_handler,
+        )
         // for tests
         .post(
             "/v1/record_safekeeper_info/:tenant_id/:timeline_id",
             record_safekeeper_info,
         )
+        .get("/v1/debug_dump", dump_debug_handler)
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ from typing import List
 import pytest
 from fixtures.compare_fixtures import PgCompare
 from fixtures.pg_stats import PgStatTable
+
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
 
 

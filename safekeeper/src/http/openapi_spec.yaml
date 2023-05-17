@@ -119,6 +119,12 @@ paths:
           $ref: "#/components/responses/ForbiddenError"
         default:
           $ref: "#/components/responses/GenericError"
+        "404":
+          description: Timeline not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
 
     delete:
       tags:

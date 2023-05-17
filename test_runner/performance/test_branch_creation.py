@@ -10,7 +10,7 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import wait_for_last_record_lsn
+from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.types import Lsn
 
 
@@ -52,13 +52,13 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
     def run_pgbench(branch: str):
         log.info(f"Start a pgbench workload on branch {branch}")
 
-        pg = env.postgres.create_start(branch, tenant_id=tenant)
-        connstr = pg.connstr()
+        endpoint = env.endpoints.create_start(branch, tenant_id=tenant)
+        connstr = endpoint.connstr()
 
         pg_bin.run_capture(["pgbench", "-i", connstr])
         pg_bin.run_capture(["pgbench", "-c10", "-T10", connstr])
 
-        pg.stop()
+        endpoint.stop()
 
     env.neon_cli.create_branch("b0", tenant_id=tenant)
 
@@ -96,8 +96,8 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
 
     env.neon_cli.create_branch("b0")
 
-    pg = env.postgres.create_start("b0")
-    neon_compare.pg_bin.run_capture(["pgbench", "-i", "-s10", pg.connstr()])
+    endpoint = env.endpoints.create_start("b0")
+    neon_compare.pg_bin.run_capture(["pgbench", "-i", "-s10", endpoint.connstr()])
 
     branch_creation_durations = []
 
@@ -124,15 +124,15 @@ def test_branch_creation_many_relations(neon_compare: NeonCompare):
 
     timeline_id = env.neon_cli.create_branch("root")
 
-    pg = env.postgres.create_start("root")
-    with closing(pg.connect()) as conn:
+    endpoint = env.endpoints.create_start("root")
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             for i in range(10000):
                 cur.execute(f"CREATE TABLE t{i} as SELECT g FROM generate_series(1, 1000) g")
 
     # Wait for the pageserver to finish processing all the pending WALs,
     # as we don't want the LSN wait time to be included during the branch creation
-    flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
     wait_for_last_record_lsn(
         env.pageserver.http_client(), env.initial_tenant, timeline_id, flush_lsn
     )
@@ -142,7 +142,7 @@ def test_branch_creation_many_relations(neon_compare: NeonCompare):
 
     # run a concurrent insertion to make the ancestor "busy" during the branch creation
     thread = threading.Thread(
-        target=pg.safe_psql, args=("INSERT INTO t0 VALUES (generate_series(1, 100000))",)
+        target=endpoint.safe_psql, args=("INSERT INTO t0 VALUES (generate_series(1, 100000))",)
     )
     thread.start()
 

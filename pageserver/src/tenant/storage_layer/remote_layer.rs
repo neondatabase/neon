@@ -4,6 +4,7 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
+use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
@@ -49,6 +50,17 @@ pub struct RemoteLayer {
     access_stats: LayerAccessStats,
 
     pub(crate) ongoing_download: Arc<tokio::sync::Semaphore>,
+
+    /// Has `LayerMap::replace` failed for this (true) or not (false).
+    ///
+    /// Used together with [`ongoing_download`] semaphore in `Timeline::download_remote_layer`.
+    /// The field is used to mark a RemoteLayer permanently (until restart or ignore+load)
+    /// unprocessable, because a LayerMap::replace failed.
+    ///
+    /// It is very unlikely to accumulate these in the Timeline's LayerMap, but having this avoids
+    /// a possible fast loop between `Timeline::get_reconstruct_data` and
+    /// `Timeline::download_remote_layer`, which also logs.
+    pub(crate) download_replacement_failure: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for RemoteLayer {
@@ -144,8 +156,8 @@ impl PersistentLayer for RemoteLayer {
         bail!("cannot iterate a remote layer");
     }
 
-    fn delete(&self) -> Result<()> {
-        Ok(())
+    fn delete_resident_layer_file(&self) -> Result<()> {
+        bail!("remote layer has no layer file");
     }
 
     fn downcast_remote_layer<'a>(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
@@ -156,7 +168,7 @@ impl PersistentLayer for RemoteLayer {
         true
     }
 
-    fn file_size(&self) -> Option<u64> {
+    fn file_size(&self) -> u64 {
         self.layer_metadata.file_size()
     }
 
@@ -171,7 +183,7 @@ impl PersistentLayer for RemoteLayer {
                 lsn_start: lsn_range.start,
                 lsn_end: lsn_range.end,
                 remote: true,
-                access_stats: self.access_stats.to_api_model(reset),
+                access_stats: self.access_stats.as_api_model(reset),
             }
         } else {
             HistoricLayerInfo::Image {
@@ -179,7 +191,7 @@ impl PersistentLayer for RemoteLayer {
                 layer_file_size: self.layer_metadata.file_size(),
                 lsn_start: lsn_range.start,
                 remote: true,
-                access_stats: self.access_stats.to_api_model(reset),
+                access_stats: self.access_stats.as_api_model(reset),
             }
         }
     }
@@ -207,6 +219,7 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            download_replacement_failure: std::sync::atomic::AtomicBool::default(),
             access_stats,
         }
     }
@@ -228,16 +241,21 @@ impl RemoteLayer {
             file_name: fname.to_owned().into(),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
+            download_replacement_failure: std::sync::atomic::AtomicBool::default(),
             access_stats,
         }
     }
 
     /// Create a Layer struct representing this layer, after it has been downloaded.
-    pub fn create_downloaded_layer(
+    pub fn create_downloaded_layer<L>(
         &self,
+        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
         conf: &'static PageServerConf,
         file_size: u64,
-    ) -> Arc<dyn PersistentLayer> {
+    ) -> Arc<dyn PersistentLayer>
+    where
+        L: ?Sized + Layer,
+    {
         if self.is_delta {
             let fname = DeltaFileName {
                 key_range: self.key_range.clone(),
@@ -249,8 +267,10 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
-                self.access_stats
-                    .clone_for_residence_change(LayerResidenceStatus::Resident),
+                self.access_stats.clone_for_residence_change(
+                    layer_map_lock_held_witness,
+                    LayerResidenceStatus::Resident,
+                ),
             ))
         } else {
             let fname = ImageFileName {
@@ -263,8 +283,10 @@ impl RemoteLayer {
                 self.tenantid,
                 &fname,
                 file_size,
-                self.access_stats
-                    .clone_for_residence_change(LayerResidenceStatus::Resident),
+                self.access_stats.clone_for_residence_change(
+                    layer_map_lock_held_witness,
+                    LayerResidenceStatus::Resident,
+                ),
             ))
         }
     }

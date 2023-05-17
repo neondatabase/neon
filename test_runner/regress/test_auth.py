@@ -1,7 +1,8 @@
 from contextlib import closing
 
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException, PgProtocol
+from fixtures.neon_fixtures import NeonEnvBuilder, PgProtocol
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.types import TenantId
 
 
@@ -30,11 +31,15 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
 
     # tenant can create branches
     tenant_http_client.timeline_create(
-        tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
+        pg_version=env.pg_version,
+        tenant_id=env.initial_tenant,
+        ancestor_timeline_id=new_timeline_id,
     )
     # console can create branches for tenant
     pageserver_http_client.timeline_create(
-        tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
+        pg_version=env.pg_version,
+        tenant_id=env.initial_tenant,
+        ancestor_timeline_id=new_timeline_id,
     )
 
     # fail to create branch using token with different tenant_id
@@ -42,7 +47,9 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         PageserverApiException, match="Forbidden: Tenant id mismatch. Permission denied"
     ):
         invalid_tenant_http_client.timeline_create(
-            tenant_id=env.initial_tenant, ancestor_timeline_id=new_timeline_id
+            pg_version=env.pg_version,
+            tenant_id=env.initial_tenant,
+            ancestor_timeline_id=new_timeline_id,
         )
 
     # create tenant using management token
@@ -63,9 +70,9 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
 
     branch = "test_compute_auth_to_pageserver"
     env.neon_cli.create_branch(branch)
-    pg = env.postgres.create_start(branch)
+    endpoint = env.endpoints.create_start(branch)
 
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             # we rely upon autocommit after each statement
             # as waiting for acceptors happens there
@@ -82,7 +89,7 @@ def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     branch = f"test_auth_failures_auth_enabled_{auth_enabled}"
     timeline_id = env.neon_cli.create_branch(branch)
-    env.postgres.create_start(branch)
+    env.endpoints.create_start(branch)
 
     tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant)
     invalid_tenant_token = env.auth_keys.generate_tenant_token(TenantId.generate())

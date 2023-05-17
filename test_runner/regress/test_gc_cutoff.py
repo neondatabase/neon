@@ -31,8 +31,8 @@ def test_gc_cutoff(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             "image_creation_threshold": "2",
         }
     )
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    connstr = pg.connstr(options="-csynchronous_commit=off")
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    connstr = endpoint.connstr(options="-csynchronous_commit=off")
     pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
 
     pageserver_http.configure_failpoints(("after-timeline-gc-removed-layers", "exit"))

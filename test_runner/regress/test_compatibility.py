@@ -1,3 +1,4 @@
+import copy
 import os
 import shutil
 import subprocess
@@ -10,12 +11,12 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonCli,
     NeonEnvBuilder,
-    PageserverHttpClient,
     PgBin,
     PortDistributor,
-    wait_for_last_record_lsn,
-    wait_for_upload,
 )
+from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pg_version import PgVersion, skip_on_postgres
 from fixtures.types import Lsn
 from pytest import FixtureRequest
 
@@ -34,53 +35,69 @@ from pytest import FixtureRequest
 # - check_neon_works performs the test itself, feel free to add more checks there.
 #
 
+check_ondisk_data_compatibility_if_enabled = pytest.mark.skipif(
+    os.environ.get("CHECK_ONDISK_DATA_COMPATIBILITY") is None,
+    reason="CHECK_ONDISK_DATA_COMPATIBILITY env is not set",
+)
 
-# Note: if renaming this test, don't forget to update a reference to it in a workflow file:
-# "Upload compatibility snapshot" step in .github/actions/run-python-test-set/action.yml
+
+@skip_on_postgres(PgVersion.V15, "Compatibility tests doesn't support Postgres 15 yet")
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(before="test_forward_compatibility")
-def test_create_snapshot(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, test_output_dir: Path):
+def test_create_snapshot(
+    neon_env_builder: NeonEnvBuilder,
+    pg_bin: PgBin,
+    top_output_dir: Path,
+    test_output_dir: Path,
+):
     # The test doesn't really test anything
     # it creates a new snapshot for releases after we tested the current version against the previous snapshot in `test_backward_compatibility`.
     #
     # There's no cleanup here, it allows to adjust the data in `test_backward_compatibility` itself without re-collecting it.
-    neon_env_builder.pg_version = "14"
+    neon_env_builder.pg_version = PgVersion.V14
     neon_env_builder.num_safekeepers = 3
     neon_env_builder.enable_local_fs_remote_storage()
     neon_env_builder.preserve_database_files = True
 
     env = neon_env_builder.init_start()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     # FIXME: Is this expected?
     env.pageserver.allowed_errors.append(
         ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
     )
 
-    pg_bin.run(["pgbench", "--initialize", "--scale=10", pg.connstr()])
-    pg_bin.run(["pgbench", "--time=60", "--progress=2", pg.connstr()])
-    pg_bin.run(["pg_dumpall", f"--dbname={pg.connstr()}", f"--file={test_output_dir / 'dump.sql'}"])
+    pg_bin.run(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
+    pg_bin.run(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
+    pg_bin.run(
+        ["pg_dumpall", f"--dbname={endpoint.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
+    )
 
     snapshot_config = toml.load(test_output_dir / "repo" / "config")
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
 
     pageserver_http = env.pageserver.http_client()
-    lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
     pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(pageserver_http, tenant_id, timeline_id, lsn)
 
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
 
-    shutil.copytree(test_output_dir, test_output_dir / "compatibility_snapshot_pg14")
-    # Directory `test_output_dir / "compatibility_snapshot_pg14"` is uploaded to S3 in a workflow, keep the name in sync with it
+    # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
+    compatibility_snapshot_dir = top_output_dir / "compatibility_snapshot_pg14"
+    if compatibility_snapshot_dir.exists():
+        shutil.rmtree(compatibility_snapshot_dir)
+    shutil.copytree(test_output_dir, compatibility_snapshot_dir)
 
 
+@skip_on_postgres(PgVersion.V15, "Compatibility tests doesn't support Postgres 15 yet")
+@check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_backward_compatibility(
@@ -89,9 +106,12 @@ def test_backward_compatibility(
     test_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
     request: FixtureRequest,
 ):
+    """
+    Test that the new binaries can read old data
+    """
     compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
     assert (
         compatibility_snapshot_dir_env is not None
@@ -114,6 +134,7 @@ def test_backward_compatibility(
         check_neon_works(
             test_output_dir / "compatibility_snapshot" / "repo",
             neon_binpath,
+            neon_binpath,
             pg_distrib_dir,
             pg_version,
             port_distributor,
@@ -134,14 +155,21 @@ def test_backward_compatibility(
     ), "Breaking changes are allowed by ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE, but the test has passed without any breakage"
 
 
+@skip_on_postgres(PgVersion.V15, "Compatibility tests doesn't support Postgres 15 yet")
+@check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
 def test_forward_compatibility(
     test_output_dir: Path,
+    top_output_dir: Path,
     port_distributor: PortDistributor,
-    pg_version: str,
+    pg_version: PgVersion,
     request: FixtureRequest,
+    neon_binpath: Path,
 ):
+    """
+    Test that the old binaries can read new data
+    """
     compatibility_neon_bin_env = os.environ.get("COMPATIBILITY_NEON_BIN")
     assert compatibility_neon_bin_env is not None, (
         "COMPATIBILITY_NEON_BIN is not set. It should be set to a path with Neon binaries "
@@ -155,9 +183,7 @@ def test_forward_compatibility(
     ), "COMPATIBILITY_POSTGRES_DISTRIB_DIR is not set. It should be set to a pg_install directrory (ideally generated by the previous version of Neon)"
     compatibility_postgres_distrib_dir = Path(compatibility_postgres_distrib_dir_env).resolve()
 
-    compatibility_snapshot_dir = (
-        test_output_dir.parent / "test_create_snapshot" / "compatibility_snapshot_pg14"
-    )
+    compatibility_snapshot_dir = top_output_dir / "compatibility_snapshot_pg14"
 
     breaking_changes_allowed = (
         os.environ.get("ALLOW_FORWARD_COMPATIBILITY_BREAKAGE", "false").lower() == "true"
@@ -176,6 +202,7 @@ def test_forward_compatibility(
         check_neon_works(
             test_output_dir / "compatibility_snapshot" / "repo",
             compatibility_neon_bin,
+            neon_binpath,
             compatibility_postgres_distrib_dir,
             pg_version,
             port_distributor,
@@ -216,13 +243,20 @@ def prepare_snapshot(
     for logfile in repo_dir.glob("**/*.log"):
         logfile.unlink()
 
-    # Remove tenants data for compute
-    for tenant in (repo_dir / "pgdatadirs" / "tenants").glob("*"):
-        shutil.rmtree(tenant)
+    # Remove old computes in 'endpoints'. Old versions of the control plane used a directory
+    # called "pgdatadirs". Delete it, too.
+    if (repo_dir / "endpoints").exists():
+        shutil.rmtree(repo_dir / "endpoints")
+    if (repo_dir / "pgdatadirs").exists():
+        shutil.rmtree(repo_dir / "pgdatadirs")
+    os.mkdir(repo_dir / "endpoints")
 
-    # Remove wal-redo temp directory
+    # Remove wal-redo temp directory if it exists. Newer pageserver versions don't create
+    # them anymore, but old versions did.
     for tenant in (repo_dir / "tenants").glob("*"):
-        shutil.rmtree(tenant / "wal-redo-datadir.___temp")
+        wal_redo_dir = tenant / "wal-redo-datadir.___temp"
+        if wal_redo_dir.exists() and wal_redo_dir.is_dir():
+            shutil.rmtree(wal_redo_dir)
 
     # Update paths and ports in config files
     pageserver_toml = repo_dir / "pageserver.toml"
@@ -242,6 +276,13 @@ def prepare_snapshot(
     etcd_broker_endpoints = [f"http://localhost:{port_distributor.get_port()}/"]
     if get_neon_version(neon_binpath) == "49da498f651b9f3a53b56c7c0697636d880ddfe0":
         pageserver_config["broker_endpoints"] = etcd_broker_endpoints  # old etcd version
+
+    # Older pageserver versions had just one `auth_type` setting. Now there
+    # are separate settings for pg and http ports. We don't use authentication
+    # in compatibility tests so just remove authentication related settings.
+    pageserver_config.pop("auth_type", None)
+    pageserver_config.pop("pg_auth_type", None)
+    pageserver_config.pop("http_auth_type", None)
 
     if pg_distrib_dir:
         pageserver_config["pg_distrib_dir"] = str(pg_distrib_dir)
@@ -309,9 +350,10 @@ def get_neon_version(neon_binpath: Path):
 
 def check_neon_works(
     repo_dir: Path,
-    neon_binpath: Path,
+    neon_target_binpath: Path,
+    neon_current_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
     port_distributor: PortDistributor,
     test_output_dir: Path,
     pg_bin: PgBin,
@@ -319,7 +361,7 @@ def check_neon_works(
 ):
     snapshot_config_toml = repo_dir / "config"
     snapshot_config = toml.load(snapshot_config_toml)
-    snapshot_config["neon_distrib_dir"] = str(neon_binpath)
+    snapshot_config["neon_distrib_dir"] = str(neon_target_binpath)
     snapshot_config["postgres_distrib_dir"] = str(pg_distrib_dir)
     with (snapshot_config_toml).open("w") as f:
         toml.dump(snapshot_config, f)
@@ -330,17 +372,25 @@ def check_neon_works(
     config.repo_dir = repo_dir
     config.pg_version = pg_version
     config.initial_tenant = snapshot_config["default_tenant_id"]
-    config.neon_binpath = neon_binpath
     config.pg_distrib_dir = pg_distrib_dir
     config.preserve_database_files = True
 
-    cli = NeonCli(config)
-    cli.raw_cli(["start"])
-    request.addfinalizer(lambda: cli.raw_cli(["stop"]))
+    # Use the "target" binaries to launch the storage nodes
+    config_target = config
+    config_target.neon_binpath = neon_target_binpath
+    cli_target = NeonCli(config_target)
+
+    # And the current binaries to launch computes
+    config_current = copy.copy(config)
+    config_current.neon_binpath = neon_current_binpath
+    cli_current = NeonCli(config_current)
+
+    cli_target.raw_cli(["start"])
+    request.addfinalizer(lambda: cli_target.raw_cli(["stop"]))
 
     pg_port = port_distributor.get_port()
-    cli.pg_start("main", port=pg_port)
-    request.addfinalizer(lambda: cli.pg_stop("main"))
+    cli_current.endpoint_start("main", port=pg_port)
+    request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"
     pg_bin.run(["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"])
@@ -355,16 +405,14 @@ def check_neon_works(
     tenant_id = snapshot_config["default_tenant_id"]
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
     pageserver_port = snapshot_config["pageserver"]["listen_http_addr"].split(":")[-1]
-    auth_token = snapshot_config["pageserver"]["auth_token"]
     pageserver_http = PageserverHttpClient(
         port=pageserver_port,
         is_testing_enabled_or_skip=lambda: True,  # TODO: check if testing really enabled
-        auth_token=auth_token,
     )
 
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
     pageserver_http.timeline_delete(tenant_id, timeline_id)
-    pageserver_http.timeline_create(tenant_id, timeline_id)
+    pageserver_http.timeline_create(pg_version, tenant_id, timeline_id)
     pg_bin.run(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
     )

@@ -3,6 +3,7 @@ import shutil
 import time
 from contextlib import closing
 from datetime import datetime
+from itertools import chain
 from pathlib import Path
 from typing import List
 
@@ -65,17 +66,17 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_1)
     env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_2)
 
-    pg_tenant1 = env.postgres.create_start(
+    endpoint_tenant1 = env.endpoints.create_start(
         "test_tenants_normal_work",
         tenant_id=tenant_1,
     )
-    pg_tenant2 = env.postgres.create_start(
+    endpoint_tenant2 = env.endpoints.create_start(
         "test_tenants_normal_work",
         tenant_id=tenant_2,
     )
 
-    for pg in [pg_tenant1, pg_tenant2]:
-        with closing(pg.connect()) as conn:
+    for endpoint in [endpoint_tenant1, endpoint_tenant2]:
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 # we rely upon autocommit after each statement
                 # as waiting for acceptors happens there
@@ -87,6 +88,7 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
 
 def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
+    neon_env_builder.pageserver_config_override = "availability_zone='test_ps_az'"
 
     env = neon_env_builder.init_start()
     tenant_1, _ = env.neon_cli.create_tenant()
@@ -95,11 +97,11 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     timeline_1 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_1)
     timeline_2 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_2)
 
-    pg_tenant1 = env.postgres.create_start("test_metrics_normal_work", tenant_id=tenant_1)
-    pg_tenant2 = env.postgres.create_start("test_metrics_normal_work", tenant_id=tenant_2)
+    endpoint_tenant1 = env.endpoints.create_start("test_metrics_normal_work", tenant_id=tenant_1)
+    endpoint_tenant2 = env.endpoints.create_start("test_metrics_normal_work", tenant_id=tenant_2)
 
-    for pg in [pg_tenant1, pg_tenant2]:
-        with closing(pg.connect()) as conn:
+    for endpoint in [endpoint_tenant1, endpoint_tenant2]:
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
@@ -107,7 +109,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
                 assert cur.fetchone() == (5000050000,)
 
     collected_metrics = {
-        "pageserver": env.pageserver.http_client().get_metrics(),
+        "pageserver": env.pageserver.http_client().get_metrics_str(),
     }
     for sk in env.safekeepers:
         collected_metrics[f"safekeeper{sk.id}"] = sk.http_client().get_metrics_str()
@@ -121,6 +123,17 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     all_metrics = [parse_metrics(m, name) for name, m in collected_metrics.items()]
     ps_metrics = all_metrics[0]
     sk_metrics = all_metrics[1:]
+
+    # Find all metrics among all safekeepers, accepts the same arguments as query_all()
+    def query_all_safekeepers(name, filter):
+        return list(
+            chain.from_iterable(
+                map(
+                    lambda sk: sk.query_all(name, filter),
+                    sk_metrics,
+                )
+            )
+        )
 
     ttids = [
         {"tenant_id": str(tenant_1), "timeline_id": str(timeline_1)},
@@ -162,6 +175,40 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
             f"process_start_time_seconds (UTC): {datetime.fromtimestamp(metrics.query_one('process_start_time_seconds').value)}"
         )
 
+    for io_direction in ["read", "write"]:
+        # Querying all metrics for number of bytes read/written by pageserver in another AZ
+        io_metrics = query_all_safekeepers(
+            "safekeeper_pg_io_bytes_total",
+            {
+                "app_name": "pageserver",
+                "client_az": "test_ps_az",
+                "dir": io_direction,
+                "same_az": "false",
+            },
+        )
+        total_bytes = sum(int(metric.value) for metric in io_metrics)
+        log.info(f"Pageserver {io_direction} bytes from another AZ: {total_bytes}")
+        # We expect some bytes to be read/written, to make sure metrics are working
+        assert total_bytes > 0
+
+    # Test (a subset of) safekeeper global metrics
+    for sk_m in sk_metrics:
+        # Test that every safekeeper has read some bytes
+        assert any(
+            map(
+                lambda x: x.value > 0,
+                sk_m.query_all("safekeeper_pg_io_bytes_total", {"dir": "read"}),
+            )
+        ), f"{sk_m.name} has not read bytes"
+
+        # Test that every safekeeper has written some bytes
+        assert any(
+            map(
+                lambda x: x.value > 0,
+                sk_m.query_all("safekeeper_pg_io_bytes_total", {"dir": "write"}),
+            )
+        ), f"{sk_m.name} has not written bytes"
+
     # Test (a subset of) pageserver global metrics
     for metric in PAGESERVER_GLOBAL_METRICS:
         ps_samples = ps_metrics.query_all(metric, {})
@@ -169,6 +216,16 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
         for sample in ps_samples:
             labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
             log.info(f"{sample.name}{{{labels}}} {sample.value}")
+
+    # Test that we gather tenant create metric
+    storage_operation_metrics = [
+        "pageserver_storage_operations_seconds_global_bucket",
+        "pageserver_storage_operations_seconds_global_sum",
+        "pageserver_storage_operations_seconds_global_count",
+    ]
+    for metric in storage_operation_metrics:
+        value = ps_metrics.query_all(metric, filter={"operation": "create tenant"})
+        assert value
 
 
 @pytest.mark.parametrize(
@@ -195,11 +252,15 @@ def test_pageserver_metrics_removed_after_detach(
     env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_1)
     env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_2)
 
-    pg_tenant1 = env.postgres.create_start("test_metrics_removed_after_detach", tenant_id=tenant_1)
-    pg_tenant2 = env.postgres.create_start("test_metrics_removed_after_detach", tenant_id=tenant_2)
+    endpoint_tenant1 = env.endpoints.create_start(
+        "test_metrics_removed_after_detach", tenant_id=tenant_1
+    )
+    endpoint_tenant2 = env.endpoints.create_start(
+        "test_metrics_removed_after_detach", tenant_id=tenant_2
+    )
 
-    for pg in [pg_tenant1, pg_tenant2]:
-        with closing(pg.connect()) as conn:
+    for endpoint in [endpoint_tenant1, endpoint_tenant2]:
+        with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
@@ -207,7 +268,7 @@ def test_pageserver_metrics_removed_after_detach(
                 assert cur.fetchone() == (5000050000,)
 
     def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
-        ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+        ps_metrics = env.pageserver.http_client().get_metrics()
         samples = []
         for metric_name in ps_metrics.metrics:
             for sample in ps_metrics.query_all(
@@ -270,7 +331,7 @@ def test_pageserver_with_empty_tenants(
     ), f"Tenant {tenant_with_empty_timelines_dir} should have an empty timelines/ directory"
 
     # Trigger timeline re-initialization after pageserver restart
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     env.pageserver.stop()
 
     tenant_without_timelines_dir = env.initial_tenant
@@ -285,36 +346,36 @@ def test_pageserver_with_empty_tenants(
 
     [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
     assert (
-        broken_tenant["state"] == "Broken"
+        broken_tenant["state"]["slug"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
     broken_tenant_status = client.tenant_status(tenant_without_timelines_dir)
     assert (
-        broken_tenant_status["state"] == "Broken"
+        broken_tenant_status["state"]["slug"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
     assert env.pageserver.log_contains(".*Setting tenant as Broken state, reason:.*")
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines_dir)]
     assert (
-        loaded_tenant["state"] == "Active"
+        loaded_tenant["state"]["slug"] == "Active"
     ), "Tenant {tenant_with_empty_timelines_dir} with empty timelines dir should be active and ready for timeline creation"
 
     loaded_tenant_status = client.tenant_status(tenant_with_empty_timelines_dir)
     assert (
-        loaded_tenant_status["state"] == "Active"
+        loaded_tenant_status["state"]["slug"] == "Active"
     ), f"Tenant {tenant_with_empty_timelines_dir} without timelines dir should be active"
 
     time.sleep(1)  # to allow metrics propagation
 
-    ps_metrics = parse_metrics(client.get_metrics(), "pageserver")
+    ps_metrics = client.get_metrics()
     broken_tenants_metric_filter = {
         "tenant_id": str(tenant_without_timelines_dir),
-        "state": "broken",
+        "state": "Broken",
     }
     active_tenants_metric_filter = {
         "tenant_id": str(tenant_with_empty_timelines_dir),
-        "state": "active",
+        "state": "Active",
     }
 
     tenant_active_count = int(

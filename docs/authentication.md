@@ -29,12 +29,54 @@ These components should not have access to the private key and may only get toke
 The key pair is generated once for an installation of compute/pageserver/safekeeper, e.g. by `neon_local init`.
 There is currently no way to rotate the key without bringing down all components.
 
+### Best practices
+
+See [RFC 8725: JSON Web Token Best Current Practices](https://www.rfc-editor.org/rfc/rfc8725)
+
+
+### Token format
+
+The JWT tokens in Neon use "EdDSA" as the algorithm (defined in [RFC8037](https://www.rfc-editor.org/rfc/rfc8037)).
+
+Example:
+
+Header:
+
+```
+{
+  "alg": "EdDSA",
+  "typ": "JWT"
+}
+```
+
+Payload:
+
+```
+{
+  "scope": "tenant",  # "tenant", "pageserverapi", or "safekeeperdata"
+  "tenant_id": "5204921ff44f09de8094a1390a6a50f6",
+}
+```
+
+
+Meanings of scope:
+
+"tenant": Provides access to all data for a specific tenant
+
+"pageserverapi": Provides blanket access to all tenants on the pageserver plus pageserver-wide APIs.
+Should only be used e.g. for status check/tenant creation/list.
+
+"safekeeperdata": Provides blanket access to all data on the safekeeper plus safekeeper-wide APIs.
+Should only be used e.g. for status check.
+Currently also used for connection from any pageserver to any safekeeper.
+
+
 ### CLI
 CLI generates a key pair during call to `neon_local init` with the following commands:
 
 ```bash
-openssl genrsa -out auth_private_key.pem 2048
-openssl rsa -in auth_private_key.pem -pubout -outform PEM -out auth_public_key.pem
+openssl genpkey -algorithm ed25519 -out auth_private_key.pem
+openssl pkey -in auth_private_key.pem -pubout -out auth_public_key.pem
 ```
 
 Configuration files for all components point to `public_key.pem` for JWT validation.
@@ -64,20 +106,22 @@ Their authentication is just plain PostgreSQL authentication and out of scope fo
 There is no administrative API except those provided by PostgreSQL.
 
 #### Outgoing connections
-Compute connects to Pageserver for getting pages.
-The connection string is configured by the `neon.pageserver_connstring` PostgreSQL GUC, e.g. `postgresql://no_user:$NEON_AUTH_TOKEN@localhost:15028`.
-The environment variable inside the connection string is substituted with
-the JWT token.
+Compute connects to Pageserver for getting pages. The connection string is
+configured by the `neon.pageserver_connstring` PostgreSQL GUC,
+e.g. `postgresql://no_user@localhost:15028`. If the `$NEON_AUTH_TOKEN`
+environment variable is set, it is used as the password for the connection. (The
+pageserver uses JWT tokens for authentication, so the password is really a
+token.)
 
-Compute connects to Safekeepers to write and commit data.
-The token is the same for all safekeepers.
-It's stored in an environment variable, whose name is configured
-by the `neon.safekeeper_token_env` PostgreSQL GUC.
-If the GUC is unset, no token is passed.
+Compute connects to Safekeepers to write and commit data. The list of safekeeper
+addresses is given in the `neon.safekeepers` GUC. The connections to the
+safekeepers take the password from the `$NEON_AUTH_TOKEN` environment
+variable, if set.
 
-Note that both tokens can be (and typically are) the same;
-the scope is the tenant and the token is usually passed through the
-`$NEON_AUTH_TOKEN` environment variable.
+The `compute_ctl` binary that runs before the PostgreSQL server, and launches
+PostgreSQL, also makes a connection to the pageserver. It uses it to fetch the
+initial "base backup" dump, to initialize the PostgreSQL data directory. It also
+uses `$NEON_AUTH_TOKEN` as the password for the connection.
 
 ### Pageserver
 #### Overview
@@ -102,10 +146,12 @@ Each compute should present a token valid for the timeline's tenant.
 Pageserver also has HTTP API: some parts are per-tenant,
 some parts are server-wide, these are different scopes.
 
-The `auth_type` configuration variable in Pageserver's config may have
-either of three values:
+Authentication can be enabled separately for the HTTP mgmt API, and
+for the libpq connections from compute. The `http_auth_type` and
+`pg_auth_type` configuration variables in Pageserver's config may
+have one of these values:
 
-* `Trust` removes all authentication. The outdated `MD5` value does likewise
+* `Trust` removes all authentication.
 * `NeonJWT` enables JWT validation.
    Tokens are validated using the public key which lies in a PEM file
    specified in the `auth_validation_public_key_path` config.

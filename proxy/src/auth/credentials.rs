@@ -1,8 +1,9 @@
 //! User credentials used in authentication.
 
-use crate::error::UserFacingError;
+use crate::{auth::password_hack::parse_endpoint_param, error::UserFacingError};
+use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::borrow::Cow;
+use std::collections::HashSet;
 use thiserror::Error;
 use tracing::info;
 
@@ -11,15 +12,18 @@ pub enum ClientCredsParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
-    #[error("Inconsistent project name inferred from SNI ('{}') and project option ('{}').", .domain, .option)]
+    #[error(
+        "Inconsistent project name inferred from \
+         SNI ('{}') and project option ('{}').",
+        .domain, .option,
+    )]
     InconsistentProjectNames { domain: String, option: String },
 
     #[error(
-        "SNI ('{}') inconsistently formatted with respect to common name ('{}'). \
-        SNI should be formatted as '<project-name>.{}'.",
-        .sni, .cn, .cn,
+        "Common name inferred from SNI ('{}') is not known",
+        .cn,
     )]
-    InconsistentSni { sni: String, cn: String },
+    UnknownCommonName { cn: String },
 
     #[error("Project name ('{0}') must contain only alphanumeric characters and hyphen.")]
     MalformedProjectName(String),
@@ -32,12 +36,8 @@ impl UserFacingError for ClientCredsParseError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientCredentials<'a> {
     pub user: &'a str,
-    pub dbname: &'a str,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
-    pub project: Option<Cow<'a, str>>,
-    /// If `True`, we'll use the old cleartext password flow. This is used for
-    /// websocket connections, which want to minimize the number of round trips.
-    pub use_cleartext_password_flow: bool,
+    pub project: Option<String>,
 }
 
 impl ClientCredentials<'_> {
@@ -51,67 +51,68 @@ impl<'a> ClientCredentials<'a> {
     pub fn parse(
         params: &'a StartupMessageParams,
         sni: Option<&str>,
-        common_name: Option<&str>,
-        use_cleartext_password_flow: bool,
+        common_names: Option<HashSet<String>>,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
         // Some parameters are stored in the startup message.
         let get_param = |key| params.get(key).ok_or(MissingKey(key));
         let user = get_param("user")?;
-        let dbname = get_param("database")?;
 
         // Project name might be passed via PG's command-line options.
-        let project_option = params.options_raw().and_then(|mut options| {
-            options
-                .find_map(|opt| opt.strip_prefix("project="))
-                .map(Cow::Borrowed)
-        });
-
-        // Alternative project name is in fact a subdomain from SNI.
-        // NOTE: we do not consider SNI if `common_name` is missing.
-        let project_domain = sni
-            .zip(common_name)
-            .map(|(sni, cn)| {
-                subdomain_from_sni(sni, cn)
-                    .ok_or_else(|| InconsistentSni {
-                        sni: sni.into(),
-                        cn: cn.into(),
-                    })
-                    .map(Cow::<'static, str>::Owned)
+        let project_option = params
+            .options_raw()
+            .and_then(|options| {
+                // We support both `project` (deprecated) and `endpoint` options for backward compatibility.
+                // However, if both are present, we don't exactly know which one to use.
+                // Therefore we require that only one of them is present.
+                options
+                    .filter_map(parse_endpoint_param)
+                    .at_most_one()
+                    .ok()?
             })
-            .transpose()?;
+            .map(|name| name.to_string());
 
-        let project = match (project_option, project_domain) {
+        let project_from_domain = if let Some(sni_str) = sni {
+            if let Some(cn) = common_names {
+                let common_name_from_sni = sni_str.split_once('.').map(|(_, domain)| domain);
+
+                let project = common_name_from_sni
+                    .and_then(|domain| {
+                        if cn.contains(domain) {
+                            subdomain_from_sni(sni_str, domain)
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| UnknownCommonName {
+                        cn: common_name_from_sni.unwrap_or("").into(),
+                    })?;
+
+                Some(project)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let project = match (project_option, project_from_domain) {
             // Invariant: if we have both project name variants, they should match.
             (Some(option), Some(domain)) if option != domain => {
-                Some(Err(InconsistentProjectNames {
-                    domain: domain.into(),
-                    option: option.into(),
-                }))
+                Some(Err(InconsistentProjectNames { domain, option }))
             }
             // Invariant: project name may not contain certain characters.
             (a, b) => a.or(b).map(|name| match project_name_valid(&name) {
-                false => Err(MalformedProjectName(name.into())),
+                false => Err(MalformedProjectName(name)),
                 true => Ok(name),
             }),
         }
         .transpose()?;
 
-        info!(
-            user = user,
-            dbname = dbname,
-            project = project.as_deref(),
-            use_cleartext_password_flow = use_cleartext_password_flow,
-            "credentials"
-        );
+        info!(user, project = project.as_deref(), "credentials");
 
-        Ok(Self {
-            user,
-            dbname,
-            project,
-            use_cleartext_password_flow,
-        })
+        Ok(Self { user, project })
     }
 }
 
@@ -131,25 +132,27 @@ mod tests {
     use ClientCredsParseError::*;
 
     #[test]
-    #[ignore = "TODO: fix how database is handled"]
     fn parse_bare_minimum() -> anyhow::Result<()> {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
 
-        // TODO: check that `creds.dbname` is None.
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
+        assert_eq!(creds.project, None);
 
         Ok(())
     }
 
     #[test]
-    fn parse_missing_project() -> anyhow::Result<()> {
-        let options = StartupMessageParams::new([("user", "john_doe"), ("database", "world")]);
+    fn parse_excessive() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("database", "world"), // should be ignored
+            ("foo", "bar"),        // should be ignored
+        ]);
 
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.dbname, "world");
         assert_eq!(creds.project, None);
 
         Ok(())
@@ -157,14 +160,13 @@ mod tests {
 
     #[test]
     fn parse_project_from_sni() -> anyhow::Result<()> {
-        let options = StartupMessageParams::new([("user", "john_doe"), ("database", "world")]);
+        let options = StartupMessageParams::new([("user", "john_doe")]);
 
         let sni = Some("foo.localhost");
-        let common_name = Some("localhost");
+        let common_names = Some(["localhost".into()].into());
 
-        let creds = ClientCredentials::parse(&options, sni, common_name, false)?;
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
         assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.dbname, "world");
         assert_eq!(creds.project.as_deref(), Some("foo"));
 
         Ok(())
@@ -174,50 +176,101 @@ mod tests {
     fn parse_project_from_options() -> anyhow::Result<()> {
         let options = StartupMessageParams::new([
             ("user", "john_doe"),
-            ("database", "world"),
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.dbname, "world");
         assert_eq!(creds.project.as_deref(), Some("bar"));
 
         Ok(())
     }
 
     #[test]
-    fn parse_projects_identical() -> anyhow::Result<()> {
+    fn parse_endpoint_from_options() -> anyhow::Result<()> {
         let options = StartupMessageParams::new([
             ("user", "john_doe"),
-            ("database", "world"),
-            ("options", "project=baz"),
+            ("options", "-ckey=1 endpoint=bar -c geqo=off"),
         ]);
 
-        let sni = Some("baz.localhost");
-        let common_name = Some("localhost");
-
-        let creds = ClientCredentials::parse(&options, sni, common_name, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
-        assert_eq!(creds.dbname, "world");
+        assert_eq!(creds.project.as_deref(), Some("bar"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_three_endpoints_from_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            (
+                "options",
+                "-ckey=1 endpoint=one endpoint=two endpoint=three -c geqo=off",
+            ),
+        ]);
+
+        let creds = ClientCredentials::parse(&options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert!(creds.project.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_when_endpoint_and_project_are_in_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
+        ]);
+
+        let creds = ClientCredentials::parse(&options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert!(creds.project.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_projects_identical() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([("user", "john_doe"), ("options", "project=baz")]);
+
+        let sni = Some("baz.localhost");
+        let common_names = Some(["localhost".into()].into());
+
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("baz"));
 
         Ok(())
     }
 
     #[test]
+    fn parse_multi_common_names() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([("user", "john_doe")]);
+
+        let common_names = Some(["a.com".into(), "b.com".into()].into());
+        let sni = Some("p1.a.com");
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        assert_eq!(creds.project.as_deref(), Some("p1"));
+
+        let common_names = Some(["a.com".into(), "b.com".into()].into());
+        let sni = Some("p1.b.com");
+        let creds = ClientCredentials::parse(&options, sni, common_names)?;
+        assert_eq!(creds.project.as_deref(), Some("p1"));
+
+        Ok(())
+    }
+
+    #[test]
     fn parse_projects_different() {
-        let options = StartupMessageParams::new([
-            ("user", "john_doe"),
-            ("database", "world"),
-            ("options", "project=first"),
-        ]);
+        let options =
+            StartupMessageParams::new([("user", "john_doe"), ("options", "project=first")]);
 
         let sni = Some("second.localhost");
-        let common_name = Some("localhost");
+        let common_names = Some(["localhost".into()].into());
 
-        let err =
-            ClientCredentials::parse(&options, sni, common_name, false).expect_err("should fail");
+        let err = ClientCredentials::parse(&options, sni, common_names).expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -229,17 +282,15 @@ mod tests {
 
     #[test]
     fn parse_inconsistent_sni() {
-        let options = StartupMessageParams::new([("user", "john_doe"), ("database", "world")]);
+        let options = StartupMessageParams::new([("user", "john_doe")]);
 
         let sni = Some("project.localhost");
-        let common_name = Some("example.com");
+        let common_names = Some(["example.com".into()].into());
 
-        let err =
-            ClientCredentials::parse(&options, sni, common_name, false).expect_err("should fail");
+        let err = ClientCredentials::parse(&options, sni, common_names).expect_err("should fail");
         match err {
-            InconsistentSni { sni, cn } => {
-                assert_eq!(sni, "project.localhost");
-                assert_eq!(cn, "example.com");
+            UnknownCommonName { cn } => {
+                assert_eq!(cn, "localhost");
             }
             _ => panic!("bad error: {err:?}"),
         }

@@ -7,6 +7,7 @@ use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 
+use chrono::NaiveDateTime;
 use std::sync::Arc;
 use tracing::info;
 
@@ -18,14 +19,14 @@ use utils::lsn::Lsn;
 // that many upload queues in a running pageserver, and most of them are initialized
 // anyway.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum UploadQueue {
+pub(super) enum UploadQueue {
     Uninitialized,
     Initialized(UploadQueueInitialized),
     Stopped(UploadQueueStopped),
 }
 
 impl UploadQueue {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             UploadQueue::Uninitialized => "Uninitialized",
             UploadQueue::Initialized(_) => "Initialized",
@@ -75,8 +76,18 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) queued_operations: VecDeque<UploadOp>,
 }
 
-pub(crate) struct UploadQueueStopped {
-    pub(crate) last_uploaded_consistent_lsn: Lsn,
+#[derive(Clone, Copy)]
+pub(super) enum SetDeletedFlagProgress {
+    NotRunning,
+    InProgress(NaiveDateTime),
+    Successful(NaiveDateTime),
+}
+
+pub(super) struct UploadQueueStopped {
+    pub(super) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
+    pub(super) last_uploaded_consistent_lsn: Lsn,
+    pub(super) latest_metadata: TimelineMetadata,
+    pub(super) deleted_at: SetDeletedFlagProgress,
 }
 
 impl UploadQueue {
@@ -127,12 +138,21 @@ impl UploadQueue {
 
         let mut files = HashMap::with_capacity(index_part.timeline_layers.len());
         for layer_name in &index_part.timeline_layers {
-            let layer_metadata = index_part
+            match index_part
                 .layer_metadata
                 .get(layer_name)
                 .map(LayerFileMetadata::from)
-                .unwrap_or(LayerFileMetadata::MISSING);
-            files.insert(layer_name.to_owned(), layer_metadata);
+            {
+                Some(layer_metadata) => {
+                    files.insert(layer_name.to_owned(), layer_metadata);
+                }
+                None => {
+                    anyhow::bail!(
+                        "No remote layer metadata found for layer {}",
+                        layer_name.file_name()
+                    );
+                }
+            }
         }
 
         let index_part_metadata = index_part.parse_metadata()?;

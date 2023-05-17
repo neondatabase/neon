@@ -16,6 +16,7 @@ import time
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Flag, auto
 from functools import cached_property
 from itertools import chain, product
@@ -28,30 +29,31 @@ import asyncpg
 import backoff  # type: ignore
 import boto3
 import jwt
-import prometheus_client
 import psycopg2
 import pytest
 import requests
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
-from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
-from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import (
-    ATTACHMENT_NAME_REGEX,
-    Fn,
-    allure_attach_from_dir,
-    get_self_dir,
-    subprocess_capture,
-)
-from prometheus_client.parser import text_string_to_metric_families
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
 from typing_extensions import Literal
+
+from fixtures.log_helper import log
+from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pg_version import PgVersion
+from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import (
+    ATTACHMENT_NAME_REGEX,
+    allure_add_grafana_links,
+    allure_attach_from_dir,
+    get_self_dir,
+    subprocess_capture,
+)
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -74,7 +76,6 @@ Env = Dict[str, str]
 
 DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
-DEFAULT_PG_VERSION_DEFAULT: str = "14"
 
 BASE_PORT: int = 15000
 WORKER_PORT_NUM: int = 1000
@@ -147,18 +148,7 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def pg_version() -> Iterator[str]:
-    if env_default_pg_version := os.environ.get("DEFAULT_PG_VERSION"):
-        version = env_default_pg_version
-    else:
-        version = DEFAULT_PG_VERSION_DEFAULT
-
-    log.info(f"pg_version is {version}")
-    yield version
-
-
-@pytest.fixture(scope="session")
-def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: str) -> Iterator[Path]:
+def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
     versioned_dir = pg_distrib_dir / f"v{pg_version}"
 
     psql_bin_path = versioned_dir / "bin/psql"
@@ -289,6 +279,12 @@ class PortDistributor:
 @pytest.fixture(scope="session")
 def port_distributor(worker_base_port: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
+
+
+@pytest.fixture(scope="session")
+def httpserver_listen_address(port_distributor: PortDistributor):
+    port = port_distributor.get_port()
+    return ("localhost", port)
 
 
 @pytest.fixture(scope="function")
@@ -431,7 +427,7 @@ class AuthKeys:
     priv: str
 
     def generate_token(self, *, scope: str, **token_data: str) -> str:
-        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="RS256")
+        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
         # cast(Any, self.priv)
 
         # jwt.encode can return 'bytes' or 'str', depending on Python version or type
@@ -585,7 +581,7 @@ class NeonEnvBuilder:
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
         pg_distrib_dir: Path,
-        pg_version: str,
+        pg_version: PgVersion,
         remote_storage: Optional[RemoteStorage] = None,
         remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
@@ -643,6 +639,7 @@ class NeonEnvBuilder:
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
         initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        env.initial_timeline = initial_timeline
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
         return env
@@ -828,7 +825,7 @@ class NeonEnvBuilder:
         # Stop all the nodes.
         if self.env:
             log.info("Cleaning up all storage and compute nodes")
-            self.env.postgres.stop_all()
+            self.env.endpoints.stop_all()
             for sk in self.env.safekeepers:
                 sk.stop(immediate=True)
             self.env.pageserver.stop(immediate=True)
@@ -892,7 +889,7 @@ class NeonEnv:
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.mock_s3_server
         self.neon_cli = NeonCli(env=self)
-        self.postgres = PostgresFactory(self)
+        self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.broker = config.broker
         self.remote_storage = config.remote_storage
@@ -900,10 +897,12 @@ class NeonEnv:
         self.pg_version = config.pg_version
         self.neon_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
+        self.endpoint_counter = 0
 
         # generate initial tenant ID here instead of letting 'neon init' generate it,
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
+        self.initial_timeline: Optional[TimelineId] = None
 
         # Create a config file corresponding to the options
         toml = textwrap.dedent(
@@ -924,7 +923,8 @@ class NeonEnv:
             pg=self.port_distributor.get_port(),
             http=self.port_distributor.get_port(),
         )
-        pageserver_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
+        pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
 
         toml += textwrap.dedent(
             f"""
@@ -932,7 +932,8 @@ class NeonEnv:
             id=1
             listen_pg_addr = 'localhost:{pageserver_port.pg}'
             listen_http_addr = 'localhost:{pageserver_port.http}'
-            auth_type = '{pageserver_auth_type}'
+            pg_auth_type = '{pg_auth_type}'
+            http_auth_type = '{http_auth_type}'
         """
         )
 
@@ -1010,6 +1011,13 @@ class NeonEnv:
         priv = (Path(self.repo_dir) / "auth_private_key.pem").read_text()
         return AuthKeys(pub=pub, priv=priv)
 
+    def generate_endpoint_id(self) -> str:
+        """
+        Generate a unique endpoint ID
+        """
+        self.endpoint_counter += 1
+        return "ep-" + str(self.endpoint_counter)
+
 
 @pytest.fixture(scope=shareable_scope)
 def _shared_simple_env(
@@ -1022,7 +1030,7 @@ def _shared_simple_env(
     top_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1068,7 +1076,7 @@ def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
     """
     yield _shared_simple_env
 
-    _shared_simple_env.postgres.stop_all()
+    _shared_simple_env.endpoints.stop_all()
 
 
 @pytest.fixture(scope="function")
@@ -1079,7 +1087,7 @@ def neon_env_builder(
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
     default_broker: NeonBroker,
     run_id: uuid.UUID,
 ) -> Iterator[NeonEnvBuilder]:
@@ -1092,7 +1100,7 @@ def neon_env_builder(
     neon_env_builder.init_start().
 
     After the initialization, you can launch compute nodes by calling
-    the functions in the 'env.postgres' factory object, stop/start the
+    the functions in the 'env.endpoints' factory object, stop/start the
     nodes, etc.
     """
 
@@ -1112,468 +1120,6 @@ def neon_env_builder(
         preserve_database_files=pytestconfig.getoption("--preserve-database-files"),
     ) as builder:
         yield builder
-
-
-class PageserverApiException(Exception):
-    pass
-
-
-class PageserverHttpClient(requests.Session):
-    def __init__(self, port: int, is_testing_enabled_or_skip: Fn, auth_token: Optional[str] = None):
-        super().__init__()
-        self.port = port
-        self.auth_token = auth_token
-        self.is_testing_enabled_or_skip = is_testing_enabled_or_skip
-
-        if auth_token is not None:
-            self.headers["Authorization"] = f"Bearer {auth_token}"
-
-    def verbose_error(self, res: requests.Response):
-        try:
-            res.raise_for_status()
-        except requests.RequestException as e:
-            try:
-                msg = res.json()["msg"]
-            except:  # noqa: E722
-                msg = ""
-            raise PageserverApiException(msg) from e
-
-    def check_status(self):
-        self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
-
-    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
-        self.is_testing_enabled_or_skip()
-
-        if isinstance(config_strings, tuple):
-            pairs = [config_strings]
-        else:
-            pairs = config_strings
-
-        log.info(f"Requesting config failpoints: {repr(pairs)}")
-
-        res = self.put(
-            f"http://localhost:{self.port}/v1/failpoints",
-            json=[{"name": name, "actions": actions} for name, actions in pairs],
-        )
-        log.info(f"Got failpoints request response code {res.status_code}")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert res_json is None
-        return res_json
-
-    def tenant_list(self) -> List[Dict[Any, Any]]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, list)
-        return res_json
-
-    def tenant_create(self, new_tenant_id: Optional[TenantId] = None) -> TenantId:
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant",
-            json={
-                "new_tenant_id": str(new_tenant_id) if new_tenant_id else None,
-            },
-        )
-        self.verbose_error(res)
-        if res.status_code == 409:
-            raise Exception(f"could not create tenant: already exists for id {new_tenant_id}")
-        new_tenant_id = res.json()
-        assert isinstance(new_tenant_id, str)
-        return TenantId(new_tenant_id)
-
-    def tenant_attach(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach")
-        self.verbose_error(res)
-
-    def tenant_detach(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/detach")
-        self.verbose_error(res)
-
-    def tenant_load(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/load")
-        self.verbose_error(res)
-
-    def tenant_ignore(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/ignore")
-        self.verbose_error(res)
-
-    def tenant_status(self, tenant_id: TenantId) -> Dict[Any, Any]:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def tenant_config(self, tenant_id: TenantId) -> TenantConfig:
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/config")
-        self.verbose_error(res)
-        return TenantConfig.from_json(res.json())
-
-    def tenant_size(self, tenant_id: TenantId) -> int:
-        return self.tenant_size_and_modelinputs(tenant_id)[0]
-
-    def tenant_size_and_modelinputs(self, tenant_id: TenantId) -> Tuple[int, Dict[str, Any]]:
-        """
-        Returns the tenant size, together with the model inputs as the second tuple item.
-        """
-        res = self.get(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/size")
-        self.verbose_error(res)
-        res = res.json()
-        assert isinstance(res, dict)
-        assert TenantId(res["id"]) == tenant_id
-        size = res["size"]
-        assert type(size) == int
-        inputs = res["inputs"]
-        assert type(inputs) is dict
-        return (size, inputs)
-
-    def timeline_list(
-        self,
-        tenant_id: TenantId,
-        include_non_incremental_logical_size: bool = False,
-        include_timeline_dir_layer_file_size_sum: bool = False,
-    ) -> List[Dict[str, Any]]:
-
-        params = {}
-        if include_non_incremental_logical_size:
-            params["include-non-incremental-logical-size"] = "true"
-        if include_timeline_dir_layer_file_size_sum:
-            params["include-timeline-dir-layer-file-size-sum"] = "true"
-
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", params=params
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, list)
-        return res_json
-
-    def timeline_create(
-        self,
-        tenant_id: TenantId,
-        new_timeline_id: Optional[TimelineId] = None,
-        ancestor_timeline_id: Optional[TimelineId] = None,
-        ancestor_start_lsn: Optional[Lsn] = None,
-    ) -> Dict[Any, Any]:
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline",
-            json={
-                "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
-                "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
-                "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
-            },
-        )
-        self.verbose_error(res)
-        if res.status_code == 409:
-            raise Exception(f"could not create timeline: already exists for id {new_timeline_id}")
-
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def timeline_detail(
-        self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        include_non_incremental_logical_size: bool = False,
-        include_timeline_dir_layer_file_size_sum: bool = False,
-    ) -> Dict[Any, Any]:
-        params = {}
-        if include_non_incremental_logical_size:
-            params["include-non-incremental-logical-size"] = "true"
-        if include_timeline_dir_layer_file_size_sum:
-            params["include-timeline-dir-layer-file-size-sum"] = "true"
-
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
-            params=params,
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId):
-        res = self.delete(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}"
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        assert res_json is None
-
-    def timeline_gc(
-        self, tenant_id: TenantId, timeline_id: TimelineId, gc_horizon: Optional[int]
-    ) -> dict[str, Any]:
-        self.is_testing_enabled_or_skip()
-
-        log.info(
-            f"Requesting GC: tenant {tenant_id}, timeline {timeline_id}, gc_horizon {repr(gc_horizon)}"
-        )
-        res = self.put(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc",
-            json={"gc_horizon": gc_horizon},
-        )
-        log.info(f"Got GC request response code: {res.status_code}")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert res_json is not None
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def timeline_compact(self, tenant_id: TenantId, timeline_id: TimelineId):
-        self.is_testing_enabled_or_skip()
-
-        log.info(f"Requesting compact: tenant {tenant_id}, timeline {timeline_id}")
-        res = self.put(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/compact"
-        )
-        log.info(f"Got compact request response code: {res.status_code}")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert res_json is None
-
-    def timeline_get_lsn_by_timestamp(
-        self, tenant_id: TenantId, timeline_id: TimelineId, timestamp
-    ):
-        log.info(
-            f"Requesting lsn by timestamp {timestamp}, tenant {tenant_id}, timeline {timeline_id}"
-        )
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/get_lsn_by_timestamp?timestamp={timestamp}",
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        return res_json
-
-    def timeline_checkpoint(self, tenant_id: TenantId, timeline_id: TimelineId):
-        self.is_testing_enabled_or_skip()
-
-        log.info(f"Requesting checkpoint: tenant {tenant_id}, timeline {timeline_id}")
-        res = self.put(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/checkpoint"
-        )
-        log.info(f"Got checkpoint request response code: {res.status_code}")
-        self.verbose_error(res)
-        res_json = res.json()
-        assert res_json is None
-
-    def timeline_spawn_download_remote_layers(
-        self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        max_concurrent_downloads: int,
-    ) -> dict[str, Any]:
-
-        body = {
-            "max_concurrent_downloads": max_concurrent_downloads,
-        }
-        res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
-            json=body,
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        assert res_json is not None
-        assert isinstance(res_json, dict)
-        return res_json
-
-    def timeline_poll_download_remote_layers_status(
-        self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        spawn_response: dict[str, Any],
-        poll_state=None,
-    ) -> None | dict[str, Any]:
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/download_remote_layers",
-        )
-        self.verbose_error(res)
-        res_json = res.json()
-        assert res_json is not None
-        assert isinstance(res_json, dict)
-
-        # assumption in this API client here is that nobody else spawns the task
-        assert res_json["task_id"] == spawn_response["task_id"]
-
-        if poll_state is None or res_json["state"] == poll_state:
-            return res_json
-        return None
-
-    def timeline_download_remote_layers(
-        self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        max_concurrent_downloads: int,
-        errors_ok=False,
-        at_least_one_download=True,
-    ):
-        res = self.timeline_spawn_download_remote_layers(
-            tenant_id, timeline_id, max_concurrent_downloads
-        )
-        while True:
-            completed = self.timeline_poll_download_remote_layers_status(
-                tenant_id, timeline_id, res, poll_state="Completed"
-            )
-            if not completed:
-                time.sleep(0.1)
-                continue
-            if not errors_ok:
-                assert completed["failed_download_count"] == 0
-            if at_least_one_download:
-                assert completed["successful_download_count"] > 0
-            return completed
-
-    def get_metrics(self) -> str:
-        res = self.get(f"http://localhost:{self.port}/metrics")
-        self.verbose_error(res)
-        return res.text
-
-    def get_timeline_metric(self, tenant_id: TenantId, timeline_id: TimelineId, metric_name: str):
-        raw = self.get_metrics()
-        family: List[prometheus_client.Metric] = list(text_string_to_metric_families(raw))
-        [metric] = [m for m in family if m.name == metric_name]
-        [sample] = [
-            s
-            for s in metric.samples
-            if s.labels["tenant_id"] == str(tenant_id)
-            and s.labels["timeline_id"] == str(timeline_id)
-        ]
-        return sample.value
-
-    def get_remote_timeline_client_metric(
-        self,
-        metric_name: str,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        file_kind: str,
-        op_kind: str,
-    ) -> Optional[float]:
-        metrics = parse_metrics(self.get_metrics(), "pageserver")
-        matches = metrics.query_all(
-            name=metric_name,
-            filter={
-                "tenant_id": str(tenant_id),
-                "timeline_id": str(timeline_id),
-                "file_kind": str(file_kind),
-                "op_kind": str(op_kind),
-            },
-        )
-        if len(matches) == 0:
-            value = None
-        elif len(matches) == 1:
-            value = matches[0].value
-            assert value is not None
-        else:
-            assert len(matches) < 2, "above filter should uniquely identify metric"
-        return value
-
-    def get_metric_value(self, name: str) -> Optional[str]:
-        metrics = self.get_metrics()
-        relevant = [line for line in metrics.splitlines() if line.startswith(name)]
-        if len(relevant) == 0:
-            log.info(f'could not find metric "{name}"')
-            return None
-        assert len(relevant) == 1
-        return relevant[0].lstrip(name).strip()
-
-    def layer_map_info(
-        self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-    ) -> LayerMapInfo:
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/",
-        )
-        self.verbose_error(res)
-        return LayerMapInfo.from_json(res.json())
-
-    def download_layer(self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: str):
-        res = self.get(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}",
-        )
-        self.verbose_error(res)
-
-        assert res.status_code == 200
-
-    def evict_layer(self, tenant_id: TenantId, timeline_id: TimelineId, layer_name: str):
-        res = self.delete(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}",
-        )
-        self.verbose_error(res)
-
-        assert res.status_code == 200
-
-
-@dataclass
-class TenantConfig:
-    tenant_specific_overrides: Dict[str, Any]
-    effective_config: Dict[str, Any]
-
-    @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> TenantConfig:
-        return TenantConfig(
-            tenant_specific_overrides=d["tenant_specific_overrides"],
-            effective_config=d["effective_config"],
-        )
-
-
-@dataclass
-class LayerMapInfo:
-    in_memory_layers: List[InMemoryLayerInfo]
-    historic_layers: List[HistoricLayerInfo]
-
-    @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> LayerMapInfo:
-        info = LayerMapInfo(in_memory_layers=[], historic_layers=[])
-
-        json_in_memory_layers = d["in_memory_layers"]
-        assert isinstance(json_in_memory_layers, List)
-        for json_in_memory_layer in json_in_memory_layers:
-            info.in_memory_layers.append(InMemoryLayerInfo.from_json(json_in_memory_layer))
-
-        json_historic_layers = d["historic_layers"]
-        assert isinstance(json_historic_layers, List)
-        for json_historic_layer in json_historic_layers:
-            info.historic_layers.append(HistoricLayerInfo.from_json(json_historic_layer))
-
-        return info
-
-
-@dataclass
-class InMemoryLayerInfo:
-    kind: str
-    lsn_start: str
-    lsn_end: Optional[str]
-
-    @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> InMemoryLayerInfo:
-        return InMemoryLayerInfo(
-            kind=d["kind"],
-            lsn_start=d["lsn_start"],
-            lsn_end=d.get("lsn_end"),
-        )
-
-
-@dataclass
-class HistoricLayerInfo:
-    kind: str
-    layer_file_name: str
-    layer_file_size: Optional[int]
-    lsn_start: str
-    lsn_end: Optional[str]
-    remote: bool
-
-    @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
-        return HistoricLayerInfo(
-            kind=d["kind"],
-            layer_file_name=d["layer_file_name"],
-            layer_file_size=d.get("layer_file_size"),
-            lsn_start=d["lsn_start"],
-            lsn_end=d.get("lsn_end"),
-            remote=d["remote"],
-        )
 
 
 @dataclass
@@ -1637,7 +1183,7 @@ class AbstractNeonCli(abc.ABC):
         env_vars["POSTGRES_DISTRIB_DIR"] = str(self.env.pg_distrib_dir)
         if self.env.rust_log_override is not None:
             env_vars["RUST_LOG"] = self.env.rust_log_override
-        for (extra_env_key, extra_env_value) in (extra_env_vars or {}).items():
+        for extra_env_key, extra_env_value in (extra_env_vars or {}).items():
             env_vars[extra_env_key] = extra_env_value
 
         # Pass coverage settings
@@ -1657,7 +1203,7 @@ class AbstractNeonCli(abc.ABC):
             timeout=timeout,
         )
         if not res.returncode:
-            log.info(f"Run success: {res.stdout}")
+            log.info(f"Run {res.args} success: {res.stdout}")
         elif check_return_code:
             # this way command output will be in recorded and shown in CI in failure message
             msg = f"""\
@@ -1895,16 +1441,17 @@ class NeonCli(AbstractNeonCli):
             args.extend(["-m", "immediate"])
         return self.raw_cli(args)
 
-    def pg_create(
+    def endpoint_create(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
-            "pg",
+            "endpoint",
             "create",
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
@@ -1917,22 +1464,24 @@ class NeonCli(AbstractNeonCli):
             args.extend(["--lsn", str(lsn)])
         if port is not None:
             args.extend(["--port", str(port)])
-        if node_name is not None:
-            args.append(node_name)
+        if endpoint_id is not None:
+            args.append(endpoint_id)
+        if hot_standby:
+            args.extend(["--hot-standby", "true"])
 
         res = self.raw_cli(args)
         res.check_returncode()
         return res
 
-    def pg_start(
+    def endpoint_start(
         self,
-        node_name: str,
+        endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
         port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
-            "pg",
+            "endpoint",
             "start",
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
@@ -1943,30 +1492,30 @@ class NeonCli(AbstractNeonCli):
             args.append(f"--lsn={lsn}")
         if port is not None:
             args.append(f"--port={port}")
-        if node_name is not None:
-            args.append(node_name)
+        if endpoint_id is not None:
+            args.append(endpoint_id)
 
         res = self.raw_cli(args)
         res.check_returncode()
         return res
 
-    def pg_stop(
+    def endpoint_stop(
         self,
-        node_name: str,
+        endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
         destroy=False,
         check_return_code=True,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
-            "pg",
+            "endpoint",
             "stop",
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
         ]
         if destroy:
             args.append("--destroy")
-        if node_name is not None:
-            args.append(node_name)
+        if endpoint_id is not None:
+            args.append(endpoint_id)
 
         return self.raw_cli(args, check_return_code=check_return_code)
 
@@ -2037,8 +1586,10 @@ class NeonPageserver(PgProtocol):
             ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",
             ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
             ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
+            # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
+            ".*Connection aborted: connection error: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*Replication stream finished: db error: ERROR: Socket IO error: end streaming to Some.*",
+            ".*Replication stream finished: db error:.*ending streaming to Some*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
@@ -2052,8 +1603,8 @@ class NeonPageserver(PgProtocol):
             # https://github.com/neondatabase/neon/issues/2442
             ".*could not remove ephemeral file.*No such file or directory.*",
             # FIXME: These need investigation
-            ".*gc_loop.*Failed to get a tenant .* Tenant .* not found in the local state.*",
-            ".*compaction_loop.*Failed to get a tenant .* Tenant .* not found in the local state.*",
+            ".*gc_loop.*Failed to get a tenant .* Tenant .* not found.*",
+            ".*compaction_loop.*Failed to get a tenant .* Tenant .* not found.*",
             ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
             ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
             ".*Removing intermediate uninit mark file.*",
@@ -2067,6 +1618,9 @@ class NeonPageserver(PgProtocol):
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
+            ".*task iteration took longer than the configured period.*",
+            # this is until #3501
+            ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
         ]
 
     def start(
@@ -2119,7 +1673,7 @@ class NeonPageserver(PgProtocol):
 
     def assert_no_errors(self):
         logfile = open(os.path.join(self.env.repo_dir, "pageserver.log"), "r")
-        error_or_warn = re.compile("ERROR|WARN")
+        error_or_warn = re.compile(r"\s(ERROR|WARN)")
         errors = []
         while True:
             line = logfile.readline()
@@ -2188,7 +1742,7 @@ def append_pageserver_param_overrides(
 class PgBin:
     """A helper class for executing postgres binaries"""
 
-    def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: str):
+    def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion):
         self.log_dir = log_dir
         self.pg_version = pg_version
         self.pg_bin_path = pg_distrib_dir / f"v{pg_version}" / "bin"
@@ -2247,7 +1801,7 @@ class PgBin:
 
 
 @pytest.fixture(scope="function")
-def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: str) -> PgBin:
+def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
@@ -2260,6 +1814,36 @@ class VanillaPostgres(PgProtocol):
         if init:
             self.pg_bin.run_capture(["initdb", "-D", str(pgdatadir)])
         self.configure([f"port = {port}\n"])
+
+    def enable_tls(self):
+        assert not self.running
+        # generate self-signed certificate
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-x509",
+                "-days",
+                "365",
+                "-nodes",
+                "-text",
+                "-out",
+                self.pgdatadir / "server.crt",
+                "-keyout",
+                self.pgdatadir / "server.key",
+                "-subj",
+                "/CN=localhost",
+            ]
+        )
+        # configure postgresql.conf
+        self.configure(
+            [
+                "ssl = on",
+                "ssl_cert_file = 'server.crt'",
+                "ssl_key_file = 'server.key'",
+            ]
+        )
 
     def configure(self, options: List[str]):
         """Append lines into postgresql.conf file."""
@@ -2305,7 +1889,7 @@ def vanilla_pg(
     test_output_dir: Path,
     port_distributor: PortDistributor,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
 ) -> Iterator[VanillaPostgres]:
     pgdatadir = test_output_dir / "pgdata-vanilla"
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
@@ -2350,7 +1934,7 @@ class RemotePostgres(PgProtocol):
 
 @pytest.fixture(scope="function")
 def remote_pg(
-    test_output_dir: Path, pg_distrib_dir: Path, pg_version: str
+    test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion
 ) -> Iterator[RemotePostgres]:
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
@@ -2358,8 +1942,25 @@ def remote_pg(
     if connstr is None:
         raise ValueError("no connstr provided, use BENCHMARK_CONNSTR environment variable")
 
+    host = parse_dsn(connstr).get("host", "")
+    is_neon = host.endswith(".neon.build")
+
+    start_ms = int(datetime.utcnow().timestamp() * 1000)
     with RemotePostgres(pg_bin, connstr) as remote_pg:
+        if is_neon:
+            timeline_id = TimelineId(remote_pg.safe_psql("SHOW neon.timeline_id")[0][0])
+
         yield remote_pg
+
+    end_ms = int(datetime.utcnow().timestamp() * 1000)
+    if is_neon:
+        # Add 10s margin to the start and end times
+        allure_add_grafana_links(
+            host,
+            timeline_id,
+            start_ms - 10_000,
+            end_ms + 10_000,
+        )
 
 
 class PSQL:
@@ -2416,6 +2017,7 @@ class NeonProxy(PgProtocol):
                 # Link auth backend params
                 *["--auth-backend", "link"],
                 *["--uri", NeonProxy.link_auth_uri],
+                *["--allow-self-signed-compute", "true"],
             ]
 
     @dataclass(frozen=True)
@@ -2436,6 +2038,7 @@ class NeonProxy(PgProtocol):
     def __init__(
         self,
         neon_binpath: Path,
+        test_output_dir: Path,
         proxy_port: int,
         http_port: int,
         mgmt_port: int,
@@ -2449,6 +2052,7 @@ class NeonProxy(PgProtocol):
         self.host = host
         self.http_port = http_port
         self.neon_binpath = neon_binpath
+        self.test_output_dir = test_output_dir
         self.proxy_port = proxy_port
         self.mgmt_port = mgmt_port
         self.auth_backend = auth_backend
@@ -2475,9 +2079,21 @@ class NeonProxy(PgProtocol):
                 *["--metric-collection-interval", self.metric_collection_interval],
             ]
 
-        self._popen = subprocess.Popen(args)
+        logfile = open(self.test_output_dir / "proxy.log", "w")
+        self._popen = subprocess.Popen(args, stdout=logfile, stderr=logfile)
         self._wait_until_ready()
         return self
+
+    # Sends SIGTERM to the proxy if it has been started
+    def terminate(self):
+        if self._popen:
+            self._popen.terminate()
+
+    # Waits for proxy to exit if it has been opened with a default timeout of
+    # two seconds. Raises subprocess.TimeoutExpired if the proxy does not exit in time.
+    def wait_for_exit(self, timeout=2):
+        if self._popen:
+            self._popen.wait(timeout=2)
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
@@ -2517,19 +2133,22 @@ class NeonProxy(PgProtocol):
         tb: Optional[TracebackType],
     ):
         if self._popen is not None:
-            # NOTE the process will die when we're done with tests anyway, because
-            # it's a child process. This is mostly to clean up in between different tests.
-            self._popen.kill()
+            self._popen.terminate()
+            try:
+                self._popen.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warning("failed to gracefully terminate proxy; killing")
+                self._popen.kill()
 
     @staticmethod
     async def activate_link_auth(
         local_vanilla_pg, proxy_with_metric_collector, psql_session_id, create_user=True
     ):
-
         pg_user = "proxy"
 
         if create_user:
             log.info("creating a new user for link auth test")
+            local_vanilla_pg.enable_tls()
             local_vanilla_pg.start()
             local_vanilla_pg.safe_psql(f"create user {pg_user} with login superuser")
 
@@ -2563,7 +2182,9 @@ class NeonProxy(PgProtocol):
 
 
 @pytest.fixture(scope="function")
-def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterator[NeonProxy]:
+def link_proxy(
+    port_distributor: PortDistributor, neon_binpath: Path, test_output_dir: Path
+) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth."""
 
     http_port = port_distributor.get_port()
@@ -2572,6 +2193,7 @@ def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterato
 
     with NeonProxy(
         neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
@@ -2583,7 +2205,10 @@ def link_proxy(port_distributor: PortDistributor, neon_binpath: Path) -> Iterato
 
 @pytest.fixture(scope="function")
 def static_proxy(
-    vanilla_pg: VanillaPostgres, port_distributor: PortDistributor, neon_binpath: Path
+    vanilla_pg: VanillaPostgres,
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes directly to vanilla postgres."""
 
@@ -2602,6 +2227,7 @@ def static_proxy(
 
     with NeonProxy(
         neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
@@ -2611,8 +2237,8 @@ def static_proxy(
         yield proxy
 
 
-class Postgres(PgProtocol):
-    """An object representing a running postgres daemon."""
+class Endpoint(PgProtocol):
+    """An object representing a Postgres compute endpoint managed by the control plane."""
 
     def __init__(
         self, env: NeonEnv, tenant_id: TenantId, port: int, check_stop_result: bool = True
@@ -2620,33 +2246,44 @@ class Postgres(PgProtocol):
         super().__init__(host="localhost", port=port, user="cloud_admin", dbname="postgres")
         self.env = env
         self.running = False
-        self.node_name: Optional[str] = None  # dubious, see asserts below
+        self.branch_name: Optional[str] = None  # dubious
+        self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.port = port
         self.check_stop_result = check_stop_result
-        # path to conf is <repo_dir>/pgdatadirs/tenants/<tenant_id>/<node_name>/postgresql.conf
+        # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
     def create(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
-    ) -> "Postgres":
+    ) -> "Endpoint":
         """
-        Create the pg data directory.
+        Create a new Postgres endpoint.
         Returns self.
         """
 
         if not config_lines:
             config_lines = []
 
-        self.node_name = node_name or f"{branch_name}_pg_node"
-        self.env.neon_cli.pg_create(
-            branch_name, node_name=self.node_name, tenant_id=self.tenant_id, lsn=lsn, port=self.port
+        if endpoint_id is None:
+            endpoint_id = self.env.generate_endpoint_id()
+        self.endpoint_id = endpoint_id
+        self.branch_name = branch_name
+
+        self.env.neon_cli.endpoint_create(
+            branch_name,
+            endpoint_id=self.endpoint_id,
+            tenant_id=self.tenant_id,
+            lsn=lsn,
+            hot_standby=hot_standby,
+            port=self.port,
         )
-        path = Path("pgdatadirs") / "tenants" / str(self.tenant_id) / self.node_name
+        path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
 
         if config_lines is None:
@@ -2659,26 +2296,30 @@ class Postgres(PgProtocol):
 
         return self
 
-    def start(self) -> "Postgres":
+    def start(self) -> "Endpoint":
         """
         Start the Postgres instance.
         Returns self.
         """
 
-        assert self.node_name is not None
+        assert self.endpoint_id is not None
 
-        log.info(f"Starting postgres node {self.node_name}")
+        log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
-        self.env.neon_cli.pg_start(self.node_name, tenant_id=self.tenant_id, port=self.port)
+        self.env.neon_cli.endpoint_start(self.endpoint_id, tenant_id=self.tenant_id, port=self.port)
         self.running = True
 
         return self
 
+    def endpoint_path(self) -> Path:
+        """Path to endpoint directory"""
+        assert self.endpoint_id
+        path = Path("endpoints") / self.endpoint_id
+        return self.env.repo_dir / path
+
     def pg_data_dir_path(self) -> str:
-        """Path to data directory"""
-        assert self.node_name
-        path = Path("pgdatadirs") / "tenants" / str(self.tenant_id) / self.node_name
-        return os.path.join(self.env.repo_dir, path)
+        """Path to Postgres data directory"""
+        return os.path.join(self.endpoint_path(), "pgdata")
 
     def pg_xact_dir_path(self) -> str:
         """Path to pg_xact dir"""
@@ -2692,7 +2333,7 @@ class Postgres(PgProtocol):
         """Path to postgresql.conf"""
         return os.path.join(self.pg_data_dir_path(), "postgresql.conf")
 
-    def adjust_for_safekeepers(self, safekeepers: str) -> "Postgres":
+    def adjust_for_safekeepers(self, safekeepers: str) -> "Endpoint":
         """
         Adjust instance config for working with wal acceptors instead of
         pageserver (pre-configured by CLI) directly.
@@ -2716,7 +2357,7 @@ class Postgres(PgProtocol):
             f.write("neon.safekeepers = '{}'\n".format(safekeepers))
         return self
 
-    def config(self, lines: List[str]) -> "Postgres":
+    def config(self, lines: List[str]) -> "Endpoint":
         """
         Add lines to postgresql.conf.
         Lines should be an array of valid postgresql.conf rows.
@@ -2730,32 +2371,32 @@ class Postgres(PgProtocol):
 
         return self
 
-    def stop(self) -> "Postgres":
+    def stop(self) -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
         Returns self.
         """
 
         if self.running:
-            assert self.node_name is not None
-            self.env.neon_cli.pg_stop(
-                self.node_name, self.tenant_id, check_return_code=self.check_stop_result
+            assert self.endpoint_id is not None
+            self.env.neon_cli.endpoint_stop(
+                self.endpoint_id, self.tenant_id, check_return_code=self.check_stop_result
             )
             self.running = False
 
         return self
 
-    def stop_and_destroy(self) -> "Postgres":
+    def stop_and_destroy(self) -> "Endpoint":
         """
-        Stop the Postgres instance, then destroy it.
+        Stop the Postgres instance, then destroy the endpoint.
         Returns self.
         """
 
-        assert self.node_name is not None
-        self.env.neon_cli.pg_stop(
-            self.node_name, self.tenant_id, True, check_return_code=self.check_stop_result
+        assert self.endpoint_id is not None
+        self.env.neon_cli.endpoint_stop(
+            self.endpoint_id, self.tenant_id, True, check_return_code=self.check_stop_result
         )
-        self.node_name = None
+        self.endpoint_id = None
         self.running = False
 
         return self
@@ -2763,13 +2404,13 @@ class Postgres(PgProtocol):
     def create_start(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
+        hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
-    ) -> "Postgres":
+    ) -> "Endpoint":
         """
-        Create a Postgres instance, apply config
-        and then start it.
+        Create an endpoint, apply config, and start Postgres.
         Returns self.
         """
 
@@ -2777,8 +2418,9 @@ class Postgres(PgProtocol):
 
         self.create(
             branch_name=branch_name,
-            node_name=node_name,
+            endpoint_id=endpoint_id,
             config_lines=config_lines,
+            hot_standby=hot_standby,
             lsn=lsn,
         ).start()
 
@@ -2786,7 +2428,7 @@ class Postgres(PgProtocol):
 
         return self
 
-    def __enter__(self) -> "Postgres":
+    def __enter__(self) -> "Endpoint":
         return self
 
     def __exit__(
@@ -2798,34 +2440,35 @@ class Postgres(PgProtocol):
         self.stop()
 
 
-class PostgresFactory:
-    """An object representing multiple running postgres daemons."""
+class EndpointFactory:
+    """An object representing multiple compute endpoints."""
 
     def __init__(self, env: NeonEnv):
         self.env = env
         self.num_instances: int = 0
-        self.instances: List[Postgres] = []
+        self.endpoints: List[Endpoint] = []
 
     def create_start(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
+        hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
-    ) -> Postgres:
-
-        pg = Postgres(
+    ) -> Endpoint:
+        ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             port=self.env.port_distributor.get_port(),
         )
         self.num_instances += 1
-        self.instances.append(pg)
+        self.endpoints.append(ep)
 
-        return pg.create_start(
+        return ep.create_start(
             branch_name=branch_name,
-            node_name=node_name,
+            endpoint_id=endpoint_id,
+            hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
         )
@@ -2833,33 +2476,67 @@ class PostgresFactory:
     def create(
         self,
         branch_name: str,
-        node_name: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
+        hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
-    ) -> Postgres:
-
-        pg = Postgres(
+    ) -> Endpoint:
+        ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
             port=self.env.port_distributor.get_port(),
         )
 
-        self.num_instances += 1
-        self.instances.append(pg)
+        if endpoint_id is None:
+            endpoint_id = self.env.generate_endpoint_id()
 
-        return pg.create(
+        self.num_instances += 1
+        self.endpoints.append(ep)
+
+        return ep.create(
             branch_name=branch_name,
-            node_name=node_name,
+            endpoint_id=endpoint_id,
             lsn=lsn,
+            hot_standby=hot_standby,
             config_lines=config_lines,
         )
 
-    def stop_all(self) -> "PostgresFactory":
-        for pg in self.instances:
-            pg.stop()
+    def stop_all(self) -> "EndpointFactory":
+        for ep in self.endpoints:
+            ep.stop()
 
         return self
+
+    def new_replica(self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]]):
+        branch_name = origin.branch_name
+        assert origin in self.endpoints
+        assert branch_name is not None
+
+        return self.create(
+            branch_name=branch_name,
+            endpoint_id=endpoint_id,
+            tenant_id=origin.tenant_id,
+            lsn=None,
+            hot_standby=True,
+            config_lines=config_lines,
+        )
+
+    def new_replica_start(
+        self, origin: Endpoint, endpoint_id: str, config_lines: Optional[List[str]] = None
+    ):
+        branch_name = origin.branch_name
+        assert origin in self.endpoints
+        assert branch_name is not None
+
+        return self.create_start(
+            branch_name=branch_name,
+            endpoint_id=endpoint_id,
+            tenant_id=origin.tenant_id,
+            lsn=None,
+            hot_standby=True,
+            config_lines=config_lines,
+        )
 
 
 @dataclass
@@ -2941,11 +2618,12 @@ class Safekeeper:
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
-    pg_version: int
+    pg_version: int  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
     flush_lsn: Lsn
     commit_lsn: Lsn
     timeline_start_lsn: Lsn
     backup_lsn: Lsn
+    peer_horizon_lsn: Lsn
     remote_consistent_lsn: Lsn
 
 
@@ -2971,8 +2649,26 @@ class SafekeeperHttpClient(requests.Session):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
+    def debug_dump(self, params: Dict[str, str] = {}) -> Dict[str, Any]:
+        res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
+    def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
+        res.raise_for_status()
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return res_json
+
     def timeline_create(
-        self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        pg_version: int,  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
+        commit_lsn: Lsn,
     ):
         body = {
             "tenant_id": str(tenant_id),
@@ -2996,6 +2692,7 @@ class SafekeeperHttpClient(requests.Session):
             commit_lsn=Lsn(resj["commit_lsn"]),
             timeline_start_lsn=Lsn(resj["timeline_start_lsn"]),
             backup_lsn=Lsn(resj["backup_lsn"]),
+            peer_horizon_lsn=Lsn(resj["peer_horizon_lsn"]),
             remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
         )
 
@@ -3225,16 +2922,16 @@ def list_files_to_compare(pgdata_dir: Path) -> List[str]:
 def check_restored_datadir_content(
     test_output_dir: Path,
     env: NeonEnv,
-    pg: Postgres,
+    endpoint: Endpoint,
 ):
     # Get the timeline ID. We need it for the 'basebackup' command
-    timeline = TimelineId(pg.safe_psql("SHOW neon.timeline_id")[0][0])
+    timeline = TimelineId(endpoint.safe_psql("SHOW neon.timeline_id")[0][0])
 
     # stop postgres to ensure that files won't change
-    pg.stop()
+    endpoint.stop()
 
     # Take a basebackup from pageserver
-    restored_dir_path = env.repo_dir / f"{pg.node_name}_restored_datadir"
+    restored_dir_path = env.repo_dir / f"{endpoint.endpoint_id}_restored_datadir"
     restored_dir_path.mkdir(exist_ok=True)
 
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
@@ -3244,7 +2941,7 @@ def check_restored_datadir_content(
         {psql_path}                                    \
             --no-psqlrc                                \
             postgres://localhost:{env.pageserver.service_port.pg}  \
-            -c 'basebackup {pg.tenant_id} {timeline}'  \
+            -c 'basebackup {endpoint.tenant_id} {timeline}'  \
          | tar -x -C {restored_dir_path}
     """
 
@@ -3261,8 +2958,8 @@ def check_restored_datadir_content(
     assert result.returncode == 0
 
     # list files we're going to compare
-    assert pg.pgdata_dir
-    pgdata_files = list_files_to_compare(Path(pg.pgdata_dir))
+    assert endpoint.pgdata_dir
+    pgdata_files = list_files_to_compare(Path(endpoint.pgdata_dir))
     restored_files = list_files_to_compare(restored_dir_path)
 
     # check that file sets are equal
@@ -3273,13 +2970,12 @@ def check_restored_datadir_content(
     # We've already filtered all mismatching files in list_files_to_compare(),
     # so here expect that the content is identical
     (match, mismatch, error) = filecmp.cmpfiles(
-        pg.pgdata_dir, restored_dir_path, pgdata_files, shallow=False
+        endpoint.pgdata_dir, restored_dir_path, pgdata_files, shallow=False
     )
     log.info(f"filecmp result mismatch and error lists:\n\t mismatch={mismatch}\n\t error={error}")
 
     for f in mismatch:
-
-        f1 = os.path.join(pg.pgdata_dir, f)
+        f1 = os.path.join(endpoint.pgdata_dir, f)
         f2 = os.path.join(restored_dir_path, f)
         stdout_filename = "{}.filediff".format(f2)
 
@@ -3293,162 +2989,25 @@ def check_restored_datadir_content(
     assert (mismatch, error) == ([], [])
 
 
-def wait_until(number_of_iterations: int, interval: float, func):
-    """
-    Wait until 'func' returns successfully, without exception. Returns the
-    last return value from the function.
-    """
-    last_exception = None
-    for i in range(number_of_iterations):
-        try:
-            res = func()
-        except Exception as e:
-            log.info("waiting for %s iteration %s failed", func, i + 1)
-            last_exception = e
-            time.sleep(interval)
-            continue
-        return res
-    raise Exception("timed out while waiting for %s" % func) from last_exception
-
-
-def wait_while(number_of_iterations: int, interval: float, func):
-    """
-    Wait until 'func' returns false, or throws an exception.
-    """
-    for i in range(number_of_iterations):
-        try:
-            if not func():
-                return
-            log.info("waiting for %s iteration %s failed", func, i + 1)
-            time.sleep(interval)
-            continue
-        except Exception:
-            return
-    raise Exception("timed out while waiting for %s" % func)
-
-
-def assert_tenant_status(
-    pageserver_http_client: PageserverHttpClient, tenant: TenantId, expected_status: str
-):
-    tenant_status = pageserver_http_client.tenant_status(tenant)
-    log.info(f"tenant_status: {tenant_status}")
-    assert tenant_status["state"] == expected_status, tenant_status
-
-
-def tenant_exists(ps_http: PageserverHttpClient, tenant_id: TenantId):
-    tenants = ps_http.tenant_list()
-    matching = [t for t in tenants if TenantId(t["id"]) == tenant_id]
-    assert len(matching) < 2
-    if len(matching) == 0:
-        return None
-    return matching[0]
-
-
-def remote_consistent_lsn(
-    pageserver_http_client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
-) -> Lsn:
-    detail = pageserver_http_client.timeline_detail(tenant, timeline)
-
-    if detail["remote_consistent_lsn"] is None:
-        # No remote information at all. This happens right after creating
-        # a timeline, before any part of it has been uploaded to remote
-        # storage yet.
-        return Lsn(0)
-    else:
-        lsn_str = detail["remote_consistent_lsn"]
-        assert isinstance(lsn_str, str)
-        return Lsn(lsn_str)
-
-
-def wait_for_upload(
-    pageserver_http_client: PageserverHttpClient,
-    tenant: TenantId,
-    timeline: TimelineId,
-    lsn: Lsn,
-):
-    """waits for local timeline upload up to specified lsn"""
-    for i in range(20):
-        current_lsn = remote_consistent_lsn(pageserver_http_client, tenant, timeline)
-        if current_lsn >= lsn:
-            log.info("wait finished")
-            return
-        log.info(
-            "waiting for remote_consistent_lsn to reach {}, now {}, iteration {}".format(
-                lsn, current_lsn, i + 1
-            )
-        )
-        time.sleep(1)
-    raise Exception(
-        "timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
-            lsn, current_lsn
-        )
-    )
-
-
-# Does not use `wait_until` for debugging purposes
-def wait_until_tenant_state(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    expected_state: str,
-    iterations: int,
-) -> bool:
-    for _ in range(iterations):
-        try:
-            tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
-            log.debug(f"Tenant {tenant_id} data: {tenant}")
-            if tenant["state"] == expected_state:
-                return True
-        except Exception as e:
-            log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
-
-        time.sleep(1)
-
-    raise Exception(f"Tenant {tenant_id} did not become {expected_state} in {iterations} seconds")
-
-
-def last_record_lsn(
-    pageserver_http_client: PageserverHttpClient, tenant: TenantId, timeline: TimelineId
-) -> Lsn:
-    detail = pageserver_http_client.timeline_detail(tenant, timeline)
-
-    lsn_str = detail["last_record_lsn"]
-    assert isinstance(lsn_str, str)
-    return Lsn(lsn_str)
-
-
-def wait_for_last_record_lsn(
-    pageserver_http_client: PageserverHttpClient,
-    tenant: TenantId,
-    timeline: TimelineId,
-    lsn: Lsn,
-) -> Lsn:
-    """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
-    for i in range(10):
-        current_lsn = last_record_lsn(pageserver_http_client, tenant, timeline)
-        if current_lsn >= lsn:
-            return current_lsn
-        log.info(
-            "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                lsn, current_lsn, i + 1
-            )
-        )
-        time.sleep(1)
-    raise Exception(
-        "timed out while waiting for last_record_lsn to reach {}, was {}".format(lsn, current_lsn)
-    )
-
-
 def wait_for_last_flush_lsn(
-    env: NeonEnv, pg: Postgres, tenant: TenantId, timeline: TimelineId
+    env: NeonEnv, endpoint: Endpoint, tenant: TenantId, timeline: TimelineId
 ) -> Lsn:
     """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
-    last_flush_lsn = Lsn(pg.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
+    return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
+
+
+def wait_for_wal_insert_lsn(
+    env: NeonEnv, endpoint: Endpoint, tenant: TenantId, timeline: TimelineId
+) -> Lsn:
+    """Wait for pageserver to catch up the latest flush LSN, returns the last observed lsn."""
+    last_flush_lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_insert_lsn()")[0][0])
     return wait_for_last_record_lsn(env.pageserver.http_client(), tenant, timeline, last_flush_lsn)
 
 
 def fork_at_current_lsn(
     env: NeonEnv,
-    pg: Postgres,
+    endpoint: Endpoint,
     new_branch_name: str,
     ancestor_branch_name: str,
     tenant_id: Optional[TenantId] = None,
@@ -3458,36 +3017,22 @@ def fork_at_current_lsn(
     The "last LSN" is taken from the given Postgres instance. The pageserver will wait for all the
     the WAL up to that LSN to arrive in the pageserver before creating the branch.
     """
-    current_lsn = pg.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
+    current_lsn = endpoint.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
 
 
-def wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    safekeepers: List[Safekeeper],
-    pageserver: NeonPageserver,
-):
-    sk_commit_lsns = [
-        sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn for sk in safekeepers
-    ]
-    lsn = max(sk_commit_lsns)
-    ps_http = pageserver.http_client()
-    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, lsn)
-    return lsn
-
-
-def wait_for_sk_commit_lsn_to_reach_remote_storage(
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-    safekeepers: List[Safekeeper],
-    pageserver: NeonPageserver,
-):
-    lsn = wait_for_sk_commit_lsn_to_arrive_at_pageserver_last_record_lsn(
-        tenant_id, timeline_id, safekeepers, pageserver
-    )
-    ps_http = pageserver.http_client()
+def last_flush_lsn_upload(
+    env: NeonEnv, endpoint: Endpoint, tenant_id: TenantId, timeline_id: TimelineId
+) -> Lsn:
+    """
+    Wait for pageserver to catch to the latest flush LSN of given endpoint,
+    checkpoint pageserver, and wait for it to be uploaded (remote_consistent_lsn
+    reaching flush LSN).
+    """
+    last_flush_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    ps_http = env.pageserver.http_client()
+    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, last_flush_lsn)
     # force a checkpoint to trigger upload
     ps_http.timeline_checkpoint(tenant_id, timeline_id)
-    wait_for_upload(ps_http, tenant_id, timeline_id, lsn)
-    return lsn
+    wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
+    return last_flush_lsn

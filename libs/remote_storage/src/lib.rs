@@ -13,7 +13,6 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     num::{NonZeroU32, NonZeroUsize},
-    ops::Deref,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -39,6 +38,9 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
 /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
+/// No limits on the client side, which currenltly means 1000 for AWS S3.
+/// https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax
+pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
 
 const REMOTE_STORAGE_PREFIX_SEPARATOR: char = '/';
 
@@ -64,6 +66,10 @@ impl RemotePath {
     pub fn object_name(&self) -> Option<&str> {
         self.0.file_name().and_then(|os_str| os_str.to_str())
     }
+
+    pub fn join(&self, segment: &Path) -> Self {
+        Self(self.0.join(segment))
+    }
 }
 
 /// Storage (potentially remote) API to manage its state.
@@ -71,9 +77,6 @@ impl RemotePath {
 /// providing basic CRUD operations for storage files.
 #[async_trait::async_trait]
 pub trait RemoteStorage: Send + Sync + 'static {
-    /// Lists all items the storage has right now.
-    async fn list(&self) -> anyhow::Result<Vec<RemotePath>>;
-
     /// Lists all top level subdirectories for a given prefix
     /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
     /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
@@ -86,7 +89,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
         &self,
-        data: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
+        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         // S3 PUT request requires the content length to be specified,
         // otherwise it starts to fail with the concurrent connection count increasing.
         data_size_bytes: usize,
@@ -111,7 +114,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
 }
 
 pub struct Download {
-    pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send>>,
+    pub download_stream: Pin<Box<dyn io::AsyncRead + Unpin + Send + Sync>>,
     /// Extra key-value data, associated with the current remote file.
     pub metadata: Option<StorageMetadata>,
 }
@@ -157,14 +160,67 @@ pub enum GenericRemoteStorage {
     Unreliable(Arc<UnreliableWrapper>),
 }
 
-impl Deref for GenericRemoteStorage {
-    type Target = dyn RemoteStorage;
-
-    fn deref(&self) -> &Self::Target {
+impl GenericRemoteStorage {
+    pub async fn list_prefixes(
+        &self,
+        prefix: Option<&RemotePath>,
+    ) -> Result<Vec<RemotePath>, DownloadError> {
         match self {
-            GenericRemoteStorage::LocalFs(local_fs) => local_fs,
-            GenericRemoteStorage::AwsS3(s3_bucket) => s3_bucket.as_ref(),
-            GenericRemoteStorage::Unreliable(s) => s.as_ref(),
+            Self::LocalFs(s) => s.list_prefixes(prefix).await,
+            Self::AwsS3(s) => s.list_prefixes(prefix).await,
+            Self::Unreliable(s) => s.list_prefixes(prefix).await,
+        }
+    }
+
+    pub async fn upload(
+        &self,
+        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
+        }
+    }
+
+    pub async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.download(from).await,
+            Self::AwsS3(s) => s.download(from).await,
+            Self::Unreliable(s) => s.download(from).await,
+        }
+    }
+
+    pub async fn download_byte_range(
+        &self,
+        from: &RemotePath,
+        start_inclusive: u64,
+        end_exclusive: Option<u64>,
+    ) -> Result<Download, DownloadError> {
+        match self {
+            Self::LocalFs(s) => {
+                s.download_byte_range(from, start_inclusive, end_exclusive)
+                    .await
+            }
+            Self::AwsS3(s) => {
+                s.download_byte_range(from, start_inclusive, end_exclusive)
+                    .await
+            }
+            Self::Unreliable(s) => {
+                s.download_byte_range(from, start_inclusive, end_exclusive)
+                    .await
+            }
+        }
+    }
+
+    pub async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.delete(path).await,
+            Self::AwsS3(s) => s.delete(path).await,
+            Self::Unreliable(s) => s.delete(path).await,
         }
     }
 }
@@ -195,7 +251,7 @@ impl GenericRemoteStorage {
     /// this path is used for the remote object id conversion only.
     pub async fn upload_storage_object(
         &self,
-        from: Box<dyn tokio::io::AsyncRead + Unpin + Send + Sync + 'static>,
+        from: impl tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
     ) -> anyhow::Result<()> {
@@ -266,6 +322,7 @@ pub struct S3Config {
     /// AWS S3 has various limits on its API calls, we need not to exceed those.
     /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
     pub concurrency_limit: NonZeroUsize,
+    pub max_keys_per_list_response: Option<i32>,
 }
 
 impl Debug for S3Config {
@@ -275,6 +332,10 @@ impl Debug for S3Config {
             .field("bucket_region", &self.bucket_region)
             .field("prefix_in_bucket", &self.prefix_in_bucket)
             .field("concurrency_limit", &self.concurrency_limit)
+            .field(
+                "max_keys_per_list_response",
+                &self.max_keys_per_list_response,
+            )
             .finish()
     }
 }
@@ -303,6 +364,11 @@ impl RemoteStorageConfig {
         )
         .context("Failed to parse 'concurrency_limit' as a positive integer")?;
 
+        let max_keys_per_list_response =
+            parse_optional_integer::<i32, _>("max_keys_per_list_response", toml)
+                .context("Failed to parse 'max_keys_per_list_response' as a positive integer")?
+                .or(DEFAULT_MAX_KEYS_PER_LIST_RESPONSE);
+
         let storage = match (local_path, bucket_name, bucket_region) {
             // no 'local_path' nor 'bucket_name' options are provided, consider this remote storage disabled
             (None, None, None) => return Ok(None),
@@ -324,6 +390,7 @@ impl RemoteStorageConfig {
                     .map(|endpoint| parse_toml_string("endpoint", endpoint))
                     .transpose()?,
                 concurrency_limit,
+                max_keys_per_list_response,
             }),
             (Some(local_path), None, None) => RemoteStorageKind::LocalFs(PathBuf::from(
                 parse_toml_string("local_path", local_path)?,

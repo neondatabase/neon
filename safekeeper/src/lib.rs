@@ -1,8 +1,8 @@
-use storage_broker::Uri;
-//
 use remote_storage::RemoteStorageConfig;
+
 use std::path::PathBuf;
 use std::time::Duration;
+use storage_broker::Uri;
 
 use utils::id::{NodeId, TenantId, TenantTimelineId};
 
@@ -10,10 +10,12 @@ mod auth;
 pub mod broker;
 pub mod control_file;
 pub mod control_file_upgrade;
+pub mod debug_dump;
 pub mod handler;
 pub mod http;
 pub mod json_ctrl;
 pub mod metrics;
+pub mod pull_timeline;
 pub mod receive_wal;
 pub mod remove_wal;
 pub mod safekeeper;
@@ -51,6 +53,7 @@ pub struct SafeKeeperConf {
     pub my_id: NodeId,
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
+    pub availability_zone: Option<String>,
     pub no_sync: bool,
     pub broker_endpoint: Uri,
     pub broker_keepalive_interval: Duration,
@@ -58,6 +61,7 @@ pub struct SafeKeeperConf {
     pub remote_storage: Option<RemoteStorageConfig>,
     pub max_offloader_lag_bytes: u64,
     pub backup_runtime_threads: Option<usize>,
+    pub backup_parallel_jobs: usize,
     pub wal_backup_enabled: bool,
     pub auth: Option<Arc<JwtAuth>>,
 }
@@ -81,6 +85,7 @@ impl SafeKeeperConf {
             no_sync: false,
             listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
             listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            availability_zone: None,
             remote_storage: None,
             my_id: NodeId(0),
             broker_endpoint: storage_broker::DEFAULT_ENDPOINT
@@ -89,6 +94,7 @@ impl SafeKeeperConf {
             broker_keepalive_interval: Duration::from_secs(5),
             backup_runtime_threads: None,
             wal_backup_enabled: true,
+            backup_parallel_jobs: 1,
             auth: None,
             heartbeat_timeout: Duration::new(5, 0),
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,

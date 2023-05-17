@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use remote_storage::RemoteStorageConfig;
 use toml_edit::Document;
+use utils::signals::ShutdownSignals;
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
@@ -39,7 +40,7 @@ use utils::{
     logging::{self, LogFormat},
     project_git_version,
     sentry_init::init_sentry,
-    signals, tcp_listener,
+    tcp_listener,
 };
 
 const PID_FILE_NAME: &str = "safekeeper.pid";
@@ -71,6 +72,9 @@ struct Args {
     /// Listen http endpoint for management and metrics in the form host:port.
     #[arg(long, default_value = DEFAULT_HTTP_LISTEN_ADDR)]
     listen_http: String,
+    /// Availability zone of the safekeeper.
+    #[arg(long)]
+    availability_zone: Option<String>,
     /// Do not wait for changes to be written safely to disk. Unsafe.
     #[arg(short, long)]
     no_sync: bool,
@@ -104,11 +108,14 @@ struct Args {
     /// available to the system.
     #[arg(long)]
     wal_backup_threads: Option<usize>,
+    /// Number of max parallel WAL segments to be offloaded to remote storage.
+    #[arg(long, default_value = "5")]
+    wal_backup_parallel_jobs: usize,
     /// Disable WAL backup to s3. When disabled, safekeeper removes WAL ignoring
     /// WAL backup horizon.
     #[arg(long)]
     disable_wal_backup: bool,
-    /// Path to an RSA .pem public key which is used to check JWT tokens.
+    /// Path to a .pem public key which is used to check JWT tokens.
     #[arg(long)]
     auth_validation_public_key_path: Option<PathBuf>,
     /// Format for logging, either 'plain' or 'json'.
@@ -126,7 +133,15 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    logging::init(LogFormat::from_config(&args.log_format)?)?;
+    // important to keep the order of:
+    // 1. init logging
+    // 2. tracing panic hook
+    // 3. sentry
+    logging::init(
+        LogFormat::from_config(&args.log_format)?,
+        logging::TracingErrorLayerEnablement::Disabled,
+    )?;
+    logging::replace_panic_hook_with_tracing_panic_hook().forget();
     info!("version: {GIT_VERSION}");
 
     let args_workdir = &args.datadir;
@@ -161,6 +176,7 @@ fn main() -> anyhow::Result<()> {
         my_id: id,
         listen_pg_addr: args.listen_pg,
         listen_http_addr: args.listen_http,
+        availability_zone: args.availability_zone,
         no_sync: args.no_sync,
         broker_endpoint: args.broker_endpoint,
         broker_keepalive_interval: args.broker_keepalive_interval,
@@ -169,6 +185,7 @@ fn main() -> anyhow::Result<()> {
         max_offloader_lag_bytes: args.max_offloader_lag,
         backup_runtime_threads: args.wal_backup_threads,
         wal_backup_enabled: !args.disable_wal_backup,
+        backup_parallel_jobs: args.wal_backup_parallel_jobs,
         auth,
     };
 
@@ -207,7 +224,6 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
     metrics::register_internal(Box::new(timeline_collector))?;
 
-    let signals = signals::install_shutdown_handlers()?;
     let mut threads = vec![];
     let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
 
@@ -231,7 +247,7 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 
     let conf_cloned = conf.clone();
     let safekeeper_thread = thread::Builder::new()
-        .name("safekeeper thread".into())
+        .name("WAL service thread".into())
         .spawn(|| wal_service::thread_main(conf_cloned, pg_listener))
         .unwrap();
 
@@ -265,15 +281,12 @@ fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
 
     set_build_info_metric(GIT_VERSION);
     // TODO: put more thoughts into handling of failed threads
-    // We probably should restart them.
+    // We should catch & die if they are in trouble.
 
-    // NOTE: we still have to handle signals like SIGQUIT to prevent coredumps
-    signals.handle(|signal| {
-        // TODO: implement graceful shutdown with joining threads etc
-        info!(
-            "received {}, terminating in immediate shutdown mode",
-            signal.name()
-        );
+    // On any shutdown signal, log receival and exit. Additionally, handling
+    // SIGQUIT prevents coredump.
+    ShutdownSignals::handle(|signal| {
+        info!("received {}, terminating", signal.name());
         std::process::exit(0);
     })
 }

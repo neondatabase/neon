@@ -43,15 +43,11 @@ def black(fix_inplace: bool) -> str:
     return cmd
 
 
-def isort(fix_inplace: bool) -> str:
-    cmd = "poetry run isort"
-    if not fix_inplace:
-        cmd += " --diff --check"
+def ruff(fix_inplace: bool) -> str:
+    cmd = "poetry run ruff"
+    if fix_inplace:
+        cmd += " --fix"
     return cmd
-
-
-def flake8() -> str:
-    return "poetry run flake8"
 
 
 def mypy() -> str:
@@ -113,13 +109,6 @@ if __name__ == "__main__":
         no_color=args.no_color,
     )
     check(
-        name="isort",
-        suffix=".py",
-        cmd=isort(fix_inplace=args.fix_inplace),
-        changed_files=files,
-        no_color=args.no_color,
-    )
-    check(
         name="black",
         suffix=".py",
         cmd=black(fix_inplace=args.fix_inplace),
@@ -127,9 +116,9 @@ if __name__ == "__main__":
         no_color=args.no_color,
     )
     check(
-        name="flake8",
+        name="ruff",
         suffix=".py",
-        cmd=flake8(),
+        cmd=ruff(fix_inplace=args.fix_inplace),
         changed_files=files,
         no_color=args.no_color,
     )

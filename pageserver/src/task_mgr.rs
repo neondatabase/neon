@@ -231,6 +231,12 @@ pub enum TaskKind {
     // Compaction. One per tenant.
     Compaction,
 
+    // Eviction. One per timeline.
+    Eviction,
+
+    /// See [`crate::disk_usage_eviction_task`].
+    DiskUsageEviction,
+
     // Initial logical size calculation
     InitialLogicalSizeCalculation,
 
@@ -478,13 +484,25 @@ pub async fn shutdown_tasks(
     for task in victim_tasks {
         let join_handle = {
             let mut task_mut = task.mutable.lock().unwrap();
-            info!("waiting for {} to shut down", task.name);
-            let join_handle = task_mut.join_handle.take();
-            drop(task_mut);
-            join_handle
+            task_mut.join_handle.take()
         };
-        if let Some(join_handle) = join_handle {
-            let _ = join_handle.await;
+        if let Some(mut join_handle) = join_handle {
+            let completed = tokio::select! {
+                _ = &mut join_handle => { true },
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    // allow some time to elapse before logging to cut down the number of log
+                    // lines.
+                    info!("waiting for {} to shut down", task.name);
+                    false
+                }
+            };
+            if !completed {
+                // we never handled this return value, but:
+                // - we don't deschedule which would lead to is_cancelled
+                // - panics are already logged (is_panicked)
+                // - task errors are already logged in the wrapper
+                let _ = join_handle.await;
+            }
         } else {
             // Possibly one of:
             //  * The task had not even fully started yet.

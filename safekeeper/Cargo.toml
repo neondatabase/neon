@@ -10,6 +10,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 const_format.workspace = true
 crc32c.workspace = true
@@ -18,23 +19,28 @@ git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
 hyper.workspace = true
-nix.workspace = true
+futures.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 postgres.workspace = true
 postgres-protocol.workspace = true
 regex.workspace = true
+scopeguard.workspace = true
+reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 signal-hook.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }
+tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
 toml_edit.workspace = true
+tempfile.workspace = true
 tracing.workspace = true
 url.workspace = true
 metrics.workspace = true
+postgres_backend.workspace = true
 postgres_ffi.workspace = true
 pq_proto.workspace = true
 remote_storage.workspace = true
@@ -43,6 +49,3 @@ storage_broker.workspace = true
 utils.workspace = true
 
 workspace_hack.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

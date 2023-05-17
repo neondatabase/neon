@@ -9,18 +9,22 @@ use std::sync::Arc;
 use anyhow::Context;
 use aws_config::{
     environment::credentials::EnvironmentVariableCredentialsProvider,
-    imds::credentials::ImdsCredentialsProvider,
-    meta::credentials::{CredentialsProviderChain, LazyCachingCredentialsProvider},
+    imds::credentials::ImdsCredentialsProvider, meta::credentials::CredentialsProviderChain,
 };
+use aws_credential_types::cache::CredentialsCache;
 use aws_sdk_s3::{
-    config::Config,
-    error::{GetObjectError, GetObjectErrorKind},
-    types::{ByteStream, SdkError},
-    Client, Endpoint, Region,
+    config::{Config, Region},
+    error::SdkError,
+    operation::get_object::GetObjectError,
+    primitives::ByteStream,
+    Client,
 };
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
-use tokio::{io, sync::Semaphore};
+use tokio::{
+    io::{self, AsyncRead},
+    sync::Semaphore,
+};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
@@ -99,10 +103,11 @@ pub struct S3Bucket {
     client: Client,
     bucket_name: String,
     prefix_in_bucket: Option<String>,
+    max_keys_per_list_response: Option<i32>,
     // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
     // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
     // The helps to ensure we don't exceed the thresholds.
-    concurrency_limiter: Semaphore,
+    concurrency_limiter: Arc<Semaphore>,
 }
 
 #[derive(Default)]
@@ -121,28 +126,23 @@ impl S3Bucket {
 
         let credentials_provider = {
             // uses "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"
-            let env_creds = EnvironmentVariableCredentialsProvider::new();
+            CredentialsProviderChain::first_try(
+                "env",
+                EnvironmentVariableCredentialsProvider::new(),
+            )
             // uses imds v2
-            let imds = ImdsCredentialsProvider::builder().build();
-
-            // finally add caching.
-            // this might change in future, see https://github.com/awslabs/aws-sdk-rust/issues/629
-            LazyCachingCredentialsProvider::builder()
-                .load(CredentialsProviderChain::first_try("env", env_creds).or_else("imds", imds))
-                .build()
+            .or_else("imds", ImdsCredentialsProvider::builder().build())
         };
 
         let mut config_builder = Config::builder()
             .region(Region::new(aws_config.bucket_region.clone()))
+            .credentials_cache(CredentialsCache::lazy())
             .credentials_provider(credentials_provider);
 
         if let Some(custom_endpoint) = aws_config.endpoint.clone() {
-            let endpoint = Endpoint::immutable(
-                custom_endpoint
-                    .parse()
-                    .expect("Failed to parse S3 custom endpoint"),
-            );
-            config_builder.set_endpoint_resolver(Some(Arc::new(endpoint)));
+            config_builder = config_builder
+                .endpoint_url(custom_endpoint)
+                .force_path_style(true);
         }
         let client = Client::from_conf(config_builder.build());
 
@@ -161,8 +161,9 @@ impl S3Bucket {
         Ok(Self {
             client,
             bucket_name: aws_config.bucket_name.clone(),
+            max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
-            concurrency_limiter: Semaphore::new(aws_config.concurrency_limit.get()),
+            concurrency_limiter: Arc::new(Semaphore::new(aws_config.concurrency_limit.get())),
         })
     }
 
@@ -194,9 +195,10 @@ impl S3Bucket {
     }
 
     async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
-        let _guard = self
+        let permit = self
             .concurrency_limiter
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .context("Concurrency limiter semaphore got closed during S3 download")
             .map_err(DownloadError::Other)?;
@@ -217,19 +219,15 @@ impl S3Bucket {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(io::BufReader::new(
+                    download_stream: Box::pin(io::BufReader::new(RatelimitedAsyncRead::new(
+                        permit,
                         object_output.body.into_async_read(),
-                    )),
+                    ))),
                 })
             }
-            Err(SdkError::ServiceError {
-                err:
-                    GetObjectError {
-                        kind: GetObjectErrorKind::NoSuchKey(..),
-                        ..
-                    },
-                ..
-            }) => Err(DownloadError::NotFound),
+            Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
+                Err(DownloadError::NotFound)
+            }
             Err(e) => {
                 metrics::inc_get_object_fail();
                 Err(DownloadError::Other(anyhow::anyhow!(
@@ -240,50 +238,34 @@ impl S3Bucket {
     }
 }
 
+pin_project_lite::pin_project! {
+    /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
+    struct RatelimitedAsyncRead<S> {
+        permit: tokio::sync::OwnedSemaphorePermit,
+        #[pin]
+        inner: S,
+    }
+}
+
+impl<S: AsyncRead> RatelimitedAsyncRead<S> {
+    fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
+        RatelimitedAsyncRead { permit, inner }
+    }
+}
+
+impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.project();
+        this.inner.poll_read(cx, buf)
+    }
+}
+
 #[async_trait::async_trait]
 impl RemoteStorage for S3Bucket {
-    async fn list(&self) -> anyhow::Result<Vec<RemotePath>> {
-        let mut document_keys = Vec::new();
-
-        let mut continuation_token = None;
-        loop {
-            let _guard = self
-                .concurrency_limiter
-                .acquire()
-                .await
-                .context("Concurrency limiter semaphore got closed during S3 list")?;
-
-            metrics::inc_list_objects();
-
-            let fetch_response = self
-                .client
-                .list_objects_v2()
-                .bucket(self.bucket_name.clone())
-                .set_prefix(self.prefix_in_bucket.clone())
-                .set_continuation_token(continuation_token)
-                .send()
-                .await
-                .map_err(|e| {
-                    metrics::inc_list_objects_fail();
-                    e
-                })?;
-            document_keys.extend(
-                fetch_response
-                    .contents
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|o| Some(self.s3_object_to_relative_path(o.key()?))),
-            );
-
-            match fetch_response.continuation_token {
-                Some(new_token) => continuation_token = Some(new_token),
-                None => break,
-            }
-        }
-
-        Ok(document_keys)
-    }
-
     /// See the doc for `RemoteStorage::list_prefixes`
     /// Note: it wont include empty "directories"
     async fn list_prefixes(
@@ -323,6 +305,7 @@ impl RemoteStorage for S3Bucket {
                 .set_prefix(list_prefix.clone())
                 .set_continuation_token(continuation_token)
                 .delimiter(REMOTE_STORAGE_PREFIX_SEPARATOR.to_string())
+                .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
                 .map_err(|e| {
@@ -340,7 +323,7 @@ impl RemoteStorage for S3Bucket {
                     .filter_map(|o| Some(self.s3_object_to_relative_path(o.prefix()?))),
             );
 
-            match fetch_response.continuation_token {
+            match fetch_response.next_continuation_token {
                 Some(new_token) => continuation_token = Some(new_token),
                 None => break,
             }
@@ -351,7 +334,7 @@ impl RemoteStorage for S3Bucket {
 
     async fn upload(
         &self,
-        from: Box<(dyn io::AsyncRead + Unpin + Send + Sync + 'static)>,
+        from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,

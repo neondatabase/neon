@@ -13,7 +13,7 @@ defaults:
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
 
 env:
@@ -74,14 +74,11 @@ jobs:
       - name: Install Python deps
         run: ./scripts/pysync
 
-      - name: Run isort to ensure code format
-        run: poetry run isort --diff --check .
+      - name: Run ruff to ensure code format
+        run: poetry run ruff .
 
       - name: Run black to ensure code format
         run: poetry run black --diff --check .
-
-      - name: Run flake8 to ensure code format
-        run: poetry run flake8 .
 
       - name: Run mypy to check types
         run: poetry run mypy .
@@ -114,8 +111,21 @@ jobs:
       - name: Get postgres headers
         run: make postgres-headers -j$(nproc)
 
-      - name: Run cargo clippy
-        run: ./run_clippy.sh
+      # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
+      # This will catch compiler & clippy warnings in all feature combinations.
+      # TODO: use cargo hack for build and test as well, but, that's quite expensive.
+      # NB: keep clippy args in sync with ./run_clippy.sh
+      - run: |
+          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
+          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
+            echo "No clippy args found in .neon_clippy_args"
+            exit 1
+          fi
+          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
+      - name: Run cargo clippy (debug)
+        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
+      - name: Run cargo clippy (release)
+        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
       - name: Check formatting
@@ -187,10 +197,10 @@ jobs:
           CARGO_FEATURES="--features testing"
           if [[ $BUILD_TYPE == "debug" ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
-            CARGO_FLAGS="--locked $CARGO_FEATURES"
+            CARGO_FLAGS="--locked"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
-            CARGO_FLAGS="--locked --release $CARGO_FEATURES"
+            CARGO_FLAGS="--locked --release"
           fi
           echo "cov_prefix=${cov_prefix}" >> $GITHUB_ENV
           echo "CARGO_FEATURES=${CARGO_FEATURES}" >> $GITHUB_ENV
@@ -243,11 +253,18 @@ jobs:
 
       - name: Run cargo build
         run: |
-          ${cov_prefix} mold -run cargo build $CARGO_FLAGS --bins --tests
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
 
       - name: Run cargo test
         run: |
-          ${cov_prefix} cargo test $CARGO_FLAGS
+          ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES
+
+          # Run separate tests for real S3
+          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-public-dev
+          export REMOTE_STORAGE_S3_REGION=eu-central-1
+          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+          ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test pagination_tests -- s3_pagination_should_work --exact
 
       - name: Install rust binaries
         run: |
@@ -271,7 +288,7 @@ jobs:
             mkdir -p /tmp/neon/test_bin/
 
             test_exe_paths=$(
-              ${cov_prefix} cargo test $CARGO_FLAGS --message-format=json --no-run |
+              ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES --message-format=json --no-run |
               jq -r '.executable | select(. != null)'
             )
             for bin in $test_exe_paths; do
@@ -307,12 +324,14 @@ jobs:
     runs-on: [ self-hosted, gen3, large ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
+      # Default shared memory is 64mb
+      options: --init --shm-size=512mb
     needs: [ build-neon ]
     strategy:
       fail-fast: false
       matrix:
         build_type: [ debug, release ]
+        pg_version: [ v14, v15 ]
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -331,16 +350,22 @@ jobs:
           real_s3_region: us-west-2
           real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
+          rerun_flaky: true
+          pg_version: ${{ matrix.pg_version }}
+        env:
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
+          CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
 
       - name: Merge and upload coverage data
-        if: matrix.build_type == 'debug'
+        if: matrix.build_type == 'debug' && matrix.pg_version == 'v14'
         uses: ./.github/actions/save-coverage-data
 
   benchmarks:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
+      # Default shared memory is 64mb
+      options: --init --shm-size=512mb
     needs: [ build-neon ]
     if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
     strategy:
@@ -360,49 +385,68 @@ jobs:
           build_type: ${{ matrix.build_type }}
           test_selection: performance
           run_in_parallel: false
-          save_perf_report: ${{ github.ref == 'refs/heads/main' }}
+          save_perf_report: ${{ github.ref_name == 'main' }}
         env:
           VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
-  merge-allure-report:
+  create-test-report:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
     needs: [ regress-tests, benchmarks ]
     if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [ debug, release ]
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: false
+      - uses: actions/checkout@v3
 
       - name: Create Allure report
+        if: ${{ !cancelled() }}
         id: create-allure-report
-        uses: ./.github/actions/allure-report
+        uses: ./.github/actions/allure-report-generate
+
+      - uses: actions/github-script@v6
+        if: >
+          !cancelled() &&
+          github.event_name == 'pull_request'
         with:
-          action: generate
-          build_type: ${{ matrix.build_type }}
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            const report = {
+              reportUrl:     "${{ steps.create-allure-report.outputs.report-url }}",
+              reportJsonUrl: "${{ steps.create-allure-report.outputs.report-json-url }}",
+            }
+
+            const script = require("./scripts/pr-comment-test-report.js")
+            await script({
+              github,
+              context,
+              fetch,
+              report,
+            })
 
       - name: Store Allure test stat in the DB
-        if: ${{ steps.create-allure-report.outputs.report-url }}
+        if: ${{ !cancelled() && steps.create-allure-report.outputs.report-json-url }}
         env:
-          BUILD_TYPE: ${{ matrix.build_type }}
-          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          REPORT_URL: ${{ steps.create-allure-report.outputs.report-url }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPORT_JSON_URL: ${{ steps.create-allure-report.outputs.report-json-url }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
         run: |
-          curl --fail --output suites.json ${REPORT_URL%/index.html}/data/suites.json
           ./scripts/pysync
 
-          DATABASE_URL="$TEST_RESULT_CONNSTR" poetry run python3 scripts/ingest_regress_test_result.py --revision ${SHA} --reference ${GITHUB_REF} --build-type ${BUILD_TYPE} --ingest suites.json
+          curl --fail --output suites.json "${REPORT_JSON_URL}"
+          export BUILD_TYPE=unified
+          export DATABASE_URL="$TEST_RESULT_CONNSTR"
+
+          poetry run python3 scripts/ingest_regress_test_result.py \
+            --revision ${COMMIT_SHA} \
+            --reference ${GITHUB_REF} \
+            --build-type ${BUILD_TYPE} \
+            --ingest suites.json
 
   coverage-report:
     runs-on: [ self-hosted, gen3, small ]
@@ -448,44 +492,50 @@ jobs:
       - name: Merge coverage data
         run: scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage merge
 
-      - name: Build and upload coverage report
+      - name: Build coverage report
+        env:
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
-          COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
-          COMMIT_URL=https://github.com/${{ github.repository }}/commit/$COMMIT_SHA
-
           scripts/coverage \
             --dir=/tmp/coverage report \
             --input-objects=/tmp/coverage/binaries.list \
-            --commit-url=$COMMIT_URL \
+            --commit-url=${COMMIT_URL} \
             --format=github
 
-          REPORT_URL=https://${{ github.repository_owner }}.github.io/zenith-coverage-data/$COMMIT_SHA
+      - name: Upload coverage report
+        id: upload-coverage-report
+        env:
+          BUCKET: neon-github-public-dev
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://neon-github-public-dev/code-coverage/${COMMIT_SHA}
 
-          scripts/git-upload \
-            --repo=https://${{ secrets.VIP_VAP_ACCESS_TOKEN }}@github.com/${{ github.repository_owner }}/zenith-coverage-data.git \
-            --message="Add code coverage for $COMMIT_URL" \
-            copy /tmp/coverage/report $COMMIT_SHA # COPY FROM TO_RELATIVE
+          REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
+          echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
-          # Add link to the coverage report to the commit
-          curl -f -X POST \
-          https://api.github.com/repos/${{ github.repository }}/statuses/$COMMIT_SHA \
-          -H "Accept: application/vnd.github.v3+json" \
-          --user "${{ secrets.CI_ACCESS_TOKEN }}" \
-          --data \
-            "{
-              \"state\": \"success\",
-              \"context\": \"neon-coverage\",
-              \"description\": \"Coverage report is ready\",
-              \"target_url\": \"$REPORT_URL\"
-            }"
+      - uses: actions/github-script@v6
+        env:
+          REPORT_URL: ${{ steps.upload-coverage-report.outputs.report-url }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        with:
+          script: |
+            const { REPORT_URL, COMMIT_SHA } = process.env
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: `${COMMIT_SHA}`,
+              state: 'success',
+              target_url: `${REPORT_URL}`,
+              context: 'Code coverage report',
+            })
 
   trigger-e2e-tests:
     runs-on: [ self-hosted, gen3, small ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
-    needs: [ push-docker-hub, tag ]
+    needs: [ promote-images, tag ]
     steps:
       - name: Set PR's status to pending and request a remote CI test
         run: |
@@ -528,8 +578,7 @@ jobs:
   neon-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    # https://github.com/GoogleContainerTools/kaniko/issues/2005
-    container: gcr.io/kaniko-project/executor:v1.7.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -541,20 +590,84 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Configure ECR and Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
 
       - name: Kaniko build neon
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+        run:
+          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
+                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --context .
+                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}}
+                           --destination neondatabase/neon:${{needs.tag.outputs.build-tag}}
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
+
+  neon-image-depot:
+    # For testing this will run side-by-side for a few merges.
+    # This action is not really optimized yet, but gets the job done
+    runs-on: [ self-hosted, gen3, large ]
+    needs: [ tag ]
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Setup go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.19'
+
+      - name: Set up Depot CLI
+        uses: depot/setup-action@v1
+
+      - name: Install Crane & ECR helper
+        run: go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
+
+      - name: Configure ECR login
+        run: |
+          mkdir /github/home/.docker/
+          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
+
+      - name: Build and push
+        uses: depot/build-push-action@v1
+        with:
+          # if no depot.json file is at the root of your repo, you must specify the project id
+          project: nrdv0s4kcs
+          push: true
+          tags: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:depot-${{needs.tag.outputs.build-tag}}
+
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
-    container: gcr.io/kaniko-project/executor:v1.7.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
     defaults:
       run:
         shell: sh -eu {0}
@@ -563,18 +676,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v1 # v3 won't work with kaniko
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Configure ECR and Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
 
       - name: Kaniko build compute tools
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache --context . --build-arg GIT_VERSION=${{ github.sha }} --dockerfile Dockerfile.compute-tools --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+        run:
+          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
+                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --context .
+                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+                           --dockerfile Dockerfile.compute-tools
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
+                           --destination neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
 
+      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.7.0-debug
+    container: gcr.io/kaniko-project/executor:v1.9.2-debug
     needs: [ tag ]
     strategy:
       fail-fast: false
@@ -591,12 +728,37 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: Configure ECR login
-        run: echo "{\"credsStore\":\"ecr-login\"}" > /kaniko/.docker/config.json
+      - name: Configure ECR and Docker Hub login
+        run: |
+          DOCKERHUB_AUTH=$(echo -n "${{ secrets.NEON_DOCKERHUB_USERNAME }}:${{ secrets.NEON_DOCKERHUB_PASSWORD }}" | base64)
+          echo "::add-mask::${DOCKERHUB_AUTH}"
+
+          cat <<-EOF > /kaniko/.docker/config.json
+            {
+              "auths": {
+                "https://index.docker.io/v1/": {
+                  "auth": "${DOCKERHUB_AUTH}"
+                }
+              },
+              "credHelpers": {
+                "369495373322.dkr.ecr.eu-central-1.amazonaws.com": "ecr-login"
+              }
+            }
+          EOF
 
       - name: Kaniko build compute node with extensions
-        run: /kaniko/executor --reproducible --snapshotMode=redo --skip-unused-stages --cache=true --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache  --context . --build-arg GIT_VERSION=${{ github.sha }} --build-arg PG_VERSION=${{ matrix.version }} --dockerfile Dockerfile.compute-node --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+        run:
+          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true
+                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
+                           --context .
+                           --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg PG_VERSION=${{ matrix.version }}
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+                           --dockerfile Dockerfile.compute-node
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+                           --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
+      # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
@@ -611,34 +773,31 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_INFORMANT_VERSION: 0.1.1
+      VM_BUILDER_VERSION: v0.4.6
 
     steps:
-      - name: Downloading latest vm-builder
+      - name: Checkout
+        uses: actions/checkout@v1
+        with:
+          fetch-depth: 0
+
+      - name: Downloading vm-builder
         run: |
-          curl -L https://github.com/neondatabase/neonvm/releases/latest/download/vm-builder -o vm-builder
+          curl -L https://github.com/neondatabase/neonvm/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
       - name: Pulling compute-node image
         run: |
           docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
-      - name: Downloading VM informant version ${{ env.VM_INFORMANT_VERSION }}
+      - name: Building VM compute-node rootfs
         run: |
-          curl -fL https://github.com/neondatabase/autoscaling/releases/download/${{ env.VM_INFORMANT_VERSION }}/vm-informant -o vm-informant
-          chmod +x vm-informant
-
-      - name: Adding VM informant to compute-node image
-        run: |
-          ID=$(docker create 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}})
-          docker cp vm-informant $ID:/bin/vm-informant
-          docker commit $ID temp-vm-compute-node
-          docker rm -f $ID
+          docker build -t temp-vm-compute-node --build-arg SRC_IMAGE=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -f Dockerfile.vm-compute-node .
 
       - name: Build vm image
         run: |
           # note: as of 2023-01-12, vm-builder requires a trailing ":latest" for local images
-          ./vm-builder -src=temp-vm-compute-node:latest -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          ./vm-builder -use-inittab -src=temp-vm-compute-node:latest -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Pushing vm-compute-node image
         run: |
@@ -691,13 +850,11 @@ jobs:
     runs-on: [ self-hosted, gen3, small ]
     needs: [ tag, test-images, vm-compute-node-image ]
     container: golang:1.19-bullseye
-    if: github.event_name != 'workflow_dispatch'
+    # Don't add if-condition here.
+    # The job should always be run because we have dependant other jobs that shouldn't be skipped
 
     steps:
       - name: Install Crane & ECR helper
-        if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
           go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
@@ -707,10 +864,15 @@ jobs:
           mkdir /github/home/.docker/
           echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
 
+      - name: Copy vm-compute-node images to Docker Hub
+        run: |
+          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
+          crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
+
       - name: Add latest tag to images
         if: |
           (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
+           github.event_name != 'workflow_dispatch'
         run: |
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
@@ -719,50 +881,10 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
 
-      - name: Cleanup ECR folder
-        run: rm -rf ~/.ecr
-
-  push-docker-hub:
-    runs-on: [ self-hosted, dev, x64 ]
-    needs: [ promote-images, tag ]
-    container: golang:1.19-bullseye
-
-    steps:
-      - name: Install Crane & ECR helper
-        run: |
-          go install github.com/google/go-containerregistry/cmd/crane@31786c6cbb82d6ec4fb8eb79cd9387905130534e # v0.11.0
-          go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
-
-      - name: Configure ECR login
-        run: |
-          mkdir /github/home/.docker/
-          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
-
-      - name: Pull neon image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} neon
-
-      - name: Pull compute tools image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} compute-tools
-
-      - name: Pull compute node v14 image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} compute-node-v14
-
-      - name: Pull vm compute node v14 image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} vm-compute-node-v14
-
-      - name: Pull compute node v15 image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} compute-node-v15
-
-      - name: Pull vm compute node v15 image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} vm-compute-node-v15
-
-      - name: Pull rust image from ECR
-        run: crane pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned rust
-
       - name: Push images to production ECR
         if: |
           (github.ref_name == 'main' || github.ref_name == 'release') &&
-          github.event_name != 'workflow_dispatch'
+           github.event_name != 'workflow_dispatch'
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
@@ -777,28 +899,12 @@ jobs:
           echo "" > /github/home/.docker/config.json
           crane auth login -u ${{ secrets.NEON_DOCKERHUB_USERNAME }} -p ${{ secrets.NEON_DOCKERHUB_PASSWORD }} index.docker.io
 
-      - name: Push neon image to Docker Hub
-        run: crane push neon neondatabase/neon:${{needs.tag.outputs.build-tag}}
+      - name: Push vm-compute-node to Docker Hub
+        run: |
+          crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
+          crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
 
-      - name: Push compute tools image to Docker Hub
-        run: crane push compute-tools neondatabase/compute-tools:${{needs.tag.outputs.build-tag}}
-
-      - name: Push compute node v14 image to Docker Hub
-        run: crane push compute-node-v14 neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}}
-
-      - name: Push vm compute node v14 image to Docker Hub
-        run: crane push vm-compute-node-v14 neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}}
-
-      - name: Push compute node v15 image to Docker Hub
-        run: crane push compute-node-v15 neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}}
-
-      - name: Push vm compute node v15 image to Docker Hub
-        run: crane push vm-compute-node-v15 neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}}
-
-      - name: Push rust image to Docker Hub
-        run: crane push rust neondatabase/rust:pinned
-
-      - name: Add latest tag to images in Docker Hub
+      - name: Push latest tags to Docker Hub
         if: |
           (github.ref_name == 'main' || github.ref_name == 'release') &&
           github.event_name != 'workflow_dispatch'
@@ -813,48 +919,22 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-  deploy-pr-test-new:
-    runs-on: [ self-hosted, gen3, small ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:pinned
-    # We need both storage **and** compute images for deploy, because control plane picks the compute version based on the storage version.
-    # If it notices a fresh storage it may bump the compute version. And if compute image failed to build it may break things badly
-    needs: [ push-docker-hub, tag, regress-tests ]
-    if: |
-      contains(github.event.pull_request.labels.*.name, 'deploy-test-storage') &&
-      github.event_name != 'workflow_dispatch'
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      matrix:
-        target_region: [ eu-west-1 ]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Redeploy
-        run: |
-          export DOCKER_TAG=${{needs.tag.outputs.build-tag}}
-          cd "$(pwd)/.github/ansible"
-
-          ./get_binaries.sh
-
-          ansible-galaxy collection install sivel.toiletwater
-          ansible-playbook deploy.yaml -i staging.${{ matrix.target_region }}.hosts.yaml -e @ssm_config -e CONSOLE_API_TOKEN=${{ secrets.NEON_STAGING_API_KEY }} -e SENTRY_URL_PAGESERVER=${{ secrets.SENTRY_URL_PAGESERVER }} -e SENTRY_URL_SAFEKEEPER=${{ secrets.SENTRY_URL_SAFEKEEPER }}
-          rm -f neon_install.tar.gz .neon_current_version
-
-      - name: Cleanup ansible folder
-        run: rm -rf ~/.ansible
-
   deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ push-docker-hub, tag, regress-tests ]
+    needs: [ promote-images, tag, regress-tests ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
+      - name: Fix git ownership
+        run: |
+          # Workaround for `fatal: detected dubious ownership in repository at ...`
+          #
+          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+          #   Ref https://github.com/actions/checkout/issues/785
+          #
+          git config --global --add safe.directory ${{ github.workspace }}
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
       - name: Checkout
         uses: actions/checkout@v3
         with:
@@ -863,12 +943,12 @@ jobs:
 
       - name: Trigger deploy workflow
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            gh workflow run deploy-dev.yml --ref main -f branch=${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}}
+            gh workflow --repo neondatabase/aws run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            gh workflow run deploy-prod.yml --ref release -f branch=${{ github.sha }} -f dockerTag=${{needs.tag.outputs.build-tag}} -f disclamerAcknowledged=true
+            gh workflow --repo neondatabase/aws run deploy-prod.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f disclamerAcknowledged=true
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1
@@ -879,7 +959,7 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-    needs: [ push-docker-hub, tag, regress-tests ]
+    needs: [ promote-images, tag, regress-tests ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
     steps:
       - name: Promote compatibility snapshot for the release
@@ -902,7 +982,7 @@ jobs:
 
             S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[].Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
             if [ -z "${S3_KEY}" ]; then
-              echo 2>&1 "Neither s3://${BUCKET}/${OLD_PREFIX}/${FILENAME} nor its version from previous attempts exist"
+              echo >&2 "Neither s3://${BUCKET}/${OLD_PREFIX}/${FILENAME} nor its version from previous attempts exist"
               exit 1
             fi
 

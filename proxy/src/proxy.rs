@@ -8,7 +8,7 @@ use crate::{
     config::{ProxyConfig, TlsConfig},
     console::{self, messages::MetricsAuxInfo},
     error::io_error,
-    stream::{MeasuredStream, PqStream, Stream},
+    stream::{PqStream, Stream},
 };
 use anyhow::{bail, Context};
 use futures::TryFutureExt;
@@ -16,8 +16,10 @@ use metrics::{register_int_counter, register_int_counter_vec, IntCounter, IntCou
 use once_cell::sync::Lazy;
 use pq_proto::{BeMessage as Be, FeStartupPacket, StartupMessageParams};
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{error, info, info_span, warn, Instrument};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
+use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
 const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
@@ -62,6 +64,7 @@ static NUM_BYTES_PROXIED_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
 pub async fn task_main(
     config: &'static ProxyConfig,
     listener: tokio::net::TcpListener,
+    cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("proxy has shut down");
@@ -71,33 +74,52 @@ pub async fn task_main(
     // will be inherited by all accepted client sockets.
     socket2::SockRef::from(&listener).set_keepalive(true)?;
 
+    let mut connections = tokio::task::JoinSet::new();
     let cancel_map = Arc::new(CancelMap::default());
+
     loop {
-        let (socket, peer_addr) = listener.accept().await?;
-        info!("accepted postgres client connection from {peer_addr}");
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (socket, peer_addr) = accept_result?;
+                info!("accepted postgres client connection from {peer_addr}");
 
-        let session_id = uuid::Uuid::new_v4();
-        let cancel_map = Arc::clone(&cancel_map);
-        tokio::spawn(
-            async move {
-                info!("spawned a task for {peer_addr}");
+                let session_id = uuid::Uuid::new_v4();
+                let cancel_map = Arc::clone(&cancel_map);
+                connections.spawn(
+                    async move {
+                        info!("spawned a task for {peer_addr}");
 
-                socket
-                    .set_nodelay(true)
-                    .context("failed to set socket option")?;
+                        socket
+                            .set_nodelay(true)
+                            .context("failed to set socket option")?;
 
-                handle_client(config, &cancel_map, session_id, socket).await
+                        handle_client(config, &cancel_map, session_id, socket).await
+                    }
+                    .unwrap_or_else(move |e| {
+                        // Acknowledge that the task has finished with an error.
+                        error!(?session_id, "per-client task finished with an error: {e:#}");
+                    }),
+                );
             }
-            .unwrap_or_else(|e| {
-                // Acknowledge that the task has finished with an error.
-                error!("per-client task finished with an error: {e:#}");
-            })
-            .instrument(info_span!("client", session = format_args!("{session_id}"))),
-        );
+            _ = cancellation_token.cancelled() => {
+                drop(listener);
+                break;
+            }
+        }
     }
+    // Drain connections
+    while let Some(res) = connections.join_next().await {
+        if let Err(e) = res {
+            if !e.is_panic() && !e.is_cancelled() {
+                warn!("unexpected error from joined connection task: {e:?}");
+            }
+        }
+    }
+    Ok(())
 }
 
 // TODO(tech debt): unite this with its twin below.
+#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
 pub async fn handle_ws_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
@@ -123,22 +145,23 @@ pub async fn handle_ws_client(
 
     // Extract credentials which we're going to use for auth.
     let creds = {
-        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_name, true))
+            .map(|_| auth::ClientCredentials::parse(&params, hostname, common_names))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
+    let client = Client::new(stream, creds, &params, session_id, false);
     cancel_map
-        .with_session(|session| client.connect_to_db(session))
+        .with_session(|session| client.connect_to_db(session, true))
         .await
 }
 
+#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
 async fn handle_client(
     config: &'static ProxyConfig,
     cancel_map: &CancelMap,
@@ -161,19 +184,27 @@ async fn handle_client(
     // Extract credentials which we're going to use for auth.
     let creds = {
         let sni = stream.get_ref().sni_hostname();
-        let common_name = tls.and_then(|tls| tls.common_name.as_deref());
+        let common_names = tls.and_then(|tls| tls.common_names.clone());
         let result = config
             .auth_backend
             .as_ref()
-            .map(|_| auth::ClientCredentials::parse(&params, sni, common_name, false))
+            .map(|_| auth::ClientCredentials::parse(&params, sni, common_names))
             .transpose();
 
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
+    let allow_self_signed_compute = config.allow_self_signed_compute;
+
+    let client = Client::new(
+        stream,
+        creds,
+        &params,
+        session_id,
+        allow_self_signed_compute,
+    );
     cancel_map
-        .with_session(|session| client.connect_to_db(session))
+        .with_session(|session| client.connect_to_db(session, false))
         .await
 }
 
@@ -207,9 +238,18 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                     if let Some(tls) = tls.take() {
                         // Upgrade raw stream into a secure TLS-backed stream.
                         // NOTE: We've consumed `tls`; this fact will be used later.
-                        stream = PqStream::new(
-                            stream.into_inner().upgrade(tls.to_server_config()).await?,
-                        );
+
+                        let (raw, read_buf) = stream.into_inner();
+                        // TODO: Normally, client doesn't send any data before
+                        // server says TLS handshake is ok and read_buf is empy.
+                        // However, you could imagine pipelining of postgres
+                        // SSLRequest + TLS ClientHello in one hunk similar to
+                        // pipelining in our node js driver. We should probably
+                        // support that by chaining read_buf with the stream.
+                        if !read_buf.is_empty() {
+                            bail!("data is sent before server replied with EncryptionResponse");
+                        }
+                        stream = PqStream::new(raw.upgrade(tls.to_server_config()).await?);
                     }
                 }
                 _ => bail!(ERR_PROTO_VIOLATION),
@@ -265,9 +305,11 @@ async fn connect_to_compute_once(
         NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
     };
 
+    let allow_self_signed_compute = node_info.allow_self_signed_compute;
+
     node_info
         .config
-        .connect()
+        .connect(allow_self_signed_compute)
         .inspect_err(invalidate_cache)
         .await
 }
@@ -346,22 +388,30 @@ async fn prepare_client_connection(
 
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]
-async fn proxy_pass(
+pub async fn proxy_pass(
     client: impl AsyncRead + AsyncWrite + Unpin,
     compute: impl AsyncRead + AsyncWrite + Unpin,
     aux: &MetricsAuxInfo,
 ) -> anyhow::Result<()> {
     let m_sent = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("tx"));
-    let mut client = MeasuredStream::new(client, |cnt| {
-        // Number of bytes we sent to the client (outbound).
-        m_sent.inc_by(cnt as u64);
-    });
+    let mut client = MeasuredStream::new(
+        client,
+        |_| {},
+        |cnt| {
+            // Number of bytes we sent to the client (outbound).
+            m_sent.inc_by(cnt as u64);
+        },
+    );
 
     let m_recv = NUM_BYTES_PROXIED_COUNTER.with_label_values(&aux.traffic_labels("rx"));
-    let mut compute = MeasuredStream::new(compute, |cnt| {
-        // Number of bytes the client sent to the compute node (inbound).
-        m_recv.inc_by(cnt as u64);
-    });
+    let mut compute = MeasuredStream::new(
+        compute,
+        |_| {},
+        |cnt| {
+            // Number of bytes the client sent to the compute node (inbound).
+            m_recv.inc_by(cnt as u64);
+        },
+    );
 
     // Starting from here we only proxy the client's traffic.
     info!("performing the proxy pass...");
@@ -380,6 +430,8 @@ struct Client<'a, S> {
     params: &'a StartupMessageParams,
     /// Unique connection ID.
     session_id: uuid::Uuid,
+    /// Allow self-signed certificates (for testing).
+    allow_self_signed_compute: bool,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -389,24 +441,31 @@ impl<'a, S> Client<'a, S> {
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
+        allow_self_signed_compute: bool,
     ) -> Self {
         Self {
             stream,
             creds,
             params,
             session_id,
+            allow_self_signed_compute,
         }
     }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
-    async fn connect_to_db(self, session: cancellation::Session<'_>) -> anyhow::Result<()> {
+    async fn connect_to_db(
+        self,
+        session: cancellation::Session<'_>,
+        allow_cleartext: bool,
+    ) -> anyhow::Result<()> {
         let Self {
             mut stream,
             mut creds,
             params,
             session_id,
+            allow_self_signed_compute,
         } = self;
 
         let extra = console::ConsoleReqExtra {
@@ -416,10 +475,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
 
         let auth_result = async {
             // `&mut stream` doesn't let us merge those 2 lines.
-            let res = creds.authenticate(&extra, &mut stream).await;
+            let res = creds
+                .authenticate(&extra, &mut stream, allow_cleartext)
+                .await;
+
             async { res }.or_else(|e| stream.throw_error(e)).await
         }
-        .instrument(info_span!("auth"))
         .await?;
 
         let AuthSuccess {
@@ -427,11 +488,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
             value: mut node_info,
         } = auth_result;
 
-        let node = connect_to_compute(&mut node_info, params, &extra, &creds)
+        node_info.allow_self_signed_compute = allow_self_signed_compute;
+
+        let mut node = connect_to_compute(&mut node_info, params, &extra, &creds)
             .or_else(|e| stream.throw_error(e))
             .await?;
 
         prepare_client_connection(&node, reported_auth_ok, session, &mut stream).await?;
-        proxy_pass(stream.into_inner(), node.stream, &node_info.aux).await
+        // Before proxy passing, forward to compute whatever data is left in the
+        // PqStream input buffer. Normally there is none, but our serverless npm
+        // driver in pipeline mode sends startup, password and first query
+        // immediately after opening the connection.
+        let (stream, read_buf) = stream.into_inner();
+        node.stream.write_all(&read_buf).await?;
+        proxy_pass(stream, node.stream, &node_info.aux).await
     }
 }

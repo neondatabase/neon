@@ -8,9 +8,8 @@ use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, Context};
-use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
-};
+use pageserver_api::models::{self, TenantInfo, TimelineInfo};
+use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::{IntoUrl, Method};
@@ -20,7 +19,6 @@ use utils::{
     http::error::HttpErrorBody,
     id::{TenantId, TimelineId},
     lsn::Lsn,
-    postgres_backend::AuthType,
 };
 
 use crate::{background_process, local_env::LocalEnv};
@@ -82,15 +80,8 @@ impl PageServerNode {
         let (host, port) = parse_host_port(&env.pageserver.listen_pg_addr)
             .expect("Unable to parse listen_pg_addr");
         let port = port.unwrap_or(5432);
-        let password = if env.pageserver.auth_type == AuthType::NeonJWT {
-            Some(env.pageserver.auth_token.clone())
-        } else {
-            None
-        };
-
         Self {
-            pg_connection_config: PgConnectionConfig::new_host_port(host, port)
-                .set_password(password),
+            pg_connection_config: PgConnectionConfig::new_host_port(host, port),
             env: env.clone(),
             http_client: Client::new(),
             http_base_url: format!("http://{}/v1", env.pageserver.listen_http_addr),
@@ -106,25 +97,32 @@ impl PageServerNode {
             self.env.pg_distrib_dir_raw().display()
         );
 
-        let authg_type_param = format!("auth_type='{}'", self.env.pageserver.auth_type);
+        let http_auth_type_param =
+            format!("http_auth_type='{}'", self.env.pageserver.http_auth_type);
         let listen_http_addr_param = format!(
             "listen_http_addr='{}'",
             self.env.pageserver.listen_http_addr
         );
+
+        let pg_auth_type_param = format!("pg_auth_type='{}'", self.env.pageserver.pg_auth_type);
         let listen_pg_addr_param =
             format!("listen_pg_addr='{}'", self.env.pageserver.listen_pg_addr);
+
         let broker_endpoint_param = format!("broker_endpoint='{}'", self.env.broker.client_url());
 
         let mut overrides = vec![
             id,
             pg_distrib_dir_param,
-            authg_type_param,
+            http_auth_type_param,
+            pg_auth_type_param,
             listen_http_addr_param,
             listen_pg_addr_param,
             broker_endpoint_param,
         ];
 
-        if self.env.pageserver.auth_type != AuthType::Trust {
+        if self.env.pageserver.http_auth_type != AuthType::Trust
+            || self.env.pageserver.pg_auth_type != AuthType::Trust
+        {
             overrides.push("auth_validation_public_key_path='auth_public_key.pem'".to_owned());
         }
         overrides
@@ -247,7 +245,10 @@ impl PageServerNode {
     }
 
     fn pageserver_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
-        Ok(if self.env.pageserver.auth_type != AuthType::Trust {
+        // FIXME: why is this tied to pageserver's auth type? Whether or not the safekeeper
+        // needs a token, and how to generate that token, seems independent to whether
+        // the pageserver requires a token in incoming requests.
+        Ok(if self.env.pageserver.http_auth_type != AuthType::Trust {
             // Generate a token to connect from the pageserver to a safekeeper
             let token = self
                 .env
@@ -270,27 +271,30 @@ impl PageServerNode {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
-    pub fn page_server_psql(&self, sql: &str) -> Vec<postgres::SimpleQueryMessage> {
-        let mut client = self.pg_connection_config.connect_no_tls().unwrap();
-
-        println!("Pageserver query: '{sql}'");
-        client.simple_query(sql).unwrap()
-    }
-
-    pub fn page_server_psql_client(&self) -> result::Result<postgres::Client, postgres::Error> {
-        self.pg_connection_config.connect_no_tls()
-    }
-
-    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let mut builder = self.http_client.request(method, url);
-        if self.env.pageserver.auth_type == AuthType::NeonJWT {
-            builder = builder.bearer_auth(&self.env.pageserver.auth_token)
+    pub fn page_server_psql_client(&self) -> anyhow::Result<postgres::Client> {
+        let mut config = self.pg_connection_config.clone();
+        if self.env.pageserver.pg_auth_type == AuthType::NeonJWT {
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
+            config = config.set_password(Some(token));
         }
-        builder
+        Ok(config.connect_no_tls()?)
+    }
+
+    fn http_request<U: IntoUrl>(&self, method: Method, url: U) -> anyhow::Result<RequestBuilder> {
+        let mut builder = self.http_client.request(method, url);
+        if self.env.pageserver.http_auth_type == AuthType::NeonJWT {
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
+            builder = builder.bearer_auth(token)
+        }
+        Ok(builder)
     }
 
     pub fn check_status(&self) -> Result<()> {
-        self.http_request(Method::GET, format!("{}/status", self.http_base_url))
+        self.http_request(Method::GET, format!("{}/status", self.http_base_url))?
             .send()?
             .error_from_body()?;
         Ok(())
@@ -298,7 +302,7 @@ impl PageServerNode {
 
     pub fn tenant_list(&self) -> Result<Vec<TenantInfo>> {
         Ok(self
-            .http_request(Method::GET, format!("{}/tenant", self.http_base_url))
+            .http_request(Method::GET, format!("{}/tenant", self.http_base_url))?
             .send()?
             .error_from_body()?
             .json()?)
@@ -310,8 +314,8 @@ impl PageServerNode {
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
-        let request = TenantCreateRequest {
-            new_tenant_id,
+
+        let config = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -352,11 +356,28 @@ impl PageServerNode {
                 .map(|x| x.parse::<bool>())
                 .transpose()
                 .context("Failed to parse 'trace_read_requests' as bool")?,
+            eviction_policy: settings
+                .remove("eviction_policy")
+                .map(serde_json::from_str)
+                .transpose()
+                .context("Failed to parse 'eviction_policy' json")?,
+            min_resident_size_override: settings
+                .remove("min_resident_size_override")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .context("Failed to parse 'min_resident_size_override' as integer")?,
+            evictions_low_residence_duration_metric_threshold: settings
+                .remove("evictions_low_residence_duration_metric_threshold")
+                .map(|x| x.to_string()),
+        };
+        let request = models::TenantCreateRequest {
+            new_tenant_id,
+            config,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
         }
-        self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))
+        self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))?
             .json(&request)
             .send()?
             .error_from_body()?
@@ -373,9 +394,9 @@ impl PageServerNode {
     }
 
     pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
-        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))
-            .json(&TenantConfigRequest {
-                tenant_id,
+        let config = {
+            // Braces to make the diff easier to read
+            models::TenantConfig {
                 checkpoint_distance: settings
                     .get("checkpoint_distance")
                     .map(|x| x.parse::<u64>())
@@ -419,7 +440,24 @@ impl PageServerNode {
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'trace_read_requests' as bool")?,
-            })
+                eviction_policy: settings
+                    .get("eviction_policy")
+                    .map(|x| serde_json::from_str(x))
+                    .transpose()
+                    .context("Failed to parse 'eviction_policy' json")?,
+                min_resident_size_override: settings
+                    .get("min_resident_size_override")
+                    .map(|x| x.parse::<u64>())
+                    .transpose()
+                    .context("Failed to parse 'min_resident_size_override' as an integer")?,
+                evictions_low_residence_duration_metric_threshold: settings
+                    .get("evictions_low_residence_duration_metric_threshold")
+                    .map(|x| x.to_string()),
+            }
+        };
+
+        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
+            .json(&models::TenantConfigRequest { tenant_id, config })
             .send()?
             .error_from_body()?;
 
@@ -431,7 +469,7 @@ impl PageServerNode {
             .http_request(
                 Method::GET,
                 format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
-            )
+            )?
             .send()?
             .error_from_body()?
             .json()?;
@@ -450,8 +488,8 @@ impl PageServerNode {
         self.http_request(
             Method::POST,
             format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
-        )
-        .json(&TimelineCreateRequest {
+        )?
+        .json(&models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
             ancestor_timeline_id,
@@ -487,7 +525,7 @@ impl PageServerNode {
         pg_wal: Option<(Lsn, PathBuf)>,
         pg_version: u32,
     ) -> anyhow::Result<()> {
-        let mut client = self.pg_connection_config.connect_no_tls().unwrap();
+        let mut client = self.page_server_psql_client()?;
 
         // Init base reader
         let (start_lsn, base_tarfile_path) = base;

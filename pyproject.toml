@@ -19,14 +19,14 @@ types-requests = "^2.28.5"
 types-psycopg2 = "^2.9.18"
 boto3 = "^1.26.16"
 boto3-stubs = {extras = ["s3"], version = "^1.26.16"}
-moto = {version = "^3.0.0", extras = ["server"]}
+moto = {extras = ["server"], version = "^4.1.2"}
 backoff = "^1.11.1"
 pytest-lazy-fixture = "^0.6.3"
 prometheus-client = "^0.14.1"
 pytest-timeout = "^2.1.0"
-Werkzeug = "2.1.2"
+Werkzeug = "^2.2.3"
 pytest-order = "^1.0.1"
-allure-pytest = "^2.10.0"
+allure-pytest = "^2.13.1"
 pytest-asyncio = "^0.19.0"
 toml = "^0.10.2"
 psutil = "^5.9.4"
@@ -34,12 +34,12 @@ types-psutil = "^5.9.5.4"
 types-toml = "^0.10.8"
 pytest-httpserver = "^1.0.6"
 aiohttp = "3.7.4"
+pytest-rerunfailures = "^11.1.2"
 
-[tool.poetry.dev-dependencies]
-flake8 = "^5.0.4"
-mypy = "==0.991"
-black = "^22.6.0"
-isort = "^5.10.1"
+[tool.poetry.group.dev.dependencies]
+black = "^23.1.0"
+mypy = "==1.1.1"
+ruff = "^0.0.255"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -52,14 +52,6 @@ extend-exclude = '''
     vendor
 )/
 '''
-
-[tool.isort]
-profile = "black"
-line_length = 100
-skip_gitignore = true
-skip = [
-    "vendor",
-]
 
 [tool.mypy]
 exclude = "^vendor/"
@@ -78,5 +70,18 @@ strict = true
 module = [
     "asyncpg.*",
     "pg8000.*",
+    "allure.*",
+    "allure_commons.*",
+    "allure_pytest.*",
 ]
 ignore_missing_imports = true
+
+[tool.ruff]
+extend-exclude = ["vendor/"]
+ignore = ["E501"]
+select = [
+    "E", # pycodestyle
+    "F", # Pyflakes
+    "I", # isort
+    "W", # pycodestyle
+]

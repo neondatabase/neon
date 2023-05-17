@@ -21,3 +21,4 @@
 !workspace_hack/
 !neon_local/
 !scripts/ninstall.sh
+!vm-cgconfig.conf

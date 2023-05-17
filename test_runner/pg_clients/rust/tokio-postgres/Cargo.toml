@@ -1,0 +1,17 @@
+[package]
+name = "rust-neon-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+native-tls = "0.2.11"
+postgres-native-tls = "0.5.0"
+tokio = { version = "1.28", features=["rt", "macros"] }
+tokio-postgres = "0.7.8"
+
+
+# This is not part of the main 'neon' workspace
+[workspace]

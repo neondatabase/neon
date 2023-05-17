@@ -1,6 +1,7 @@
 from contextlib import closing
 
-from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_record_lsn
+from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar
 
@@ -20,22 +21,22 @@ def test_read_request_tracing(neon_env_builder: NeonEnvBuilder):
     )
 
     timeline = env.neon_cli.create_timeline("test_trace_replay", tenant_id=tenant)
-    pg = env.postgres.create_start("test_trace_replay", "main", tenant)
+    endpoint = env.endpoints.create_start("test_trace_replay", "main", tenant)
 
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("create table t (i integer);")
             cur.execute(f"insert into t values (generate_series(1,{10000}));")
             cur.execute("select count(*) from t;")
-            tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-            timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+            tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+            timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
     # wait until pageserver receives that data
     pageserver_http = env.pageserver.http_client()
     wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, current_lsn)
 
-    # Stop pg so we drop the connection and flush the traces
-    pg.stop()
+    # Stop postgres so we drop the connection and flush the traces
+    endpoint.stop()
 
     trace_path = env.repo_dir / "traces" / str(tenant) / str(timeline)
     assert trace_path.exists()

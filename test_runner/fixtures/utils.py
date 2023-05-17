@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import re
 import subprocess
@@ -6,10 +7,13 @@ import tarfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, TypeVar
+from urllib.parse import urlencode
 
-import allure  # type: ignore
-from fixtures.log_helper import log
+import allure
 from psycopg2.extensions import cursor
+
+from fixtures.log_helper import log
+from fixtures.types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
@@ -183,6 +187,65 @@ def allure_attach_from_dir(dir: Path):
             allure.attach.file(source, name, attachment_type, extension)
 
 
+GRAFANA_URL = "https://neonprod.grafana.net"
+GRAFANA_EXPLORE_URL = f"{GRAFANA_URL}/explore"
+GRAFANA_TIMELINE_INSPECTOR_DASHBOARD_URL = f"{GRAFANA_URL}/d/8G011dlnk/timeline-inspector"
+LOGS_STAGING_DATASOURCE_ID = "xHHYY0dVz"
+
+
+def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, end_ms: int):
+    """Add links to server logs in Grafana to Allure report"""
+    links = {}
+    # We expect host to be in format like ep-divine-night-159320.us-east-2.aws.neon.build
+    endpoint_id, region_id, _ = host.split(".", 2)
+
+    expressions = {
+        "compute logs": f'{{app="compute-node-{endpoint_id}", neon_region="{region_id}"}}',
+        "k8s events": f'{{job="integrations/kubernetes/eventhandler"}} |~ "name=compute-node-{endpoint_id}-"',
+        "console logs": f'{{neon_service="console", neon_region="{region_id}"}} | json | endpoint_id = "{endpoint_id}"',
+        "proxy logs": f'{{neon_service="proxy-scram", neon_region="{region_id}"}}',
+    }
+
+    params: Dict[str, Any] = {
+        "datasource": LOGS_STAGING_DATASOURCE_ID,
+        "queries": [
+            {
+                "expr": "<PUT AN EXPRESSION HERE>",
+                "refId": "A",
+                "datasource": {"type": "loki", "uid": LOGS_STAGING_DATASOURCE_ID},
+                "editorMode": "code",
+                "queryType": "range",
+            }
+        ],
+        "range": {
+            "from": str(start_ms),
+            "to": str(end_ms),
+        },
+    }
+    for name, expr in expressions.items():
+        params["queries"][0]["expr"] = expr
+        query_string = urlencode({"orgId": 1, "left": json.dumps(params)})
+        links[name] = f"{GRAFANA_EXPLORE_URL}?{query_string}"
+
+    timeline_qs = urlencode(
+        {
+            "orgId": 1,
+            "var-environment": "victoria-metrics-aws-dev",
+            "var-timeline_id": timeline_id,
+            "var-endpoint_id": endpoint_id,
+            "var-log_datasource": "grafanacloud-neonstaging-logs",
+            "from": start_ms,
+            "to": end_ms,
+        }
+    )
+    link = f"{GRAFANA_TIMELINE_INSPECTOR_DASHBOARD_URL}?{timeline_qs}"
+    links["Timeline Inspector"] = link
+
+    for name, link in links.items():
+        allure.dynamic.link(link, name=name)
+        log.info(f"{name}: {link}")
+
+
 def start_in_background(
     command: list[str], cwd: Path, log_file_name: str, is_started: Fn
 ) -> subprocess.Popen[bytes]:
@@ -235,3 +298,19 @@ def wait_until(number_of_iterations: int, interval: float, func: Fn):
             continue
         return res
     raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def wait_while(number_of_iterations: int, interval: float, func):
+    """
+    Wait until 'func' returns false, or throws an exception.
+    """
+    for i in range(number_of_iterations):
+        try:
+            if not func():
+                return
+            log.info("waiting for %s iteration %s failed", func, i + 1)
+            time.sleep(interval)
+            continue
+        except Exception:
+            return
+    raise Exception("timed out while waiting for %s" % func)

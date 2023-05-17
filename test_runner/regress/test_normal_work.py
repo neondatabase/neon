@@ -1,13 +1,14 @@
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PageserverHttpClient
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+from fixtures.pageserver.http import PageserverHttpClient
 
 
 def check_tenant(env: NeonEnv, pageserver_http: PageserverHttpClient):
     tenant_id, timeline_id = env.neon_cli.create_tenant()
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
-    res_1 = pg.safe_psql_many(
+    res_1 = endpoint.safe_psql_many(
         queries=[
             "CREATE TABLE t(key int primary key, value text)",
             "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
@@ -18,14 +19,14 @@ def check_tenant(env: NeonEnv, pageserver_http: PageserverHttpClient):
     assert res_1[-1][0] == (5000050000,)
     # TODO check detach on live instance
     log.info("stopping compute")
-    pg.stop()
+    endpoint.stop()
     log.info("compute stopped")
 
-    pg.start()
-    res_2 = pg.safe_psql("SELECT sum(key) FROM t")
+    endpoint.start()
+    res_2 = endpoint.safe_psql("SELECT sum(key) FROM t")
     assert res_2[0] == (5000050000,)
 
-    pg.stop()
+    endpoint.stop()
     pageserver_http.tenant_detach(tenant_id)
 
 

@@ -62,29 +62,48 @@ impl Lsn {
     }
 
     /// Compute the offset into a segment
+    #[inline]
     pub fn segment_offset(self, seg_sz: usize) -> usize {
         (self.0 % seg_sz as u64) as usize
     }
 
     /// Compute LSN of the segment start.
+    #[inline]
     pub fn segment_lsn(self, seg_sz: usize) -> Lsn {
         Lsn(self.0 - (self.0 % seg_sz as u64))
     }
 
     /// Compute the segment number
+    #[inline]
     pub fn segment_number(self, seg_sz: usize) -> u64 {
         self.0 / seg_sz as u64
     }
 
     /// Compute the offset into a block
+    #[inline]
     pub fn block_offset(self) -> u64 {
         const BLCKSZ: u64 = XLOG_BLCKSZ as u64;
         self.0 % BLCKSZ
     }
 
+    /// Compute the block offset of the first byte of this Lsn within this
+    /// segment
+    #[inline]
+    pub fn page_lsn(self) -> Lsn {
+        Lsn(self.0 - self.block_offset())
+    }
+
+    /// Compute the block offset of the first byte of this Lsn within this
+    /// segment
+    #[inline]
+    pub fn page_offset_in_segment(self, seg_sz: usize) -> u64 {
+        (self.0 - self.block_offset()) - self.segment_lsn(seg_sz).0
+    }
+
     /// Compute the bytes remaining in this block
     ///
     /// If the LSN is already at the block boundary, it will return `XLOG_BLCKSZ`.
+    #[inline]
     pub fn remaining_in_block(self) -> u64 {
         const BLCKSZ: u64 = XLOG_BLCKSZ as u64;
         BLCKSZ - (self.0 % BLCKSZ)

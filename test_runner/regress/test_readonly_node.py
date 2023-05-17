@@ -1,6 +1,7 @@
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, wait_for_last_record_lsn
+from fixtures.neon_fixtures import NeonEnv
+from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.types import Lsn
 from fixtures.utils import query_scalar
 
@@ -14,12 +15,12 @@ from fixtures.utils import query_scalar
 def test_readonly_node(neon_simple_env: NeonEnv):
     env = neon_simple_env
     env.neon_cli.create_branch("test_readonly_node", "empty")
-    pgmain = env.postgres.create_start("test_readonly_node")
+    endpoint_main = env.endpoints.create_start("test_readonly_node")
     log.info("postgres is running on 'test_readonly_node' branch")
 
     env.pageserver.allowed_errors.append(".*basebackup .* failed: invalid basebackup lsn.*")
 
-    main_pg_conn = pgmain.connect()
+    main_pg_conn = endpoint_main.connect()
     main_cur = main_pg_conn.cursor()
 
     # Create table, and insert the first 100 rows
@@ -60,23 +61,23 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     log.info("LSN after 400100 rows: " + lsn_c)
 
     # Create first read-only node at the point where only 100 rows were inserted
-    pg_hundred = env.postgres.create_start(
-        branch_name="test_readonly_node", node_name="test_readonly_node_hundred", lsn=lsn_a
+    endpoint_hundred = env.endpoints.create_start(
+        branch_name="test_readonly_node", endpoint_id="ep-readonly_node_hundred", lsn=lsn_a
     )
 
     # And another at the point where 200100 rows were inserted
-    pg_more = env.postgres.create_start(
-        branch_name="test_readonly_node", node_name="test_readonly_node_more", lsn=lsn_b
+    endpoint_more = env.endpoints.create_start(
+        branch_name="test_readonly_node", endpoint_id="ep-readonly_node_more", lsn=lsn_b
     )
 
     # On the 'hundred' node, we should see only 100 rows
-    hundred_pg_conn = pg_hundred.connect()
+    hundred_pg_conn = endpoint_hundred.connect()
     hundred_cur = hundred_pg_conn.cursor()
     hundred_cur.execute("SELECT count(*) FROM foo")
     assert hundred_cur.fetchone() == (100,)
 
     # On the 'more' node, we should see 100200 rows
-    more_pg_conn = pg_more.connect()
+    more_pg_conn = endpoint_more.connect()
     more_cur = more_pg_conn.cursor()
     more_cur.execute("SELECT count(*) FROM foo")
     assert more_cur.fetchone() == (200100,)
@@ -86,21 +87,21 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     assert main_cur.fetchone() == (400100,)
 
     # Check creating a node at segment boundary
-    pg = env.postgres.create_start(
+    endpoint = env.endpoints.create_start(
         branch_name="test_readonly_node",
-        node_name="test_branch_segment_boundary",
+        endpoint_id="ep-branch_segment_boundary",
         lsn=Lsn("0/3000000"),
     )
-    cur = pg.connect().cursor()
+    cur = endpoint.connect().cursor()
     cur.execute("SELECT 1")
     assert cur.fetchone() == (1,)
 
     # Create node at pre-initdb lsn
     with pytest.raises(Exception, match="invalid basebackup lsn"):
         # compute node startup with invalid LSN should fail
-        env.postgres.create_start(
+        env.endpoints.create_start(
             branch_name="test_readonly_node",
-            node_name="test_readonly_node_preinitdb",
+            endpoint_id="ep-readonly_node_preinitdb",
             lsn=Lsn("0/42"),
         )
 
@@ -110,16 +111,16 @@ def test_timetravel(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
     env.neon_cli.create_branch("test_timetravel", "empty")
-    pg = env.postgres.create_start("test_timetravel")
+    endpoint = env.endpoints.create_start("test_timetravel")
 
     client = env.pageserver.http_client()
 
-    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
+    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
 
     lsns = []
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute(
             """
         CREATE TABLE testtab(id serial primary key, iteration int, data text);
@@ -130,7 +131,7 @@ def test_timetravel(neon_simple_env: NeonEnv):
     lsns.append((0, current_lsn))
 
     for i in range(1, 5):
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute(f"UPDATE testtab SET iteration = {i}")
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
         lsns.append((i, current_lsn))
@@ -142,14 +143,14 @@ def test_timetravel(neon_simple_env: NeonEnv):
         pageserver_http_client.timeline_checkpoint(tenant_id, timeline_id)
 
     ##### Restart pageserver
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     env.pageserver.stop()
     env.pageserver.start()
 
-    for (i, lsn) in lsns:
-        pg_old = env.postgres.create_start(
-            branch_name="test_timetravel", node_name=f"test_old_lsn_{i}", lsn=lsn
+    for i, lsn in lsns:
+        endpoint_old = env.endpoints.create_start(
+            branch_name="test_timetravel", endpoint_id=f"ep-old_lsn_{i}", lsn=lsn
         )
-        with pg_old.cursor() as cur:
+        with endpoint_old.cursor() as cur:
             assert query_scalar(cur, f"select count(*) from testtab where iteration={i}") == 100000
             assert query_scalar(cur, f"select count(*) from testtab where iteration<>{i}") == 0

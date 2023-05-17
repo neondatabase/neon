@@ -39,10 +39,6 @@ typedef struct WalProposerConn WalProposerConn;
 struct WalMessage;
 typedef struct WalMessage WalMessage;
 
-extern char *neon_timeline_walproposer;
-extern char *neon_tenant_walproposer;
-extern char *neon_safekeeper_token_walproposer;
-
 /* Possible return values from ReadPGAsync */
 typedef enum
 {
@@ -284,21 +280,21 @@ typedef struct HotStandbyFeedback
 	FullTransactionId catalog_xmin;
 }			HotStandbyFeedback;
 
-typedef struct ReplicationFeedback
+typedef struct PageserverFeedback
 {
 	/* current size of the timeline on pageserver */
 	uint64		currentClusterSize;
 	/* standby_status_update fields that safekeeper received from pageserver */
-	XLogRecPtr	ps_writelsn;
-	XLogRecPtr	ps_flushlsn;
-	XLogRecPtr	ps_applylsn;
-	TimestampTz ps_replytime;
-}			ReplicationFeedback;
+	XLogRecPtr	last_received_lsn;
+	XLogRecPtr	disk_consistent_lsn;
+	XLogRecPtr	remote_consistent_lsn;
+	TimestampTz replytime;
+}			PageserverFeedback;
 
 typedef struct WalproposerShmemState
 {
 	slock_t		mutex;
-	ReplicationFeedback feedback;
+	PageserverFeedback feedback;
 	term_t		mineLastElectedTerm;
 	pg_atomic_uint64 backpressureThrottlingTime;
 }			WalproposerShmemState;
@@ -324,10 +320,10 @@ typedef struct AppendResponse
 	/* Feedback recieved from pageserver includes standby_status_update fields */
 	/* and custom neon feedback. */
 	/* This part of the message is extensible. */
-	ReplicationFeedback rf;
+	PageserverFeedback rf;
 }			AppendResponse;
 
-/*  ReplicationFeedback is extensible part of the message that is parsed separately */
+/*  PageserverFeedback is extensible part of the message that is parsed separately */
 /*  Other fields are fixed part */
 #define APPENDRESPONSE_FIXEDPART_SIZE offsetof(AppendResponse, rf)
 
@@ -387,13 +383,13 @@ extern void WalProposerSync(int argc, char *argv[]);
 extern void WalProposerMain(Datum main_arg);
 extern void WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos);
 extern void WalProposerPoll(void);
-extern void ParseReplicationFeedbackMessage(StringInfo reply_message,
-											ReplicationFeedback *rf);
+extern void ParsePageserverFeedbackMessage(StringInfo reply_message,
+											PageserverFeedback *rf);
 extern void StartProposerReplication(StartReplicationCmd *cmd);
 
 extern Size WalproposerShmemSize(void);
 extern bool WalproposerShmemInit(void);
-extern void replication_feedback_set(ReplicationFeedback *rf);
+extern void replication_feedback_set(PageserverFeedback *rf);
 extern void replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn);
 
 /* libpqwalproposer hooks & helper type */
@@ -458,7 +454,7 @@ extern char *walprop_error_message(WalProposerConn *conn);
 extern WalProposerConnStatusType walprop_status(WalProposerConn *conn);
 
 /* Re-exported PQconnectStart */
-extern WalProposerConn * walprop_connect_start(char *conninfo);
+extern WalProposerConn * walprop_connect_start(char *conninfo, char *password);
 
 /* Re-exported PQconectPoll */
 extern WalProposerConnectPollStatusType walprop_connect_poll(WalProposerConn *conn);

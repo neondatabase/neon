@@ -7,11 +7,11 @@ use std::fmt;
 use std::ops::{AddAssign, Range};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 /// Key used in the Repository kv-store.
 ///
 /// The Repository treats this as an opaque struct, but see the code in pgdatadir_mapping.rs
 /// for what we actually store in these fields.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct Key {
     pub field1: u8,
     pub field2: u32,

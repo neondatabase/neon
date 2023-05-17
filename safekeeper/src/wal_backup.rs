@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 
+use futures::stream::FuturesOrdered;
+use futures::StreamExt;
 use tokio::task::JoinHandle;
 use utils::id::NodeId;
 
@@ -25,6 +27,7 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
+use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS};
 use crate::timeline::{PeerInfo, Timeline};
 use crate::{GlobalTimelines, SafeKeeperConf};
 
@@ -154,8 +157,14 @@ async fn update_task(
             let timeline_dir = conf.timeline_dir(&ttid);
 
             let handle = tokio::spawn(
-                backup_task_main(ttid, timeline_dir, conf.workdir.clone(), shutdown_rx)
-                    .instrument(info_span!("WAL backup task", ttid = %ttid)),
+                backup_task_main(
+                    ttid,
+                    timeline_dir,
+                    conf.workdir.clone(),
+                    conf.backup_parallel_jobs,
+                    shutdown_rx,
+                )
+                .instrument(info_span!("WAL backup task", ttid = %ttid)),
             );
 
             entry.handle = Some(WalBackupTaskHandle {
@@ -191,7 +200,7 @@ async fn wal_backup_launcher_main_loop(
             .map(|c| GenericRemoteStorage::from_config(c).expect("failed to create remote storage"))
     });
 
-    // Presense in this map means launcher is aware s3 offloading is needed for
+    // Presence in this map means launcher is aware s3 offloading is needed for
     // the timeline, but task is started only if it makes sense for to offload
     // from this safekeeper.
     let mut tasks: HashMap<TenantTimelineId, WalBackupTimelineEntry> = HashMap::new();
@@ -239,6 +248,7 @@ struct WalBackupTask {
     timeline_dir: PathBuf,
     workspace_dir: PathBuf,
     wal_seg_size: usize,
+    parallel_jobs: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
 }
 
@@ -247,6 +257,7 @@ async fn backup_task_main(
     ttid: TenantTimelineId,
     timeline_dir: PathBuf,
     workspace_dir: PathBuf,
+    parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
     info!("started");
@@ -263,6 +274,7 @@ async fn backup_task_main(
         timeline: tli,
         timeline_dir,
         workspace_dir,
+        parallel_jobs,
     };
 
     // task is spinned up only when wal_seg_size already initialized
@@ -323,21 +335,17 @@ impl WalBackupTask {
             }
 
             match backup_lsn_range(
-                backup_lsn,
+                &self.timeline,
+                &mut backup_lsn,
                 commit_lsn,
                 self.wal_seg_size,
                 &self.timeline_dir,
                 &self.workspace_dir,
+                self.parallel_jobs,
             )
             .await
             {
-                Ok(backup_lsn_result) => {
-                    backup_lsn = backup_lsn_result;
-                    let res = self.timeline.set_wal_backup_lsn(backup_lsn_result);
-                    if let Err(e) = res {
-                        error!("failed to set wal_backup_lsn: {}", e);
-                        return;
-                    }
+                Ok(()) => {
                     retry_attempt = 0;
                 }
                 Err(e) => {
@@ -354,35 +362,69 @@ impl WalBackupTask {
 }
 
 pub async fn backup_lsn_range(
-    start_lsn: Lsn,
+    timeline: &Arc<Timeline>,
+    backup_lsn: &mut Lsn,
     end_lsn: Lsn,
     wal_seg_size: usize,
     timeline_dir: &Path,
     workspace_dir: &Path,
-) -> Result<Lsn> {
-    let mut res = start_lsn;
-    let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
-    for s in &segments {
-        backup_single_segment(s, timeline_dir, workspace_dir)
-            .await
-            .with_context(|| format!("offloading segno {}", s.seg_no))?;
-
-        res = s.end_lsn;
+    parallel_jobs: usize,
+) -> Result<()> {
+    if parallel_jobs < 1 {
+        anyhow::bail!("parallel_jobs must be >= 1");
     }
+
+    let start_lsn = *backup_lsn;
+    let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
+
+    // Pool of concurrent upload tasks. We use `FuturesOrdered` to
+    // preserve order of uploads, and update `backup_lsn` only after
+    // all previous uploads are finished.
+    let mut uploads = FuturesOrdered::new();
+    let mut iter = segments.iter();
+
+    loop {
+        let added_task = match iter.next() {
+            Some(s) => {
+                uploads.push_back(backup_single_segment(s, timeline_dir, workspace_dir));
+                true
+            }
+            None => false,
+        };
+
+        // Wait for the next segment to upload if we don't have any more segments,
+        // or if we have too many concurrent uploads.
+        if !added_task || uploads.len() >= parallel_jobs {
+            let next = uploads.next().await;
+            if let Some(res) = next {
+                // next segment uploaded
+                let segment = res?;
+                let new_backup_lsn = segment.end_lsn;
+                timeline
+                    .set_wal_backup_lsn(new_backup_lsn)
+                    .context("setting wal_backup_lsn")?;
+                *backup_lsn = new_backup_lsn;
+            } else {
+                // no more segments to upload
+                break;
+            }
+        }
+    }
+
     info!(
         "offloaded segnos {:?} up to {}, previous backup_lsn {}",
         segments.iter().map(|&s| s.seg_no).collect::<Vec<_>>(),
         end_lsn,
         start_lsn,
     );
-    Ok(res)
+    Ok(())
 }
 
 async fn backup_single_segment(
     seg: &Segment,
     timeline_dir: &Path,
     workspace_dir: &Path,
-) -> Result<()> {
+) -> Result<Segment> {
     let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = segment_file_path
         .strip_prefix(workspace_dir)
@@ -394,10 +436,16 @@ async fn backup_single_segment(
             )
         })?;
 
-    backup_object(&segment_file_path, &remote_segment_path, seg.size()).await?;
+    let res = backup_object(&segment_file_path, &remote_segment_path, seg.size()).await;
+    if res.is_ok() {
+        BACKED_UP_SEGMENTS.inc();
+    } else {
+        BACKUP_ERRORS.inc();
+    }
+    res?;
     debug!("Backup of {} done", segment_file_path.display());
 
-    Ok(())
+    Ok(*seg)
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -467,7 +515,7 @@ async fn backup_object(source_file: &Path, target_file: &RemotePath, size: usize
 pub async fn read_object(
     file_path: &RemotePath,
     offset: u64,
-) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead>>> {
+) -> anyhow::Result<Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>> {
     let storage = REMOTE_STORAGE
         .get()
         .context("Failed to get remote storage")?

@@ -5,6 +5,7 @@
 
 use anyhow::{bail, ensure, Context};
 
+use postgres_backend::AuthType;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -17,9 +18,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use utils::{
-    auth::{encode_from_key_file, Claims, Scope},
+    auth::{encode_from_key_file, Claims},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
-    postgres_backend::AuthType,
 };
 
 use crate::safekeeper::SafekeeperNode;
@@ -110,15 +110,14 @@ impl NeonBroker {
 pub struct PageServerConf {
     // node id
     pub id: NodeId,
+
     // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
 
-    // used to determine which auth type is used
-    pub auth_type: AuthType,
-
-    // jwt auth token used for communication with pageserver
-    pub auth_token: String,
+    // auth type used for the PG and HTTP ports
+    pub pg_auth_type: AuthType,
+    pub http_auth_type: AuthType,
 }
 
 impl Default for PageServerConf {
@@ -127,8 +126,8 @@ impl Default for PageServerConf {
             id: NodeId(0),
             listen_pg_addr: String::new(),
             listen_http_addr: String::new(),
-            auth_type: AuthType::Trust,
-            auth_token: String::new(),
+            pg_auth_type: AuthType::Trust,
+            http_auth_type: AuthType::Trust,
         }
     }
 }
@@ -201,14 +200,8 @@ impl LocalEnv {
         self.neon_distrib_dir.join("storage_broker")
     }
 
-    pub fn pg_data_dirs_path(&self) -> PathBuf {
-        self.base_data_dir.join("pgdatadirs").join("tenants")
-    }
-
-    pub fn pg_data_dir(&self, tenant_id: &TenantId, branch_name: &str) -> PathBuf {
-        self.pg_data_dirs_path()
-            .join(tenant_id.to_string())
-            .join(branch_name)
+    pub fn endpoints_path(&self) -> PathBuf {
+        self.base_data_dir.join("endpoints")
     }
 
     // TODO: move pageserver files into ./pageserver
@@ -401,55 +394,46 @@ impl LocalEnv {
 
         fs::create_dir(base_path)?;
 
-        // generate keys for jwt
-        // openssl genrsa -out private_key.pem 2048
-        let private_key_path;
+        // Generate keypair for JWT.
+        //
+        // The keypair is only needed if authentication is enabled in any of the
+        // components. For convenience, we generate the keypair even if authentication
+        // is not enabled, so that you can easily enable it after the initialization
+        // step. However, if the key generation fails, we treat it as non-fatal if
+        // authentication was not enabled.
         if self.private_key_path == PathBuf::new() {
-            private_key_path = base_path.join("auth_private_key.pem");
-            let keygen_output = Command::new("openssl")
-                .arg("genrsa")
-                .args(["-out", private_key_path.to_str().unwrap()])
-                .arg("2048")
-                .stdout(Stdio::null())
-                .output()
-                .context("failed to generate auth private key")?;
-            if !keygen_output.status.success() {
-                bail!(
-                    "openssl failed: '{}'",
-                    String::from_utf8_lossy(&keygen_output.stderr)
-                );
-            }
-            self.private_key_path = PathBuf::from("auth_private_key.pem");
-
-            let public_key_path = base_path.join("auth_public_key.pem");
-            // openssl rsa -in private_key.pem -pubout -outform PEM -out public_key.pem
-            let keygen_output = Command::new("openssl")
-                .arg("rsa")
-                .args(["-in", private_key_path.to_str().unwrap()])
-                .arg("-pubout")
-                .args(["-outform", "PEM"])
-                .args(["-out", public_key_path.to_str().unwrap()])
-                .stdout(Stdio::null())
-                .output()
-                .context("failed to generate auth private key")?;
-            if !keygen_output.status.success() {
-                bail!(
-                    "openssl failed: '{}'",
-                    String::from_utf8_lossy(&keygen_output.stderr)
-                );
+            match generate_auth_keys(
+                base_path.join("auth_private_key.pem").as_path(),
+                base_path.join("auth_public_key.pem").as_path(),
+            ) {
+                Ok(()) => {
+                    self.private_key_path = PathBuf::from("auth_private_key.pem");
+                }
+                Err(e) => {
+                    if !self.auth_keys_needed() {
+                        eprintln!("Could not generate keypair for JWT authentication: {e}");
+                        eprintln!("Continuing anyway because authentication was not enabled");
+                        self.private_key_path = PathBuf::from("auth_private_key.pem");
+                    } else {
+                        return Err(e);
+                    }
+                }
             }
         }
 
-        self.pageserver.auth_token =
-            self.generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
-
-        fs::create_dir_all(self.pg_data_dirs_path())?;
+        fs::create_dir_all(self.endpoints_path())?;
 
         for safekeeper in &self.safekeepers {
             fs::create_dir_all(SafekeeperNode::datadir_path_by_id(self, safekeeper.id))?;
         }
 
         self.persist_config(base_path)
+    }
+
+    fn auth_keys_needed(&self) -> bool {
+        self.pageserver.pg_auth_type == AuthType::NeonJWT
+            || self.pageserver.http_auth_type == AuthType::NeonJWT
+            || self.safekeepers.iter().any(|sk| sk.auth_enabled)
     }
 }
 
@@ -458,6 +442,43 @@ fn base_path() -> PathBuf {
         Some(val) => PathBuf::from(val),
         None => PathBuf::from(".neon"),
     }
+}
+
+/// Generate a public/private key pair for JWT authentication
+fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow::Result<()> {
+    // Generate the key pair
+    //
+    // openssl genpkey -algorithm ed25519 -out auth_private_key.pem
+    let keygen_output = Command::new("openssl")
+        .arg("genpkey")
+        .args(["-algorithm", "ed25519"])
+        .args(["-out", private_key_path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .output()
+        .context("failed to generate auth private key")?;
+    if !keygen_output.status.success() {
+        bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+    // Extract the public key from the private key file
+    //
+    // openssl pkey -in auth_private_key.pem -pubout -out auth_public_key.pem
+    let keygen_output = Command::new("openssl")
+        .arg("pkey")
+        .args(["-in", private_key_path.to_str().unwrap()])
+        .arg("-pubout")
+        .args(["-out", public_key_path.to_str().unwrap()])
+        .output()
+        .context("failed to extract public key from private key")?;
+    if !keygen_output.status.success() {
+        bail!(
+            "openssl failed: '{}'",
+            String::from_utf8_lossy(&keygen_output.stderr)
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

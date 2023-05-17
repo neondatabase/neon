@@ -9,7 +9,6 @@ from typing import Iterator
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
     PSQL,
     NeonEnvBuilder,
@@ -24,13 +23,6 @@ from fixtures.utils import query_scalar
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
-
-
-@pytest.fixture(scope="session")
-def httpserver_listen_address(port_distributor: PortDistributor):
-    port = port_distributor.get_port()
-    return ("localhost", port)
-
 
 # ==============================================================================
 # Storage metrics tests
@@ -124,9 +116,9 @@ def test_metric_collection(
     # before pageserver, pageserver log might contain such errors in the end.
     env.pageserver.allowed_errors.append(".*metrics endpoint refused the sent metrics*")
     env.neon_cli.create_branch("test_metric_collection")
-    pg = env.postgres.create_start("test_metric_collection")
+    endpoint = env.endpoints.create_start("test_metric_collection")
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     tenant_id = TenantId(query_scalar(cur, "SHOW neon.tenant_id"))
@@ -143,7 +135,7 @@ def test_metric_collection(
 
     # Helper function that gets the number of given kind of remote ops from the metrics
     def get_num_remote_ops(file_kind: str, op_kind: str) -> int:
-        ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+        ps_metrics = env.pageserver.http_client().get_metrics()
         total = 0.0
         for sample in ps_metrics.query_all(
             name="pageserver_remote_operation_seconds_count",
@@ -159,7 +151,7 @@ def test_metric_collection(
 
     # upload some data to remote storage
     if remote_storage_kind == RemoteStorageKind.LOCAL_FS:
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
         pageserver_http = env.pageserver.http_client()
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
         pageserver_http.timeline_gc(tenant_id, timeline_id, 10000)
@@ -200,9 +192,12 @@ def proxy_metrics_handler(request: Request) -> Response:
     return Response(status=200)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def proxy_with_metric_collector(
-    port_distributor: PortDistributor, neon_binpath: Path, httpserver_listen_address
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    httpserver_listen_address,
+    test_output_dir: Path,
 ) -> Iterator[NeonProxy]:
     """Neon proxy that routes through link auth and has metric collection enabled."""
 
@@ -216,6 +211,7 @@ def proxy_with_metric_collector(
 
     with NeonProxy(
         neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,

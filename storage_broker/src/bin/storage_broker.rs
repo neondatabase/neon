@@ -23,7 +23,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
@@ -33,6 +32,7 @@ use tonic::transport::server::Connected;
 use tonic::Code;
 use tonic::{Request, Response, Status};
 use tracing::*;
+use utils::signals::ShutdownSignals;
 
 use metrics::{Encoder, TextEncoder};
 use storage_broker::metrics::{NUM_PUBS, NUM_SUBS_ALL, NUM_SUBS_TIMELINE};
@@ -373,7 +373,7 @@ impl BrokerService for Broker {
                     Ok(info) => yield info,
                     Err(RecvError::Lagged(skipped_msg)) => {
                         missed_msgs += skipped_msg;
-                        if let Poll::Ready(_) = futures::poll!(Box::pin(warn_interval.tick())) {
+                        if (futures::poll!(Box::pin(warn_interval.tick()))).is_ready() {
                             warn!("subscription id={}, key={:?} addr={:?} dropped {} messages, channel is full",
                                 subscriber.id, subscriber.key, subscriber.remote_addr, missed_msgs);
                             missed_msgs = 0;
@@ -424,14 +424,29 @@ async fn http1_handler(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // initialize sentry if SENTRY_DSN is provided
-    let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
-
     let args = Args::parse();
 
-    logging::init(LogFormat::from_config(&args.log_format)?)?;
+    // important to keep the order of:
+    // 1. init logging
+    // 2. tracing panic hook
+    // 3. sentry
+    logging::init(
+        LogFormat::from_config(&args.log_format)?,
+        logging::TracingErrorLayerEnablement::Disabled,
+    )?;
+    logging::replace_panic_hook_with_tracing_panic_hook().forget();
+    // initialize sentry if SENTRY_DSN is provided
+    let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
     info!("version: {GIT_VERSION}");
     ::metrics::set_build_info_metric(GIT_VERSION);
+
+    // On any shutdown signal, log receival and exit.
+    std::thread::spawn(move || {
+        ShutdownSignals::handle(|signal| {
+            info!("received {}, terminating", signal.name());
+            std::process::exit(0);
+        })
+    });
 
     let registry = Registry {
         shared_state: Arc::new(RwLock::new(SharedState::new(args.all_keys_chan_size))),
@@ -512,6 +527,7 @@ mod tests {
             peer_horizon_lsn: 5,
             safekeeper_connstr: "neon-1-sk-1.local:7676".to_owned(),
             local_start_lsn: 0,
+            availability_zone: None,
         }
     }
 

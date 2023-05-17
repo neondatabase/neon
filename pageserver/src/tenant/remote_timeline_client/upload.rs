@@ -19,9 +19,12 @@ pub(super) async fn upload_index_part<'a>(
     timeline_id: TimelineId,
     index_part: &'a IndexPart,
 ) -> anyhow::Result<()> {
+    tracing::trace!("uploading new index part");
+
     fail_point!("before-upload-index", |_| {
         bail!("failpoint before-upload-index")
     });
+
     let index_part_bytes = serde_json::to_vec(&index_part)
         .context("Failed to serialize index part file into bytes")?;
     let index_part_size = index_part_bytes.len();
@@ -31,6 +34,7 @@ pub(super) async fn upload_index_part<'a>(
         .metadata_path(timeline_id, tenant_id)
         .with_file_name(IndexPart::FILE_NAME);
     let storage_path = conf.remote_path(&index_part_path)?;
+
     storage
         .upload_storage_object(Box::new(index_part_bytes), index_part_size, &storage_path)
         .await
@@ -64,13 +68,9 @@ pub(super) async fn upload_timeline_layer<'a>(
         })?
         .len();
 
-    // FIXME: this looks bad
-    if let Some(metadata_size) = known_metadata.file_size() {
-        if metadata_size != fs_size {
-            bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
-        }
-    } else {
-        // this is a silly state we would like to avoid
+    let metadata_size = known_metadata.file_size();
+    if metadata_size != fs_size {
+        bail!("File {source_path:?} has its current FS size {fs_size} diferent from initially determined {metadata_size}");
     }
 
     let fs_size = usize::try_from(fs_size).with_context(|| {
@@ -78,7 +78,7 @@ pub(super) async fn upload_timeline_layer<'a>(
     })?;
 
     storage
-        .upload(Box::new(source_file), fs_size, &storage_path, None)
+        .upload(source_file, fs_size, &storage_path, None)
         .await
         .with_context(|| {
             format!(

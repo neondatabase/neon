@@ -13,8 +13,6 @@ pub mod simple_rcu;
 pub mod vec_map;
 
 pub mod bin_ser;
-pub mod postgres_backend;
-pub mod postgres_backend_async;
 
 // helper functions for creating and fsyncing
 pub mod crashsafe;
@@ -26,9 +24,6 @@ pub mod auth;
 pub mod id;
 // http endpoint utils
 pub mod http;
-
-// socket splitting utils
-pub mod sock_split;
 
 // common log initialisation routine
 pub mod logging;
@@ -54,24 +49,54 @@ pub mod fs_ext;
 
 pub mod history_buffer;
 
-/// use with fail::cfg("$name", "return(2000)")
-#[macro_export]
-macro_rules! failpoint_sleep_millis_async {
-    ($name:literal) => {{
-        let should_sleep: Option<std::time::Duration> = (|| {
-            fail::fail_point!($name, |v: Option<_>| {
-                let millis = v.unwrap().parse::<u64>().unwrap();
-                Some(Duration::from_millis(millis))
-            });
-            None
-        })();
-        if let Some(d) = should_sleep {
-            tracing::info!("failpoint {:?}: sleeping for {:?}", $name, d);
-            tokio::time::sleep(d).await;
-            tracing::info!("failpoint {:?}: sleep done", $name);
-        }
-    }};
+pub mod measured_stream;
+
+pub mod serde_percent;
+pub mod serde_regex;
+
+pub mod pageserver_feedback;
+
+pub mod tracing_span_assert;
+
+pub mod rate_limit;
+
+mod failpoint_macro_helpers {
+
+    /// use with fail::cfg("$name", "return(2000)")
+    ///
+    /// The effect is similar to a "sleep(2000)" action, i.e. we sleep for the
+    /// specified time (in milliseconds). The main difference is that we use async
+    /// tokio sleep function. Another difference is that we print lines to the log,
+    /// which can be useful in tests to check that the failpoint was hit.
+    #[macro_export]
+    macro_rules! failpoint_sleep_millis_async {
+        ($name:literal) => {{
+            // If the failpoint is used with a "return" action, set should_sleep to the
+            // returned value (as string). Otherwise it's set to None.
+            let should_sleep = (|| {
+                ::fail::fail_point!($name, |x| x);
+                ::std::option::Option::None
+            })();
+
+            // Sleep if the action was a returned value
+            if let ::std::option::Option::Some(duration_str) = should_sleep {
+                $crate::failpoint_sleep_helper($name, duration_str).await
+            }
+        }};
+    }
+
+    // Helper function used by the macro. (A function has nicer scoping so we
+    // don't need to decorate everything with "::")
+    pub async fn failpoint_sleep_helper(name: &'static str, duration_str: String) {
+        let millis = duration_str.parse::<u64>().unwrap();
+        let d = std::time::Duration::from_millis(millis);
+
+        tracing::info!("failpoint {:?}: sleeping for {:?}", name, d);
+        tokio::time::sleep(d).await;
+        tracing::info!("failpoint {:?}: sleep done", name);
+    }
 }
+pub use failpoint_macro_helpers::failpoint_sleep_helper;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///

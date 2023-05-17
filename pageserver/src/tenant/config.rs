@@ -8,6 +8,8 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
+use anyhow::Context;
+use pageserver_api::models;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 use std::time::Duration;
@@ -39,6 +41,7 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
+    pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 }
 
 /// Per-tenant configuration options
@@ -91,6 +94,11 @@ pub struct TenantConf {
     /// to avoid eager reconnects.
     pub max_lsn_wal_lag: NonZeroU64,
     pub trace_read_requests: bool,
+    pub eviction_policy: EvictionPolicy,
+    pub min_resident_size_override: Option<u64>,
+    // See the corresponding metric's help string.
+    #[serde(with = "humantime_serde")]
+    pub evictions_low_residence_duration_metric_threshold: Duration,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -102,6 +110,7 @@ pub struct TenantConfOpt {
     pub checkpoint_distance: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub checkpoint_timeout: Option<Duration>,
 
@@ -153,6 +162,43 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub trace_read_requests: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub eviction_policy: Option<EvictionPolicy>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub min_resident_size_override: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "humantime_serde")]
+    #[serde(default)]
+    pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum EvictionPolicy {
+    NoEviction,
+    LayerAccessThreshold(EvictionPolicyLayerAccessThreshold),
+}
+
+impl EvictionPolicy {
+    pub fn discriminant_str(&self) -> &'static str {
+        match self {
+            EvictionPolicy::NoEviction => "NoEviction",
+            EvictionPolicy::LayerAccessThreshold(_) => "LayerAccessThreshold",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvictionPolicyLayerAccessThreshold {
+    #[serde(with = "humantime_serde")]
+    pub period: Duration,
+    #[serde(with = "humantime_serde")]
+    pub threshold: Duration,
 }
 
 impl TenantConfOpt {
@@ -189,48 +235,13 @@ impl TenantConfOpt {
             trace_read_requests: self
                 .trace_read_requests
                 .unwrap_or(global_conf.trace_read_requests),
-        }
-    }
-
-    pub fn update(&mut self, other: &TenantConfOpt) {
-        if let Some(checkpoint_distance) = other.checkpoint_distance {
-            self.checkpoint_distance = Some(checkpoint_distance);
-        }
-        if let Some(checkpoint_timeout) = other.checkpoint_timeout {
-            self.checkpoint_timeout = Some(checkpoint_timeout);
-        }
-        if let Some(compaction_target_size) = other.compaction_target_size {
-            self.compaction_target_size = Some(compaction_target_size);
-        }
-        if let Some(compaction_period) = other.compaction_period {
-            self.compaction_period = Some(compaction_period);
-        }
-        if let Some(compaction_threshold) = other.compaction_threshold {
-            self.compaction_threshold = Some(compaction_threshold);
-        }
-        if let Some(gc_horizon) = other.gc_horizon {
-            self.gc_horizon = Some(gc_horizon);
-        }
-        if let Some(gc_period) = other.gc_period {
-            self.gc_period = Some(gc_period);
-        }
-        if let Some(image_creation_threshold) = other.image_creation_threshold {
-            self.image_creation_threshold = Some(image_creation_threshold);
-        }
-        if let Some(pitr_interval) = other.pitr_interval {
-            self.pitr_interval = Some(pitr_interval);
-        }
-        if let Some(walreceiver_connect_timeout) = other.walreceiver_connect_timeout {
-            self.walreceiver_connect_timeout = Some(walreceiver_connect_timeout);
-        }
-        if let Some(lagging_wal_timeout) = other.lagging_wal_timeout {
-            self.lagging_wal_timeout = Some(lagging_wal_timeout);
-        }
-        if let Some(max_lsn_wal_lag) = other.max_lsn_wal_lag {
-            self.max_lsn_wal_lag = Some(max_lsn_wal_lag);
-        }
-        if let Some(trace_read_requests) = other.trace_read_requests {
-            self.trace_read_requests = Some(trace_read_requests);
+            eviction_policy: self.eviction_policy.unwrap_or(global_conf.eviction_policy),
+            min_resident_size_override: self
+                .min_resident_size_override
+                .or(global_conf.min_resident_size_override),
+            evictions_low_residence_duration_metric_threshold: self
+                .evictions_low_residence_duration_metric_threshold
+                .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
         }
     }
 }
@@ -261,7 +272,108 @@ impl Default for TenantConf {
             max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
                 .expect("cannot parse default max walreceiver Lsn wal lag"),
             trace_read_requests: false,
+            eviction_policy: EvictionPolicy::NoEviction,
+            min_resident_size_override: None,
+            evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
+                DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
+            )
+            .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
         }
+    }
+}
+
+// Helper function to standardize the error messages we produce on bad durations
+//
+// Intended to be used with anyhow's `with_context`, e.g.:
+//
+//   let value = result.with_context(bad_duration("name", &value))?;
+//
+fn bad_duration<'a>(field_name: &'static str, value: &'a str) -> impl 'a + Fn() -> String {
+    move || format!("Cannot parse `{field_name}` duration {value:?}")
+}
+
+impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
+    type Error = anyhow::Error;
+
+    fn try_from(request_data: &'_ models::TenantConfig) -> Result<Self, Self::Error> {
+        let mut tenant_conf = TenantConfOpt::default();
+
+        if let Some(gc_period) = &request_data.gc_period {
+            tenant_conf.gc_period = Some(
+                humantime::parse_duration(gc_period)
+                    .with_context(bad_duration("gc_period", gc_period))?,
+            );
+        }
+        tenant_conf.gc_horizon = request_data.gc_horizon;
+        tenant_conf.image_creation_threshold = request_data.image_creation_threshold;
+
+        if let Some(pitr_interval) = &request_data.pitr_interval {
+            tenant_conf.pitr_interval = Some(
+                humantime::parse_duration(pitr_interval)
+                    .with_context(bad_duration("pitr_interval", pitr_interval))?,
+            );
+        }
+
+        if let Some(walreceiver_connect_timeout) = &request_data.walreceiver_connect_timeout {
+            tenant_conf.walreceiver_connect_timeout = Some(
+                humantime::parse_duration(walreceiver_connect_timeout).with_context(
+                    bad_duration("walreceiver_connect_timeout", walreceiver_connect_timeout),
+                )?,
+            );
+        }
+        if let Some(lagging_wal_timeout) = &request_data.lagging_wal_timeout {
+            tenant_conf.lagging_wal_timeout = Some(
+                humantime::parse_duration(lagging_wal_timeout)
+                    .with_context(bad_duration("lagging_wal_timeout", lagging_wal_timeout))?,
+            );
+        }
+        if let Some(max_lsn_wal_lag) = request_data.max_lsn_wal_lag {
+            tenant_conf.max_lsn_wal_lag = Some(max_lsn_wal_lag);
+        }
+        if let Some(trace_read_requests) = request_data.trace_read_requests {
+            tenant_conf.trace_read_requests = Some(trace_read_requests);
+        }
+
+        tenant_conf.checkpoint_distance = request_data.checkpoint_distance;
+        if let Some(checkpoint_timeout) = &request_data.checkpoint_timeout {
+            tenant_conf.checkpoint_timeout = Some(
+                humantime::parse_duration(checkpoint_timeout)
+                    .with_context(bad_duration("checkpoint_timeout", checkpoint_timeout))?,
+            );
+        }
+
+        tenant_conf.compaction_target_size = request_data.compaction_target_size;
+        tenant_conf.compaction_threshold = request_data.compaction_threshold;
+
+        if let Some(compaction_period) = &request_data.compaction_period {
+            tenant_conf.compaction_period = Some(
+                humantime::parse_duration(compaction_period)
+                    .with_context(bad_duration("compaction_period", compaction_period))?,
+            );
+        }
+
+        if let Some(eviction_policy) = &request_data.eviction_policy {
+            tenant_conf.eviction_policy = Some(
+                serde::Deserialize::deserialize(eviction_policy)
+                    .context("parse field `eviction_policy`")?,
+            );
+        }
+
+        tenant_conf.min_resident_size_override = request_data.min_resident_size_override;
+
+        if let Some(evictions_low_residence_duration_metric_threshold) =
+            &request_data.evictions_low_residence_duration_metric_threshold
+        {
+            tenant_conf.evictions_low_residence_duration_metric_threshold = Some(
+                humantime::parse_duration(evictions_low_residence_duration_metric_threshold)
+                    .with_context(bad_duration(
+                        "evictions_low_residence_duration_metric_threshold",
+                        evictions_low_residence_duration_metric_threshold,
+                    ))?,
+            );
+        }
+
+        Ok(tenant_conf)
     }
 }
 
@@ -276,9 +388,9 @@ mod tests {
             ..TenantConfOpt::default()
         };
 
-        let toml_form = toml_edit::easy::to_string(&small_conf).unwrap();
+        let toml_form = toml_edit::ser::to_string(&small_conf).unwrap();
         assert_eq!(toml_form, "gc_horizon = 42\n");
-        assert_eq!(small_conf, toml_edit::easy::from_str(&toml_form).unwrap());
+        assert_eq!(small_conf, toml_edit::de::from_str(&toml_form).unwrap());
 
         let json_form = serde_json::to_string(&small_conf).unwrap();
         assert_eq!(json_form, "{\"gc_horizon\":42}");

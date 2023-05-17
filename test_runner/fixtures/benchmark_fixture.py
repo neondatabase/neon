@@ -17,6 +17,7 @@ import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.terminal import TerminalReporter
+
 from fixtures.neon_fixtures import NeonPageserver
 from fixtures.types import TenantId, TimelineId
 
@@ -354,29 +355,26 @@ class NeonBenchmarker:
         """
         Fetch the "cumulative # of bytes written" metric from the pageserver
         """
-        metric_name = r'libmetrics_disk_io_bytes_total{io_operation="write"}'
-        return self.get_int_counter_value(pageserver, metric_name)
+        return self.get_int_counter_value(
+            pageserver, "libmetrics_disk_io_bytes_total", {"io_operation": "write"}
+        )
 
     def get_peak_mem(self, pageserver: NeonPageserver) -> int:
         """
         Fetch the "maxrss" metric from the pageserver
         """
-        metric_name = r"libmetrics_maxrss_kb"
-        return self.get_int_counter_value(pageserver, metric_name)
+        return self.get_int_counter_value(pageserver, "libmetrics_maxrss_kb")
 
-    def get_int_counter_value(self, pageserver: NeonPageserver, metric_name: str) -> int:
+    def get_int_counter_value(
+        self,
+        pageserver: NeonPageserver,
+        metric_name: str,
+        label_filters: Optional[Dict[str, str]] = None,
+    ) -> int:
         """Fetch the value of given int counter from pageserver metrics."""
-        # TODO: If we start to collect more of the prometheus metrics in the
-        # performance test suite like this, we should refactor this to load and
-        # parse all the metrics into a more convenient structure in one go.
-        #
-        # The metric should be an integer, as it's a number of bytes. But in general
-        # all prometheus metrics are floats. So to be pedantic, read it as a float
-        # and round to integer.
         all_metrics = pageserver.http_client().get_metrics()
-        matches = re.search(rf"^{metric_name} (\S+)$", all_metrics, re.MULTILINE)
-        assert matches, f"metric {metric_name} not found"
-        return int(round(float(matches.group(1))))
+        sample = all_metrics.query_one(metric_name, label_filters)
+        return int(round(sample.value))
 
     def get_timeline_size(
         self, repo_dir: Path, tenant_id: TenantId, timeline_id: TimelineId
@@ -453,13 +451,17 @@ def pytest_terminal_summary(
     revision = os.getenv("GITHUB_SHA", "local")
     platform = os.getenv("PLATFORM", "local")
 
-    terminalreporter.section("Benchmark results", "-")
+    is_header_printed = False
 
     result = []
     for test_report in terminalreporter.stats.get("passed", []):
         result_entry = []
 
         for _, recorded_property in test_report.user_properties:
+            if not is_header_printed:
+                terminalreporter.section("Benchmark results", "-")
+                is_header_printed = True
+
             terminalreporter.write(
                 "{}.{}: ".format(test_report.head_line, recorded_property["name"])
             )
@@ -487,7 +489,6 @@ def pytest_terminal_summary(
 
     out_dir = config.getoption("out_dir")
     if out_dir is None:
-        warnings.warn("no out dir provided to store performance test results")
         return
 
     if not result:

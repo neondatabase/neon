@@ -18,7 +18,8 @@ use crate::control_file;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::wal_storage;
-use pq_proto::{ReplicationFeedback, SystemId};
+use pq_proto::SystemId;
+use utils::pageserver_feedback::PageserverFeedback;
 use utils::{
     bin_ser::LeSer,
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -191,7 +192,8 @@ pub struct SafeKeeperState {
     /// Minimal LSN which may be needed for recovery of some safekeeper (end_lsn
     /// of last record streamed to everyone). Persisting it helps skipping
     /// recovery in walproposer, generally we compute it from peers. In
-    /// walproposer proto called 'truncate_lsn'.
+    /// walproposer proto called 'truncate_lsn'. Updates are currently drived
+    /// only by walproposer.
     pub peer_horizon_lsn: Lsn,
     /// LSN of the oldest known checkpoint made by pageserver and successfully
     /// pushed to s3. We don't remove WAL beyond it. Persisted only for
@@ -204,14 +206,14 @@ pub struct SafeKeeperState {
     pub peers: PersistedPeers,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 // In memory safekeeper state. Fields mirror ones in `SafeKeeperState`; values
 // are not flushed yet.
 pub struct SafekeeperMemState {
     pub commit_lsn: Lsn,
     pub backup_lsn: Lsn,
     pub peer_horizon_lsn: Lsn,
-    pub remote_consistent_lsn: Lsn,
+    #[serde(with = "hex")]
     pub proposer_uuid: PgUuid,
 }
 
@@ -345,7 +347,7 @@ pub struct AppendRequestHeader {
 }
 
 /// Report safekeeper state to proposer
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct AppendResponse {
     // Current term of the safekeeper; if it is higher than proposer's, the
     // compute is out of date.
@@ -358,7 +360,7 @@ pub struct AppendResponse {
     // a criterion for walproposer --sync mode exit
     pub commit_lsn: Lsn,
     pub hs_feedback: HotStandbyFeedback,
-    pub pageserver_feedback: ReplicationFeedback,
+    pub pageserver_feedback: PageserverFeedback,
 }
 
 impl AppendResponse {
@@ -368,7 +370,7 @@ impl AppendResponse {
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
             hs_feedback: HotStandbyFeedback::empty(),
-            pageserver_feedback: ReplicationFeedback::empty(),
+            pageserver_feedback: PageserverFeedback::empty(),
         }
     }
 }
@@ -486,7 +488,7 @@ impl AcceptorProposerMessage {
                 buf.put_u64_le(msg.hs_feedback.xmin);
                 buf.put_u64_le(msg.hs_feedback.catalog_xmin);
 
-                msg.pageserver_feedback.serialize(buf)?
+                msg.pageserver_feedback.serialize(buf);
             }
         }
 
@@ -538,7 +540,6 @@ where
                 commit_lsn: state.commit_lsn,
                 backup_lsn: state.backup_lsn,
                 peer_horizon_lsn: state.peer_horizon_lsn,
-                remote_consistent_lsn: state.remote_consistent_lsn,
                 proposer_uuid: state.proposer_uuid,
             },
             state,
@@ -681,7 +682,7 @@ where
             term: self.state.acceptor_state.term,
             vote_given: false as u64,
             flush_lsn: self.flush_lsn(),
-            truncate_lsn: self.state.peer_horizon_lsn,
+            truncate_lsn: self.inmem.peer_horizon_lsn,
             term_history: self.get_term_history(),
             timeline_start_lsn: self.state.timeline_start_lsn,
         };
@@ -706,7 +707,7 @@ where
             commit_lsn: self.state.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
-            pageserver_feedback: ReplicationFeedback::empty(),
+            pageserver_feedback: PageserverFeedback::empty(),
         };
         trace!("formed AppendResponse {:?}", ar);
         ar
@@ -779,10 +780,6 @@ where
 
             // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
             self.inmem.backup_lsn = max(self.inmem.backup_lsn, state.timeline_start_lsn);
-            // Initializing remote_consistent_lsn sets that we have nothing to
-            // stream to pageserver(s) immediately after creation.
-            self.inmem.remote_consistent_lsn =
-                max(self.inmem.remote_consistent_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
             self.persist_control_file(state)?;
@@ -835,7 +832,6 @@ where
         state.commit_lsn = self.inmem.commit_lsn;
         state.backup_lsn = self.inmem.backup_lsn;
         state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
-        state.remote_consistent_lsn = self.inmem.remote_consistent_lsn;
         state.proposer_uuid = self.inmem.proposer_uuid;
         self.state.persist(&state)
     }
@@ -877,7 +873,13 @@ where
         if msg.h.commit_lsn != Lsn(0) {
             self.update_commit_lsn(msg.h.commit_lsn)?;
         }
-        self.inmem.peer_horizon_lsn = msg.h.truncate_lsn;
+        // Value calculated by walproposer can always lag:
+        // - safekeepers can forget inmem value and send to proposer lower
+        //   persisted one on restart;
+        // - if we make safekeepers always send persistent value,
+        //   any compute restart would pull it down.
+        // Thus, take max before adopting.
+        self.inmem.peer_horizon_lsn = max(self.inmem.peer_horizon_lsn, msg.h.truncate_lsn);
 
         // Update truncate and commit LSN in control file.
         // To avoid negative impact on performance of extra fsync, do it only
@@ -932,14 +934,12 @@ where
             self.state.backup_lsn + (self.state.server.wal_seg_size as u64) < new_backup_lsn;
         self.inmem.backup_lsn = new_backup_lsn;
 
-        let new_remote_consistent_lsn = max(
-            Lsn(sk_info.remote_consistent_lsn),
-            self.inmem.remote_consistent_lsn,
-        );
+        // value in sk_info should be maximized over our local in memory value.
+        let new_remote_consistent_lsn = Lsn(sk_info.remote_consistent_lsn);
+        assert!(self.state.remote_consistent_lsn <= new_remote_consistent_lsn);
         sync_control_file |= self.state.remote_consistent_lsn
             + (self.state.server.wal_seg_size as u64)
             < new_remote_consistent_lsn;
-        self.inmem.remote_consistent_lsn = new_remote_consistent_lsn;
 
         let new_peer_horizon_lsn = max(Lsn(sk_info.peer_horizon_lsn), self.inmem.peer_horizon_lsn);
         sync_control_file |= self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
@@ -947,7 +947,12 @@ where
         self.inmem.peer_horizon_lsn = new_peer_horizon_lsn;
 
         if sync_control_file {
-            self.persist_control_file(self.state.clone())?;
+            let mut state = self.state.clone();
+            // Note: we do not persist remote_consistent_lsn in other paths of
+            // persisting cf -- that is not much needed currently. We could do
+            // that by storing Arc to walsenders in Safekeeper.
+            state.remote_consistent_lsn = new_remote_consistent_lsn;
+            self.persist_control_file(state)?;
         }
         Ok(())
     }

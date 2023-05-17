@@ -308,8 +308,8 @@ def lsn_to_hex(num: int) -> str:
 
 def lsn_from_hex(lsn_hex: str) -> int:
     """Convert lsn from hex notation to int."""
-    l, r = lsn_hex.split("/")
-    return (int(l, 16) << 32) + int(r, 16)
+    left, right = lsn_hex.split("/")
+    return (int(left, 16) << 32) + int(right, 16)
 
 
 def remote_consistent_lsn(
@@ -398,7 +398,6 @@ def reconstruct_paths(log_dir, pg_bin, base_tar, port: int):
                 result = vanilla_pg.safe_psql(query, user="cloud_admin", dbname=database)
                 for relname, filepath in result:
                     if filepath is not None:
-
                         if database == "template0copy":
                             # Add all template0copy paths to template0
                             prefix = f"base/{oid}/"

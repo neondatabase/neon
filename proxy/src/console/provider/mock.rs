@@ -8,6 +8,7 @@ use crate::{auth::ClientCredentials, compute, error::io_error, scram, url::ApiUr
 use async_trait::async_trait;
 use futures::TryFutureExt;
 use thiserror::Error;
+use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Debug, Error)]
@@ -82,20 +83,17 @@ impl Api {
         .await
     }
 
-    async fn do_wake_compute(
-        &self,
-        creds: &ClientCredentials<'_>,
-    ) -> Result<NodeInfo, WakeComputeError> {
+    async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let mut config = compute::ConnCfg::new();
         config
             .host(self.endpoint.host_str().unwrap_or("localhost"))
             .port(self.endpoint.port().unwrap_or(5432))
-            .dbname(creds.dbname)
-            .user(creds.user);
+            .ssl_mode(SslMode::Disable);
 
         let node = NodeInfo {
             config,
             aux: Default::default(),
+            allow_self_signed_compute: false,
         };
 
         Ok(node)
@@ -117,9 +115,9 @@ impl super::Api for Api {
     async fn wake_compute(
         &self,
         _extra: &ConsoleReqExtra<'_>,
-        creds: &ClientCredentials<'_>,
+        _creds: &ClientCredentials<'_>,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        self.do_wake_compute(creds)
+        self.do_wake_compute()
             .map_ok(CachedNodeInfo::new_uncached)
             .await
     }

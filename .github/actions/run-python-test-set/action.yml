@@ -44,6 +44,14 @@ inputs:
     description: 'Secret access key'
     required: false
     default: ''
+  rerun_flaky:
+    description: 'Whether to rerun flaky tests'
+    required: false
+    default: 'false'
+  pg_version:
+    description: 'Postgres version to use for tests'
+    required: false
+    default: 'v14'
 
 runs:
   using: "composite"
@@ -64,7 +72,7 @@ runs:
         prefix: latest
 
     - name: Download compatibility snapshot for Postgres 14
-      if: inputs.build_type != 'remote'
+      if: inputs.build_type != 'remote' && inputs.pg_version == 'v14'
       uses: ./.github/actions/download
       with:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg14
@@ -101,13 +109,15 @@ runs:
         COMPATIBILITY_SNAPSHOT_DIR: /tmp/compatibility_snapshot_pg14
         ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
         ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
+        RERUN_FLAKY: ${{ inputs.rerun_flaky }}
+        PG_VERSION: ${{ inputs.pg_version }}
       shell: bash -euxo pipefail {0}
       run: |
         # PLATFORM will be embedded in the perf test report
         # and it is needed to distinguish different environments
         export PLATFORM=${PLATFORM:-github-actions-selfhosted}
         export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
-        export DEFAULT_PG_VERSION=${DEFAULT_PG_VERSION:-14}
+        export DEFAULT_PG_VERSION=${PG_VERSION#v}
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
@@ -141,6 +151,13 @@ runs:
         if [[ "${{ inputs.save_perf_report }}" == "true" ]]; then
           mkdir -p "$PERF_REPORT_DIR"
           EXTRA_PARAMS="--out-dir $PERF_REPORT_DIR $EXTRA_PARAMS"
+        fi
+
+        if [ "${RERUN_FLAKY}" == "true" ]; then
+          mkdir -p $TEST_OUTPUT
+          poetry run ./scripts/flaky_tests.py "${TEST_RESULT_CONNSTR}" --days 10 --output "$TEST_OUTPUT/flaky.json"
+
+          EXTRA_PARAMS="--flaky-tests-json $TEST_OUTPUT/flaky.json $EXTRA_PARAMS"
         fi
 
         if [[ "${{ inputs.build_type }}" == "debug" ]]; then
@@ -181,18 +198,17 @@ runs:
         fi
 
     - name: Upload compatibility snapshot for Postgres 14
-      if: github.ref_name == 'release'
+      if: github.ref_name == 'release' && inputs.pg_version == 'v14'
       uses: ./.github/actions/upload
       with:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg14-${{ github.run_id }}
-        # The path includes a test name (test_create_snapshot) and directory that the test creates (compatibility_snapshot_pg14), keep the path in sync with the test
-        path: /tmp/test_output/test_create_snapshot/compatibility_snapshot_pg14/
+        # Directory is created by test_compatibility.py::test_create_snapshot, keep the path in sync with the test
+        path: /tmp/test_output/compatibility_snapshot_pg14/
         prefix: latest
 
-    - name: Create Allure report
-      if: success() || failure()
-      uses: ./.github/actions/allure-report
+    - name: Upload test results
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-store
       with:
-        action: store
-        build_type: ${{ inputs.build_type }}
-        test_selection: ${{ inputs.test_selection }}
+        report-dir: /tmp/test_output/allure/results
+        unique-key: ${{ inputs.build_type }}

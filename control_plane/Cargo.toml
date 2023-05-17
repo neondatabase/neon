@@ -15,6 +15,7 @@ postgres.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 serde.workspace = true
+serde_json.workspace = true
 serde_with.workspace = true
 tar.workspace = true
 thiserror.workspace = true
@@ -23,9 +24,11 @@ url.workspace = true
 # Note: Do not directly depend on pageserver or safekeeper; use pageserver_api or safekeeper_api
 # instead, so that recompile times are better.
 pageserver_api.workspace = true
+postgres_backend.workspace = true
 safekeeper_api.workspace = true
 postgres_connection.workspace = true
 storage_broker.workspace = true
 utils.workspace = true
 
+compute_api.workspace = true
 workspace_hack.workspace = true

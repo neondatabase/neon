@@ -18,10 +18,10 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
 
     # Branch at the point where only 100 rows were inserted
     env.neon_cli.create_branch("test_branch_behind")
-    pgmain = env.postgres.create_start("test_branch_behind")
+    endpoint_main = env.endpoints.create_start("test_branch_behind")
     log.info("postgres is running on 'test_branch_behind' branch")
 
-    main_cur = pgmain.connect().cursor()
+    main_cur = endpoint_main.connect().cursor()
 
     timeline = TimelineId(query_scalar(main_cur, "SHOW neon.timeline_id"))
 
@@ -74,15 +74,15 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
         "test_branch_behind_more", "test_branch_behind", ancestor_start_lsn=lsn_b
     )
 
-    pg_hundred = env.postgres.create_start("test_branch_behind_hundred")
-    pg_more = env.postgres.create_start("test_branch_behind_more")
+    endpoint_hundred = env.endpoints.create_start("test_branch_behind_hundred")
+    endpoint_more = env.endpoints.create_start("test_branch_behind_more")
 
     # On the 'hundred' branch, we should see only 100 rows
-    hundred_cur = pg_hundred.connect().cursor()
+    hundred_cur = endpoint_hundred.connect().cursor()
     assert query_scalar(hundred_cur, "SELECT count(*) FROM foo") == 100
 
     # On the 'more' branch, we should see 100200 rows
-    more_cur = pg_more.connect().cursor()
+    more_cur = endpoint_more.connect().cursor()
     assert query_scalar(more_cur, "SELECT count(*) FROM foo") == 200100
 
     # All the rows are visible on the main branch
@@ -94,8 +94,8 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.create_branch(
         "test_branch_segment_boundary", "test_branch_behind", ancestor_start_lsn=Lsn("0/3000000")
     )
-    pg = env.postgres.create_start("test_branch_segment_boundary")
-    assert pg.safe_psql("SELECT 1")[0][0] == 1
+    endpoint = env.endpoints.create_start("test_branch_segment_boundary")
+    assert endpoint.safe_psql("SELECT 1")[0][0] == 1
 
     # branch at pre-initdb lsn
     with pytest.raises(Exception, match="invalid branch start lsn: .*"):

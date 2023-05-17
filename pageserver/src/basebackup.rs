@@ -33,6 +33,7 @@ use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
+use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
 use postgres_ffi::TransactionId;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::PG_TLI;
@@ -190,14 +191,31 @@ where
         {
             self.add_dbdir(spcnode, dbnode, has_relmap_file).await?;
 
-            // Gather and send relational files in each database if full backup is requested.
-            if self.full_backup {
-                for rel in self
-                    .timeline
-                    .list_rels(spcnode, dbnode, self.lsn, self.ctx)
-                    .await?
-                {
-                    self.add_rel(rel).await?;
+            // If full backup is requested, include all relation files.
+            // Otherwise only include init forks of unlogged relations.
+            let rels = self
+                .timeline
+                .list_rels(spcnode, dbnode, self.lsn, self.ctx)
+                .await?;
+            for &rel in rels.iter() {
+                // Send init fork as main fork to provide well formed empty
+                // contents of UNLOGGED relations. Postgres copies it in
+                // `reinit.c` during recovery.
+                if rel.forknum == INIT_FORKNUM {
+                    // I doubt we need _init fork itself, but having it at least
+                    // serves as a marker relation is unlogged.
+                    self.add_rel(rel, rel).await?;
+                    self.add_rel(rel, rel.with_forknum(MAIN_FORKNUM)).await?;
+                    continue;
+                }
+
+                if self.full_backup {
+                    if rel.forknum == MAIN_FORKNUM && rels.contains(&rel.with_forknum(INIT_FORKNUM))
+                    {
+                        // skip this, will include it when we reach the init fork
+                        continue;
+                    }
+                    self.add_rel(rel, rel).await?;
                 }
             }
         }
@@ -220,15 +238,16 @@ where
         Ok(())
     }
 
-    async fn add_rel(&mut self, tag: RelTag) -> anyhow::Result<()> {
+    /// Add contents of relfilenode `src`, naming it as `dst`.
+    async fn add_rel(&mut self, src: RelTag, dst: RelTag) -> anyhow::Result<()> {
         let nblocks = self
             .timeline
-            .get_rel_size(tag, self.lsn, false, self.ctx)
+            .get_rel_size(src, self.lsn, false, self.ctx)
             .await?;
 
         // If the relation is empty, create an empty file
         if nblocks == 0 {
-            let file_name = tag.to_segfile_name(0);
+            let file_name = dst.to_segfile_name(0);
             let header = new_tar_header(&file_name, 0)?;
             self.ar.append(&header, &mut io::empty()).await?;
             return Ok(());
@@ -244,12 +263,12 @@ where
             for blknum in startblk..endblk {
                 let img = self
                     .timeline
-                    .get_rel_page_at_lsn(tag, blknum, self.lsn, false, self.ctx)
+                    .get_rel_page_at_lsn(src, blknum, self.lsn, false, self.ctx)
                     .await?;
                 segment_data.extend_from_slice(&img[..]);
             }
 
-            let file_name = tag.to_segfile_name(seg as u32);
+            let file_name = dst.to_segfile_name(seg as u32);
             let header = new_tar_header(&file_name, segment_data.len() as u64)?;
             self.ar.append(&header, segment_data.as_slice()).await?;
 
@@ -444,9 +463,13 @@ where
         let wal_file_path = format!("pg_wal/{}", wal_file_name);
         let header = new_tar_header(&wal_file_path, WAL_SEGMENT_SIZE as u64)?;
 
-        let wal_seg =
-            postgres_ffi::generate_wal_segment(segno, system_identifier, self.timeline.pg_version)
-                .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
+        let wal_seg = postgres_ffi::generate_wal_segment(
+            segno,
+            system_identifier,
+            self.timeline.pg_version,
+            self.lsn,
+        )
+        .map_err(|e| anyhow!(e).context("Failed generating wal segment"))?;
         ensure!(wal_seg.len() == WAL_SEGMENT_SIZE);
         self.ar.append(&header, &wal_seg[..]).await?;
         Ok(())

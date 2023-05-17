@@ -10,49 +10,34 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Result};
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
-use serde::Deserialize;
 use tracing::{debug, instrument};
+
+use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
-/// Rust representation of Postgres role info with only those fields
-/// that matter for us.
-#[derive(Clone, Deserialize)]
-pub struct Role {
-    pub name: PgIdent,
-    pub encrypted_password: Option<String>,
-    pub options: GenericOptions,
+/// Escape a string for including it in a SQL literal
+fn escape_literal(s: &str) -> String {
+    s.replace('\'', "''").replace('\\', "\\\\")
 }
 
-/// Rust representation of Postgres database info with only those fields
-/// that matter for us.
-#[derive(Clone, Deserialize)]
-pub struct Database {
-    pub name: PgIdent,
-    pub owner: PgIdent,
-    pub options: GenericOptions,
+/// Escape a string so that it can be used in postgresql.conf.
+/// Same as escape_literal, currently.
+fn escape_conf_value(s: &str) -> String {
+    s.replace('\'', "''").replace('\\', "\\\\")
 }
 
-/// Common type representing both SQL statement params with or without value,
-/// like `LOGIN` or `OWNER username` in the `CREATE/ALTER ROLE`, and config
-/// options like `wal_level = logical`.
-#[derive(Clone, Deserialize)]
-pub struct GenericOption {
-    pub name: String,
-    pub value: Option<String>,
-    pub vartype: String,
+trait GenericOptionExt {
+    fn to_pg_option(&self) -> String;
+    fn to_pg_setting(&self) -> String;
 }
 
-/// Optional collection of `GenericOption`'s. Type alias allows us to
-/// declare a `trait` on it.
-pub type GenericOptions = Option<Vec<GenericOption>>;
-
-impl GenericOption {
+impl GenericOptionExt for GenericOption {
     /// Represent `GenericOption` as SQL statement parameter.
-    pub fn to_pg_option(&self) -> String {
+    fn to_pg_option(&self) -> String {
         if let Some(val) = &self.value {
             match self.vartype.as_ref() {
-                "string" => format!("{} '{}'", self.name, val),
+                "string" => format!("{} '{}'", self.name, escape_literal(val)),
                 _ => format!("{} {}", self.name, val),
             }
         } else {
@@ -61,18 +46,11 @@ impl GenericOption {
     }
 
     /// Represent `GenericOption` as configuration option.
-    pub fn to_pg_setting(&self) -> String {
+    fn to_pg_setting(&self) -> String {
         if let Some(val) = &self.value {
-            let name = match self.name.as_str() {
-                "safekeepers" => "neon.safekeepers",
-                "wal_acceptor_reconnect" => "neon.safekeeper_reconnect_timeout",
-                "wal_acceptor_connection_timeout" => "neon.safekeeper_connection_timeout",
-                it => it,
-            };
-
             match self.vartype.as_ref() {
-                "string" => format!("{} = '{}'", name, val),
-                _ => format!("{} = {}", name, val),
+                "string" => format!("{} = '{}'", self.name, escape_conf_value(val)),
+                _ => format!("{} = {}", self.name, val),
             }
         } else {
             self.name.to_owned()
@@ -107,6 +85,7 @@ impl PgOptionsSerialize for GenericOptions {
                 .map(|op| op.to_pg_setting())
                 .collect::<Vec<String>>()
                 .join("\n")
+                + "\n" // newline after last setting
         } else {
             "".to_string()
         }
@@ -115,6 +94,7 @@ impl PgOptionsSerialize for GenericOptions {
 
 pub trait GenericOptionsSearch {
     fn find(&self, name: &str) -> Option<String>;
+    fn find_ref(&self, name: &str) -> Option<&GenericOption>;
 }
 
 impl GenericOptionsSearch for GenericOptions {
@@ -124,12 +104,22 @@ impl GenericOptionsSearch for GenericOptions {
         let op = ops.iter().find(|s| s.name == name)?;
         op.value.clone()
     }
+
+    /// Lookup option by name, returning ref
+    fn find_ref(&self, name: &str) -> Option<&GenericOption> {
+        let ops = self.as_ref()?;
+        ops.iter().find(|s| s.name == name)
+    }
 }
 
-impl Role {
+pub trait RoleExt {
+    fn to_pg_options(&self) -> String;
+}
+
+impl RoleExt for Role {
     /// Serialize a list of role parameters into a Postgres-acceptable
     /// string of arguments.
-    pub fn to_pg_options(&self) -> String {
+    fn to_pg_options(&self) -> String {
         // XXX: consider putting LOGIN as a default option somewhere higher, e.g. in control-plane.
         // For now, we do not use generic `options` for roles. Once used, add
         // `self.options.as_pg_options()` somewhere here.
@@ -154,21 +144,17 @@ impl Role {
     }
 }
 
-impl Database {
-    pub fn new(name: PgIdent, owner: PgIdent) -> Self {
-        Self {
-            name,
-            owner,
-            options: None,
-        }
-    }
+pub trait DatabaseExt {
+    fn to_pg_options(&self) -> String;
+}
 
+impl DatabaseExt for Database {
     /// Serialize a list of database parameters into a Postgres-acceptable
     /// string of arguments.
     /// NB: `TEMPLATE` is actually also an identifier, but so far we only need
     /// to use `template0` and `template1`, so it is not a problem. Yet in the future
     /// it may require a proper quoting too.
-    pub fn to_pg_options(&self) -> String {
+    fn to_pg_options(&self) -> String {
         let mut params: String = self.options.as_pg_options();
         write!(params, " OWNER {}", &self.owner.pg_quote())
             .expect("String is documented to not to error during write operations");
@@ -176,10 +162,6 @@ impl Database {
         params
     }
 }
-
-/// String type alias representing Postgres identifier and
-/// intended to be used for DB / role names.
-pub type PgIdent = String;
 
 /// Generic trait used to provide quoting / encoding for strings used in the
 /// Postgres SQL queries and DATABASE_URL.
@@ -221,7 +203,11 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
             &[],
         )?
         .iter()
-        .map(|row| Database::new(row.get("datname"), row.get("owner")))
+        .map(|row| Database {
+            name: row.get("datname"),
+            owner: row.get("owner"),
+            options: None,
+        })
         .collect();
 
     Ok(postgres_dbs)

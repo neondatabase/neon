@@ -57,7 +57,7 @@ use utils::{
 
 use super::{
     DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerFileName, LayerIter,
-    LayerKeyIter, LayerResidenceStatus, PathOrConf,
+    LayerKeyIter, PathOrConf,
 };
 
 ///
@@ -194,8 +194,10 @@ pub struct DeltaLayer {
 
 impl std::fmt::Debug for DeltaLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use super::RangeDisplayDebug;
+
         f.debug_struct("DeltaLayer")
-            .field("key_range", &self.key_range)
+            .field("key_range", &RangeDisplayDebug(&self.key_range))
             .field("lsn_range", &self.lsn_range)
             .field("file_size", &self.file_size)
             .field("inner", &self.inner)
@@ -436,25 +438,25 @@ impl PersistentLayer for DeltaLayer {
         ))
     }
 
-    fn delete(&self) -> Result<()> {
+    fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
         Ok(())
     }
 
-    fn file_size(&self) -> Option<u64> {
-        Some(self.file_size)
+    fn file_size(&self) -> u64 {
+        self.file_size
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let lsn_range = self.get_lsn_range();
 
-        let access_stats = self.access_stats.to_api_model(reset);
+        let access_stats = self.access_stats.as_api_model(reset);
 
         HistoricLayerInfo::Delta {
             layer_file_name,
-            layer_file_size: Some(self.file_size),
+            layer_file_size: self.file_size,
             lsn_start: lsn_range.start,
             lsn_end: lsn_range.end,
             remote: false,
@@ -635,7 +637,7 @@ impl DeltaLayer {
             key_range: summary.key_range,
             lsn_range: summary.lsn_range,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
+            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,
@@ -806,7 +808,7 @@ impl DeltaLayerWriterInner {
             key_range: self.key_start..key_end,
             lsn_range: self.lsn_range.clone(),
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::for_new_layer_file(),
+            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(DeltaLayerInner {
                 loaded: false,
                 file: None,

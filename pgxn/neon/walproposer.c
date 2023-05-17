@@ -78,10 +78,6 @@ int			wal_acceptor_reconnect_timeout;
 int			wal_acceptor_connection_timeout;
 bool		am_wal_proposer;
 
-char	   *neon_timeline_walproposer = NULL;
-char	   *neon_tenant_walproposer = NULL;
-char	   *neon_safekeeper_token_walproposer = NULL;
-
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
 
 static int	n_safekeepers = 0;
@@ -514,17 +510,9 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 			Safekeeper *sk = &safekeeper[n_safekeepers];
 			int written = 0;
 
-			if (neon_safekeeper_token_walproposer != NULL) {
-				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-								   "host=%s port=%s password=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-								   sk->host, sk->port, neon_safekeeper_token_walproposer, neon_timeline_walproposer,
-								   neon_tenant_walproposer);
-			} else {
-				written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
-								   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
-								   sk->host, sk->port, neon_timeline_walproposer, neon_tenant_walproposer);
-			}
-
+			written = snprintf((char *) &sk->conninfo, MAXCONNINFO,
+							   "host=%s port=%s dbname=replication options='-c timeline_id=%s tenant_id=%s'",
+							   sk->host, sk->port, neon_timeline, neon_tenant);
 			if (written > MAXCONNINFO || written < 0)
 				elog(FATAL, "could not create connection string for safekeeper %s:%s", sk->host, sk->port);
 		}
@@ -550,16 +538,16 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 	greetRequest.pgVersion = PG_VERSION_NUM;
 	pg_strong_random(&greetRequest.proposerId, sizeof(greetRequest.proposerId));
 	greetRequest.systemId = systemId;
-	if (!neon_timeline_walproposer)
+	if (!neon_timeline)
 		elog(FATAL, "neon.timeline_id is not provided");
-	if (*neon_timeline_walproposer != '\0' &&
-		!HexDecodeString(greetRequest.timeline_id, neon_timeline_walproposer, 16))
-		elog(FATAL, "Could not parse neon.timeline_id, %s", neon_timeline_walproposer);
-	if (!neon_tenant_walproposer)
+	if (*neon_timeline != '\0' &&
+		!HexDecodeString(greetRequest.timeline_id, neon_timeline, 16))
+		elog(FATAL, "Could not parse neon.timeline_id, %s", neon_timeline);
+	if (!neon_tenant)
 		elog(FATAL, "neon.tenant_id is not provided");
-	if (*neon_tenant_walproposer != '\0' &&
-		!HexDecodeString(greetRequest.tenant_id, neon_tenant_walproposer, 16))
-		elog(FATAL, "Could not parse neon.tenant_id, %s", neon_tenant_walproposer);
+	if (*neon_tenant != '\0' &&
+		!HexDecodeString(greetRequest.tenant_id, neon_tenant, 16))
+		elog(FATAL, "Could not parse neon.tenant_id, %s", neon_tenant);
 
 #if PG_VERSION_NUM >= 150000
 	/* FIXME don't use hardcoded timeline id */
@@ -700,7 +688,7 @@ ResetConnection(Safekeeper *sk)
 	/*
 	 * Try to establish new connection
 	 */
-	sk->conn = walprop_connect_start((char *) &sk->conninfo);
+	sk->conn = walprop_connect_start((char *) &sk->conninfo, neon_auth_token);
 
 	/*
 	 * "If the result is null, then libpq has been unable to allocate a new
@@ -1884,9 +1872,9 @@ RecvAppendResponses(Safekeeper *sk)
 	return sk->state == SS_ACTIVE;
 }
 
-/* Parse a ReplicationFeedback message, or the ReplicationFeedback part of an AppendResponse */
+/* Parse a PageserverFeedback message, or the PageserverFeedback part of an AppendResponse */
 void
-ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * rf)
+ParsePageserverFeedbackMessage(StringInfo reply_message, PageserverFeedback * rf)
 {
 	uint8		nkeys;
 	int			i;
@@ -1904,45 +1892,45 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
 			rf->currentClusterSize = pq_getmsgint64(reply_message);
-			elog(DEBUG2, "ParseReplicationFeedbackMessage: current_timeline_size %lu",
+			elog(DEBUG2, "ParsePageserverFeedbackMessage: current_timeline_size %lu",
 				 rf->currentClusterSize);
 		}
-		else if (strcmp(key, "ps_writelsn") == 0)
+		else if ((strcmp(key, "ps_writelsn") == 0) || (strcmp(key, "last_received_lsn") == 0))
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
-			rf->ps_writelsn = pq_getmsgint64(reply_message);
-			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_writelsn %X/%X",
-				 LSN_FORMAT_ARGS(rf->ps_writelsn));
+			rf->last_received_lsn = pq_getmsgint64(reply_message);
+			elog(DEBUG2, "ParsePageserverFeedbackMessage: last_received_lsn %X/%X",
+				 LSN_FORMAT_ARGS(rf->last_received_lsn));
 		}
-		else if (strcmp(key, "ps_flushlsn") == 0)
+		else if ((strcmp(key, "ps_flushlsn") == 0) || (strcmp(key, "disk_consistent_lsn") == 0))
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
-			rf->ps_flushlsn = pq_getmsgint64(reply_message);
-			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_flushlsn %X/%X",
-				 LSN_FORMAT_ARGS(rf->ps_flushlsn));
+			rf->disk_consistent_lsn = pq_getmsgint64(reply_message);
+			elog(DEBUG2, "ParsePageserverFeedbackMessage: disk_consistent_lsn %X/%X",
+				 LSN_FORMAT_ARGS(rf->disk_consistent_lsn));
 		}
-		else if (strcmp(key, "ps_applylsn") == 0)
+		else if ((strcmp(key, "ps_applylsn") == 0) || (strcmp(key, "remote_consistent_lsn") == 0))
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
-			rf->ps_applylsn = pq_getmsgint64(reply_message);
-			elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_applylsn %X/%X",
-				 LSN_FORMAT_ARGS(rf->ps_applylsn));
+			rf->remote_consistent_lsn = pq_getmsgint64(reply_message);
+			elog(DEBUG2, "ParsePageserverFeedbackMessage: remote_consistent_lsn %X/%X",
+				 LSN_FORMAT_ARGS(rf->remote_consistent_lsn));
 		}
-		else if (strcmp(key, "ps_replytime") == 0)
+		else if ((strcmp(key, "ps_replytime") == 0) || (strcmp(key, "replytime") == 0))
 		{
 			pq_getmsgint(reply_message, sizeof(int32));
 			/* read value length */
-			rf->ps_replytime = pq_getmsgint64(reply_message);
+			rf->replytime = pq_getmsgint64(reply_message);
 			{
 				char	   *replyTimeStr;
 
 				/* Copy because timestamptz_to_str returns a static buffer */
-				replyTimeStr = pstrdup(timestamptz_to_str(rf->ps_replytime));
-				elog(DEBUG2, "ParseReplicationFeedbackMessage: ps_replytime %lu reply_time: %s",
-					 rf->ps_replytime, replyTimeStr);
+				replyTimeStr = pstrdup(timestamptz_to_str(rf->replytime));
+				elog(DEBUG2, "ParsePageserverFeedbackMessage: replytime %lu reply_time: %s",
+					 rf->replytime, replyTimeStr);
 
 				pfree(replyTimeStr);
 			}
@@ -1956,7 +1944,7 @@ ParseReplicationFeedbackMessage(StringInfo reply_message, ReplicationFeedback * 
 			 * Skip unknown keys to support backward compatibile protocol
 			 * changes
 			 */
-			elog(LOG, "ParseReplicationFeedbackMessage: unknown key: %s len %d", key, len);
+			elog(LOG, "ParsePageserverFeedbackMessage: unknown key: %s len %d", key, len);
 			pq_getmsgbytes(reply_message, len);
 		};
 	}
@@ -1976,18 +1964,26 @@ CombineHotStanbyFeedbacks(HotStandbyFeedback * hs)
 	{
 		if (safekeeper[i].appendResponse.hs.ts != 0)
 		{
-			if (FullTransactionIdPrecedes(safekeeper[i].appendResponse.hs.xmin, hs->xmin))
+			HotStandbyFeedback *skhs = &safekeeper[i].appendResponse.hs;
+			if (FullTransactionIdIsNormal(skhs->xmin)
+				&& FullTransactionIdPrecedes(skhs->xmin, hs->xmin))
 			{
-				hs->xmin = safekeeper[i].appendResponse.hs.xmin;
-				hs->ts = safekeeper[i].appendResponse.hs.ts;
+				hs->xmin = skhs->xmin;
+				hs->ts = skhs->ts;
 			}
-			if (FullTransactionIdPrecedes(safekeeper[i].appendResponse.hs.catalog_xmin, hs->catalog_xmin))
+			if (FullTransactionIdIsNormal(skhs->catalog_xmin)
+				&& FullTransactionIdPrecedes(skhs->catalog_xmin, hs->xmin))
 			{
-				hs->catalog_xmin = safekeeper[i].appendResponse.hs.catalog_xmin;
-				hs->ts = safekeeper[i].appendResponse.hs.ts;
+				hs->catalog_xmin = skhs->catalog_xmin;
+				hs->ts = skhs->ts;
 			}
 		}
 	}
+
+	if (hs->xmin.value == ~0)
+		hs->xmin = InvalidFullTransactionId;
+	if (hs->catalog_xmin.value == ~0)
+		hs->catalog_xmin = InvalidFullTransactionId;
 }
 
 /*
@@ -2036,7 +2032,7 @@ GetAcknowledgedByQuorumWALPosition(void)
 }
 
 /*
- * ReplicationFeedbackShmemSize --- report amount of shared memory space needed
+ * WalproposerShmemSize --- report amount of shared memory space needed
  */
 Size
 WalproposerShmemSize(void)
@@ -2066,10 +2062,10 @@ WalproposerShmemInit(void)
 }
 
 void
-replication_feedback_set(ReplicationFeedback * rf)
+replication_feedback_set(PageserverFeedback * rf)
 {
 	SpinLockAcquire(&walprop_shared->mutex);
-	memcpy(&walprop_shared->feedback, rf, sizeof(ReplicationFeedback));
+	memcpy(&walprop_shared->feedback, rf, sizeof(PageserverFeedback));
 	SpinLockRelease(&walprop_shared->mutex);
 }
 
@@ -2077,43 +2073,43 @@ void
 replication_feedback_get_lsns(XLogRecPtr *writeLsn, XLogRecPtr *flushLsn, XLogRecPtr *applyLsn)
 {
 	SpinLockAcquire(&walprop_shared->mutex);
-	*writeLsn = walprop_shared->feedback.ps_writelsn;
-	*flushLsn = walprop_shared->feedback.ps_flushlsn;
-	*applyLsn = walprop_shared->feedback.ps_applylsn;
+	*writeLsn = walprop_shared->feedback.last_received_lsn;
+	*flushLsn = walprop_shared->feedback.disk_consistent_lsn;
+	*applyLsn = walprop_shared->feedback.remote_consistent_lsn;
 	SpinLockRelease(&walprop_shared->mutex);
 }
 
 /*
- * Get ReplicationFeedback fields from the most advanced safekeeper
+ * Get PageserverFeedback fields from the most advanced safekeeper
  */
 static void
-GetLatestNeonFeedback(ReplicationFeedback * rf)
+GetLatestNeonFeedback(PageserverFeedback * rf)
 {
 	int			latest_safekeeper = 0;
-	XLogRecPtr	ps_writelsn = InvalidXLogRecPtr;
+	XLogRecPtr	last_received_lsn = InvalidXLogRecPtr;
 
 	for (int i = 0; i < n_safekeepers; i++)
 	{
-		if (safekeeper[i].appendResponse.rf.ps_writelsn > ps_writelsn)
+		if (safekeeper[i].appendResponse.rf.last_received_lsn > last_received_lsn)
 		{
 			latest_safekeeper = i;
-			ps_writelsn = safekeeper[i].appendResponse.rf.ps_writelsn;
+			last_received_lsn = safekeeper[i].appendResponse.rf.last_received_lsn;
 		}
 	}
 
 	rf->currentClusterSize = safekeeper[latest_safekeeper].appendResponse.rf.currentClusterSize;
-	rf->ps_writelsn = safekeeper[latest_safekeeper].appendResponse.rf.ps_writelsn;
-	rf->ps_flushlsn = safekeeper[latest_safekeeper].appendResponse.rf.ps_flushlsn;
-	rf->ps_applylsn = safekeeper[latest_safekeeper].appendResponse.rf.ps_applylsn;
-	rf->ps_replytime = safekeeper[latest_safekeeper].appendResponse.rf.ps_replytime;
+	rf->last_received_lsn = safekeeper[latest_safekeeper].appendResponse.rf.last_received_lsn;
+	rf->disk_consistent_lsn = safekeeper[latest_safekeeper].appendResponse.rf.disk_consistent_lsn;
+	rf->remote_consistent_lsn = safekeeper[latest_safekeeper].appendResponse.rf.remote_consistent_lsn;
+	rf->replytime = safekeeper[latest_safekeeper].appendResponse.rf.replytime;
 
 	elog(DEBUG2, "GetLatestNeonFeedback: currentClusterSize %lu,"
-		 " ps_writelsn %X/%X, ps_flushlsn %X/%X, ps_applylsn %X/%X, ps_replytime %lu",
+		 " last_received_lsn %X/%X, disk_consistent_lsn %X/%X, remote_consistent_lsn %X/%X, replytime %lu",
 		 rf->currentClusterSize,
-		 LSN_FORMAT_ARGS(rf->ps_writelsn),
-		 LSN_FORMAT_ARGS(rf->ps_flushlsn),
-		 LSN_FORMAT_ARGS(rf->ps_applylsn),
-		 rf->ps_replytime);
+		 LSN_FORMAT_ARGS(rf->last_received_lsn),
+		 LSN_FORMAT_ARGS(rf->disk_consistent_lsn),
+		 LSN_FORMAT_ARGS(rf->remote_consistent_lsn),
+		 rf->replytime);
 
 	replication_feedback_set(rf);
 }
@@ -2127,16 +2123,16 @@ HandleSafekeeperResponse(void)
 	XLogRecPtr	minFlushLsn;
 
 	minQuorumLsn = GetAcknowledgedByQuorumWALPosition();
-	diskConsistentLsn = quorumFeedback.rf.ps_flushlsn;
+	diskConsistentLsn = quorumFeedback.rf.disk_consistent_lsn;
 
 	if (!syncSafekeepers)
 	{
-		/* Get ReplicationFeedback fields from the most advanced safekeeper */
+		/* Get PageserverFeedback fields from the most advanced safekeeper */
 		GetLatestNeonFeedback(&quorumFeedback.rf);
 		SetZenithCurrentClusterSize(quorumFeedback.rf.currentClusterSize);
 	}
 
-	if (minQuorumLsn > quorumFeedback.flushLsn || diskConsistentLsn != quorumFeedback.rf.ps_flushlsn)
+	if (minQuorumLsn > quorumFeedback.flushLsn || diskConsistentLsn != quorumFeedback.rf.disk_consistent_lsn)
 	{
 
 		if (minQuorumLsn > quorumFeedback.flushLsn)
@@ -2154,7 +2150,7 @@ HandleSafekeeperResponse(void)
 			 * apply_lsn - This is what processed and durably saved at*
 			 * pageserver.
 			 */
-								quorumFeedback.rf.ps_flushlsn,
+								quorumFeedback.rf.disk_consistent_lsn,
 								GetCurrentTimestamp(), false);
 	}
 
@@ -2338,7 +2334,7 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage * anymsg)
 				msg->hs.xmin.value = pq_getmsgint64_le(&s);
 				msg->hs.catalog_xmin.value = pq_getmsgint64_le(&s);
 				if (buf_size > APPENDRESPONSE_FIXEDPART_SIZE)
-					ParseReplicationFeedbackMessage(&s, &msg->rf);
+					ParsePageserverFeedbackMessage(&s, &msg->rf);
 				pq_getmsgend(&s);
 				return true;
 			}
@@ -2474,7 +2470,7 @@ backpressure_lag_impl(void)
 		replication_feedback_get_lsns(&writePtr, &flushPtr, &applyPtr);
 #define MB ((XLogRecPtr)1024 * 1024)
 
-		elog(DEBUG2, "current flushLsn %X/%X ReplicationFeedback: write %X/%X flush %X/%X apply %X/%X",
+		elog(DEBUG2, "current flushLsn %X/%X PageserverFeedback: write %X/%X flush %X/%X apply %X/%X",
 			 LSN_FORMAT_ARGS(myFlushLsn),
 			 LSN_FORMAT_ARGS(writePtr),
 			 LSN_FORMAT_ARGS(flushPtr),

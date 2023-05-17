@@ -27,6 +27,31 @@ paths:
                   id:
                     type: integer
 
+  /v1/disk_usage_eviction/run:
+    put:
+      description: Do an iteration of disk-usage-based eviction to evict a given amount of disk space.
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - evict_bytes
+              properties:
+                evict_bytes:
+                  type: integer
+      responses:
+        "200":
+          description: |
+            The run completed.
+            This does not necessarily mean that we actually evicted `evict_bytes`.
+            Examine the returned object for detail, or, just watch the actual effect of the call using `du` or `df`.
+          content:
+            application/json:
+              schema:
+                type: object
+
   /v1/tenant/{tenant_id}:
     parameters:
       - name: tenant_id
@@ -183,6 +208,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Timeline not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "412":
+          description: Tenant is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreconditionFailedError"
+
         "500":
           description: Generic operation error
           content:
@@ -245,6 +283,53 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/tenant/{tenant_id}/timeline/{timeline_id}/do_gc:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+      - name: timeline_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    put:
+      description: Garbage collect given timeline
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: string
+        "400":
+          description: Error when no tenant id found in path, no timeline id or invalid timestamp
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/tenant/{tenant_id}/attach:
     parameters:
       - name: tenant_id
@@ -255,7 +340,29 @@ paths:
           format: hex
 
     post:
-      description: Schedules attach operation to happen in the background for given tenant
+      description: |
+        Schedules attach operation to happen in the background for the given tenant.
+        As soon as the caller sends this request, it must assume the pageserver
+        starts writing to the tenant's S3 state unless it receives one of the
+        distinguished errors below that state otherwise.
+
+        If a client receives a not-distinguished response, e.g., a network timeout,
+        it MUST retry the /attach request and poll again for the tenant's
+        attachment status.
+
+        After the client has received a 202, it MUST poll the tenant's
+        attachment status (field `attachment_status`) to reach state `attached`.
+        If the `attachment_status` is missing, the client MUST retry the `/attach`
+        request (goto previous paragraph). This is a robustness measure in case the tenant
+        status endpoint is buggy, but the attach operation is ongoing.
+
+        There is no way to cancel an in-flight request.
+
+        In any case, the client
+        * MUST NOT ASSUME that the /attach request has been lost in the network,
+        * MUST NOT ASSUME that the request has been lost, based on the observation
+          that a subsequent tenant status request returns 404. The request may
+          still be in flight. It must be retried.
       responses:
         "202":
           description: Tenant attaching scheduled
@@ -304,6 +411,13 @@ paths:
         schema:
           type: string
           format: hex
+      - name: detach_ignored
+        in: query
+        required: false
+        schema:
+          type: boolean
+        description: |
+          When true, allow to detach a tenant which state is ignored.
     post:
       description: |
         Remove tenant data (including all corresponding timelines) from pageserver's memory and file system.
@@ -329,6 +443,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
+        "404":
+          description: Tenant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
         "500":
           description: Generic operation error
           content:
@@ -422,6 +542,43 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/tenant/{tenant_id}/synthetic_size:
+    parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: hex
+    get:
+      description: |
+        Calculate tenant's synthetic size
+      responses:
+        "200":
+          description: Tenant's synthetic size
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyntheticSizeResponse"
+        "401":
+          description: Unauthorized Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnauthorizedError"
+        "403":
+          description: Forbidden Error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForbiddenError"
+        "500":
+          description: Generic operation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/tenant/{tenant_id}/size:
     parameters:
       - name: tenant_id
@@ -437,6 +594,13 @@ paths:
           type: boolean
         description: |
           When true, skip calculation and only provide the model inputs (for debugging). Defaults to false.
+      - name: retention_period
+        in: query
+        required: false
+        schema:
+          type: integer
+        description: |
+          Override the default retention period (in bytes) used for size calculation.
     get:
       description: |
         Calculate tenant's size, which is a mixture of WAL (bytes) and logical_size (bytes).
@@ -583,7 +747,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantCreateInfo"
+              $ref: "#/components/schemas/TenantCreateRequest"
       responses:
         "201":
           description: New tenant created successfully
@@ -630,7 +794,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantConfigInfo"
+              $ref: "#/components/schemas/TenantConfigRequest"
       responses:
         "200":
           description: OK
@@ -682,7 +846,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TenantConfig"
+                $ref: "#/components/schemas/TenantConfigResponse"
         "400":
           description: Malformed get tenanant config request
           content:
@@ -724,45 +888,48 @@ components:
       type: object
       required:
         - id
-        - state
+        - attachment_status
       properties:
         id:
           type: string
-        state:
-          type: string
         current_physical_size:
           type: integer
-        has_in_progress_downloads:
-          type: boolean
-    TenantCreateInfo:
+        attachment_status:
+          description: |
+            Status of this tenant's attachment to this pageserver.
+
+            - `maybe` means almost nothing, don't read anything into it
+              except for the fact that the pageserver _might_ be already
+              writing to the tenant's S3 state, so, DO NOT ATTACH the
+              tenant to any other pageserver, or we risk split-brain.
+            - `attached` means that the attach operation has completed,
+              maybe successfully, maybe not. Perform a health check at
+              the Postgres level to determine healthiness of the tenant.
+
+            See the tenant `/attach` endpoint for more information.
+          type: string
+          enum: [ "maybe", "attached" ]
+    TenantCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/TenantConfig'
+        - type: object
+          properties:
+            new_tenant_id:
+              type: string
+              format: hex
+    TenantConfigRequest:
+      allOf:
+        - $ref: '#/components/schemas/TenantConfig'
+        - type: object
+          required:
+            - tenant_id
+          properties:
+            tenant_id:
+              type: string
+              format: hex
+    TenantConfig:
       type: object
       properties:
-        new_tenant_id:
-          type: string
-          format: hex
-        tenant_id:
-          type: string
-          format: hex
-        gc_period:
-          type: string
-        gc_horizon:
-          type: integer
-        pitr_interval:
-          type: string
-        checkpoint_distance:
-          type: integer
-        checkpoint_timeout:
-          type: string
-        compaction_period:
-          type: string
-        compaction_threshold:
-          type: string
-    TenantConfigInfo:
-      type: object
-      properties:
-        tenant_id:
-          type: string
-          format: hex
         gc_period:
           type: string
         gc_horizon:
@@ -789,17 +956,13 @@ components:
           type: integer
         trace_read_requests:
           type: boolean
-    TenantConfig:
+    TenantConfigResponse:
       type: object
       properties:
         tenant_specific_overrides:
-          type: object
-          schema:
-            $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfig"
         effective_config:
-          type: object
-          schema:
-            $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfig"
     TimelineInfo:
       type: object
       required:
@@ -850,6 +1013,84 @@ components:
         latest_gc_cutoff_lsn:
           type: string
           format: hex
+
+    SyntheticSizeResponse:
+      type: object
+      required:
+        - id
+        - size
+        - segment_sizes
+        - inputs
+      properties:
+        id:
+          type: string
+          format: hex
+        size:
+          type: integer
+        segment_sizes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SegmentSize"
+        inputs:
+          type: object
+          properties:
+            segments:
+              type: array
+              items:
+                $ref: "#/components/schemas/SegmentData"
+            timeline_inputs:
+              type: array
+              items:
+                $ref: "#/components/schemas/TimelineInput"
+
+    SegmentSize:
+      type: object
+      required:
+        - method
+        - accum_size
+      properties:
+        method:
+          type: string
+        accum_size:
+          type: integer
+
+    SegmentData:
+      type: object
+      required:
+        - segment
+      properties:
+        segment:
+          type: object
+          required:
+            - lsn
+          properties:
+            parent:
+              type: integer
+            lsn:
+              type: integer
+            size:
+              type: integer
+            needed:
+              type: boolean
+        timeline_id:
+          type: string
+          format: hex
+        kind:
+          type: string
+
+    TimelineInput:
+      type: object
+      required:
+        - timeline_id
+      properties:
+        ancestor_id:
+          type: string
+        ancestor_lsn:
+          type: string
+        timeline_id:
+          type: string
+          format: hex
+
     Error:
       type: object
       required:
@@ -879,6 +1120,13 @@ components:
         msg:
           type: string
     ConflictError:
+      type: object
+      required:
+        - msg
+      properties:
+        msg:
+          type: string
+    PreconditionFailedError:
       type: object
       required:
         - msg

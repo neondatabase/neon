@@ -24,14 +24,14 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
         "autovacuum_freeze_max_age=100000",
     ]
 
-    pg = env.postgres.create_start("test_clog_truncate", config_lines=config)
+    endpoint = env.endpoints.create_start("test_clog_truncate", config_lines=config)
     log.info("postgres is running on test_clog_truncate branch")
 
     # Install extension containing function needed for test
-    pg.safe_psql("CREATE EXTENSION neon_test_utils")
+    endpoint.safe_psql("CREATE EXTENSION neon_test_utils")
 
     # Consume many xids to advance clog
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("select test_consume_xids(1000*1000*10);")
         log.info("xids consumed")
 
@@ -44,7 +44,7 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
 
     # wait for autovacuum to truncate the pg_xact
     # XXX Is it worth to add a timeout here?
-    pg_xact_0000_path = os.path.join(pg.pg_xact_dir_path(), "0000")
+    pg_xact_0000_path = os.path.join(endpoint.pg_xact_dir_path(), "0000")
     log.info(f"pg_xact_0000_path = {pg_xact_0000_path}")
 
     while os.path.isfile(pg_xact_0000_path):
@@ -52,7 +52,7 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
         time.sleep(5)
 
     # checkpoint to advance latest lsn
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("CHECKPOINT;")
         lsn_after_truncation = query_scalar(cur, "select pg_current_wal_insert_lsn()")
 
@@ -61,10 +61,10 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch(
         "test_clog_truncate_new", "test_clog_truncate", ancestor_start_lsn=lsn_after_truncation
     )
-    pg2 = env.postgres.create_start("test_clog_truncate_new")
+    endpoint2 = env.endpoints.create_start("test_clog_truncate_new")
     log.info("postgres is running on test_clog_truncate_new branch")
 
     # check that new node doesn't contain truncated segment
-    pg_xact_0000_path_new = os.path.join(pg2.pg_xact_dir_path(), "0000")
+    pg_xact_0000_path_new = os.path.join(endpoint2.pg_xact_dir_path(), "0000")
     log.info(f"pg_xact_0000_path_new = {pg_xact_0000_path_new}")
     assert os.path.isfile(pg_xact_0000_path_new) is False

@@ -22,10 +22,10 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     # Create a branch for us
     env.neon_cli.create_branch("test_pageserver_recovery", "main")
 
-    pg = env.postgres.create_start("test_pageserver_recovery")
+    endpoint = env.endpoints.create_start("test_pageserver_recovery")
     log.info("postgres is running on 'test_pageserver_recovery' branch")
 
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             with env.pageserver.http_client() as pageserver_http:
                 # Create and initialize test table
@@ -54,7 +54,7 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     env.pageserver.stop()
     env.pageserver.start()
 
-    with closing(pg.connect()) as conn:
+    with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("select count(*) from foo")
             assert cur.fetchone() == (100000,)

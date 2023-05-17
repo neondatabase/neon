@@ -6,22 +6,21 @@ from threading import Thread
 import asyncpg
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     NeonEnvBuilder,
-    PageserverApiException,
-    PageserverHttpClient,
-    Postgres,
     RemoteStorageKind,
     available_remote_storages,
+)
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_until,
     wait_until_tenant_state,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
 
 
 def do_gc_target(
@@ -60,8 +59,8 @@ def test_tenant_reattach(
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
-    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
-        with pg.cursor() as cur:
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t(key int primary key, value text)")
             cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -79,7 +78,7 @@ def test_tenant_reattach(
         ".*failed to perform remote task UploadMetadata.*, will retry.*"
     )
 
-    ps_metrics = parse_metrics(pageserver_http.get_metrics(), "pageserver")
+    ps_metrics = pageserver_http.get_metrics()
     tenant_metric_filter = {
         "tenant_id": str(tenant_id),
         "timeline_id": str(timeline_id),
@@ -93,15 +92,15 @@ def test_tenant_reattach(
 
     time.sleep(1)  # for metrics propagation
 
-    ps_metrics = parse_metrics(pageserver_http.get_metrics(), "pageserver")
+    ps_metrics = pageserver_http.get_metrics()
     pageserver_last_record_lsn = int(
         ps_metrics.query_one("pageserver_last_record_lsn", filter=tenant_metric_filter).value
     )
 
     assert pageserver_last_record_lsn_before_detach == pageserver_last_record_lsn
 
-    with env.postgres.create_start("main", tenant_id=tenant_id) as pg:
-        with pg.cursor() as cur:
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        with endpoint.cursor() as cur:
             assert query_scalar(cur, "SELECT count(*) FROM t") == 100000
 
         # Check that we had to retry the downloads
@@ -158,11 +157,11 @@ async def sleep_and_reattach(pageserver_http: PageserverHttpClient, tenant_id: T
 
 # async guts of test_tenant_reattach_while_bysy test
 async def reattach_while_busy(
-    env: NeonEnv, pg: Postgres, pageserver_http: PageserverHttpClient, tenant_id: TenantId
+    env: NeonEnv, endpoint: Endpoint, pageserver_http: PageserverHttpClient, tenant_id: TenantId
 ):
     workers = []
     for worker_id in range(num_connections):
-        pg_conn = await pg.connect_async()
+        pg_conn = await endpoint.connect_async()
         workers.append(asyncio.create_task(update_table(pg_conn)))
 
     workers.append(asyncio.create_task(sleep_and_reattach(pageserver_http, tenant_id)))
@@ -177,6 +176,7 @@ async def reattach_while_busy(
 # detached but not yet re-attached. But Postgres itself should keep
 # running, and when we retry the queries, they should start working
 # after the attach has finished.
+
 
 # FIXME:
 #
@@ -225,7 +225,7 @@ def test_tenant_reattach_while_busy(
 
     # Attempts to connect from compute to pageserver while the tenant is
     # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(".*Tenant .* not found in the local state.*")
+    env.pageserver.allowed_errors.append(".*Tenant .* not found.*")
     env.pageserver.allowed_errors.append(
         ".*Tenant .* will not become active\\. Current state: Stopping.*"
     )
@@ -238,15 +238,15 @@ def test_tenant_reattach_while_busy(
         conf={"checkpoint_distance": "100000"}
     )
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
-    cur = pg.connect().cursor()
+    cur = endpoint.connect().cursor()
 
     cur.execute("CREATE TABLE t(id int primary key, counter int)")
     cur.execute(f"INSERT INTO t SELECT generate_series(1,{num_rows}), 0")
 
     # Run the test
-    asyncio.run(reattach_while_busy(env, pg, pageserver_http, tenant_id))
+    asyncio.run(reattach_while_busy(env, endpoint, pageserver_http, tenant_id))
 
     # Verify table contents
     assert query_scalar(cur, "SELECT count(*) FROM t") == num_rows
@@ -257,18 +257,20 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
-    env.pageserver.allowed_errors.append(".*NotFound: Tenant .* not found")
+    env.pageserver.allowed_errors.append(".*NotFound: Tenant .*")
 
     # first check for non existing tenant
     tenant_id = TenantId.generate()
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Tenant not found for id {tenant_id}",
-    ):
+        match=f"NotFound: tenant {tenant_id}",
+    ) as excinfo:
         pageserver_http.tenant_detach(tenant_id)
 
+    assert excinfo.value.status_code == 404
+
     # the error will be printed to the log too
-    env.pageserver.allowed_errors.append(".*Tenant not found for id.*")
+    env.pageserver.allowed_errors.append(".*NotFound: tenant *")
 
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
@@ -276,9 +278,9 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     # assert tenant exists on disk
     assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         queries=[
             "CREATE TABLE t(key int primary key, value text)",
             "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
@@ -294,7 +296,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     # the error will be printed to the log too
     env.pageserver.allowed_errors.append(".*gc target timeline does not exist.*")
-    # Timelines get stopped during detach, ignore the gc calls that error, whitnessing that
+    # Timelines get stopped during detach, ignore the gc calls that error, witnessing that
     env.pageserver.allowed_errors.append(".*InternalServerError\\(timeline is Stopping.*")
 
     # Detach while running manual GC.
@@ -320,12 +322,96 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
     with pytest.raises(
-        expected_exception=PageserverApiException, match=f"Tenant {tenant_id} not found"
+        expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
     ):
         pageserver_http.timeline_gc(tenant_id, timeline_id, 0)
 
 
-#
+# Creates and ignores a tenant, then detaches it: first, with no parameters (should fail),
+# then with parameters to force ignored tenant detach (should not fail).
+def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    client = env.pageserver.http_client()
+
+    # create a new tenant
+    tenant_id, _ = env.neon_cli.create_tenant()
+
+    # assert tenant exists on disk
+    assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    # we rely upon autocommit after each statement
+    endpoint.safe_psql_many(
+        queries=[
+            "CREATE TABLE t(key int primary key, value text)",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        ]
+    )
+
+    # ignore tenant
+    client.tenant_ignore(tenant_id)
+    env.pageserver.allowed_errors.append(".*NotFound: tenant .*")
+    # ensure tenant couldn't be detached without the special flag for ignored tenant
+    log.info("detaching ignored tenant WITHOUT required flag")
+    with pytest.raises(
+        expected_exception=PageserverApiException, match=f"NotFound: tenant {tenant_id}"
+    ):
+        client.tenant_detach(tenant_id)
+
+    log.info("tenant detached failed as expected")
+
+    # ensure tenant is detached with ignore state
+    log.info("detaching ignored tenant with required flag")
+    client.tenant_detach(tenant_id, True)
+    log.info("ignored tenant detached without error")
+
+    # check that nothing is left on disk for deleted tenant
+    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    # assert the tenant does not exists in the Pageserver
+    tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
+    assert (
+        tenant_id not in tenants_after_detach
+    ), f"Ignored and then detached tenant {tenant_id} \
+        should not be present in pageserver's memory"
+
+
+# Creates a tenant, and detaches it with extra paremeter that forces ignored tenant detach.
+# Tenant should be detached without issues.
+def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    client = env.pageserver.http_client()
+
+    # create a new tenant
+    tenant_id, _ = env.neon_cli.create_tenant()
+
+    # assert tenant exists on disk
+    assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    # we rely upon autocommit after each statement
+    endpoint.safe_psql_many(
+        queries=[
+            "CREATE TABLE t(key int primary key, value text)",
+            "INSERT INTO t SELECT generate_series(1,100000), 'payload'",
+        ]
+    )
+
+    log.info("detaching regular tenant with detach ignored flag")
+    client.tenant_detach(tenant_id, True)
+    log.info("regular tenant detached without error")
+
+    # check that nothing is left on disk for deleted tenant
+    assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+
+    # assert the tenant does not exists in the Pageserver
+    tenants_after_detach = [tenant["id"] for tenant in client.tenant_list()]
+    assert (
+        tenant_id not in tenants_after_detach
+    ), f"Ignored and then detached tenant {tenant_id} \
+        should not be present in pageserver's memory"
+
+
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 def test_detach_while_attaching(
     neon_env_builder: NeonEnvBuilder,
@@ -339,18 +425,18 @@ def test_detach_while_attaching(
     ##### First start, insert secret data and upload it to the remote storage
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
     # from shared_buffers without hitting the page server, which defeats the point
     # of this test.
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("CREATE TABLE foo (t text)")
         cur.execute(
             """
@@ -391,7 +477,7 @@ def test_detach_while_attaching(
     # cycle are still running, things could get really confusing..
     pageserver_http.tenant_attach(tenant_id)
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM foo")
 
 
@@ -486,14 +572,14 @@ def test_ignored_tenant_download_missing_layers(
     )
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     data_id = 1
     data_secret = "very secret secret"
-    insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, pg)
+    insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, endpoint)
 
     tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
     tenants_before_ignore.sort()
@@ -525,9 +611,9 @@ def test_ignored_tenant_download_missing_layers(
     ]
     assert timelines_before_ignore == timelines_after_ignore, "Should have all timelines back"
 
-    pg.stop()
-    pg.start()
-    ensure_test_data(data_id, data_secret, pg)
+    endpoint.stop()
+    endpoint.start()
+    ensure_test_data(data_id, data_secret, endpoint)
 
 
 # Tests that it's possible to `load` broken tenants:
@@ -545,10 +631,10 @@ def test_ignored_tenant_stays_broken_without_metadata(
     )
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     # ignore the tenant and remove its metadata
     pageserver_http.tenant_ignore(tenant_id)
@@ -580,9 +666,9 @@ def test_load_attach_negatives(
     )
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
 
     env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
     with pytest.raises(
@@ -599,12 +685,10 @@ def test_load_attach_negatives(
 
     pageserver_http.tenant_ignore(tenant_id)
 
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Cannot attach tenant {tenant_id}, local tenant directory already exists",
+        match="tenant directory already exists",
     ):
         pageserver_http.tenant_attach(tenant_id)
 
@@ -621,16 +705,16 @@ def test_ignore_while_attaching(
 
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     data_id = 1
     data_secret = "very secret secret"
-    insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, pg)
+    insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, endpoint)
 
     tenants_before_ignore = [tenant["id"] for tenant in pageserver_http.tenant_list()]
 
@@ -648,12 +732,10 @@ def test_ignore_while_attaching(
     pageserver_http.tenant_ignore(tenant_id)
 
     # Cannot attach it due to some local files existing
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Cannot attach tenant {tenant_id}, local tenant directory already exists",
+        match="tenant directory already exists",
     ):
         pageserver_http.tenant_attach(tenant_id)
 
@@ -668,9 +750,9 @@ def test_ignore_while_attaching(
 
     wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
-    pg.stop()
-    pg.start()
-    ensure_test_data(data_id, data_secret, pg)
+    endpoint.stop()
+    endpoint.start()
+    ensure_test_data(data_id, data_secret, endpoint)
 
 
 def insert_test_data(
@@ -679,9 +761,9 @@ def insert_test_data(
     timeline_id: TimelineId,
     data_id: int,
     data: str,
-    pg: Postgres,
+    endpoint: Endpoint,
 ):
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         cur.execute(
             f"""
             CREATE TABLE test(id int primary key, secret text);
@@ -701,8 +783,8 @@ def insert_test_data(
     wait_for_upload(pageserver_http, tenant_id, timeline_id, current_lsn)
 
 
-def ensure_test_data(data_id: int, data: str, pg: Postgres):
-    with pg.cursor() as cur:
+def ensure_test_data(data_id: int, data: str, endpoint: Endpoint):
+    with endpoint.cursor() as cur:
         assert (
             query_scalar(cur, f"SELECT secret FROM test WHERE id = {data_id};") == data
         ), "Should have timeline data back"

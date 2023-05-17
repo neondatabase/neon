@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
+from fixtures.pg_version import PgVersion, xfail_on_postgres
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -24,8 +25,8 @@ def test_pg_regress(
 
     env.neon_cli.create_branch("test_pg_regress", "empty")
     # Connect to postgres and create a database called "regression".
-    pg = env.postgres.create_start("test_pg_regress")
-    pg.safe_psql("CREATE DATABASE regression")
+    endpoint = env.endpoints.create_start("test_pg_regress")
+    endpoint.safe_psql("CREATE DATABASE regression")
 
     # Create some local directories for pg_regress to run in.
     runpath = test_output_dir / "regress"
@@ -49,9 +50,9 @@ def test_pg_regress(
     ]
 
     env_vars = {
-        "PGPORT": str(pg.default_options["port"]),
-        "PGUSER": pg.default_options["user"],
-        "PGHOST": pg.default_options["host"],
+        "PGPORT": str(endpoint.default_options["port"]),
+        "PGUSER": endpoint.default_options["user"],
+        "PGHOST": endpoint.default_options["host"],
     }
 
     # Run the command.
@@ -61,16 +62,17 @@ def test_pg_regress(
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
         # checkpoint one more time to ensure that the lsn we get is the latest one
-        pg.safe_psql("CHECKPOINT")
+        endpoint.safe_psql("CHECKPOINT")
 
         # Check that we restore the content of the datadir correctly
-        check_restored_datadir_content(test_output_dir, env, pg)
+        check_restored_datadir_content(test_output_dir, env, endpoint)
 
 
 # Run the PostgreSQL "isolation" tests, in src/test/isolation.
 #
 # This runs for a long time, especially in debug mode, so use a larger-than-default
 # timeout.
+@xfail_on_postgres(PgVersion.V15, reason="https://github.com/neondatabase/neon/pull/4213")
 @pytest.mark.timeout(1800)
 def test_isolation(
     neon_simple_env: NeonEnv,
@@ -85,8 +87,10 @@ def test_isolation(
     env.neon_cli.create_branch("test_isolation", "empty")
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-    pg = env.postgres.create_start("test_isolation", config_lines=["max_prepared_transactions=100"])
-    pg.safe_psql("CREATE DATABASE isolation_regression")
+    endpoint = env.endpoints.create_start(
+        "test_isolation", config_lines=["max_prepared_transactions=100"]
+    )
+    endpoint.safe_psql("CREATE DATABASE isolation_regression")
 
     # Create some local directories for pg_isolation_regress to run in.
     runpath = test_output_dir / "regress"
@@ -109,9 +113,9 @@ def test_isolation(
     ]
 
     env_vars = {
-        "PGPORT": str(pg.default_options["port"]),
-        "PGUSER": pg.default_options["user"],
-        "PGHOST": pg.default_options["host"],
+        "PGPORT": str(endpoint.default_options["port"]),
+        "PGUSER": endpoint.default_options["user"],
+        "PGHOST": endpoint.default_options["host"],
     }
 
     # Run the command.
@@ -135,8 +139,8 @@ def test_sql_regress(
 
     env.neon_cli.create_branch("test_sql_regress", "empty")
     # Connect to postgres and create a database called "regression".
-    pg = env.postgres.create_start("test_sql_regress")
-    pg.safe_psql("CREATE DATABASE regression")
+    endpoint = env.endpoints.create_start("test_sql_regress")
+    endpoint.safe_psql("CREATE DATABASE regression")
 
     # Create some local directories for pg_regress to run in.
     runpath = test_output_dir / "regress"
@@ -160,9 +164,9 @@ def test_sql_regress(
     ]
 
     env_vars = {
-        "PGPORT": str(pg.default_options["port"]),
-        "PGUSER": pg.default_options["user"],
-        "PGHOST": pg.default_options["host"],
+        "PGPORT": str(endpoint.default_options["port"]),
+        "PGUSER": endpoint.default_options["user"],
+        "PGHOST": endpoint.default_options["host"],
     }
 
     # Run the command.
@@ -172,8 +176,8 @@ def test_sql_regress(
         pg_bin.run(pg_regress_command, env=env_vars, cwd=runpath)
 
         # checkpoint one more time to ensure that the lsn we get is the latest one
-        pg.safe_psql("CHECKPOINT")
-        pg.safe_psql("select pg_current_wal_insert_lsn()")[0][0]
+        endpoint.safe_psql("CHECKPOINT")
+        endpoint.safe_psql("select pg_current_wal_insert_lsn()")[0][0]
 
         # Check that we restore the content of the datadir correctly
-        check_restored_datadir_content(test_output_dir, env, pg)
+        check_restored_datadir_content(test_output_dir, env, endpoint)

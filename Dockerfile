@@ -2,7 +2,7 @@
 ### The image itself is mainly used as a container for the binaries and for starting e2e tests with custom parameters.
 ### By default, the binaries inside the image have some mock parameters and can start, but are not intended to be used
 ### inside this image in the real deployments.
-ARG REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
+ARG REPOSITORY=neondatabase
 ARG IMAGE=rust
 ARG TAG=pinned
 
@@ -39,12 +39,20 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
-COPY . .
+COPY --chown=nonroot . .
 
 # Show build caching stats to check if it was used in the end.
 # Has to be the part of the same RUN since cachepot daemon is killed in the end of this RUN, losing the compilation stats.
 RUN set -e \
-&& mold -run cargo build --bin pageserver --bin pageserver_binutils --bin draw_timeline_dir --bin safekeeper --bin storage_broker --bin proxy --locked --release \
+    && mold -run cargo build  \
+      --bin pg_sni_router  \
+      --bin pageserver  \
+      --bin pageserver_binutils  \
+      --bin draw_timeline_dir \
+      --bin safekeeper  \
+      --bin storage_broker  \
+      --bin proxy  \
+      --locked --release \
     && cachepot -s
 
 # Build final image
@@ -63,6 +71,7 @@ RUN set -e \
     && useradd -d /data neon \
     && chown -R neon:neon /data
 
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/pg_sni_router       /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver_binutils /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/draw_timeline_dir   /usr/local/bin

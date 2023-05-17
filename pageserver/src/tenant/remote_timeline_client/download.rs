@@ -6,25 +6,30 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{error, info, warn};
+
+use tracing::{info, warn};
 
 use crate::config::PageServerConf;
 use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::timeline::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 use remote_storage::{DownloadError, GenericRemoteStorage};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 
-use super::index::{IndexPart, IndexPartUnclean, LayerFileMetadata};
+use super::index::{IndexPart, LayerFileMetadata};
 use super::{FAILED_DOWNLOAD_RETRIES, FAILED_DOWNLOAD_WARN_THRESHOLD};
 
 async fn fsync_path(path: impl AsRef<std::path::Path>) -> Result<(), std::io::Error> {
     fs::File::open(path).await?.sync_all().await
 }
+
+static MAX_DOWNLOAD_DURATION: Duration = Duration::from_secs(120);
 
 ///
 /// If 'metadata' is given, we will validate that the downloaded file's size matches that
@@ -39,6 +44,8 @@ pub async fn download_layer_file<'a>(
     layer_file_name: &'a LayerFileName,
     layer_metadata: &'a LayerFileMetadata,
 ) -> Result<u64, DownloadError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+
     let timeline_path = conf.timeline_path(&timeline_id, &tenant_id);
 
     let local_path = timeline_path.join(layer_file_name.file_name());
@@ -64,22 +71,28 @@ pub async fn download_layer_file<'a>(
             // TODO: this doesn't use the cached fd for some reason?
             let mut destination_file = fs::File::create(&temp_file_path).await.with_context(|| {
                 format!(
-                    "Failed to create a destination file for layer '{}'",
+                    "create a destination file for layer '{}'",
                     temp_file_path.display()
                 )
             })
             .map_err(DownloadError::Other)?;
             let mut download = storage.download(&remote_path).await.with_context(|| {
                 format!(
-                    "Failed to open a download stream for layer with remote storage path '{remote_path:?}'"
+                    "open a download stream for layer with remote storage path '{remote_path:?}'"
                 )
             })
             .map_err(DownloadError::Other)?;
-            let bytes_amount = tokio::io::copy(&mut download.download_stream, &mut destination_file).await.with_context(|| {
-                format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
-            })
-            .map_err(DownloadError::Other)?;
+
+            let bytes_amount = tokio::time::timeout(MAX_DOWNLOAD_DURATION, tokio::io::copy(&mut download.download_stream, &mut destination_file))
+                .await
+                .map_err(|e| DownloadError::Other(anyhow::anyhow!("Timed out  {:?}", e)))?
+                .with_context(|| {
+                    format!("Failed to download layer with remote storage path '{remote_path:?}' into file {temp_file_path:?}")
+                })
+                .map_err(DownloadError::Other)?;
+
             Ok((destination_file, bytes_amount))
+
         },
         &format!("download {remote_path:?}"),
     ).await?;
@@ -103,16 +116,11 @@ pub async fn download_layer_file<'a>(
         })
         .map_err(DownloadError::Other)?;
 
-    match layer_metadata.file_size() {
-        Some(expected) if expected != bytes_amount => {
-            return Err(DownloadError::Other(anyhow!(
-                "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file '{}'",
-                temp_file_path.display()
-            )));
-        }
-        Some(_) | None => {
-            // matches, or upgrading from an earlier IndexPart version
-        }
+    let expected = layer_metadata.file_size();
+    if expected != bytes_amount {
+        return Err(DownloadError::Other(anyhow!(
+            "According to layer file metadata should have downloaded {expected} bytes but downloaded {bytes_amount} bytes into file {temp_file_path:?}",
+        )));
     }
 
     // not using sync_data because it can lose file size update
@@ -149,7 +157,7 @@ pub async fn download_layer_file<'a>(
         .with_context(|| format!("Could not fsync layer file {}", local_path.display(),))
         .map_err(DownloadError::Other)?;
 
-    tracing::info!("download complete: {}", local_path.display());
+    tracing::debug!("download complete: {}", local_path.display());
 
     Ok(bytes_amount)
 }
@@ -251,13 +259,11 @@ pub(super) async fn download_index_part(
     )
     .await?;
 
-    let index_part: IndexPartUnclean = serde_json::from_slice(&index_part_bytes)
+    let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
         .with_context(|| {
             format!("Failed to deserialize index part file into file {index_part_path:?}")
         })
         .map_err(DownloadError::Other)?;
-
-    let index_part = index_part.remove_unclean_layer_file_names();
 
     Ok(index_part)
 }
@@ -300,7 +306,7 @@ where
             }
             Err(DownloadError::Other(ref err)) => {
                 // Operation failed FAILED_DOWNLOAD_RETRIES times. Time to give up.
-                error!("{description} still failed after {attempts} retries, giving up: {err:?}");
+                warn!("{description} still failed after {attempts} retries, giving up: {err:?}");
                 return result;
             }
         }

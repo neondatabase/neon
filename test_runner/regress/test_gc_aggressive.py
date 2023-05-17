@@ -4,11 +4,10 @@ import random
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     NeonEnvBuilder,
-    Postgres,
     RemoteStorageKind,
     wait_for_last_flush_lsn,
 )
@@ -27,9 +26,9 @@ updates_performed = 0
 
 
 # Run random UPDATEs on test table
-async def update_table(pg: Postgres):
+async def update_table(endpoint: Endpoint):
     global updates_performed
-    pg_conn = await pg.connect_async()
+    pg_conn = await endpoint.connect_async()
 
     while updates_performed < updates_to_perform:
         updates_performed += 1
@@ -53,10 +52,10 @@ async def gc(env: NeonEnv, timeline: TimelineId):
 
 
 # At the same time, run UPDATEs and GC
-async def update_and_gc(env: NeonEnv, pg: Postgres, timeline: TimelineId):
+async def update_and_gc(env: NeonEnv, endpoint: Endpoint, timeline: TimelineId):
     workers = []
     for worker_id in range(num_connections):
-        workers.append(asyncio.create_task(update_table(pg)))
+        workers.append(asyncio.create_task(update_table(endpoint)))
     workers.append(asyncio.create_task(gc(env, timeline)))
 
     # await all workers
@@ -69,15 +68,14 @@ async def update_and_gc(env: NeonEnv, pg: Postgres, timeline: TimelineId):
 # (repro for https://github.com/neondatabase/neon/issues/1047)
 #
 def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
-
     # Disable pitr, because here we want to test branch creation after GC
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("test_gc_aggressive", "main")
-    pg = env.postgres.create_start("test_gc_aggressive")
+    endpoint = env.endpoints.create_start("test_gc_aggressive")
     log.info("postgres is running on test_gc_aggressive branch")
 
-    with pg.cursor() as cur:
+    with endpoint.cursor() as cur:
         timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
         # Create table, and insert the first 100 rows
@@ -91,7 +89,7 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
         )
         cur.execute("CREATE INDEX ON foo(id)")
 
-        asyncio.run(update_and_gc(env, pg, timeline))
+        asyncio.run(update_and_gc(env, endpoint, timeline))
 
         cur.execute("SELECT COUNT(*), SUM(counter) FROM foo")
         r = cur.fetchone()
@@ -102,7 +100,6 @@ def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
 #
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
-
     # Disable time-based pitr, we will use LSN-based thresholds in the manual GC calls
     neon_env_builder.pageserver_config_override = "tenant_config={pitr_interval = '0 sec'}"
 
@@ -113,11 +110,11 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
 
     env = neon_env_builder.init_start()
     env.neon_cli.create_branch("test_gc_index_upload", "main")
-    pg = env.postgres.create_start("test_gc_index_upload")
+    endpoint = env.endpoints.create_start("test_gc_index_upload")
 
     pageserver_http = env.pageserver.http_client()
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     tenant_id = TenantId(query_scalar(cur, "SHOW neon.tenant_id"))
@@ -134,7 +131,7 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
 
     # Helper function that gets the number of given kind of remote ops from the metrics
     def get_num_remote_ops(file_kind: str, op_kind: str) -> int:
-        ps_metrics = parse_metrics(env.pageserver.http_client().get_metrics(), "pageserver")
+        ps_metrics = env.pageserver.http_client().get_metrics()
         total = 0.0
         for sample in ps_metrics.query_all(
             name="pageserver_remote_operation_seconds_count",
@@ -149,7 +146,7 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder, remote_storage_kind: 
         return int(total)
 
     # Sanity check that the metric works
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
     pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
     pageserver_http.timeline_gc(tenant_id, timeline_id, 10000)
     before = get_num_remote_ops("index", "upload")

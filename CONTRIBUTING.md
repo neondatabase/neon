@@ -2,7 +2,7 @@
 
 Howdy! Usual good software engineering practices apply. Write
 tests. Write comments. Follow standard Rust coding practices where
-possible. Use 'cargo fmt' and 'clippy' to tidy up formatting.
+possible. Use `cargo fmt` and `cargo clippy` to tidy up formatting.
 
 There are soft spots in the code, which could use cleanup,
 refactoring, additional comments, and so forth. Let's try to raise the

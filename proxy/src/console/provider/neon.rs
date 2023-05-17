@@ -8,7 +8,7 @@ use super::{
 use crate::{auth::ClientCredentials, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
-use reqwest::StatusCode as HttpStatusCode;
+use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Clone)]
@@ -52,7 +52,7 @@ impl Api {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
                 Err(e) => match e.http_status_code() {
-                    Some(HttpStatusCode::NOT_FOUND) => return Ok(None),
+                    Some(http::StatusCode::NOT_FOUND) => return Ok(None),
                     _otherwise => return Err(e.into()),
                 },
             };
@@ -97,16 +97,16 @@ impl Api {
                 Some(x) => x,
             };
 
+            // Don't set anything but host and port! This config will be cached.
+            // We'll set username and such later using the startup message.
+            // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config
-                .host(host)
-                .port(port)
-                .dbname(creds.dbname)
-                .user(creds.user);
+            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,
                 aux: body.aux.into(),
+                allow_self_signed_compute: false,
             };
 
             Ok(node)
@@ -155,7 +155,7 @@ impl super::Api for Api {
 
 /// Parse http response body, taking status code into account.
 async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
-    response: reqwest::Response,
+    response: http::Response,
 ) -> Result<T, ApiError> {
     let status = response.status();
     if status.is_success() {

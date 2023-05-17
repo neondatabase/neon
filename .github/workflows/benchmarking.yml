@@ -16,12 +16,12 @@ on:
   workflow_dispatch: # adds ability to run this manually
     inputs:
       region_id:
-        description: 'Use a particular region. If not set the default region will be used'
+        description: 'Project region id. If not set, the default region will be used'
         required: false
         default: 'aws-us-east-2'
       save_perf_report:
         type: boolean
-        description: 'Publish perf report or not. If not set, the report is published only for the main branch'
+        description: 'Publish perf report. If not set, the report will be published only for the main branch'
         required: false
 
 defaults:
@@ -30,7 +30,7 @@ defaults:
 
 concurrency:
   # Allow only one workflow per any non-`main` branch.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
   cancel-in-progress: true
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: "neon-staging"
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -92,11 +92,8 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
-      if: success() || failure()
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -107,25 +104,66 @@ jobs:
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
+  generate-matrices:
+    # Create matrices for the benchmarking jobs, so we run benchmarks on rds only once a week (on Saturday)
+    #
+    # Available platforms:
+    # - neon-captest-new: Freshly created project (1 CU)
+    # - neon-captest-freetier: Use freetier-sized compute (0.25 CU)
+    # - neon-captest-reuse: Reusing existing project
+    # - rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
+    # - rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
+    runs-on: ubuntu-latest
+    outputs:
+      pgbench-compare-matrix: ${{ steps.pgbench-compare-matrix.outputs.matrix }}
+      olap-compare-matrix: ${{ steps.olap-compare-matrix.outputs.matrix }}
+
+    steps:
+    - name: Generate matrix for pgbench benchmark
+      id: pgbench-compare-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-new",
+            "neon-captest-reuse",
+            "neonvm-captest-new"
+          ],
+          "db_size": [ "10gb" ],
+          "include": [{ "platform": "neon-captest-freetier",   "db_size": "3gb"  },
+                      { "platform": "neon-captest-new",        "db_size": "50gb" },
+                      { "platform": "neonvm-captest-freetier", "db_size": "3gb"  },
+                      { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
+        }'
+
+        if [ "$(date +%A)" = "Saturday" ]; then
+          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres", "db_size": "10gb"},
+                                                   { "platform": "rds-aurora",   "db_size": "50gb"}]')
+        fi
+
+        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+
+    - name: Generate matrix for OLAP benchmarks
+      id: olap-compare-matrix
+      run: |
+        matrix='{
+          "platform": [
+            "neon-captest-reuse"
+          ]
+        }'
+
+        if [ "$(date +%A)" = "Saturday" ]; then
+          matrix=$(echo $matrix | jq '.include += [{ "platform": "rds-postgres" },
+                                                   { "platform": "rds-aurora"   }]')
+        fi
+
+        echo "matrix=$(echo $matrix | jq --compact-output '.')" >> $GITHUB_OUTPUT
+
   pgbench-compare:
+    needs: [ generate-matrices ]
+
     strategy:
       fail-fast: false
-      matrix:
-        # neon-captest-new: Run pgbench in a freshly created project
-        # neon-captest-reuse: Same, but reusing existing project
-        # neon-captest-prefetch: Same, with prefetching enabled (new project)
-        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
-        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-reuse, neon-captest-prefetch, rds-postgres ]
-        db_size: [ 10gb ]
-        runner: [ us-east-2 ]
-        include:
-          - platform: neon-captest-prefetch
-            db_size: 50gb
-            runner: us-east-2
-          - platform: rds-aurora
-            db_size: 50gb
-            runner: us-east-2
+      matrix: ${{fromJson(needs.generate-matrices.outputs.pgbench-compare-matrix)}}
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
@@ -134,10 +172,10 @@ jobs:
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
-    runs-on: [ self-hosted, "${{ matrix.runner }}", x64 ]
+    runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
@@ -160,13 +198,15 @@ jobs:
         echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
     - name: Create Neon Project
-      if: contains(fromJson('["neon-captest-new", "neon-captest-prefetch"]'), matrix.platform)
+      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier", "neonvm-captest-new", "neonvm-captest-freetier"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
         region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        compute_units: ${{ (matrix.platform == 'neon-captest-freetier' && '[0.25, 0.25]') || '[1, 1]' }}
+        provisioner: ${{ (contains(matrix.platform, 'neonvm-') && 'k8s-neonvm') || 'k8s-pod' }}
 
     - name: Set up Connection String
       id: set-up-connstr
@@ -175,7 +215,7 @@ jobs:
           neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
-          neon-captest-new | neon-captest-prefetch)
+          neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
@@ -185,7 +225,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}"
             exit 1
             ;;
         esac
@@ -193,17 +233,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Set database options
-      if: matrix.platform == 'neon-captest-prefetch'
-      run: |
-        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
-
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Benchmark init
       uses: ./.github/actions/run-python-test-set
@@ -252,11 +281,8 @@ jobs:
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Create Allure report
-      if: success() || failure()
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -275,23 +301,19 @@ jobs:
     #
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
-    if: success() || failure()
-    needs: [ pgbench-compare ]
+    if: ${{ !cancelled() }}
+    needs: [ generate-matrices, pgbench-compare ]
 
     strategy:
       fail-fast: false
-      matrix:
-        # neon-captest-prefetch: We have pre-created projects with prefetch enabled
-        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
-        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-prefetch, rds-postgres, rds-aurora ]
+      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -320,7 +342,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-prefetch)
+          neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CLICKBENCH_10M_CONNSTR }}
             ;;
           rds-aurora)
@@ -330,7 +352,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CLICKBENCH_10M_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -338,17 +360,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Set database options
-      if: matrix.platform == 'neon-captest-prefetch'
-      run: |
-        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
-
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: ClickBench benchmark
       uses: ./.github/actions/run-python-test-set
@@ -364,11 +375,8 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -386,23 +394,19 @@ jobs:
     # We might change it after https://github.com/neondatabase/neon/issues/2900.
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
-    if: success() || failure()
-    needs: [ clickbench-compare ]
+    if: ${{ !cancelled() }}
+    needs: [ generate-matrices, clickbench-compare ]
 
     strategy:
       fail-fast: false
-      matrix:
-        # neon-captest-prefetch: We have pre-created projects with prefetch enabled
-        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
-        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-prefetch, rds-postgres, rds-aurora ]
+      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -431,7 +435,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-prefetch)
+          neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_TPCH_S10_CONNSTR }}
             ;;
           rds-aurora)
@@ -441,7 +445,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_TPCH_S10_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -449,17 +453,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Set database options
-      if: matrix.platform == 'neon-captest-prefetch'
-      run: |
-        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
-
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Run TPC-H benchmark
       uses: ./.github/actions/run-python-test-set
@@ -475,11 +468,8 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -491,23 +481,19 @@ jobs:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
   user-examples-compare:
-    if: success() || failure()
-    needs: [ tpch-compare ]
+    if: ${{ !cancelled() }}
+    needs: [ generate-matrices, tpch-compare ]
 
     strategy:
       fail-fast: false
-      matrix:
-        # neon-captest-prefetch: We have pre-created projects with prefetch enabled
-        # rds-aurora: Aurora Postgres Serverless v2 with autoscaling from 0.5 to 2 ACUs
-        # rds-postgres: RDS Postgres db.m5.large instance (2 vCPU, 8 GiB) with gp3 EBS storage
-        platform: [ neon-captest-prefetch, rds-postgres, rds-aurora ]
+      matrix: ${{ fromJson(needs.generate-matrices.outputs.olap-compare-matrix) }}
 
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 14
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.platform }}
 
     runs-on: [ self-hosted, us-east-2, x64 ]
@@ -536,7 +522,7 @@ jobs:
       id: set-up-connstr
       run: |
         case "${PLATFORM}" in
-          neon-captest-prefetch)
+          neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_CAPTEST_CONNSTR }}
             ;;
           rds-aurora)
@@ -546,7 +532,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_USER_EXAMPLE_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo 2>&1 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-prefetch', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'rds-aurora', or 'rds-postgres'"
             exit 1
             ;;
         esac
@@ -554,17 +540,6 @@ jobs:
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
         psql ${CONNSTR} -c "SELECT version();"
-
-    - name: Set database options
-      if: matrix.platform == 'neon-captest-prefetch'
-      run: |
-        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
-
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
-        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
-      env:
-        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Run user examples
       uses: ./.github/actions/run-python-test-set
@@ -580,17 +555,14 @@ jobs:
         BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
 
     - name: Create Allure report
-      if: success() || failure()
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic TPC-H perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: "Periodic User example perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

@@ -160,6 +160,7 @@ services:
     build:
       context: ./compute_wrapper/
       args:
+        - REPOSITORY=${REPOSITORY:-neondatabase}
         - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-14}
         - TAG=${TAG:-latest}
         - http_proxy=$http_proxy

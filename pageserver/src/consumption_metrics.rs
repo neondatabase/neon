@@ -5,7 +5,7 @@
 //!
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
-use crate::tenant::mgr;
+use crate::tenant::{mgr, LogicalSizeCalculationCause};
 use anyhow;
 use chrono::Utc;
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
@@ -25,7 +25,7 @@ const REMOTE_STORAGE_SIZE: &str = "remote_storage_size";
 const TIMELINE_LOGICAL_SIZE: &str = "timeline_logical_size";
 
 #[serde_as]
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct Ids {
     #[serde_as(as = "DisplayFromStr")]
     tenant_id: TenantId,
@@ -75,7 +75,7 @@ pub async fn collect_metrics(
     // define client here to reuse it for all requests
     let client = reqwest::Client::new();
     let mut cached_metrics: HashMap<PageserverConsumptionMetricsKey, u64> = HashMap::new();
-    let mut prev_iteration_time: Option<std::time::Instant> = None;
+    let mut prev_iteration_time: std::time::Instant = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -86,11 +86,11 @@ pub async fn collect_metrics(
             _ = ticker.tick() => {
 
                 // send cached metrics every cached_metric_collection_interval
-                let send_cached = prev_iteration_time
-                .map(|x| x.elapsed() >= cached_metric_collection_interval)
-                .unwrap_or(false);
+                let send_cached = prev_iteration_time.elapsed() >= cached_metric_collection_interval;
 
-                prev_iteration_time = Some(std::time::Instant::now());
+                if send_cached {
+                    prev_iteration_time = std::time::Instant::now();
+                }
 
                 collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
             }
@@ -164,7 +164,8 @@ pub async fn collect_metrics_iteration(
                     timeline_written_size,
                 ));
 
-                match timeline.get_current_logical_size(ctx) {
+                let span = info_span!("collect_metrics_iteration", tenant_id = %timeline.tenant_id, timeline_id = %timeline.timeline_id);
+                match span.in_scope(|| timeline.get_current_logical_size(ctx)) {
                     // Only send timeline logical size when it is fully calculated.
                     Ok((size, is_exact)) if is_exact => {
                         current_metrics.push((
@@ -287,6 +288,12 @@ pub async fn collect_metrics_iteration(
                     }
                 } else {
                     error!("metrics endpoint refused the sent metrics: {:?}", res);
+                    for metric in chunk_to_send.iter() {
+                        // Report if the metric value is suspiciously large
+                        if metric.value > (1u64 << 40) {
+                            error!("potentially abnormal metric value: {:?}", metric);
+                        }
+                    }
                 }
             }
             Err(err) => {
@@ -328,7 +335,9 @@ pub async fn calculate_synthetic_size_worker(
 
                     if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await
                     {
-                        if let Err(e) = tenant.calculate_synthetic_size(ctx).await {
+                        if let Err(e) = tenant.calculate_synthetic_size(
+                            LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize,
+                            ctx).await {
                             error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
                         }
                     }

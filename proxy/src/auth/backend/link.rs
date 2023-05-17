@@ -9,6 +9,7 @@ use crate::{
 use pq_proto::BeMessage as Be;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
@@ -53,7 +54,7 @@ pub fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
 }
 
-pub(super) async fn handle_user(
+pub(super) async fn authenticate(
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<AuthSuccess<NodeInfo>> {
@@ -78,12 +79,24 @@ pub(super) async fn handle_user(
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
+    // This config should be self-contained, because we won't
+    // take username or dbname from client's startup message.
     let mut config = compute::ConnCfg::new();
     config
         .host(&db_info.host)
         .port(db_info.port)
         .dbname(&db_info.dbname)
         .user(&db_info.user);
+
+    // Backwards compatibility. pg_sni_proxy uses "--" in domain names
+    // while direct connections do not. Once we migrate to pg_sni_proxy
+    // everywhere, we can remove this.
+    if db_info.host.contains("--") {
+        // we need TLS connection with SNI info to properly route it
+        config.ssl_mode(SslMode::Require);
+    } else {
+        config.ssl_mode(SslMode::Disable);
+    }
 
     if let Some(password) = db_info.password {
         config.password(password.as_ref());
@@ -94,6 +107,7 @@ pub(super) async fn handle_user(
         value: NodeInfo {
             config,
             aux: db_info.aux.into(),
+            allow_self_signed_compute: false, // caller may override
         },
     })
 }

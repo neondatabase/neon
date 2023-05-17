@@ -15,6 +15,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
+use once_cell::sync::Lazy;
 use pageserver_api::models::LayerAccessKind;
 use pageserver_api::models::{
     HistoricLayerInfo, LayerResidenceEvent, LayerResidenceEventReason, LayerResidenceStatus,
@@ -22,8 +23,10 @@ use pageserver_api::models::{
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::warn;
 use utils::history_buffer::HistoryBufferWithDropCounter;
+use utils::rate_limit::RateLimit;
 
 use utils::{
     id::{TenantId, TimelineId},
@@ -35,6 +38,8 @@ pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
 pub use remote_layer::RemoteLayer;
+
+use super::layer_map::BatchedUpdates;
 
 pub fn range_overlaps<T>(a: &Range<T>, b: &Range<T>) -> bool
 where
@@ -92,7 +97,23 @@ pub enum ValueReconstructResult {
 }
 
 #[derive(Debug)]
-pub struct LayerAccessStats(Mutex<LayerAccessStatsInner>);
+pub struct LayerAccessStats(Mutex<LayerAccessStatsLocked>);
+
+/// This struct holds two instances of [`LayerAccessStatsInner`].
+/// Accesses are recorded to both instances.
+/// The `for_scraping_api`instance can be reset from the management API via [`LayerAccessStatsReset`].
+/// The `for_eviction_policy` is never reset.
+#[derive(Debug, Default, Clone)]
+struct LayerAccessStatsLocked {
+    for_scraping_api: LayerAccessStatsInner,
+    for_eviction_policy: LayerAccessStatsInner,
+}
+
+impl LayerAccessStatsLocked {
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut LayerAccessStatsInner> {
+        [&mut self.for_scraping_api, &mut self.for_eviction_policy].into_iter()
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 struct LayerAccessStatsInner {
@@ -103,11 +124,11 @@ struct LayerAccessStatsInner {
     last_residence_changes: HistoryBufferWithDropCounter<LayerResidenceEvent, 16>,
 }
 
-#[derive(Debug, Clone)]
-struct LayerAccessStatFullDetails {
-    when: SystemTime,
-    task_kind: TaskKind,
-    access_kind: LayerAccessKind,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LayerAccessStatFullDetails {
+    pub(crate) when: SystemTime,
+    pub(crate) task_kind: TaskKind,
+    pub(crate) access_kind: LayerAccessKind,
 }
 
 #[derive(Clone, Copy, strum_macros::EnumString)]
@@ -126,7 +147,7 @@ fn system_time_to_millis_since_epoch(ts: &SystemTime) -> u64 {
 }
 
 impl LayerAccessStatFullDetails {
-    fn to_api_model(&self) -> pageserver_api::models::LayerAccessStatFullDetails {
+    fn as_api_model(&self) -> pageserver_api::models::LayerAccessStatFullDetails {
         let Self {
             when,
             task_kind,
@@ -141,73 +162,119 @@ impl LayerAccessStatFullDetails {
 }
 
 impl LayerAccessStats {
-    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
-        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
-        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
-        new
+    /// Create an empty stats object.
+    ///
+    /// The caller is responsible for recording a residence event
+    /// using [`record_residence_event`] before calling `latest_activity`.
+    /// If they don't, [`latest_activity`] will return `None`.
+    pub(crate) fn empty_will_record_residence_event_later() -> Self {
+        LayerAccessStats(Mutex::default())
     }
 
-    pub(crate) fn for_new_layer_file() -> Self {
-        let new = LayerAccessStats(Mutex::new(LayerAccessStatsInner::default()));
+    /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
+    ///
+    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
+    pub(crate) fn for_loading_layer<L>(
+        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
+        status: LayerResidenceStatus,
+    ) -> Self
+    where
+        L: ?Sized + Layer,
+    {
+        let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
         new.record_residence_event(
-            LayerResidenceStatus::Resident,
-            LayerResidenceEventReason::LayerCreate,
+            layer_map_lock_held_witness,
+            status,
+            LayerResidenceEventReason::LayerLoad,
         );
         new
     }
 
     /// Creates a clone of `self` and records `new_status` in the clone.
-    /// The `new_status` is not recorded in `self`
-    pub(crate) fn clone_for_residence_change(
+    ///
+    /// The `new_status` is not recorded in `self`.
+    ///
+    /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
+    pub(crate) fn clone_for_residence_change<L>(
         &self,
+        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
         new_status: LayerResidenceStatus,
-    ) -> LayerAccessStats {
+    ) -> LayerAccessStats
+    where
+        L: ?Sized + Layer,
+    {
         let clone = {
             let inner = self.0.lock().unwrap();
             inner.clone()
         };
         let new = LayerAccessStats(Mutex::new(clone));
-        new.record_residence_event(new_status, LayerResidenceEventReason::ResidenceChange);
+        new.record_residence_event(
+            layer_map_lock_held_witness,
+            new_status,
+            LayerResidenceEventReason::ResidenceChange,
+        );
         new
     }
 
-    fn record_residence_event(
+    /// Record a change in layer residency.
+    ///
+    /// Recording the event must happen while holding the layer map lock to
+    /// ensure that latest-activity-threshold-based layer eviction (eviction_task.rs)
+    /// can do an "imitate access" to this layer, before it observes `now-latest_activity() > threshold`.
+    ///
+    /// If we instead recorded the residence event with a timestamp from before grabbing the layer map lock,
+    /// the following race could happen:
+    ///
+    /// - Compact: Write out an L1 layer from several L0 layers. This records residence event LayerCreate with the current timestamp.
+    /// - Eviction: imitate access logical size calculation. This accesses the L0 layers because the L1 layer is not yet in the layer map.
+    /// - Compact: Grab layer map lock, add the new L1 to layer map and remove the L0s, release layer map lock.
+    /// - Eviction: observes the new L1 layer whose only activity timestamp is the LayerCreate event.
+    ///
+    pub(crate) fn record_residence_event<L>(
         &self,
+        _layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
         status: LayerResidenceStatus,
         reason: LayerResidenceEventReason,
-    ) {
-        let mut inner = self.0.lock().unwrap();
-        inner
-            .last_residence_changes
-            .write(LayerResidenceEvent::new(status, reason));
+    ) where
+        L: ?Sized + Layer,
+    {
+        let mut locked = self.0.lock().unwrap();
+        locked.iter_mut().for_each(|inner| {
+            inner
+                .last_residence_changes
+                .write(LayerResidenceEvent::new(status, reason))
+        });
     }
 
     fn record_access(&self, access_kind: LayerAccessKind, task_kind: TaskKind) {
-        let mut inner = self.0.lock().unwrap();
         let this_access = LayerAccessStatFullDetails {
             when: SystemTime::now(),
             task_kind,
             access_kind,
         };
-        inner
-            .first_access
-            .get_or_insert_with(|| this_access.clone());
-        inner.count_by_access_kind[access_kind] += 1;
-        inner.task_kind_flag |= task_kind;
-        inner.last_accesses.write(this_access);
+
+        let mut locked = self.0.lock().unwrap();
+        locked.iter_mut().for_each(|inner| {
+            inner.first_access.get_or_insert(this_access);
+            inner.count_by_access_kind[access_kind] += 1;
+            inner.task_kind_flag |= task_kind;
+            inner.last_accesses.write(this_access);
+        })
     }
-    fn to_api_model(
+
+    fn as_api_model(
         &self,
         reset: LayerAccessStatsReset,
     ) -> pageserver_api::models::LayerAccessStats {
-        let mut inner = self.0.lock().unwrap();
+        let mut locked = self.0.lock().unwrap();
+        let inner = &mut locked.for_scraping_api;
         let LayerAccessStatsInner {
             first_access,
             count_by_access_kind,
             task_kind_flag,
             last_accesses,
             last_residence_changes,
-        } = &*inner;
+        } = inner;
         let ret = pageserver_api::models::LayerAccessStats {
             access_count_by_access_kind: count_by_access_kind
                 .iter()
@@ -217,8 +284,8 @@ impl LayerAccessStats {
                 .iter()
                 .map(|task_kind| task_kind.into()) // into static str, powered by strum_macros
                 .collect(),
-            first: first_access.as_ref().map(|a| a.to_api_model()),
-            accesses_history: last_accesses.map(|m| m.to_api_model()),
+            first: first_access.as_ref().map(|a| a.as_api_model()),
+            accesses_history: last_accesses.map(|m| m.as_api_model()),
             residence_events_history: last_residence_changes.clone(),
         };
         match reset {
@@ -231,6 +298,40 @@ impl LayerAccessStats {
             }
         }
         ret
+    }
+
+    /// Get the latest access timestamp, falling back to latest residence event.
+    ///
+    /// This function can only return `None` if there has not yet been a call to the
+    /// [`record_residence_event`] method. That would generally be considered an
+    /// implementation error. This function logs a rate-limited warning in that case.
+    ///
+    /// TODO: use type system to avoid the need for `fallback`.
+    /// The approach in https://github.com/neondatabase/neon/pull/3775
+    /// could be used to enforce that a residence event is recorded
+    /// before a layer is added to the layer map. We could also have
+    /// a layer wrapper type that holds the LayerAccessStats, and ensure
+    /// that that type can only be produced by inserting into the layer map.
+    pub(crate) fn latest_activity(&self) -> Option<SystemTime> {
+        let locked = self.0.lock().unwrap();
+        let inner = &locked.for_eviction_policy;
+        match inner.last_accesses.recent() {
+            Some(a) => Some(a.when),
+            None => match inner.last_residence_changes.recent() {
+                Some(e) => Some(e.timestamp),
+                None => {
+                    static WARN_RATE_LIMIT: Lazy<Mutex<(usize, RateLimit)>> =
+                        Lazy::new(|| Mutex::new((0, RateLimit::new(Duration::from_secs(10)))));
+                    let mut guard = WARN_RATE_LIMIT.lock().unwrap();
+                    guard.0 += 1;
+                    let occurences = guard.0;
+                    guard.1.call(move || {
+                        warn!(parent: None, occurences, "latest_activity not available, this is an implementation bug, using fallback value");
+                    });
+                    None
+                }
+            },
+        }
     }
 }
 
@@ -328,7 +429,7 @@ pub trait PersistentLayer: Layer {
     }
 
     /// Permanently remove this layer from disk.
-    fn delete(&self) -> Result<()>;
+    fn delete_resident_layer_file(&self) -> Result<()>;
 
     fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
         None
@@ -342,7 +443,7 @@ pub trait PersistentLayer: Layer {
     ///
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> Option<u64>;
+    fn file_size(&self) -> u64;
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
 
@@ -448,4 +549,15 @@ impl From<LayerFileName> for LayerDescriptor {
 enum PathOrConf {
     Path(PathBuf),
     Conf(&'static PageServerConf),
+}
+
+/// Range wrapping newtype, which uses display to render Debug.
+///
+/// Useful with `Key`, which has too verbose `{:?}` for printing multiple layers.
+struct RangeDisplayDebug<'a, T: std::fmt::Display>(&'a Range<T>);
+
+impl<'a, T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..{}", self.0.start, self.0.end)
+    }
 }

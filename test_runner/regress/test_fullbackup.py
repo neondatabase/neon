@@ -2,7 +2,12 @@ import os
 from pathlib import Path
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, PortDistributor, VanillaPostgres
+from fixtures.neon_fixtures import (
+    NeonEnvBuilder,
+    PgBin,
+    PortDistributor,
+    VanillaPostgres,
+)
 from fixtures.types import Lsn, TimelineId
 from fixtures.utils import query_scalar, subprocess_capture
 
@@ -19,10 +24,10 @@ def test_fullbackup(
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_fullbackup")
-    pgmain = env.postgres.create_start("test_fullbackup")
+    endpoint_main = env.endpoints.create_start("test_fullbackup")
     log.info("postgres is running on 'test_fullbackup' branch")
 
-    with pgmain.cursor() as cur:
+    with endpoint_main.cursor() as cur:
         timeline = TimelineId(query_scalar(cur, "SHOW neon.timeline_id"))
 
         # data loading may take a while, so increase statement timeout

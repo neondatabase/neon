@@ -7,6 +7,7 @@ use std::{
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use strum_macros;
 use utils::{
     history_buffer::HistoryBufferWithDropCounter,
     id::{NodeId, TenantId, TimelineId},
@@ -18,11 +19,23 @@ use anyhow::bail;
 use bytes::{BufMut, Bytes, BytesMut};
 
 /// A state of a tenant in pageserver's memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum_macros::Display,
+    strum_macros::EnumString,
+    strum_macros::EnumVariantNames,
+    strum_macros::AsRefStr,
+    strum_macros::IntoStaticStr,
+)]
+#[serde(tag = "slug", content = "data")]
 pub enum TenantState {
-    // This tenant is being loaded from local disk
+    /// This tenant is being loaded from local disk
     Loading,
-    // This tenant is being downloaded from cloud storage.
+    /// This tenant is being downloaded from cloud storage.
     Attaching,
     /// Tenant is fully operational
     Active,
@@ -31,35 +44,56 @@ pub enum TenantState {
     Stopping,
     /// A tenant is recognized by the pageserver, but can no longer be used for
     /// any operations, because it failed to be activated.
-    Broken,
-}
-
-pub mod state {
-    pub const LOADING: &str = "loading";
-    pub const ATTACHING: &str = "attaching";
-    pub const ACTIVE: &str = "active";
-    pub const STOPPING: &str = "stopping";
-    pub const BROKEN: &str = "broken";
+    Broken { reason: String, backtrace: String },
 }
 
 impl TenantState {
-    pub fn has_in_progress_downloads(&self) -> bool {
+    pub fn attachment_status(&self) -> TenantAttachmentStatus {
+        use TenantAttachmentStatus::*;
         match self {
-            Self::Loading => true,
-            Self::Attaching => true,
-            Self::Active => false,
-            Self::Stopping => false,
-            Self::Broken => false,
+            // The attach procedure writes the marker file before adding the Attaching tenant to the tenants map.
+            // So, technically, we can return Attached here.
+            // However, as soon as Console observes Attached, it will proceed with the Postgres-level health check.
+            // But, our attach task might still be fetching the remote timelines, etc.
+            // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
+            Self::Attaching => Maybe,
+            // tenant mgr startup distinguishes attaching from loading via marker file.
+            // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
+            Self::Loading => Attached,
+            // We only reach Active after successful load / attach.
+            // So, call atttachment status Attached.
+            Self::Active => Attached,
+            // If the (initial or resumed) attach procedure fails, the tenant becomes Broken.
+            // However, it also becomes Broken if the regular load fails.
+            // We would need a separate TenantState variant to distinguish these cases.
+            // However, there's no practical difference from Console's perspective.
+            // It will run a Postgres-level health check as soon as it observes Attached.
+            // That will fail on Broken tenants.
+            // Console can then rollback the attach, or, wait for operator to fix the Broken tenant.
+            Self::Broken { .. } => Attached,
+            // Why is Stopping a Maybe case? Because, during pageserver shutdown,
+            // we set the Stopping state irrespective of whether the tenant
+            // has finished attaching or not.
+            Self::Stopping => Maybe,
         }
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub fn broken_from_reason(reason: String) -> Self {
+        let backtrace_str: String = format!("{}", std::backtrace::Backtrace::force_capture());
+        Self::Broken {
+            reason,
+            backtrace: backtrace_str,
+        }
+    }
+}
+
+impl std::fmt::Debug for TenantState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TenantState::Loading => state::LOADING,
-            TenantState::Attaching => state::ATTACHING,
-            TenantState::Active => state::ACTIVE,
-            TenantState::Stopping => state::STOPPING,
-            TenantState::Broken => state::BROKEN,
+            Self::Broken { reason, backtrace } if !reason.is_empty() => {
+                write!(f, "Broken due to: {reason}. Backtrace:\n{backtrace}")
+            }
+            _ => write!(f, "{self}"),
         }
     }
 }
@@ -102,6 +136,20 @@ pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub new_tenant_id: Option<TenantId>,
+    #[serde(flatten)]
+    pub config: TenantConfig,
+}
+
+impl std::ops::Deref for TenantCreateRequest {
+    type Target = TenantConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
@@ -115,6 +163,13 @@ pub struct TenantCreateRequest {
     pub lagging_wal_timeout: Option<String>,
     pub max_lsn_wal_lag: Option<NonZeroU64>,
     pub trace_read_requests: Option<bool>,
+    // We defer the parsing of the eviction_policy field to the request handler.
+    // Otherwise we'd have to move the types for eviction policy into this package.
+    // We might do that once the eviction feature has stabilizied.
+    // For now, this field is not even documented in the openapi_spec.yml.
+    pub eviction_policy: Option<serde_json::Value>,
+    pub min_resident_size_override: Option<u64>,
+    pub evictions_low_residence_duration_metric_threshold: Option<String>,
 }
 
 #[serde_as]
@@ -141,26 +196,21 @@ impl TenantCreateRequest {
 pub struct TenantConfigRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde(default)]
-    pub checkpoint_distance: Option<u64>,
-    pub checkpoint_timeout: Option<String>,
-    pub compaction_target_size: Option<u64>,
-    pub compaction_period: Option<String>,
-    pub compaction_threshold: Option<usize>,
-    pub gc_horizon: Option<u64>,
-    pub gc_period: Option<String>,
-    pub image_creation_threshold: Option<usize>,
-    pub pitr_interval: Option<String>,
-    pub walreceiver_connect_timeout: Option<String>,
-    pub lagging_wal_timeout: Option<String>,
-    pub max_lsn_wal_lag: Option<NonZeroU64>,
-    pub trace_read_requests: Option<bool>,
+    #[serde(flatten)]
+    pub config: TenantConfig,
+}
+
+impl std::ops::Deref for TenantConfigRequest {
+    type Target = TenantConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
 }
 
 impl TenantConfigRequest {
     pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
-        TenantConfigRequest {
-            tenant_id,
+        let config = TenantConfig {
             checkpoint_distance: None,
             checkpoint_timeout: None,
             compaction_target_size: None,
@@ -174,8 +224,20 @@ impl TenantConfigRequest {
             lagging_wal_timeout: None,
             max_lsn_wal_lag: None,
             trace_read_requests: None,
-        }
+            eviction_policy: None,
+            min_resident_size_override: None,
+            evictions_low_residence_duration_metric_threshold: None,
+        };
+        TenantConfigRequest { tenant_id, config }
     }
+}
+
+/// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantAttachmentStatus {
+    Maybe,
+    Attached,
 }
 
 #[serde_as]
@@ -183,11 +245,12 @@ impl TenantConfigRequest {
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
+    // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
-    pub has_in_progress_downloads: Option<bool>,
+    pub attachment_status: TenantAttachmentStatus,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -263,11 +326,11 @@ pub struct LayerResidenceEvent {
     ///
     #[serde(rename = "timestamp_millis_since_epoch")]
     #[serde_as(as = "serde_with::TimestampMilliSeconds")]
-    timestamp: SystemTime,
+    pub timestamp: SystemTime,
     /// The new residence status of the layer.
-    status: LayerResidenceStatus,
+    pub status: LayerResidenceStatus,
     /// The reason why we had to record this event.
-    reason: LayerResidenceEventReason,
+    pub reason: LayerResidenceEventReason,
 }
 
 /// The reason for recording a given [`ResidenceEvent`].
@@ -335,7 +398,7 @@ pub enum InMemoryLayerInfo {
 pub enum HistoricLayerInfo {
     Delta {
         layer_file_name: String,
-        layer_file_size: Option<u64>,
+        layer_file_size: u64,
 
         #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
@@ -346,7 +409,7 @@ pub enum HistoricLayerInfo {
     },
     Image {
         layer_file_name: String,
-        layer_file_size: Option<u64>,
+        layer_file_size: u64,
 
         #[serde_as(as = "DisplayFromStr")]
         lsn_start: Lsn,
@@ -601,6 +664,7 @@ impl PagestreamBeMessage {
 #[cfg(test)]
 mod tests {
     use bytes::Buf;
+    use serde_json::json;
 
     use super::*;
 
@@ -650,5 +714,58 @@ mod tests {
             let reconstructed = PagestreamFeMessage::parse(&mut bytes.reader()).unwrap();
             assert!(msg == reconstructed);
         }
+    }
+
+    #[test]
+    fn test_tenantinfo_serde() {
+        // Test serialization/deserialization of TenantInfo
+        let original_active = TenantInfo {
+            id: TenantId::generate(),
+            state: TenantState::Active,
+            current_physical_size: Some(42),
+            attachment_status: TenantAttachmentStatus::Attached,
+        };
+        let expected_active = json!({
+            "id": original_active.id.to_string(),
+            "state": {
+                "slug": "Active",
+            },
+            "current_physical_size": 42,
+            "attachment_status": "attached",
+        });
+
+        let original_broken = TenantInfo {
+            id: TenantId::generate(),
+            state: TenantState::Broken {
+                reason: "reason".into(),
+                backtrace: "backtrace info".into(),
+            },
+            current_physical_size: Some(42),
+            attachment_status: TenantAttachmentStatus::Attached,
+        };
+        let expected_broken = json!({
+            "id": original_broken.id.to_string(),
+            "state": {
+                "slug": "Broken",
+                "data": {
+                    "backtrace": "backtrace info",
+                    "reason": "reason",
+                }
+            },
+            "current_physical_size": 42,
+            "attachment_status": "attached",
+        });
+
+        assert_eq!(
+            serde_json::to_value(&original_active).unwrap(),
+            expected_active
+        );
+
+        assert_eq!(
+            serde_json::to_value(&original_broken).unwrap(),
+            expected_broken
+        );
+        assert!(format!("{:?}", &original_broken.state).contains("reason"));
+        assert!(format!("{:?}", &original_broken.state).contains("backtrace info"));
     }
 }

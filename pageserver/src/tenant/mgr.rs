@@ -19,7 +19,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{Tenant, TenantState};
+use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
 use crate::IGNORED_TENANT_FILE_NAME;
 
 use utils::fs_ext::PathExt;
@@ -186,10 +186,20 @@ pub fn schedule_local_tenant_processing(
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
         if let Some(remote_storage) = remote_storage {
-            Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx)
+            match Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx) {
+                Ok(tenant) => tenant,
+                Err(e) => {
+                    error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
+                    Tenant::create_broken_tenant(conf, tenant_id, format!("{e:#}"))
+                }
+            }
         } else {
             warn!("tenant {tenant_id} has attaching mark file, but pageserver has no remote storage configured");
-            Tenant::create_broken_tenant(conf, tenant_id)
+            Tenant::create_broken_tenant(
+                conf,
+                tenant_id,
+                "attaching mark file present but no remote storage configured".to_string(),
+            )
         }
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
@@ -272,9 +282,15 @@ pub async fn create_tenant(
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id)?;
+        let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Create)?;
+        // TODO: tenant directory remains on disk if we bail out from here on.
+        //       See https://github.com/neondatabase/neon/issues/4233
+
         let created_tenant =
             schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
+        //      See https://github.com/neondatabase/neon/issues/4233
+
         let crated_tenant_id = created_tenant.tenant_id();
         anyhow::ensure!(
                 tenant_id == crated_tenant_id,
@@ -289,7 +305,7 @@ pub async fn set_new_tenant_config(
     conf: &'static PageServerConf,
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> Result<(), TenantStateError> {
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
@@ -306,50 +322,84 @@ pub async fn set_new_tenant_config(
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
 /// `active_only = true` allows to query only tenants that are ready for operations, erroring on other kinds of tenants.
-pub async fn get_tenant(tenant_id: TenantId, active_only: bool) -> anyhow::Result<Arc<Tenant>> {
+pub async fn get_tenant(
+    tenant_id: TenantId,
+    active_only: bool,
+) -> Result<Arc<Tenant>, TenantStateError> {
     let m = TENANTS.read().await;
     let tenant = m
         .get(&tenant_id)
-        .with_context(|| format!("Tenant {tenant_id} not found in the local state"))?;
+        .ok_or(TenantStateError::NotFound(tenant_id))?;
     if active_only && !tenant.is_active() {
-        anyhow::bail!(
-            "Tenant {tenant_id} is not active. Current state: {:?}",
-            tenant.current_state()
-        )
+        Err(TenantStateError::NotActive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteTimelineError {
+    #[error("Tenant {0}")]
+    Tenant(#[from] TenantStateError),
+
+    #[error("Timeline {0}")]
+    Timeline(#[from] crate::tenant::DeleteTimelineError),
 }
 
 pub async fn delete_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     ctx: &RequestContext,
-) -> anyhow::Result<()> {
-    match get_tenant(tenant_id, true).await {
-        Ok(tenant) => {
-            tenant.delete_timeline(timeline_id, ctx).await?;
-        }
-        Err(e) => anyhow::bail!("Cannot access tenant {tenant_id} in local tenant state: {e:?}"),
-    }
-
+) -> Result<(), DeleteTimelineError> {
+    let tenant = get_tenant(tenant_id, true).await?;
+    tenant.delete_timeline(timeline_id, ctx).await?;
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TenantStateError {
+    #[error("Tenant {0} not found")]
+    NotFound(TenantId),
+    #[error("Tenant {0} is stopping")]
+    IsStopping(TenantId),
+    #[error("Tenant {0} is not active")]
+    NotActive(TenantId),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 pub async fn detach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
-    remove_tenant_from_memory(tenant_id, async {
-        let local_tenant_directory = conf.tenant_path(&tenant_id);
+    detach_ignored: bool,
+) -> Result<(), TenantStateError> {
+    let local_files_cleanup_operation = |tenant_id_to_clean| async move {
+        let local_tenant_directory = conf.tenant_path(&tenant_id_to_clean);
         fs::remove_dir_all(&local_tenant_directory)
             .await
             .with_context(|| {
-                format!("Failed to remove local tenant directory {local_tenant_directory:?}")
+                format!("local tenant directory {local_tenant_directory:?} removal")
             })?;
         Ok(())
-    })
-    .await
+    };
+
+    let removal_result =
+        remove_tenant_from_memory(tenant_id, local_files_cleanup_operation(tenant_id)).await;
+
+    // Ignored tenants are not present in memory and will bail the removal from memory operation.
+    // Before returning the error, check for ignored tenant removal case — we only need to clean its local files then.
+    if detach_ignored && matches!(removal_result, Err(TenantStateError::NotFound(_))) {
+        let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
+        if tenant_ignore_mark.exists() {
+            info!("Detaching an ignored tenant");
+            local_files_cleanup_operation(tenant_id)
+                .await
+                .with_context(|| format!("Ignored tenant {tenant_id} local files cleanup"))?;
+            return Ok(());
+        }
+    }
+
+    removal_result
 }
 
 pub async fn load_tenant(
@@ -379,7 +429,7 @@ pub async fn load_tenant(
 pub async fn ignore_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-) -> anyhow::Result<()> {
+) -> Result<(), TenantStateError> {
     remove_tenant_from_memory(tenant_id, async {
         let ignore_mark_file = conf.tenant_ignore_mark_file_path(tenant_id);
         fs::File::create(&ignore_mark_file)
@@ -422,18 +472,32 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
 pub async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    tenant_conf: TenantConfOpt,
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, |vacant_entry| {
-        let tenant_path = conf.tenant_path(&tenant_id);
-        anyhow::ensure!(
-            !tenant_path.exists(),
-            "Cannot attach tenant {tenant_id}, local tenant directory already exists"
-        );
+        let tenant_dir = create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Attach)?;
+        // TODO: tenant directory remains on disk if we bail out from here on.
+        //       See https://github.com/neondatabase/neon/issues/4233
 
-        let tenant = Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx);
-        vacant_entry.insert(tenant);
+        // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
+        let marker_file_exists = conf
+            .tenant_attaching_mark_file_path(&tenant_id)
+            .try_exists()
+            .context("check for attach marker file existence")?;
+        anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
+
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, Some(remote_storage), ctx)?;
+        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
+        //      See https://github.com/neondatabase/neon/issues/4233
+
+        let attached_tenant_id = attached_tenant.tenant_id();
+        anyhow::ensure!(
+            tenant_id == attached_tenant_id,
+            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
+        );
+        vacant_entry.insert(Arc::clone(&attached_tenant));
         Ok(())
     })
     .await
@@ -489,7 +553,7 @@ where
 async fn remove_tenant_from_memory<V, F>(
     tenant_id: TenantId,
     tenant_cleanup: F,
-) -> anyhow::Result<V>
+) -> Result<V, TenantStateError>
 where
     F: std::future::Future<Output = anyhow::Result<V>>,
 {
@@ -503,13 +567,11 @@ where
             Some(tenant) => match tenant.current_state() {
                 TenantState::Attaching
                 | TenantState::Loading
-                | TenantState::Broken
+                | TenantState::Broken { .. }
                 | TenantState::Active => tenant.set_stopping(),
-                TenantState::Stopping => {
-                    anyhow::bail!("Tenant {tenant_id} is stopping already")
-                }
+                TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
             },
-            None => anyhow::bail!("Tenant not found for id {tenant_id}"),
+            None => return Err(TenantStateError::NotFound(tenant_id)),
         }
     }
 
@@ -532,21 +594,24 @@ where
         Err(e) => {
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
-                Some(tenant) => tenant.set_broken(&e.to_string()),
-                None => warn!("Tenant {tenant_id} got removed from memory"),
+                Some(tenant) => {
+                    tenant.set_broken(e.to_string());
+                }
+                None => {
+                    warn!("Tenant {tenant_id} got removed from memory");
+                    return Err(TenantStateError::NotFound(tenant_id));
+                }
             }
-            Err(e)
+            Err(TenantStateError::Other(e))
         }
     }
 }
 
-#[cfg(feature = "testing")]
 use {
     crate::repository::GcResult, pageserver_api::models::TimelineGcRequest,
     utils::http::error::ApiError,
 };
 
-#[cfg(feature = "testing")]
 pub async fn immediate_gc(
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -557,7 +622,7 @@ pub async fn immediate_gc(
     let tenant = guard
         .get(&tenant_id)
         .map(Arc::clone)
-        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .with_context(|| format!("tenant {tenant_id}"))
         .map_err(ApiError::NotFound)?;
 
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
@@ -607,7 +672,7 @@ pub async fn immediate_compact(
     let tenant = guard
         .get(&tenant_id)
         .map(Arc::clone)
-        .with_context(|| format!("Tenant {tenant_id} not found"))
+        .with_context(|| format!("tenant {tenant_id}"))
         .map_err(ApiError::NotFound)?;
 
     let timeline = tenant

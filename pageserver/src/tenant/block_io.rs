@@ -51,9 +51,6 @@ where
 ///
 /// A "cursor" for efficiently reading multiple pages from a BlockReader
 ///
-/// A cursor caches the last accessed page, allowing for faster access if the
-/// same block is accessed repeatedly.
-///
 /// You can access the last page with `*cursor`. 'read_blk' returns 'self', so
 /// that in many cases you can use a BlockCursor as a drop-in replacement for
 /// the underlying BlockReader. For example:
@@ -73,8 +70,6 @@ where
     R: BlockReader,
 {
     reader: R,
-    /// last accessed page
-    cache: Option<(u32, R::BlockLease)>,
 }
 
 impl<R> BlockCursor<R>
@@ -82,40 +77,13 @@ where
     R: BlockReader,
 {
     pub fn new(reader: R) -> Self {
-        BlockCursor {
-            reader,
-            cache: None,
-        }
+        BlockCursor { reader }
     }
 
-    pub fn read_blk(&mut self, blknum: u32) -> Result<&Self, std::io::Error> {
-        // Fast return if this is the same block as before
-        if let Some((cached_blk, _buf)) = &self.cache {
-            if *cached_blk == blknum {
-                return Ok(self);
-            }
-        }
-
-        // Read the block from the underlying reader, and cache it
-        self.cache = None;
-        let buf = self.reader.read_blk(blknum)?;
-        self.cache = Some((blknum, buf));
-
-        Ok(self)
+    pub fn read_blk(&mut self, blknum: u32) -> Result<R::BlockLease, std::io::Error> {
+        self.reader.read_blk(blknum)
     }
 }
-
-impl<R> Deref for BlockCursor<R>
-where
-    R: BlockReader,
-{
-    type Target = [u8; PAGE_SZ];
-
-    fn deref(&self) -> &<Self as Deref>::Target {
-        &self.cache.as_ref().unwrap().1
-    }
-}
-
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// An adapter for reading a (virtual) file using the page cache.

@@ -2,26 +2,32 @@
 # env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import os
+import queue
 import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    LocalFsStorage,
     NeonEnvBuilder,
-    PageserverApiException,
     RemoteStorageKind,
     available_remote_storages,
     wait_for_last_flush_lsn,
+)
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_until_tenant_active,
     wait_until_tenant_state,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import print_gc_result, query_scalar, wait_until
+from requests import ReadTimeout
 
 
 #
@@ -77,23 +83,21 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
     # we have a bunch of pytest.raises for these below
     env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
     env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
 
-    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
-    timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+    tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
+    timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
     checkpoint_numbers = range(1, 3)
 
     for checkpoint_number in checkpoint_numbers:
-        with pg.cursor() as cur:
+        with endpoint.cursor() as cur:
             cur.execute(
                 f"""
                 CREATE TABLE t{checkpoint_number}(id int primary key, data text);
@@ -122,7 +126,7 @@ def test_remote_storage_backup_and_restore(
     )
 
     ##### Stop the first pageserver instance, erase all its data
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
     env.pageserver.stop()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
@@ -170,15 +174,10 @@ def test_remote_storage_backup_and_restore(
         client.tenant_attach(tenant_id)
     log.info("waiting for tenant to become active. this should be quick with on-demand download")
 
-    def tenant_active():
-        all_states = client.tenant_list()
-        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["state"] == "Active"
-
-    wait_until(
-        number_of_iterations=5,
-        interval=1,
-        func=tenant_active,
+    wait_until_tenant_active(
+        pageserver_http=client,
+        tenant_id=tenant_id,
+        iterations=5,
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
@@ -188,8 +187,8 @@ def test_remote_storage_backup_and_restore(
     ), "current db Lsn should should not be less than the one stored on remote storage"
 
     log.info("select some data, this will cause layers to be downloaded")
-    pg = env.postgres.create_start("main")
-    with pg.cursor() as cur:
+    endpoint = env.endpoints.create_start("main")
+    with endpoint.cursor() as cur:
         for checkpoint_number in checkpoint_numbers:
             assert (
                 query_scalar(cur, f"SELECT data FROM t{checkpoint_number} WHERE id = {data_id};")
@@ -212,7 +211,6 @@ def test_remote_storage_upload_queue_retries(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_storage_upload_queue_retries",
@@ -233,16 +231,16 @@ def test_remote_storage_upload_queue_retries(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
-            # don't create image layers, that causes just noise
-            "image_creation_threshold": "10000",
+            # create image layers eagerly, so that GC can remove some layers
+            "image_creation_threshold": "1",
         }
     )
 
     client = env.pageserver.http_client()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
-    pg.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+    endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
 
     def configure_storage_sync_failpoints(action):
         client.configure_failpoints(
@@ -255,7 +253,7 @@ def test_remote_storage_upload_queue_retries(
 
     def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
         # create initial set of layers & upload them with failpoints configured
-        pg.safe_psql_many(
+        endpoint.safe_psql_many(
             [
                 f"""
                INSERT INTO foo (id, val)
@@ -268,7 +266,7 @@ def test_remote_storage_upload_queue_retries(
                 "VACUUM foo",
             ]
         )
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     def get_queued_count(file_kind, op_kind):
         val = client.get_remote_timeline_client_metric(
@@ -301,7 +299,7 @@ def test_remote_storage_upload_queue_retries(
 
     # Create more churn to generate all upload ops.
     # The checkpoint / compact / gc ops will block because they call remote_client.wait_completion().
-    # So, run this in a differen thread.
+    # So, run this in a different thread.
     churn_thread_result = [False]
 
     def churn_while_failpoints_active(result):
@@ -345,7 +343,7 @@ def test_remote_storage_upload_queue_retries(
     #      but how do we validate the result after restore?
 
     env.pageserver.stop(immediate=True)
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
     shutil.rmtree(dir_to_clear)
@@ -356,16 +354,11 @@ def test_remote_storage_upload_queue_retries(
 
     client.tenant_attach(tenant_id)
 
-    def tenant_active():
-        all_states = client.tenant_list()
-        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["state"] == "Active"
-
-    wait_until(30, 1, tenant_active)
+    wait_until_tenant_active(client, tenant_id)
 
     log.info("restarting postgres to validate")
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    with pg.cursor() as cur:
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    with endpoint.cursor() as cur:
         assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
 
 
@@ -374,7 +367,6 @@ def test_remote_timeline_client_calls_started_metric(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_timeline_client_metrics",
@@ -395,20 +387,20 @@ def test_remote_timeline_client_calls_started_metric(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
-            # don't create image layers, that causes just noise
-            "image_creation_threshold": "10000",
+            # create image layers eagerly, so that GC can remove some layers
+            "image_creation_threshold": "1",
         }
     )
 
     client = env.pageserver.http_client()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
-    pg.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
+    endpoint.safe_psql("CREATE TABLE foo (id INTEGER PRIMARY KEY, val text)")
 
     def overwrite_data_and_wait_for_it_to_arrive_at_pageserver(data):
         # create initial set of layers & upload them with failpoints configured
-        pg.safe_psql_many(
+        endpoint.safe_psql_many(
             [
                 f"""
                INSERT INTO foo (id, val)
@@ -421,24 +413,7 @@ def test_remote_timeline_client_calls_started_metric(
                 "VACUUM foo",
             ]
         )
-        wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
-
-    def get_queued_count(file_kind, op_kind):
-        val = client.get_remote_timeline_client_metric(
-            "pageserver_remote_timeline_client_calls_unfinished",
-            tenant_id,
-            timeline_id,
-            file_kind,
-            op_kind,
-        )
-        if val is None:
-            return val
-        return int(val)
-
-    def wait_upload_queue_empty():
-        wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="upload") == 0)
-        wait_until(2, 1, lambda: get_queued_count(file_kind="index", op_kind="upload") == 0)
-        wait_until(2, 1, lambda: get_queued_count(file_kind="layer", op_kind="delete") == 0)
+        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     calls_started: Dict[Tuple[str, str], List[int]] = {
         ("layer", "upload"): [0],
@@ -480,7 +455,7 @@ def test_remote_timeline_client_calls_started_metric(
     # create some layers & wait for uploads to finish
     churn("a", "b")
 
-    wait_upload_queue_empty()
+    wait_upload_queue_empty(client, tenant_id, timeline_id)
 
     # ensure that we updated the calls_started metric
     fetch_calls_started()
@@ -503,7 +478,7 @@ def test_remote_timeline_client_calls_started_metric(
     )
 
     env.pageserver.stop(immediate=True)
-    env.postgres.stop_all()
+    env.endpoints.stop_all()
 
     dir_to_clear = Path(env.repo_dir) / "tenants"
     shutil.rmtree(dir_to_clear)
@@ -514,16 +489,11 @@ def test_remote_timeline_client_calls_started_metric(
 
     client.tenant_attach(tenant_id)
 
-    def tenant_active():
-        all_states = client.tenant_list()
-        [tenant] = [t for t in all_states if TenantId(t["id"]) == tenant_id]
-        assert tenant["state"] == "Active"
-
-    wait_until(30, 1, tenant_active)
+    wait_until_tenant_active(client, tenant_id)
 
     log.info("restarting postgres to validate")
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
-    with pg.cursor() as cur:
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    with endpoint.cursor() as cur:
         assert query_scalar(cur, "SELECT COUNT(*) FROM foo WHERE val = 'd'") == 10000
 
     # ensure that we updated the calls_started download metric
@@ -573,17 +543,17 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
         )
         return int(val) if val is not None else val
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
     client.configure_failpoints(("before-upload-layer", "return"))
 
-    pg.safe_psql_many(
+    endpoint.safe_psql_many(
         [
             "CREATE TABLE foo (x INTEGER)",
             "INSERT INTO foo SELECT g FROM generate_series(1, 10000) g",
         ]
     )
-    wait_for_last_flush_lsn(env, pg, tenant_id, timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     # Kick off a checkpoint operation.
     # It will get stuck in remote_client.wait_completion(), since the select query will have
@@ -618,6 +588,9 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     # checkpoint operations. Hence, checkpoint is allowed to fail now.
     log.info("sending delete request")
     checkpoint_allowed_to_fail.set()
+    env.pageserver.allowed_errors.append(
+        ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
+    )
     client.timeline_delete(tenant_id, timeline_id)
 
     assert not timeline_path.exists()
@@ -634,6 +607,217 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     client.configure_failpoints(("before-upload-layer", "off"))
     # XXX force retry, currently we have to wait for exponential backoff
     time.sleep(10)
+
+
+# Branches off a root branch, but does not write anything to the new branch, so it has a metadata file only.
+# Ensures that such branch is still persisted on the remote storage, and can be restored during tenant (re)attach.
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_empty_branch_remote_storage_upload(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_empty_branch_remote_storage_upload",
+    )
+
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+
+    new_branch_name = "new_branch"
+    new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+    assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
+
+    timelines_before_detach = set(
+        map(
+            lambda t: TimelineId(t["timeline_id"]),
+            client.timeline_list(env.initial_tenant),
+        )
+    )
+    expected_timelines = set([env.initial_timeline, new_branch_timeline_id])
+    assert (
+        timelines_before_detach == expected_timelines
+    ), f"Expected to have an initial timeline and the branch timeline only, but got {timelines_before_detach}"
+
+    client.tenant_detach(env.initial_tenant)
+    client.tenant_attach(env.initial_tenant)
+    wait_until_tenant_state(client, env.initial_tenant, "Active", 5)
+
+    timelines_after_detach = set(
+        map(
+            lambda t: TimelineId(t["timeline_id"]),
+            client.timeline_list(env.initial_tenant),
+        )
+    )
+
+    assert (
+        timelines_before_detach == timelines_after_detach
+    ), f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
+
+
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_empty_branch_remote_storage_upload_on_restart(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    """
+    Branches off a root branch, but does not write anything to the new branch, so
+    it has a metadata file only.
+
+    Ensures the branch is not on the remote storage and restarts the pageserver
+    — the upload should be scheduled by load, and create_timeline should await
+    for it even though it gets 409 Conflict.
+    """
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_empty_branch_remote_storage_upload_on_restart",
+    )
+
+    env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
+
+    client.configure_failpoints(("before-upload-index", "return"))
+
+    new_branch_timeline_id = TimelineId.generate()
+
+    with pytest.raises(ReadTimeout):
+        client.timeline_create(
+            tenant_id=env.initial_tenant,
+            ancestor_timeline_id=env.initial_timeline,
+            new_timeline_id=new_branch_timeline_id,
+            pg_version=env.pg_version,
+            timeout=4,
+        )
+
+    env.pageserver.allowed_errors.append(
+        f".*POST.* path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
+    )
+
+    # index upload is now hitting the failpoint, should not block the shutdown
+    env.pageserver.stop()
+
+    timeline_path = (
+        Path("tenants") / str(env.initial_tenant) / "timelines" / str(new_branch_timeline_id)
+    )
+
+    local_metadata = env.repo_dir / timeline_path / "metadata"
+    assert local_metadata.is_file(), "timeout cancelled timeline branching, not the upload"
+
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    new_branch_on_remote_storage = env.remote_storage.root / timeline_path
+    assert (
+        not new_branch_on_remote_storage.exists()
+    ), "failpoint should had prohibited index_part.json upload"
+
+    # during reconciliation we should had scheduled the uploads and on the
+    # retried create_timeline, we will await for those to complete on next
+    # client.timeline_create
+    env.pageserver.start(extra_env_vars={"FAILPOINTS": "before-upload-index=return"})
+
+    # sleep a bit to force the upload task go into exponential backoff
+    time.sleep(1)
+
+    q: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
+    barrier = threading.Barrier(2)
+
+    def create_in_background():
+        barrier.wait()
+        try:
+            client.timeline_create(
+                tenant_id=env.initial_tenant,
+                ancestor_timeline_id=env.initial_timeline,
+                new_timeline_id=new_branch_timeline_id,
+                pg_version=env.pg_version,
+            )
+            q.put(None)
+        except PageserverApiException as e:
+            q.put(e)
+
+    create_thread = threading.Thread(target=create_in_background)
+    create_thread.start()
+
+    try:
+        # maximize chances of actually waiting for the uploads by create_timeline
+        barrier.wait()
+
+        assert not new_branch_on_remote_storage.exists(), "failpoint should had stopped uploading"
+
+        client.configure_failpoints(("before-upload-index", "off"))
+        conflict = q.get()
+
+        assert conflict, "create_timeline should not have succeeded"
+        assert (
+            conflict.status_code == 409
+        ), "timeline was created before restart, and uploads scheduled during initial load, so we expect 409 conflict"
+
+        assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
+
+        assert (
+            new_branch_on_remote_storage / "index_part.json"
+        ).is_file(), "uploads scheduled during initial load should had been awaited for"
+    finally:
+        create_thread.join()
+
+
+def wait_upload_queue_empty(
+    client: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
+):
+    wait_until(
+        2,
+        1,
+        lambda: get_queued_count(
+            client, tenant_id, timeline_id, file_kind="layer", op_kind="upload"
+        )
+        == 0,
+    )
+    wait_until(
+        2,
+        1,
+        lambda: get_queued_count(
+            client, tenant_id, timeline_id, file_kind="index", op_kind="upload"
+        )
+        == 0,
+    )
+    wait_until(
+        2,
+        1,
+        lambda: get_queued_count(
+            client, tenant_id, timeline_id, file_kind="layer", op_kind="delete"
+        )
+        == 0,
+    )
+
+
+def get_queued_count(
+    client: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    file_kind: str,
+    op_kind: str,
+):
+    val = client.get_remote_timeline_client_metric(
+        "pageserver_remote_timeline_client_calls_unfinished",
+        tenant_id,
+        timeline_id,
+        file_kind,
+        op_kind,
+    )
+    if val is None:
+        return val
+    return int(val)
+
+
+def assert_nothing_to_upload(
+    client: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+):
+    """
+    Check last_record_lsn == remote_consistent_lsn. Assert works only for empty timelines, which
+    do not have anything to compact or gc.
+    """
+    detail = client.timeline_detail(tenant_id, timeline_id)
+    assert Lsn(detail["last_record_lsn"]) == Lsn(detail["remote_consistent_lsn"])
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.

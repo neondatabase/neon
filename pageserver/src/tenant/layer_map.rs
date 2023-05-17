@@ -48,7 +48,6 @@ mod layer_coverage;
 
 use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
-use crate::metrics::NUM_ONDISK_LAYERS;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
@@ -154,6 +153,8 @@ where
         expected: &Arc<L>,
         new: Arc<L>,
     ) -> anyhow::Result<Replacement<Arc<L>>> {
+        fail::fail_point!("layermap-replace-notfound", |_| Ok(Replacement::NotFound));
+
         self.layer_map.replace_historic_noflush(expected, new)
     }
 
@@ -273,6 +274,7 @@ where
     /// Helper function for BatchedUpdates::insert_historic
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
+        // TODO: See #3869, resulting #4088, attempted fix and repro #4094
         self.historic.insert(
             historic_layer_coverage::LayerKey::from(&*layer),
             Arc::clone(&layer),
@@ -281,8 +283,6 @@ where
         if Self::is_l0(&layer) {
             self.l0_delta_layers.push(layer);
         }
-
-        NUM_ONDISK_LAYERS.inc();
     }
 
     ///
@@ -307,8 +307,6 @@ where
                 "failed to locate removed historic layer from l0_delta_layers"
             );
         }
-
-        NUM_ONDISK_LAYERS.dec();
     }
 
     pub(self) fn replace_historic_noflush(
@@ -334,12 +332,15 @@ where
 
         let l0_index = if expected_l0 {
             // find the index in case replace worked, we need to replace that as well
-            Some(
-                self.l0_delta_layers
-                    .iter()
-                    .position(|slot| Self::compare_arced_layers(slot, expected))
-                    .ok_or_else(|| anyhow::anyhow!("existing l0 delta layer was not found"))?,
-            )
+            let pos = self
+                .l0_delta_layers
+                .iter()
+                .position(|slot| Self::compare_arced_layers(slot, expected));
+
+            if pos.is_none() {
+                return Ok(Replacement::NotFound);
+            }
+            pos
         } else {
             None
         };
@@ -731,16 +732,30 @@ where
         Ok(())
     }
 
+    /// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
+    ///
+    /// Returns `true` if the two `Arc` point to the same layer, false otherwise.
     #[inline(always)]
-    fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
-        // FIXME: ptr_eq might fail to return true for 'dyn' references because of multiple vtables
-        // can be created in compilation. Clippy complains about this. In practice it seems to
-        // work.
+    pub fn compare_arced_layers(left: &Arc<L>, right: &Arc<L>) -> bool {
+        // "dyn Trait" objects are "fat pointers" in that they have two components:
+        // - pointer to the object
+        // - pointer to the vtable
         //
-        // In future rust versions this might become Arc::as_ptr(left) as *const () ==
-        // Arc::as_ptr(right) as *const (), we could change to that before.
-        #[allow(clippy::vtable_address_comparisons)]
-        Arc::ptr_eq(left, right)
+        // rust does not provide a guarantee that these vtables are unique, but however
+        // `Arc::ptr_eq` as of writing (at least up to 1.67) uses a comparison where both the
+        // pointer and the vtable need to be equal.
+        //
+        // See: https://github.com/rust-lang/rust/issues/103763
+        //
+        // A future version of rust will most likely use this form below, where we cast each
+        // pointer into a pointer to unit, which drops the inaccessible vtable pointer, making it
+        // not affect the comparison.
+        //
+        // See: https://github.com/rust-lang/rust/pull/106450
+        let left = Arc::as_ptr(left) as *const ();
+        let right = Arc::as_ptr(right) as *const ();
+
+        left == right
     }
 }
 
@@ -784,6 +799,26 @@ mod tests {
             )
         }
 
+        #[test]
+        fn replacing_missing_l0_is_notfound() {
+            // original impl had an oversight, and L0 was an anyhow::Error. anyhow::Error should
+            // however only happen for precondition failures.
+
+            let layer = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000053423C21-0000000053424D69";
+            let layer = LayerFileName::from_str(layer).unwrap();
+            let layer = LayerDescriptor::from(layer);
+
+            // same skeletan construction; see scenario below
+            let not_found: Arc<dyn Layer> = Arc::new(layer.clone());
+            let new_version: Arc<dyn Layer> = Arc::new(layer);
+
+            let mut map = LayerMap::default();
+
+            let res = map.batch_update().replace_historic(&not_found, new_version);
+
+            assert!(matches!(res, Ok(Replacement::NotFound)), "{res:?}");
+        }
+
         fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
             let name = LayerFileName::from_str(layer_name).unwrap();
             let skeleton = LayerDescriptor::from(name);
@@ -793,7 +828,8 @@ mod tests {
 
             let mut map = LayerMap::default();
 
-            // two disjoint Arcs in different lifecycle phases.
+            // two disjoint Arcs in different lifecycle phases. even if it seems they must be the
+            // same layer, we use LayerMap::compare_arced_layers as the identity of layers.
             assert!(!LayerMap::compare_arced_layers(&remote, &downloaded));
 
             let expected_in_counts = (1, usize::from(expected_l0));

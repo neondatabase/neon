@@ -30,27 +30,29 @@
 //!             -b /usr/local/bin/postgres
 //! ```
 //!
+use std::collections::HashMap;
 use std::fs::File;
 use std::panic;
 use std::path::Path;
 use std::process::exit;
-use std::sync::{Arc, RwLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
 use tracing::{error, info};
+use url::Url;
 
-use compute_tools::compute::{ComputeMetrics, ComputeNode, ComputeState, ComputeStatus};
+use compute_api::responses::ComputeStatus;
+
+use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
+use compute_tools::configurator::launch_configurator;
 use compute_tools::http::api::launch_http_server;
-use compute_tools::informant::spawn_vm_informant_if_present;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
-use compute_tools::pg_helpers::*;
 use compute_tools::spec::*;
-use url::Url;
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
@@ -63,86 +65,157 @@ fn main() -> Result<()> {
     let connstr = matches
         .get_one::<String>("connstr")
         .expect("Postgres connection string is required");
-    let spec = matches.get_one::<String>("spec");
+    let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
 
-    // Try to use just 'postgres' if no path is provided
-    let pgbin = matches.get_one::<String>("pgbin").unwrap();
-
-    let spec: ComputeSpec = match spec {
-        // First, try to get cluster spec from the cli argument
-        Some(json) => serde_json::from_str(json)?,
-        None => {
-            // Second, try to read it from the file if path is provided
-            if let Some(sp) = spec_path {
-                let path = Path::new(sp);
-                let file = File::open(path)?;
-                serde_json::from_reader(file)?
-            } else {
-                panic!("cluster spec should be provided via --spec or --spec-path argument");
-            }
-        }
-    };
-
-    // Extract OpenTelemetry context for the startup actions from the spec, and
-    // attach it to the current tracing context.
+    // Extract OpenTelemetry context for the startup actions from the
+    // TRACEPARENT and TRACESTATE env variables, and attach it to the current
+    // tracing context.
     //
     // This is used to propagate the context for the 'start_compute' operation
     // from the neon control plane. This allows linking together the wider
     // 'start_compute' operation that creates the compute container, with the
     // startup actions here within the container.
     //
+    // There is no standard for passing context in env variables, but a lot of
+    // tools use TRACEPARENT/TRACESTATE, so we use that convention too. See
+    // https://github.com/open-telemetry/opentelemetry-specification/issues/740
+    //
     // Switch to the startup context here, and exit it once the startup has
     // completed and Postgres is up and running.
+    //
+    // If this pod is pre-created without binding it to any particular endpoint
+    // yet, this isn't the right place to enter the startup context. In that
+    // case, the control plane should pass the tracing context as part of the
+    // /configure API call.
     //
     // NOTE: This is supposed to only cover the *startup* actions. Once
     // postgres is configured and up-and-running, we exit this span. Any other
     // actions that are performed on incoming HTTP requests, for example, are
     // performed in separate spans.
-    let startup_context_guard = if let Some(ref carrier) = spec.startup_tracing_context {
+    //
+    // XXX: If the pod is restarted, we perform the startup actions in the same
+    // context as the original startup actions, which probably doesn't make
+    // sense.
+    let mut startup_tracing_carrier: HashMap<String, String> = HashMap::new();
+    if let Ok(val) = std::env::var("TRACEPARENT") {
+        startup_tracing_carrier.insert("traceparent".to_string(), val);
+    }
+    if let Ok(val) = std::env::var("TRACESTATE") {
+        startup_tracing_carrier.insert("tracestate".to_string(), val);
+    }
+    let startup_context_guard = if !startup_tracing_carrier.is_empty() {
         use opentelemetry::propagation::TextMapPropagator;
         use opentelemetry::sdk::propagation::TraceContextPropagator;
-        Some(TraceContextPropagator::new().extract(carrier).attach())
+        let guard = TraceContextPropagator::new()
+            .extract(&startup_tracing_carrier)
+            .attach();
+        info!("startup tracing context attached");
+        Some(guard)
     } else {
         None
     };
 
-    let pageserver_connstr = spec
-        .cluster
-        .settings
-        .find("neon.pageserver_connstring")
-        .expect("pageserver connstr should be provided");
-    let tenant = spec
-        .cluster
-        .settings
-        .find("neon.tenant_id")
-        .expect("tenant id should be provided");
-    let timeline = spec
-        .cluster
-        .settings
-        .find("neon.timeline_id")
-        .expect("tenant id should be provided");
+    let compute_id = matches.get_one::<String>("compute-id");
+    let control_plane_uri = matches.get_one::<String>("control-plane-uri");
 
-    let compute_state = ComputeNode {
-        start_time: Utc::now(),
+    // Try to use just 'postgres' if no path is provided
+    let pgbin = matches.get_one::<String>("pgbin").unwrap();
+
+    let spec;
+    let mut live_config_allowed = false;
+    match spec_json {
+        // First, try to get cluster spec from the cli argument
+        Some(json) => {
+            spec = Some(serde_json::from_str(json)?);
+        }
+        None => {
+            // Second, try to read it from the file if path is provided
+            if let Some(sp) = spec_path {
+                let path = Path::new(sp);
+                let file = File::open(path)?;
+                spec = Some(serde_json::from_reader(file)?);
+            } else if let Some(id) = compute_id {
+                if let Some(cp_base) = control_plane_uri {
+                    live_config_allowed = true;
+                    spec = match get_spec_from_control_plane(cp_base, id) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!("cannot get response from control plane: {}", e);
+                            panic!("neither spec nor confirmation that compute is in the Empty state was received");
+                        }
+                    };
+                } else {
+                    panic!("must specify both --control-plane-uri and --compute-id or none");
+                }
+            } else {
+                panic!(
+                    "compute spec should be provided by one of the following ways: \
+                    --spec OR --spec-path OR --control-plane-uri and --compute-id"
+                );
+            }
+        }
+    };
+
+    let mut new_state = ComputeState::new();
+    let spec_set;
+    if let Some(spec) = spec {
+        let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
+        new_state.pspec = Some(pspec);
+        spec_set = true;
+    } else {
+        spec_set = false;
+    }
+    let compute_node = ComputeNode {
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
-        spec,
-        tenant,
-        timeline,
-        pageserver_connstr,
-        metrics: ComputeMetrics::default(),
-        state: RwLock::new(ComputeState::new()),
+        live_config_allowed,
+        state: Mutex::new(new_state),
+        state_changed: Condvar::new(),
     };
-    let compute = Arc::new(compute_state);
+    let compute = Arc::new(compute_node);
 
-    // Launch service threads first, so we were able to serve availability
+    // Launch http service first, so we were able to serve control-plane
     // requests, while configuration is still in progress.
     let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
+
+    if !spec_set {
+        // No spec provided, hang waiting for it.
+        info!("no compute spec provided, waiting");
+        let mut state = compute.state.lock().unwrap();
+        while state.status != ComputeStatus::ConfigurationPending {
+            state = compute.state_changed.wait(state).unwrap();
+
+            if state.status == ComputeStatus::ConfigurationPending {
+                info!("got spec, continue configuration");
+                // Spec is already set by the http server handler.
+                break;
+            }
+        }
+    }
+
+    // We got all we need, update the state.
+    let mut state = compute.state.lock().unwrap();
+
+    // Record for how long we slept waiting for the spec.
+    state.metrics.wait_for_spec_ms = Utc::now()
+        .signed_duration_since(state.start_time)
+        .to_std()
+        .unwrap()
+        .as_millis() as u64;
+    // Reset start time to the actual start of the configuration, so that
+    // total startup time was properly measured at the end.
+    state.start_time = Utc::now();
+
+    state.status = ComputeStatus::Init;
+    compute.state_changed.notify_all();
+    drop(state);
+
+    // Launch remaining service threads
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
-    // Also spawn the thread responsible for handling the VM informant -- if it's present
-    let _vm_informant_handle = spawn_vm_informant_if_present().expect("cannot launch VM informant");
+    let _configurator_handle =
+        launch_configurator(&compute).expect("cannot launch configurator thread");
 
     // Start Postgres
     let mut delay_exit = false;
@@ -151,7 +224,7 @@ fn main() -> Result<()> {
         Ok(pg) => Some(pg),
         Err(err) => {
             error!("could not start the compute node: {:?}", err);
-            let mut state = compute.state.write().unwrap();
+            let mut state = compute.state.lock().unwrap();
             state.error = Some(format!("{:?}", err));
             state.status = ComputeStatus::Failed;
             drop(state);
@@ -182,13 +255,29 @@ fn main() -> Result<()> {
     if delay_exit {
         info!("giving control plane 30s to collect the error before shutdown");
         thread::sleep(Duration::from_secs(30));
-        info!("shutting down");
     }
 
     // Shutdown trace pipeline gracefully, so that it has a chance to send any
-    // pending traces before we exit.
-    tracing_utils::shutdown_tracing();
+    // pending traces before we exit. Shutting down OTEL tracing provider may
+    // hang for quite some time, see, for example:
+    // - https://github.com/open-telemetry/opentelemetry-rust/issues/868
+    // - and our problems with staging https://github.com/neondatabase/cloud/issues/3707#issuecomment-1493983636
+    //
+    // Yet, we want computes to shut down fast enough, as we may need a new one
+    // for the same timeline ASAP. So wait no longer than 2s for the shutdown to
+    // complete, then just error out and exit the main thread.
+    info!("shutting down tracing");
+    let (sender, receiver) = mpsc::channel();
+    let _ = thread::spawn(move || {
+        tracing_utils::shutdown_tracing();
+        sender.send(()).ok()
+    });
+    let shutdown_res = receiver.recv_timeout(Duration::from_millis(2000));
+    if shutdown_res.is_err() {
+        error!("timed out while shutting down tracing, exiting anyway");
+    }
 
+    info!("shutting down");
     exit(exit_code.unwrap_or(1))
 }
 
@@ -229,6 +318,18 @@ fn cli() -> clap::Command {
                 .short('S')
                 .long("spec-path")
                 .value_name("SPEC_PATH"),
+        )
+        .arg(
+            Arg::new("compute-id")
+                .short('i')
+                .long("compute-id")
+                .value_name("COMPUTE_ID"),
+        )
+        .arg(
+            Arg::new("control-plane-uri")
+                .short('p')
+                .long("control-plane-uri")
+                .value_name("CONTROL_PLANE_API_BASE_URI"),
         )
 }
 

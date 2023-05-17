@@ -3,7 +3,8 @@ import time
 import psutil
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder, PageserverApiException
+from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.types import TenantId
 
 
@@ -23,7 +24,7 @@ def assert_child_processes(pageserver_pid, wal_redo_present=False, defunct_prese
 def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     # We intentionally test for a non-existent tenant.
-    env.pageserver.allowed_errors.append(".*Tenant not found.*")
+    env.pageserver.allowed_errors.append(".*NotFound: tenant.*")
     pageserver_http = env.pageserver.http_client()
 
     pagserver_pid = int((env.repo_dir / "pageserver.pid").read_text())
@@ -34,7 +35,7 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
     tenant_id = TenantId.generate()
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Tenant not found for id {tenant_id}",
+        match=f"NotFound: tenant {tenant_id}",
     ):
         pageserver_http.tenant_detach(tenant_id)
 
@@ -44,9 +45,9 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
     # assert tenant exists on disk
     assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
-    pg = env.postgres.create_start("main", tenant_id=tenant_id)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 
-    pg_conn = pg.connect()
+    pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in

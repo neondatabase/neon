@@ -23,7 +23,7 @@ pub enum IdError {
 struct Id([u8; 16]);
 
 impl Id {
-    pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> Id {
+    pub fn get_from_buf(buf: &mut impl bytes::Buf) -> Id {
         let mut arr = [0u8; 16];
         buf.copy_to_slice(&mut arr);
         Id::from(arr)
@@ -112,7 +112,7 @@ impl fmt::Debug for Id {
 macro_rules! id_newtype {
     ($t:ident) => {
         impl $t {
-            pub fn get_from_buf(buf: &mut dyn bytes::Buf) -> $t {
+            pub fn get_from_buf(buf: &mut impl bytes::Buf) -> $t {
                 $t(Id::get_from_buf(buf))
             }
 
@@ -262,6 +262,26 @@ impl TenantTimelineId {
 impl fmt::Display for TenantTimelineId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}/{}", self.tenant_id, self.timeline_id)
+    }
+}
+
+impl FromStr for TenantTimelineId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.split('/');
+        let tenant_id = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("TenantTimelineId must contain tenant_id"))?
+            .parse()?;
+        let timeline_id = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("TenantTimelineId must contain timeline_id"))?
+            .parse()?;
+        if parts.next().is_some() {
+            anyhow::bail!("TenantTimelineId must contain only tenant_id and timeline_id");
+        }
+        Ok(TenantTimelineId::new(tenant_id, timeline_id))
     }
 }
 

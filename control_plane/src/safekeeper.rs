@@ -1,7 +1,6 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::Arc;
 use std::{io, result};
 
 use anyhow::Context;
@@ -11,7 +10,6 @@ use reqwest::{IntoUrl, Method};
 use thiserror::Error;
 use utils::{http::error::HttpErrorBody, id::NodeId};
 
-use crate::pageserver::PageServerNode;
 use crate::{
     background_process,
     local_env::{LocalEnv, SafekeeperConf},
@@ -65,14 +63,10 @@ pub struct SafekeeperNode {
     pub env: LocalEnv,
     pub http_client: Client,
     pub http_base_url: String,
-
-    pub pageserver: Arc<PageServerNode>,
 }
 
 impl SafekeeperNode {
     pub fn from_env(env: &LocalEnv, conf: &SafekeeperConf) -> SafekeeperNode {
-        let pageserver = Arc::new(PageServerNode::from_env(env));
-
         SafekeeperNode {
             id: conf.id,
             conf: conf.clone(),
@@ -80,7 +74,6 @@ impl SafekeeperNode {
             env: env.clone(),
             http_client: Client::new(),
             http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
-            pageserver,
         }
     }
 
@@ -115,6 +108,10 @@ impl SafekeeperNode {
         let datadir = self.datadir_path();
 
         let id_string = id.to_string();
+        // TODO: add availability_zone to the config.
+        // Right now we just specify any value here and use it to check metrics in tests.
+        let availability_zone = format!("sk-{}", id_string);
+
         let mut args = vec![
             "-D",
             datadir.to_str().with_context(|| {
@@ -126,6 +123,8 @@ impl SafekeeperNode {
             &listen_pg,
             "--listen-http",
             &listen_http,
+            "--availability-zone",
+            &availability_zone,
         ];
         if !self.conf.sync {
             args.push("--no-sync");
@@ -157,7 +156,7 @@ impl SafekeeperNode {
         }
 
         background_process::start_process(
-            &format!("safekeeper {id}"),
+            &format!("safekeeper-{id}"),
             &datadir,
             &self.env.safekeeper_bin(),
             &args,

@@ -2,72 +2,138 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
-use anyhow::anyhow;
-use anyhow::Context;
-
-use bytes::BytesMut;
-use tracing::*;
-use utils::lsn::Lsn;
-use utils::postgres_backend_async::QueryError;
-
-use crate::safekeeper::ServerInfo;
-use crate::timeline::Timeline;
-use crate::GlobalTimelines;
-
-use std::net::SocketAddr;
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Receiver;
-
-use std::sync::Arc;
-use std::thread;
-
+use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
+use crate::safekeeper::ServerInfo;
+use crate::timeline::Timeline;
+use crate::wal_service::ConnectionId;
+use crate::GlobalTimelines;
+use anyhow::{anyhow, Context};
+use bytes::BytesMut;
+use postgres_backend::CopyStreamHandlerEnd;
+use postgres_backend::PostgresBackend;
+use postgres_backend::PostgresBackendReader;
+use postgres_backend::QueryError;
+use pq_proto::BeMessage;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::thread;
+use std::thread::JoinHandle;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
+use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
+use tokio::task::spawn_blocking;
+use tokio::time::Duration;
+use tokio::time::Instant;
+use tracing::*;
+use utils::id::TenantTimelineId;
+use utils::lsn::Lsn;
 
-use crate::handler::SafekeeperPostgresHandler;
-use pq_proto::{BeMessage, FeMessage};
-use utils::{postgres_backend::PostgresBackend, sock_split::ReadStream};
+const MSG_QUEUE_SIZE: usize = 256;
+const REPLY_QUEUE_SIZE: usize = 16;
 
-pub struct ReceiveWalConn<'pg> {
-    /// Postgres connection
-    pg_backend: &'pg mut PostgresBackend,
-    /// The cached result of `pg_backend.socket().peer_addr()` (roughly)
-    peer_addr: SocketAddr,
-}
-
-impl<'pg> ReceiveWalConn<'pg> {
-    pub fn new(pg: &'pg mut PostgresBackend) -> ReceiveWalConn<'pg> {
-        let peer_addr = *pg.get_peer_addr();
-        ReceiveWalConn {
-            pg_backend: pg,
-            peer_addr,
+impl SafekeeperPostgresHandler {
+    /// Wrapper around handle_start_wal_push_guts handling result. Error is
+    /// handled here while we're still in walreceiver ttid span; with API
+    /// extension, this can probably be moved into postgres_backend.
+    pub async fn handle_start_wal_push<IO: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+    ) -> Result<(), QueryError> {
+        if let Err(end) = self.handle_start_wal_push_guts(pgb).await {
+            // Log the result and probably send it to the client, closing the stream.
+            pgb.handle_copy_stream_end(end).await;
         }
-    }
-
-    // Send message to the postgres
-    fn write_msg(&mut self, msg: &AcceptorProposerMessage) -> anyhow::Result<()> {
-        let mut buf = BytesMut::with_capacity(128);
-        msg.serialize(&mut buf)?;
-        self.pg_backend.write_message(&BeMessage::CopyData(&buf))?;
         Ok(())
     }
 
-    /// Receive WAL from wal_proposer
-    pub fn run(&mut self, spg: &mut SafekeeperPostgresHandler) -> Result<(), QueryError> {
-        let _enter = info_span!("WAL acceptor", ttid = %spg.ttid).entered();
-
+    pub async fn handle_start_wal_push_guts<IO: AsyncRead + AsyncWrite + Unpin>(
+        &mut self,
+        pgb: &mut PostgresBackend<IO>,
+    ) -> Result<(), CopyStreamHandlerEnd> {
         // Notify the libpq client that it's allowed to send `CopyData` messages
-        self.pg_backend
-            .write_message(&BeMessage::CopyBothResponse)?;
+        pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
-        let r = self
-            .pg_backend
-            .take_stream_in()
-            .ok_or_else(|| anyhow!("failed to take read stream from pgbackend"))?;
-        let mut poll_reader = ProposerPollStream::new(r)?;
+        // Experiments [1] confirm that doing network IO in one (this) thread and
+        // processing with disc IO in another significantly improves
+        // performance; we spawn off WalAcceptor thread for message processing
+        // to this end.
+        //
+        // [1] https://github.com/neondatabase/neon/pull/1318
+        let (msg_tx, msg_rx) = channel(MSG_QUEUE_SIZE);
+        let (reply_tx, reply_rx) = channel(REPLY_QUEUE_SIZE);
+        let mut acceptor_handle: Option<JoinHandle<anyhow::Result<()>>> = None;
 
-        // Receive information about server
-        let next_msg = poll_reader.recv_msg()?;
+        // Concurrently receive and send data; replies are not synchronized with
+        // sends, so this avoids deadlocks.
+        let mut pgb_reader = pgb.split().context("START_WAL_PUSH split")?;
+        let peer_addr = *pgb.get_peer_addr();
+        let network_reader = NetworkReader {
+            ttid: self.ttid,
+            conn_id: self.conn_id,
+            pgb_reader: &mut pgb_reader,
+            peer_addr,
+            acceptor_handle: &mut acceptor_handle,
+        };
+        let res = tokio::select! {
+            // todo: add read|write .context to these errors
+            r = network_reader.run(msg_tx, msg_rx, reply_tx) => r,
+            r = network_write(pgb, reply_rx) => r,
+        };
+
+        // Join pg backend back.
+        pgb.unsplit(pgb_reader)?;
+
+        // Join the spawned WalAcceptor. At this point chans to/from it passed
+        // to network routines are dropped, so it will exit as soon as it
+        // touches them.
+        match acceptor_handle {
+            None => {
+                // failed even before spawning; read_network should have error
+                Err(res.expect_err("no error with WalAcceptor not spawn"))
+            }
+            Some(handle) => {
+                let wal_acceptor_res = handle.join();
+
+                // If there was any network error, return it.
+                res?;
+
+                // Otherwise, WalAcceptor thread must have errored.
+                match wal_acceptor_res {
+                    Ok(Ok(_)) => Ok(()), // can't happen currently; would be if we add graceful termination
+                    Ok(Err(e)) => Err(CopyStreamHandlerEnd::Other(e.context("WAL acceptor"))),
+                    Err(_) => Err(CopyStreamHandlerEnd::Other(anyhow!(
+                        "WalAcceptor thread panicked",
+                    ))),
+                }
+            }
+        }
+    }
+}
+
+struct NetworkReader<'a, IO> {
+    ttid: TenantTimelineId,
+    conn_id: ConnectionId,
+    pgb_reader: &'a mut PostgresBackendReader<IO>,
+    peer_addr: SocketAddr,
+    // WalAcceptor is spawned when we learn server info from walproposer and
+    // create timeline; handle is put here.
+    acceptor_handle: &'a mut Option<JoinHandle<anyhow::Result<()>>>,
+}
+
+impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
+    async fn run(
+        self,
+        msg_tx: Sender<ProposerAcceptorMessage>,
+        msg_rx: Receiver<ProposerAcceptorMessage>,
+        reply_tx: Sender<AcceptorProposerMessage>,
+    ) -> Result<(), CopyStreamHandlerEnd> {
+        // Receive information about server to create timeline, if not yet.
+        let next_msg = read_message(self.pgb_reader).await?;
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
@@ -79,127 +145,174 @@ impl<'pg> ReceiveWalConn<'pg> {
                     system_id: greeting.system_id,
                     wal_seg_size: greeting.wal_seg_size,
                 };
-                GlobalTimelines::create(spg.ttid, server_info, Lsn::INVALID, Lsn::INVALID)?
+                GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID).await?
             }
             _ => {
-                return Err(QueryError::Other(anyhow::anyhow!(
+                return Err(CopyStreamHandlerEnd::Other(anyhow::anyhow!(
                     "unexpected message {next_msg:?} instead of greeting"
                 )))
             }
         };
 
-        let mut next_msg = Some(next_msg);
+        *self.acceptor_handle = Some(
+            WalAcceptor::spawn(tli.clone(), msg_rx, reply_tx, self.conn_id)
+                .context("spawn WalAcceptor thread")?,
+        );
 
-        let mut first_time_through = true;
-        let mut _guard: Option<ComputeConnectionGuard> = None;
-        loop {
-            if matches!(next_msg, Some(ProposerAcceptorMessage::AppendRequest(_))) {
-                // poll AppendRequest's without blocking and write WAL to disk without flushing,
-                // while it's readily available
-                while let Some(ProposerAcceptorMessage::AppendRequest(append_request)) = next_msg {
-                    let msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
+        // Forward all messages to WalAcceptor
+        read_network_loop(self.pgb_reader, msg_tx, next_msg).await
+    }
+}
 
-                    let reply = tli.process_msg(&msg)?;
-                    if let Some(reply) = reply {
-                        self.write_msg(&reply)?;
-                    }
+/// Read next message from walproposer.
+/// TODO: Return Ok(None) on graceful termination.
+async fn read_message<IO: AsyncRead + AsyncWrite + Unpin>(
+    pgb_reader: &mut PostgresBackendReader<IO>,
+) -> Result<ProposerAcceptorMessage, CopyStreamHandlerEnd> {
+    let copy_data = pgb_reader.read_copy_message().await?;
+    let msg = ProposerAcceptorMessage::parse(copy_data)?;
+    Ok(msg)
+}
 
-                    next_msg = poll_reader.poll_msg();
-                }
+async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
+    pgb_reader: &mut PostgresBackendReader<IO>,
+    msg_tx: Sender<ProposerAcceptorMessage>,
+    mut next_msg: ProposerAcceptorMessage,
+) -> Result<(), CopyStreamHandlerEnd> {
+    loop {
+        if msg_tx.send(next_msg).await.is_err() {
+            return Ok(()); // chan closed, WalAcceptor terminated
+        }
+        next_msg = read_message(pgb_reader).await?;
+    }
+}
 
-                // flush all written WAL to the disk
-                let reply = tli.process_msg(&ProposerAcceptorMessage::FlushWAL)?;
-                if let Some(reply) = reply {
-                    self.write_msg(&reply)?;
-                }
-            } else if let Some(msg) = next_msg.take() {
-                // process other message
-                let reply = tli.process_msg(&msg)?;
-                if let Some(reply) = reply {
-                    self.write_msg(&reply)?;
-                }
+/// Read replies from WalAcceptor and pass them back to socket. Returns Ok(())
+/// if reply_rx closed; it must mean WalAcceptor terminated, joining it should
+/// tell the error.
+async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
+    pgb_writer: &mut PostgresBackend<IO>,
+    mut reply_rx: Receiver<AcceptorProposerMessage>,
+) -> Result<(), CopyStreamHandlerEnd> {
+    let mut buf = BytesMut::with_capacity(128);
+
+    loop {
+        match reply_rx.recv().await {
+            Some(msg) => {
+                buf.clear();
+                msg.serialize(&mut buf)?;
+                pgb_writer.write_message(&BeMessage::CopyData(&buf)).await?;
             }
-            if first_time_through {
-                // Register the connection and defer unregister. Do that only
-                // after processing first message, as it sets wal_seg_size,
-                // wanted by many.
-                tli.on_compute_connect()?;
-                _guard = Some(ComputeConnectionGuard {
-                    timeline: Arc::clone(&tli),
-                });
-                first_time_through = false;
-            }
-
-            // blocking wait for the next message
-            if next_msg.is_none() {
-                next_msg = Some(poll_reader.recv_msg()?);
-            }
+            None => return Ok(()), // chan closed, WalAcceptor terminated
         }
     }
 }
 
-struct ProposerPollStream {
+// Send keepalive messages to walproposer, to make sure it receives updates
+// even when it writes a steady stream of messages.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Takes messages from msg_rx, processes and pushes replies to reply_tx.
+struct WalAcceptor {
+    tli: Arc<Timeline>,
     msg_rx: Receiver<ProposerAcceptorMessage>,
-    read_thread: Option<thread::JoinHandle<Result<(), QueryError>>>,
+    reply_tx: Sender<AcceptorProposerMessage>,
 }
 
-impl ProposerPollStream {
-    fn new(mut r: ReadStream) -> anyhow::Result<Self> {
-        let (msg_tx, msg_rx) = channel();
+impl WalAcceptor {
+    /// Spawn thread with WalAcceptor running, return handle to it.
+    fn spawn(
+        tli: Arc<Timeline>,
+        msg_rx: Receiver<ProposerAcceptorMessage>,
+        reply_tx: Sender<AcceptorProposerMessage>,
+        conn_id: ConnectionId,
+    ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+        let thread_name = format!("WAL acceptor {}", tli.ttid);
+        thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || -> anyhow::Result<()> {
+                let mut wa = WalAcceptor {
+                    tli,
+                    msg_rx,
+                    reply_tx,
+                };
 
-        let read_thread = thread::Builder::new()
-            .name("Read WAL thread".into())
-            .spawn(move || -> Result<(), QueryError> {
-                loop {
-                    let copy_data = match FeMessage::read(&mut r)? {
-                        Some(FeMessage::CopyData(bytes)) => Ok(bytes),
-                        Some(msg) => Err(QueryError::Other(anyhow::anyhow!(
-                            "expected `CopyData` message, found {msg:?}"
-                        ))),
-                        None => Err(QueryError::from(std::io::Error::new(
-                            std::io::ErrorKind::ConnectionAborted,
-                            "walproposer closed the connection",
-                        ))),
-                    }?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
 
-                    let msg = ProposerAcceptorMessage::parse(copy_data)?;
-                    msg_tx
-                        .send(msg)
-                        .context("Failed to send the proposer message")?;
-                }
-                // msg_tx will be dropped here, this will also close msg_rx
-            })?;
-
-        Ok(Self {
-            msg_rx,
-            read_thread: Some(read_thread),
-        })
+                let span_ttid = wa.tli.ttid; // satisfy borrow checker
+                runtime.block_on(
+                    wa.run()
+                        .instrument(info_span!("WAL acceptor", cid = %conn_id, ttid = %span_ttid)),
+                )
+            })
+            .map_err(anyhow::Error::from)
     }
 
-    fn recv_msg(&mut self) -> Result<ProposerAcceptorMessage, QueryError> {
-        self.msg_rx.recv().map_err(|_| {
-            // return error from the read thread
-            let res = match self.read_thread.take() {
-                Some(thread) => thread.join(),
-                None => return QueryError::Other(anyhow::anyhow!("read thread is gone")),
+    /// The main loop. Returns Ok(()) if either msg_rx or reply_tx got closed;
+    /// it must mean that network thread terminated.
+    async fn run(&mut self) -> anyhow::Result<()> {
+        // Register the connection and defer unregister.
+        self.tli.on_compute_connect().await?;
+        let _guard = ComputeConnectionGuard {
+            timeline: Arc::clone(&self.tli),
+        };
+
+        // After this timestamp we will stop processing AppendRequests and send a response
+        // to the walproposer. walproposer sends at least one AppendRequest per second,
+        // we will send keepalives by replying to these requests once per second.
+        let mut next_keepalive = Instant::now();
+
+        loop {
+            let opt_msg = self.msg_rx.recv().await;
+            if opt_msg.is_none() {
+                return Ok(()); // chan closed, streaming terminated
+            }
+            let mut next_msg = opt_msg.unwrap();
+
+            let reply_msg = if matches!(next_msg, ProposerAcceptorMessage::AppendRequest(_)) {
+                // loop through AppendRequest's while it's readily available to
+                // write as many WAL as possible without fsyncing
+                //
+                // Note: this will need to be rewritten if we want to read non-AppendRequest messages here.
+                // Otherwise, we might end up in a situation where we read a message, but don't
+                // process it.
+                while let ProposerAcceptorMessage::AppendRequest(append_request) = next_msg {
+                    let noflush_msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
+
+                    if let Some(reply) = self.tli.process_msg(&noflush_msg)? {
+                        if self.reply_tx.send(reply).await.is_err() {
+                            return Ok(()); // chan closed, streaming terminated
+                        }
+                    }
+
+                    // get out of this loop if keepalive time is reached
+                    if Instant::now() >= next_keepalive {
+                        break;
+                    }
+
+                    match self.msg_rx.try_recv() {
+                        Ok(msg) => next_msg = msg,
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => return Ok(()), // chan closed, streaming terminated
+                    }
+                }
+
+                // flush all written WAL to the disk
+                self.tli.process_msg(&ProposerAcceptorMessage::FlushWAL)?
+            } else {
+                // process message other than AppendRequest
+                self.tli.process_msg(&next_msg)?
             };
 
-            match res {
-                Ok(Ok(())) => {
-                    QueryError::Other(anyhow::anyhow!("unexpected result from read thread"))
+            if let Some(reply) = reply_msg {
+                if self.reply_tx.send(reply).await.is_err() {
+                    return Ok(()); // chan closed, streaming terminated
                 }
-                Err(err) => QueryError::Other(anyhow::anyhow!("read thread panicked: {err:?}")),
-                Ok(Err(err)) => err,
+                // reset keepalive time
+                next_keepalive = Instant::now() + KEEPALIVE_INTERVAL;
             }
-        })
-    }
-
-    fn poll_msg(&mut self) -> Option<ProposerAcceptorMessage> {
-        let res = self.msg_rx.try_recv();
-
-        match res {
-            Err(_) => None,
-            Ok(msg) => Some(msg),
         }
     }
 }
@@ -210,8 +323,13 @@ struct ComputeConnectionGuard {
 
 impl Drop for ComputeConnectionGuard {
     fn drop(&mut self) {
-        if let Err(e) = self.timeline.on_compute_disconnect() {
-            error!("failed to unregister compute connection: {}", e);
-        }
+        let tli = self.timeline.clone();
+        // tokio forbids to call blocking_send inside the runtime, and see
+        // comments in on_compute_disconnect why we call blocking_send.
+        spawn_blocking(move || {
+            if let Err(e) = tli.on_compute_disconnect() {
+                error!("failed to unregister compute connection: {}", e);
+            }
+        });
     }
 }

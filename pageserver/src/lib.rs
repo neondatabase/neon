@@ -4,6 +4,7 @@ pub mod broker_client;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;
+pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub mod keyspace;
@@ -12,6 +13,7 @@ pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
 pub mod repository;
+pub(crate) mod statvfs;
 pub mod task_mgr;
 pub mod tenant;
 pub mod trace;
@@ -41,6 +43,8 @@ pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;
 pub const DELTA_FILE_MAGIC: u16 = 0x5A61;
 
 static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
+
+pub use crate::metrics::preinitialize_metrics;
 
 pub async fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint task. This prevents new connections from

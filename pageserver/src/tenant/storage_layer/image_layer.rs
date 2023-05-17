@@ -53,7 +53,7 @@ use utils::{
 };
 
 use super::filename::{ImageFileName, LayerFileName};
-use super::{Layer, LayerAccessStatsReset, LayerIter, LayerResidenceStatus, PathOrConf};
+use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf};
 
 ///
 /// Header stored in the beginning of the file
@@ -119,8 +119,10 @@ pub struct ImageLayer {
 
 impl std::fmt::Debug for ImageLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use super::RangeDisplayDebug;
+
         f.debug_struct("ImageLayer")
-            .field("key_range", &self.key_range)
+            .field("key_range", &RangeDisplayDebug(&self.key_range))
             .field("file_size", &self.file_size)
             .field("lsn", &self.lsn)
             .field("inner", &self.inner)
@@ -250,14 +252,14 @@ impl PersistentLayer for ImageLayer {
         unimplemented!();
     }
 
-    fn delete(&self) -> Result<()> {
+    fn delete_resident_layer_file(&self) -> Result<()> {
         // delete underlying file
         fs::remove_file(self.path())?;
         Ok(())
     }
 
-    fn file_size(&self) -> Option<u64> {
-        Some(self.file_size)
+    fn file_size(&self) -> u64 {
+        self.file_size
     }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
@@ -266,10 +268,10 @@ impl PersistentLayer for ImageLayer {
 
         HistoricLayerInfo::Image {
             layer_file_name,
-            layer_file_size: Some(self.file_size),
+            layer_file_size: self.file_size,
             lsn_start: lsn_range.start,
             remote: false,
-            access_stats: self.access_stats.to_api_model(reset),
+            access_stats: self.access_stats.as_api_model(reset),
         }
     }
 
@@ -436,7 +438,7 @@ impl ImageLayer {
             key_range: summary.key_range,
             lsn: summary.lsn,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::for_loading_layer(LayerResidenceStatus::Resident),
+            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
                 loaded: false,
@@ -596,7 +598,7 @@ impl ImageLayerWriterInner {
             key_range: self.key_range.clone(),
             lsn: self.lsn,
             file_size: metadata.len(),
-            access_stats: LayerAccessStats::for_new_layer_file(),
+            access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
                 file: None,

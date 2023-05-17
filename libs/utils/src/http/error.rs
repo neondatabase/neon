@@ -20,6 +20,9 @@ pub enum ApiError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Precondition failed: {0}")]
+    PreconditionFailed(&'static str),
+
     #[error(transparent)]
     InternalServerError(anyhow::Error),
 }
@@ -44,6 +47,10 @@ impl ApiError {
             ApiError::Conflict(_) => {
                 HttpErrorBody::response_from_msg_and_status(self.to_string(), StatusCode::CONFLICT)
             }
+            ApiError::PreconditionFailed(_) => HttpErrorBody::response_from_msg_and_status(
+                self.to_string(),
+                StatusCode::PRECONDITION_FAILED,
+            ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),
                 StatusCode::INTERNAL_SERVER_ERROR,

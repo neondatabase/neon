@@ -15,9 +15,9 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 def test_large_schema(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    pg = env.postgres.create_start("main")
+    endpoint = env.endpoints.create_start("main")
 
-    conn = pg.connect()
+    conn = endpoint.connect()
     cur = conn.cursor()
 
     tables = 2  # 10 is too much for debug build
@@ -27,18 +27,18 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
 
         # Restart compute. Restart is actually not strictly needed.
         # It is done mostly because this test originally tries to model the problem reported by Ketteq.
-        pg.stop()
+        endpoint.stop()
         # Kill and restart the pageserver.
         # env.pageserver.stop(immediate=True)
         # env.pageserver.start()
-        pg.start()
+        endpoint.start()
 
         retry_sleep = 0.5
         max_retries = 200
         retries = 0
         while True:
             try:
-                conn = pg.connect()
+                conn = endpoint.connect()
                 cur = conn.cursor()
                 cur.execute(f"CREATE TABLE if not exists t_{i}(pk integer) partition by range (pk)")
                 for j in range(1, partitions + 1):
@@ -63,7 +63,7 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
                     raise
             break
 
-    conn = pg.connect()
+    conn = endpoint.connect()
     cur = conn.cursor()
 
     for i in range(1, tables + 1):
@@ -74,8 +74,8 @@ def test_large_schema(neon_env_builder: NeonEnvBuilder):
     cur.execute("select * from pg_depend order by refclassid, refobjid, refobjsubid")
 
     # Check layer file sizes
-    tenant_id = pg.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = pg.safe_psql("show neon.timeline_id")[0][0]
+    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
+    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
     timeline_path = "{}/tenants/{}/timelines/{}/".format(env.repo_dir, tenant_id, timeline_id)
     for filename in os.listdir(timeline_path):
         if filename.startswith("00000"):

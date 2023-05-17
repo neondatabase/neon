@@ -4,16 +4,11 @@ use crate::{
 };
 use anyhow::Context;
 use once_cell::sync::Lazy;
+use postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP, QueryError};
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
-use std::{
-    net::{TcpListener, TcpStream},
-    thread,
-};
+use std::future;
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, info_span};
-use utils::{
-    postgres_backend::{self, AuthType, PostgresBackend},
-    postgres_backend_async::QueryError,
-};
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
 
@@ -34,28 +29,23 @@ pub fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), waiters::N
     CPLANE_WAITERS.notify(psql_session_id, msg)
 }
 
-/// Console management API listener thread.
+/// Console management API listener task.
 /// It spawns console response handlers needed for the link auth.
-pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
+pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
     scopeguard::defer! {
         info!("mgmt has shut down");
     }
 
-    listener
-        .set_nonblocking(false)
-        .context("failed to set listener to blocking")?;
-
     loop {
-        let (socket, peer_addr) = listener.accept().context("failed to accept a new client")?;
+        let (socket, peer_addr) = listener.accept().await?;
         info!("accepted connection from {peer_addr}");
+
         socket
             .set_nodelay(true)
             .context("failed to set client socket option")?;
 
-        // TODO: replace with async tasks.
-        thread::spawn(move || {
-            let tid = std::thread::current().id();
-            let span = info_span!("mgmt", thread = format_args!("{tid:?}"));
+        tokio::task::spawn(async move {
+            let span = info_span!("mgmt", peer = %peer_addr);
             let _enter = span.enter();
 
             info!("started a new console management API thread");
@@ -63,16 +53,16 @@ pub fn thread_main(listener: TcpListener) -> anyhow::Result<()> {
                 info!("console management API thread is about to finish");
             }
 
-            if let Err(e) = handle_connection(socket) {
+            if let Err(e) = handle_connection(socket).await {
                 error!("thread failed with an error: {e}");
             }
         });
     }
 }
 
-fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
-    let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None, true)?;
-    pgbackend.run(&mut MgmtHandler)
+async fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
+    let pgbackend = PostgresBackend::new(socket, AuthType::Trust, None)?;
+    pgbackend.run(&mut MgmtHandler, future::pending::<()>).await
 }
 
 /// A message received by `mgmt` when a compute node is ready.
@@ -80,16 +70,21 @@ pub type ComputeReady = Result<DatabaseInfo, String>;
 
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
-impl postgres_backend::Handler for MgmtHandler {
-    fn process_query(&mut self, pgb: &mut PostgresBackend, query: &str) -> Result<(), QueryError> {
-        try_process_query(pgb, query).map_err(|e| {
+#[async_trait::async_trait]
+impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
+    async fn process_query(
+        &mut self,
+        pgb: &mut PostgresBackendTCP,
+        query: &str,
+    ) -> Result<(), QueryError> {
+        try_process_query(pgb, query).await.map_err(|e| {
             error!("failed to process response: {e:?}");
             e
         })
     }
 }
 
-fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), QueryError> {
+async fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<(), QueryError> {
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);
@@ -100,11 +95,11 @@ fn try_process_query(pgb: &mut PostgresBackend, query: &str) -> Result<(), Query
         Ok(()) => {
             pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
                 .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
-                .write_message(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
         Err(e) => {
             error!("failed to deliver response to per-client task");
-            pgb.write_message(&BeMessage::ErrorResponse(&e.to_string(), None))?;
+            pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string(), None))?;
         }
     }
 

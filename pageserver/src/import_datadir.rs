@@ -114,7 +114,7 @@ async fn import_rel(
     path: &Path,
     spcoid: Oid,
     dboid: Oid,
-    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
+    reader: &mut (impl AsyncRead + Unpin),
     len: usize,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
@@ -200,7 +200,7 @@ async fn import_slru(
     modification: &mut DatadirModification<'_>,
     slru: SlruKind,
     path: &Path,
-    reader: &mut (impl AsyncRead + Send + Sync + Unpin),
+    reader: &mut (impl AsyncRead + Unpin),
     len: usize,
     ctx: &RequestContext,
 ) -> anyhow::Result<()> {
@@ -612,8 +612,8 @@ async fn import_file(
     Ok(None)
 }
 
-async fn read_all_bytes(reader: &mut (impl AsyncRead + Send + Sync + Unpin)) -> Result<Bytes> {
+async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes> {
     let mut buf: Vec<u8> = vec![];
     reader.read_to_end(&mut buf).await?;
-    Ok(Bytes::copy_from_slice(&buf[..]))
+    Ok(Bytes::from(buf))
 }

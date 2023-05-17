@@ -17,6 +17,8 @@
 #include "pagestore_client.h"
 #include "fmgr.h"
 #include "access/xlog.h"
+#include "access/xlogutils.h"
+#include "storage/buf_internals.h"
 
 #include "libpq-fe.h"
 #include "libpq/pqformat.h"
@@ -32,6 +34,9 @@
 
 #define PageStoreTrace DEBUG5
 
+#define MAX_RECONNECT_ATTEMPTS 5
+#define RECONNECT_INTERVAL_USEC 1000000
+
 bool		connected = false;
 PGconn	   *pageserver_conn = NULL;
 
@@ -43,24 +48,57 @@ PGconn	   *pageserver_conn = NULL;
  */
 WaitEventSet *pageserver_conn_wes = NULL;
 
-char	   *page_server_connstring_raw;
-char	   *safekeeper_token_env;
+/* GUCs */
+char	   *neon_timeline;
+char	   *neon_tenant;
+int32		max_cluster_size;
+char	   *page_server_connstring;
+char	   *neon_auth_token;
 
 int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
 int			readahead_buffer_size = 128;
 
+bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
+
 static void pageserver_flush(void);
 
-static void
-pageserver_connect()
+static bool
+pageserver_connect(int elevel)
 {
 	char	   *query;
 	int			ret;
+	const char *keywords[3];
+	const char *values[3];
+	int			n;
 
 	Assert(!connected);
 
-	pageserver_conn = PQconnectdb(page_server_connstring);
+	/*
+	 * Connect using the connection string we got from the
+	 * neon.pageserver_connstring GUC. If the NEON_AUTH_TOKEN environment
+	 * variable was set, use that as the password.
+	 *
+	 * The connection options are parsed in the order they're given, so
+	 * when we set the password before the connection string, the
+	 * connection string can override the password from the env variable.
+	 * Seems useful, although we don't currently use that capability
+	 * anywhere.
+	 */
+	n = 0;
+	if (neon_auth_token)
+	{
+		keywords[n] = "password";
+		values[n] = neon_auth_token;
+		n++;
+	}
+	keywords[n] = "dbname";
+	values[n] = page_server_connstring;
+	n++;
+	keywords[n] = NULL;
+	values[n] = NULL;
+	n++;
+	pageserver_conn = PQconnectdbParams(keywords, values, 1);
 
 	if (PQstatus(pageserver_conn) == CONNECTION_BAD)
 	{
@@ -69,10 +107,11 @@ pageserver_connect()
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 
-		ereport(ERROR,
+		ereport(elevel,
 				(errcode(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION),
 				 errmsg(NEON_TAG "could not establish connection to pageserver"),
 				 errdetail_internal("%s", msg)));
+		return false;
 	}
 
 	query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
@@ -81,7 +120,8 @@ pageserver_connect()
 	{
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
-		neon_log(ERROR, "could not send pagestream command to pageserver");
+		neon_log(elevel, "could not send pagestream command to pageserver");
+		return false;
 	}
 
 	pageserver_conn_wes = CreateWaitEventSet(TopMemoryContext, 3);
@@ -113,15 +153,17 @@ pageserver_connect()
 				FreeWaitEventSet(pageserver_conn_wes);
 				pageserver_conn_wes = NULL;
 
-				neon_log(ERROR, "could not complete handshake with pageserver: %s",
+				neon_log(elevel, "could not complete handshake with pageserver: %s",
 						 msg);
+				return false;
 			}
 		}
 	}
 
-	neon_log(LOG, "libpagestore: connected to '%s'", page_server_connstring_raw);
+	neon_log(LOG, "libpagestore: connected to '%s'", page_server_connstring);
 
 	connected = true;
+	return true;
 }
 
 /*
@@ -149,8 +191,12 @@ retry:
 		if (event.events & WL_SOCKET_READABLE)
 		{
 			if (!PQconsumeInput(pageserver_conn))
-				neon_log(ERROR, "could not get response from pageserver: %s",
-						 PQerrorMessage(pageserver_conn));
+			{
+				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+				neon_log(LOG, "could not get response from pageserver: %s", msg);
+				pfree(msg);
+				return -1;
+			}
 		}
 
 		goto retry;
@@ -190,31 +236,62 @@ static void
 pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
+	int n_reconnect_attempts = 0;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
 		pageserver_disconnect();
 
-	if (!connected)
-		pageserver_connect();
 
 	req_buff = nm_pack_request(request);
 
 	/*
-	 * Send request.
-	 *
-	 * In principle, this could block if the output buffer is full, and we
-	 * should use async mode and check for interrupts while waiting. In
-	 * practice, our requests are small enough to always fit in the output and
-	 * TCP buffer.
+	 * If pageserver is stopped, the connections from compute node are broken.
+	 * The compute node doesn't notice that immediately, but it will cause the next request to fail, usually on the next query.
+	 * That causes user-visible errors if pageserver is restarted, or the tenant is moved from one pageserver to another.
+	 * See https://github.com/neondatabase/neon/issues/1138
+	 * So try to reestablish connection in case of failure.
 	 */
-	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+	while (true)
 	{
-		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+		if (!connected)
+		{
+			if (!pageserver_connect(n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS ? LOG : ERROR))
+			{
+				n_reconnect_attempts += 1;
+				pg_usleep(RECONNECT_INTERVAL_USEC);
+				continue;
+			}
+		}
 
-		pageserver_disconnect();
-		neon_log(ERROR, "failed to send page request: %s", msg);
+		/*
+		 * Send request.
+		 *
+		 * In principle, this could block if the output buffer is full, and we
+		 * should use async mode and check for interrupts while waiting. In
+		 * practice, our requests are small enough to always fit in the output and
+		 * TCP buffer.
+		 */
+		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+		{
+			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+			if (n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
+			{
+				neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
+				if (n_reconnect_attempts != 0) /* do not sleep before first reconnect attempt, assuming that pageserver is already restarted */
+					pg_usleep(RECONNECT_INTERVAL_USEC);
+				n_reconnect_attempts += 1;
+				continue;
+			}
+			else
+			{
+				pageserver_disconnect();
+				neon_log(ERROR, "failed to send page request: %s", msg);
+			}
+		}
+		break;
 	}
+
 	pfree(req_buff.data);
 
 	n_unflushed_requests++;
@@ -267,7 +344,7 @@ pageserver_receive(void)
 			resp = NULL;
 		}
 		else if (rc == -2)
-			neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
+			neon_log(ERROR, "could not read COPY data: %s", pchomp(PQerrorMessage(pageserver_conn)));
 		else
 			neon_log(ERROR, "unexpected PQgetCopyData return value: %d", rc);
 	}
@@ -291,7 +368,7 @@ pageserver_flush(void)
 	}
 	else if (PQflush(pageserver_conn))
 	{
-		char	   *msg = PQerrorMessage(pageserver_conn);
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to flush page requests: %s", msg);
@@ -313,105 +390,6 @@ check_neon_id(char **newval, void **extra, GucSource source)
 	return **newval == '\0' || HexDecodeString(id, *newval, 16);
 }
 
-static char *
-substitute_pageserver_password(const char *page_server_connstring_raw)
-{
-	char	   *host = NULL;
-	char	   *port = NULL;
-	char	   *user = NULL;
-	char	   *auth_token = NULL;
-	char	   *err = NULL;
-	char	   *page_server_connstring = NULL;
-	PQconninfoOption *conn_options;
-	PQconninfoOption *conn_option;
-	MemoryContext oldcontext;
-
-	/*
-	 * Here we substitute password in connection string with an environment
-	 * variable. To simplify things we construct a connection string back with
-	 * only known options. In particular: host port user and password. We do
-	 * not currently use other options and constructing full connstring in an
-	 * URI shape is quite messy.
-	 */
-
-	if (page_server_connstring_raw == NULL || page_server_connstring_raw[0] == '\0')
-		return NULL;
-
-	/* extract the auth token from the connection string */
-	conn_options = PQconninfoParse(page_server_connstring_raw, &err);
-	if (conn_options == NULL)
-	{
-		/* The error string is malloc'd, so we must free it explicitly */
-		char	   *errcopy = err ? pstrdup(err) : "out of memory";
-
-		PQfreemem(err);
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("invalid connection string syntax: %s", errcopy)));
-	}
-
-	/*
-	 * Trying to populate pageserver connection string with auth token from
-	 * environment. We are looking for password in with placeholder value like
-	 * $ENV_VAR_NAME, so if password field is present and starts with $ we try
-	 * to fetch environment variable value and fail loudly if it is not set.
-	 */
-	for (conn_option = conn_options; conn_option->keyword != NULL; conn_option++)
-	{
-		if (strcmp(conn_option->keyword, "host") == 0)
-		{
-			if (conn_option->val != NULL && conn_option->val[0] != '\0')
-				host = conn_option->val;
-		}
-		else if (strcmp(conn_option->keyword, "port") == 0)
-		{
-			if (conn_option->val != NULL && conn_option->val[0] != '\0')
-				port = conn_option->val;
-		}
-		else if (strcmp(conn_option->keyword, "user") == 0)
-		{
-			if (conn_option->val != NULL && conn_option->val[0] != '\0')
-				user = conn_option->val;
-		}
-		else if (strcmp(conn_option->keyword, "password") == 0)
-		{
-			if (conn_option->val != NULL && conn_option->val[0] != '\0')
-			{
-				/* ensure that this is a template */
-				if (strncmp(conn_option->val, "$", 1) != 0)
-					ereport(ERROR,
-							(errcode(ERRCODE_CONNECTION_EXCEPTION),
-							 errmsg("expected placeholder value in pageserver password starting from $ but found: %s", &conn_option->val[1])));
-
-				neon_log(LOG, "found auth token placeholder in pageserver conn string '%s'", &conn_option->val[1]);
-				auth_token = getenv(&conn_option->val[1]);
-				if (!auth_token)
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_CONNECTION_EXCEPTION),
-							 errmsg("cannot get auth token, environment variable %s is not set", &conn_option->val[1])));
-				}
-				else
-				{
-					neon_log(LOG, "using auth token from environment passed via env");
-				}
-			}
-		}
-	}
-
-	/*
-	 * allocate connection string in TopMemoryContext to make sure it is not
-	 * freed
-	 */
-	oldcontext = CurrentMemoryContext;
-	MemoryContextSwitchTo(TopMemoryContext);
-	page_server_connstring = psprintf("postgresql://%s:%s@%s:%s", user, auth_token ? auth_token : "", host, port);
-	MemoryContextSwitchTo(oldcontext);
-
-	PQconninfoFree(conn_options);
-	return page_server_connstring;
-}
-
 /*
  * Module initialization function
  */
@@ -421,20 +399,11 @@ pg_init_libpagestore(void)
 	DefineCustomStringVariable("neon.pageserver_connstring",
 							   "connection string to the page server",
 							   NULL,
-							   &page_server_connstring_raw,
+							   &page_server_connstring,
 							   "",
 							   PGC_POSTMASTER,
 							   0,	/* no flags required */
 							   NULL, NULL, NULL);
-
-    DefineCustomStringVariable("neon.safekeeper_token_env",
-                               "the environment variable containing JWT token for authentication with Safekeepers, the convention is to either unset or set to $NEON_AUTH_TOKEN",
-                               NULL,
-                               &safekeeper_token_env,
-                               NULL,
-                               PGC_POSTMASTER,
-                               0,	/* no flags required */
-                               NULL, NULL, NULL);
 
 	DefineCustomStringVariable("neon.timeline_id",
 							   "Neon timeline_id the server is running on",
@@ -492,30 +461,10 @@ pg_init_libpagestore(void)
 	neon_log(PageStoreTrace, "libpagestore already loaded");
 	page_server = &api;
 
-	/* substitute password in pageserver_connstring */
-	page_server_connstring = substitute_pageserver_password(page_server_connstring_raw);
-
-	/* Is there more correct way to pass CustomGUC to postgres code? */
-	neon_timeline_walproposer = neon_timeline;
-	neon_tenant_walproposer = neon_tenant;
-
-	/* retrieve the token for Safekeeper, if present */
-	if (safekeeper_token_env != NULL) {
-		if (safekeeper_token_env[0] != '$') {
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_EXCEPTION),
-							errmsg("expected safekeeper auth token environment variable's name starting with $ but found: %s",
-								   safekeeper_token_env)));
-		}
-		neon_safekeeper_token_walproposer = getenv(&safekeeper_token_env[1]);
-		if (!neon_safekeeper_token_walproposer) {
-			ereport(ERROR,
-					(errcode(ERRCODE_CONNECTION_EXCEPTION),
-							errmsg("cannot get safekeeper auth token, environment variable %s is not set",
-								   &safekeeper_token_env[1])));
-		}
-		neon_log(LOG, "using safekeeper auth token from environment variable");
-	}
+	/* Retrieve the auth token to use when connecting to pageserver and safekeepers */
+	neon_auth_token = getenv("NEON_AUTH_TOKEN");
+	if (neon_auth_token)
+		neon_log(LOG, "using storage auth token from NEON_AUTH_TOKEN environment variable");
 
 	if (page_server_connstring && page_server_connstring[0])
 	{
@@ -523,6 +472,8 @@ pg_init_libpagestore(void)
 		smgr_hook = smgr_neon;
 		smgr_init_hook = smgr_init_neon;
 		dbsize_hook = neon_dbsize;
+		old_redo_read_buffer_filter = redo_read_buffer_filter;
+		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
 	lfc_init();
 }

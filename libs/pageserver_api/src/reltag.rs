@@ -98,6 +98,15 @@ impl RelTag {
 
         name
     }
+
+    pub fn with_forknum(&self, forknum: u8) -> Self {
+        RelTag {
+            forknum,
+            spcnode: self.spcnode,
+            dbnode: self.dbnode,
+            relnode: self.relnode,
+        }
+    }
 }
 
 ///

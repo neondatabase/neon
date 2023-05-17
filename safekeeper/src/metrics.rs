@@ -1,21 +1,25 @@
 //! Global safekeeper mertics and per-timeline safekeeper metrics.
 
-use std::time::{Instant, SystemTime};
+use std::{
+    sync::{Arc, RwLock},
+    time::{Instant, SystemTime},
+};
 
 use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_WRITE_SECONDS_BUCKETS};
 use anyhow::Result;
 use metrics::{
-    core::{AtomicU64, Collector, Desc, GenericGaugeVec, Opts},
+    core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    Gauge, IntGaugeVec,
+    register_int_counter, register_int_counter_vec, Gauge, IntCounter, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
+
 use postgres_ffi::XLogSegNo;
+use utils::pageserver_feedback::PageserverFeedback;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     safekeeper::{SafeKeeperState, SafekeeperMemState},
-    timeline::ReplicaState,
     GlobalTimelines,
 };
 
@@ -61,6 +65,185 @@ pub static PERSIST_CONTROL_FILE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_persist_control_file_seconds histogram vec")
 });
+pub static PG_IO_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_io_bytes_total",
+        "Bytes read from or written to any PostgreSQL connection",
+        &["client_az", "sk_az", "app_name", "dir", "same_az"]
+    )
+    .expect("Failed to register safekeeper_pg_io_bytes gauge")
+});
+pub static BROKER_PUSHED_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_broker_pushed_updates_total",
+        "Number of timeline updates pushed to the broker"
+    )
+    .expect("Failed to register safekeeper_broker_pushed_updates_total counter")
+});
+pub static BROKER_PULLED_UPDATES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_broker_pulled_updates_total",
+        "Number of timeline updates pulled and processed from the broker",
+        &["result"]
+    )
+    .expect("Failed to register safekeeper_broker_pulled_updates_total counter")
+});
+pub static PG_QUERIES_RECEIVED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_queries_received_total",
+        "Number of queries received through pg protocol",
+        &["query"]
+    )
+    .expect("Failed to register safekeeper_pg_queries_received_total counter")
+});
+pub static PG_QUERIES_FINISHED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_queries_finished_total",
+        "Number of queries finished through pg protocol",
+        &["query"]
+    )
+    .expect("Failed to register safekeeper_pg_queries_finished_total counter")
+});
+pub static REMOVED_WAL_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_removed_wal_segments_total",
+        "Number of WAL segments removed from the disk"
+    )
+    .expect("Failed to register safekeeper_removed_wal_segments_total counter")
+});
+pub static BACKED_UP_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backed_up_segments_total",
+        "Number of WAL segments backed up to the broker"
+    )
+    .expect("Failed to register safekeeper_backed_up_segments_total counter")
+});
+pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backup_errors_total",
+        "Number of errors during backup"
+    )
+    .expect("Failed to register safekeeper_backup_errors_total counter")
+});
+
+pub const LABEL_UNKNOWN: &str = "unknown";
+
+/// Labels for traffic metrics.
+#[derive(Clone)]
+struct ConnectionLabels {
+    /// Availability zone of the connection origin.
+    client_az: String,
+    /// Availability zone of the current safekeeper.
+    sk_az: String,
+    /// Client application name.
+    app_name: String,
+}
+
+impl ConnectionLabels {
+    fn new() -> Self {
+        Self {
+            client_az: LABEL_UNKNOWN.to_string(),
+            sk_az: LABEL_UNKNOWN.to_string(),
+            app_name: LABEL_UNKNOWN.to_string(),
+        }
+    }
+
+    fn build_metrics(
+        &self,
+    ) -> (
+        GenericCounter<metrics::core::AtomicU64>,
+        GenericCounter<metrics::core::AtomicU64>,
+    ) {
+        let same_az = match (self.client_az.as_str(), self.sk_az.as_str()) {
+            (LABEL_UNKNOWN, _) | (_, LABEL_UNKNOWN) => LABEL_UNKNOWN,
+            (client_az, sk_az) => {
+                if client_az == sk_az {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
+        };
+
+        let read = PG_IO_BYTES.with_label_values(&[
+            &self.client_az,
+            &self.sk_az,
+            &self.app_name,
+            "read",
+            same_az,
+        ]);
+        let write = PG_IO_BYTES.with_label_values(&[
+            &self.client_az,
+            &self.sk_az,
+            &self.app_name,
+            "write",
+            same_az,
+        ]);
+        (read, write)
+    }
+}
+
+struct TrafficMetricsState {
+    /// Labels for traffic metrics.
+    labels: ConnectionLabels,
+    /// Total bytes read from this connection.
+    read: GenericCounter<metrics::core::AtomicU64>,
+    /// Total bytes written to this connection.
+    write: GenericCounter<metrics::core::AtomicU64>,
+}
+
+/// Metrics for measuring traffic (r/w bytes) in a single PostgreSQL connection.
+#[derive(Clone)]
+pub struct TrafficMetrics {
+    state: Arc<RwLock<TrafficMetricsState>>,
+}
+
+impl Default for TrafficMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrafficMetrics {
+    pub fn new() -> Self {
+        let labels = ConnectionLabels::new();
+        let (read, write) = labels.build_metrics();
+        let state = TrafficMetricsState {
+            labels,
+            read,
+            write,
+        };
+        Self {
+            state: Arc::new(RwLock::new(state)),
+        }
+    }
+
+    pub fn set_client_az(&self, value: &str) {
+        let mut state = self.state.write().unwrap();
+        state.labels.client_az = value.to_string();
+        (state.read, state.write) = state.labels.build_metrics();
+    }
+
+    pub fn set_sk_az(&self, value: &str) {
+        let mut state = self.state.write().unwrap();
+        state.labels.sk_az = value.to_string();
+        (state.read, state.write) = state.labels.build_metrics();
+    }
+
+    pub fn set_app_name(&self, value: &str) {
+        let mut state = self.state.write().unwrap();
+        state.labels.app_name = value.to_string();
+        (state.read, state.write) = state.labels.build_metrics();
+    }
+
+    pub fn observe_read(&self, cnt: usize) {
+        self.state.read().unwrap().read.inc_by(cnt as u64)
+    }
+
+    pub fn observe_write(&self, cnt: usize) {
+        self.state.read().unwrap().write.inc_by(cnt as u64)
+    }
+}
 
 /// Metrics for WalStorage in a single timeline.
 #[derive(Clone, Default)]
@@ -100,7 +283,7 @@ pub fn time_io_closure(closure: impl FnOnce() -> Result<()>) -> Result<f64> {
 /// Metrics for a single timeline.
 pub struct FullTimelineInfo {
     pub ttid: TenantTimelineId,
-    pub replicas: Vec<ReplicaState>,
+    pub ps_feedback: PageserverFeedback,
     pub wal_backup_active: bool,
     pub timeline_is_active: bool,
     pub num_computes: u32,
@@ -111,6 +294,7 @@ pub struct FullTimelineInfo {
     pub persisted_state: SafeKeeperState,
 
     pub flush_lsn: Lsn,
+    pub remote_consistent_lsn: Lsn,
 
     pub wal_storage: WalStorageMetrics,
 }
@@ -124,7 +308,7 @@ pub struct TimelineCollector {
     epoch_start_lsn: GenericGaugeVec<AtomicU64>,
     peer_horizon_lsn: GenericGaugeVec<AtomicU64>,
     remote_consistent_lsn: GenericGaugeVec<AtomicU64>,
-    feedback_ps_write_lsn: GenericGaugeVec<AtomicU64>,
+    ps_last_received_lsn: GenericGaugeVec<AtomicU64>,
     feedback_last_time_seconds: GenericGaugeVec<AtomicU64>,
     timeline_active: GenericGaugeVec<AtomicU64>,
     wal_backup_active: GenericGaugeVec<AtomicU64>,
@@ -208,15 +392,15 @@ impl TimelineCollector {
         .unwrap();
         descs.extend(remote_consistent_lsn.desc().into_iter().cloned());
 
-        let feedback_ps_write_lsn = GenericGaugeVec::new(
+        let ps_last_received_lsn = GenericGaugeVec::new(
             Opts::new(
-                "safekeeper_feedback_ps_write_lsn",
+                "safekeeper_ps_last_received_lsn",
                 "Last LSN received by the pageserver, acknowledged in the feedback",
             ),
             &["tenant_id", "timeline_id"],
         )
         .unwrap();
-        descs.extend(feedback_ps_write_lsn.desc().into_iter().cloned());
+        descs.extend(ps_last_received_lsn.desc().into_iter().cloned());
 
         let feedback_last_time_seconds = GenericGaugeVec::new(
             Opts::new(
@@ -327,7 +511,7 @@ impl TimelineCollector {
             epoch_start_lsn,
             peer_horizon_lsn,
             remote_consistent_lsn,
-            feedback_ps_write_lsn,
+            ps_last_received_lsn,
             feedback_last_time_seconds,
             timeline_active,
             wal_backup_active,
@@ -358,7 +542,7 @@ impl Collector for TimelineCollector {
         self.epoch_start_lsn.reset();
         self.peer_horizon_lsn.reset();
         self.remote_consistent_lsn.reset();
-        self.feedback_ps_write_lsn.reset();
+        self.ps_last_received_lsn.reset();
         self.feedback_last_time_seconds.reset();
         self.timeline_active.reset();
         self.wal_backup_active.reset();
@@ -383,19 +567,6 @@ impl Collector for TimelineCollector {
             let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
 
-            let mut most_advanced: Option<pq_proto::ReplicationFeedback> = None;
-            for replica in tli.replicas.iter() {
-                if let Some(replica_feedback) = replica.pageserver_feedback {
-                    if let Some(current) = most_advanced {
-                        if current.ps_writelsn < replica_feedback.ps_writelsn {
-                            most_advanced = Some(replica_feedback);
-                        }
-                    } else {
-                        most_advanced = Some(replica_feedback);
-                    }
-                }
-            }
-
             self.commit_lsn
                 .with_label_values(labels)
                 .set(tli.mem_state.commit_lsn.into());
@@ -413,7 +584,7 @@ impl Collector for TimelineCollector {
                 .set(tli.mem_state.peer_horizon_lsn.into());
             self.remote_consistent_lsn
                 .with_label_values(labels)
-                .set(tli.mem_state.remote_consistent_lsn.into());
+                .set(tli.remote_consistent_lsn.into());
             self.timeline_active
                 .with_label_values(labels)
                 .set(tli.timeline_is_active as u64);
@@ -436,16 +607,17 @@ impl Collector for TimelineCollector {
                 .with_label_values(labels)
                 .set(tli.wal_storage.flush_wal_seconds);
 
-            if let Some(feedback) = most_advanced {
-                self.feedback_ps_write_lsn
+            self.ps_last_received_lsn
+                .with_label_values(labels)
+                .set(tli.ps_feedback.last_received_lsn.0);
+            if let Ok(unix_time) = tli
+                .ps_feedback
+                .replytime
+                .duration_since(SystemTime::UNIX_EPOCH)
+            {
+                self.feedback_last_time_seconds
                     .with_label_values(labels)
-                    .set(feedback.ps_writelsn);
-                if let Ok(unix_time) = feedback.ps_replytime.duration_since(SystemTime::UNIX_EPOCH)
-                {
-                    self.feedback_last_time_seconds
-                        .with_label_values(labels)
-                        .set(unix_time.as_secs());
-                }
+                    .set(unix_time.as_secs());
             }
 
             if tli.last_removed_segno != 0 {
@@ -468,7 +640,7 @@ impl Collector for TimelineCollector {
         mfs.extend(self.epoch_start_lsn.collect());
         mfs.extend(self.peer_horizon_lsn.collect());
         mfs.extend(self.remote_consistent_lsn.collect());
-        mfs.extend(self.feedback_ps_write_lsn.collect());
+        mfs.extend(self.ps_last_received_lsn.collect());
         mfs.extend(self.feedback_last_time_seconds.collect());
         mfs.extend(self.timeline_active.collect());
         mfs.extend(self.wal_backup_active.collect());

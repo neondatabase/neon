@@ -23,6 +23,7 @@ const_format.workspace = true
 consumption_metrics.workspace = true
 crc32c.workspace = true
 crossbeam-utils.workspace = true
+either.workspace = true
 fail.workspace = true
 futures.workspace = true
 git-version.workspace = true
@@ -36,6 +37,7 @@ num-traits.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
 postgres.workspace = true
+postgres_backend.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
 rand.workspace = true
@@ -46,12 +48,14 @@ serde_json = { workspace = true, features = ["raw_value"] }
 serde_with.workspace = true
 signal-hook.workspace = true
 svg_fmt.workspace = true
+sync_wrapper.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
+tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
 tokio-util.workspace = true
-toml_edit.workspace = true
+toml_edit = { workspace = true, features = [ "serde" ] }
 tracing.workspace = true
 url.workspace = true
 walkdir.workspace = true

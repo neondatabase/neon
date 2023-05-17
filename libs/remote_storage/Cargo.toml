@@ -12,6 +12,7 @@ aws-smithy-http.workspace = true
 aws-types.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
+aws-credential-types.workspace = true
 hyper = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -21,8 +22,9 @@ toml_edit.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 utils.workspace = true
-
+pin-project-lite.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+test-context.workspace = true

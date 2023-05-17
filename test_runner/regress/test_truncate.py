@@ -7,7 +7,6 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 # Test truncation of FSM and VM forks of a relation
 #
 def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
-
     env = neon_env_builder.init_start()
     n_records = 10000
     n_iter = 10
@@ -28,8 +27,8 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     )
 
     env.neon_cli.create_timeline("test_truncate", tenant_id=tenant)
-    pg = env.postgres.create_start("test_truncate", tenant_id=tenant)
-    cur = pg.connect().cursor()
+    endpoint = env.endpoints.create_start("test_truncate", tenant_id=tenant)
+    cur = endpoint.connect().cursor()
     cur.execute("create table t1(x integer)")
     cur.execute(f"insert into t1 values (generate_series(1,{n_records}))")
     cur.execute("vacuum t1")
