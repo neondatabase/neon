@@ -2839,6 +2839,10 @@ impl Timeline {
 
         drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
 
+        fail_point!("compact-level0-phase1-finish", |_| {
+            Err(anyhow::anyhow!("failpoint compact-level0-phase1-finish").into())
+        });
+
         Ok(CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
