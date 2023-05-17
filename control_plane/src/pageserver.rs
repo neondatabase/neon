@@ -448,7 +448,7 @@ impl PageServerNode {
                     .context("Failed to parse 'trace_read_requests' as bool")?,
                 eviction_policy: settings
                     .remove("eviction_policy")
-                    .map(|x| serde_json::from_str(x))
+                    .map(serde_json::from_str)
                     .transpose()
                     .context("Failed to parse 'eviction_policy' json")?,
                 min_resident_size_override: settings
