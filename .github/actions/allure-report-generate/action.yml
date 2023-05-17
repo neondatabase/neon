@@ -147,6 +147,8 @@ runs:
         echo "report-url=${REPORT_URL}"                                   >> $GITHUB_OUTPUT
         echo "report-json-url=${REPORT_URL%/index.html}/data/suites.json" >> $GITHUB_OUTPUT
 
+        echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
+
     - name: Release lock
       if: always()
       shell: bash -euxo pipefail {0}
