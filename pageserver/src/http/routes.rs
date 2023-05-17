@@ -19,13 +19,14 @@ use super::models::{
 };
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::disk_usage_eviction_task;
+use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::mgr::{TenantMapInsertError, TenantStateError};
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -104,6 +105,9 @@ impl From<PageReconstructError> for ApiError {
             }
             PageReconstructError::Cancelled => {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
+            }
+            PageReconstructError::AncestorStopping(_) => {
+                ApiError::InternalServerError(anyhow::Error::new(pre))
             }
             PageReconstructError::WalRedo(pre) => {
                 ApiError::InternalServerError(anyhow::Error::new(pre))
@@ -542,7 +546,11 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     // this can be long operation
     let inputs = tenant
-        .gather_size_inputs(retention_period, &ctx)
+        .gather_size_inputs(
+            retention_period,
+            LogicalSizeCalculationCause::TenantSizeHandler,
+            &ctx,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -709,6 +717,11 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
+    let _timer = STORAGE_TIME_GLOBAL
+        .get_metric_with_label_values(&[StorageTimeOperation::CreateTenant.into()])
+        .expect("bug")
+        .start_timer();
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
@@ -745,6 +758,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         res.context("created tenant failed to become active")
             .map_err(ApiError::InternalServerError)?;
     }
+
     json_response(
         StatusCode::CREATED,
         TenantCreateResponse(new_tenant.tenant_id()),

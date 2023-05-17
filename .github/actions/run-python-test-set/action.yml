@@ -48,6 +48,10 @@ inputs:
     description: 'Whether to rerun flaky tests'
     required: false
     default: 'false'
+  pg_version:
+    description: 'Postgres version to use for tests'
+    required: false
+    default: 'v14'
 
 runs:
   using: "composite"
@@ -68,7 +72,7 @@ runs:
         prefix: latest
 
     - name: Download compatibility snapshot for Postgres 14
-      if: inputs.build_type != 'remote'
+      if: inputs.build_type != 'remote' && inputs.pg_version == 'v14'
       uses: ./.github/actions/download
       with:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg14
@@ -106,13 +110,14 @@ runs:
         ALLOW_BACKWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'backward compatibility breakage')
         ALLOW_FORWARD_COMPATIBILITY_BREAKAGE: contains(github.event.pull_request.labels.*.name, 'forward compatibility breakage')
         RERUN_FLAKY: ${{ inputs.rerun_flaky }}
+        PG_VERSION: ${{ inputs.pg_version }}
       shell: bash -euxo pipefail {0}
       run: |
         # PLATFORM will be embedded in the perf test report
         # and it is needed to distinguish different environments
         export PLATFORM=${PLATFORM:-github-actions-selfhosted}
         export POSTGRES_DISTRIB_DIR=${POSTGRES_DISTRIB_DIR:-/tmp/neon/pg_install}
-        export DEFAULT_PG_VERSION=${DEFAULT_PG_VERSION:-14}
+        export DEFAULT_PG_VERSION=${PG_VERSION#v}
 
         if [ "${BUILD_TYPE}" = "remote" ]; then
           export REMOTE_ENV=1
@@ -193,7 +198,7 @@ runs:
         fi
 
     - name: Upload compatibility snapshot for Postgres 14
-      if: github.ref_name == 'release'
+      if: github.ref_name == 'release' && inputs.pg_version == 'v14'
       uses: ./.github/actions/upload
       with:
         name: compatibility-snapshot-${{ inputs.build_type }}-pg14-${{ github.run_id }}
@@ -206,4 +211,4 @@ runs:
       uses: ./.github/actions/allure-report-store
       with:
         report-dir: /tmp/test_output/allure/results
-        unique-key: ${{ inputs.test_selection }}-${{ inputs.build_type }}
+        unique-key: ${{ inputs.build_type }}

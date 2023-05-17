@@ -305,6 +305,15 @@ impl<'a> WalIngest<'a> {
                     self.checkpoint_modified = true;
                 }
             }
+        } else if decoded.xl_rmid == pg_constants::RM_LOGICALMSG_ID {
+            let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+            if info == pg_constants::XLOG_LOGICAL_MESSAGE {
+                // This is a convenient way to make the WAL ingestion pause at
+                // particular point in the WAL. For more fine-grained control,
+                // we could peek into the message and only pause if it contains
+                // a particular string, for example, but this is enough for now.
+                utils::failpoint_sleep_millis_async!("wal-ingest-logical-message-sleep");
+            }
         }
 
         // Iterate through all the blocks that the record modifies, and
