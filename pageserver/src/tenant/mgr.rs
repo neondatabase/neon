@@ -19,7 +19,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{Tenant, TenantState};
+use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
 use crate::IGNORED_TENANT_FILE_NAME;
 
 use utils::fs_ext::PathExt;
@@ -282,9 +282,15 @@ pub async fn create_tenant(
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id)?;
+        let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Create)?;
+        // TODO: tenant directory remains on disk if we bail out from here on.
+        //       See https://github.com/neondatabase/neon/issues/4233
+
         let created_tenant =
             schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
+        //      See https://github.com/neondatabase/neon/issues/4233
+
         let crated_tenant_id = created_tenant.tenant_id();
         anyhow::ensure!(
                 tenant_id == crated_tenant_id,
@@ -466,19 +472,32 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
 pub async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    tenant_conf: TenantConfOpt,
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
     tenant_map_insert(tenant_id, |vacant_entry| {
-        let tenant_path = conf.tenant_path(&tenant_id);
-        anyhow::ensure!(
-            !tenant_path.exists(),
-            "Cannot attach tenant {tenant_id}, local tenant directory already exists"
-        );
+        let tenant_dir = create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Attach)?;
+        // TODO: tenant directory remains on disk if we bail out from here on.
+        //       See https://github.com/neondatabase/neon/issues/4233
 
-        let tenant =
-            Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx).context("spawn_attach")?;
-        vacant_entry.insert(tenant);
+        // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
+        let marker_file_exists = conf
+            .tenant_attaching_mark_file_path(&tenant_id)
+            .try_exists()
+            .context("check for attach marker file existence")?;
+        anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
+
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, Some(remote_storage), ctx)?;
+        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
+        //      See https://github.com/neondatabase/neon/issues/4233
+
+        let attached_tenant_id = attached_tenant.tenant_id();
+        anyhow::ensure!(
+            tenant_id == attached_tenant_id,
+            "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
+        );
+        vacant_entry.insert(Arc::clone(&attached_tenant));
         Ok(())
     })
     .await

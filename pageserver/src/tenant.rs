@@ -99,7 +99,9 @@ mod timeline;
 pub mod size;
 
 pub(crate) use timeline::debug_assert_current_span_has_tenant_and_timeline_id;
-pub use timeline::{LocalLayerInfoForDiskUsageEviction, PageReconstructError, Timeline};
+pub use timeline::{
+    LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
+};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -607,12 +609,9 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
-        // XXX: Attach should provide the config, especially during tenant migration.
-        //      See https://github.com/neondatabase/neon/issues/1555
-        let tenant_conf = TenantConfOpt::default();
-
-        Self::attach_idempotent_create_marker_file(conf, tenant_id)
-            .context("create attach marker file")?;
+        // TODO dedup with spawn_load
+        let tenant_conf =
+            Self::load_tenant_config(conf, tenant_id).context("load tenant config")?;
 
         let wal_redo_manager = Arc::new(PostgresRedoManager::new(conf, tenant_id));
         let tenant = Arc::new(Tenant::new(
@@ -647,45 +646,6 @@ impl Tenant {
             },
         );
         Ok(tenant)
-    }
-
-    fn attach_idempotent_create_marker_file(
-        conf: &'static PageServerConf,
-        tenant_id: TenantId,
-    ) -> anyhow::Result<()> {
-        // Create directory with marker file to indicate attaching state.
-        // The load_local_tenants() function in tenant::mgr relies on the marker file
-        // to determine whether a tenant has finished attaching.
-        let tenant_dir = conf.tenant_path(&tenant_id);
-        let marker_file = conf.tenant_attaching_mark_file_path(&tenant_id);
-        debug_assert_eq!(marker_file.parent().unwrap(), tenant_dir);
-        // TODO: should use tokio::fs here, but
-        // 1. caller is not async, for good reason (it holds tenants map lock)
-        // 2. we'd need to think about cancel safety. Turns out dropping a tokio::fs future
-        //    doesn't wait for the activity in the fs thread pool.
-        crashsafe::create_dir_all(&tenant_dir).context("create tenant directory")?;
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker_file)
-        {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Either this is a retry of attach or there is a concurrent task also doing attach for this tenant.
-                // We cannot distinguish this here.
-                // The caller is responsible for ensuring there's no concurrent attach for a tenant.
-                {} // fsync again, we don't know if that already happened
-            }
-            err => {
-                err.context("create tenant attaching marker file")?;
-                unreachable!("we covered the Ok() case above");
-            }
-        }
-        crashsafe::fsync_file_and_parent(&marker_file)
-            .context("fsync tenant attaching marker file and parent")?;
-        debug_assert!(tenant_dir.is_dir());
-        debug_assert!(marker_file.is_file());
-        Ok(())
     }
 
     ///
@@ -839,6 +799,8 @@ impl Tenant {
         remote_client: RemoteTimelineClient,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
@@ -1103,6 +1065,8 @@ impl Tenant {
         local_metadata: TimelineMetadata,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
             RemoteTimelineClient::new(
                 remote_storage.clone(),
@@ -1270,8 +1234,24 @@ impl Tenant {
             "Cannot create timelines on inactive tenant"
         );
 
-        if self.get_timeline(new_timeline_id, false).await.is_ok() {
+        if let Ok(existing) = self.get_timeline(new_timeline_id, false).await {
             debug!("timeline {new_timeline_id} already exists");
+
+            if let Some(remote_client) = existing.remote_client.as_ref() {
+                // Wait for uploads to complete, so that when we return Ok, the timeline
+                // is known to be durable on remote storage. Just like we do at the end of
+                // this function, after we have created the timeline ourselves.
+                //
+                // We only really care that the initial version of `index_part.json` has
+                // been uploaded. That's enough to remember that the timeline
+                // exists. However, there is no function to wait specifically for that so
+                // we just wait for all in-progress uploads to finish.
+                remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for timeline uploads to complete")?;
+            }
+
             return Ok(None);
         }
 
@@ -1313,6 +1293,17 @@ impl Tenant {
                     .await?
             }
         };
+
+        if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
+            // Wait for the upload of the 'index_part.json` file to finish, so that when we return
+            // Ok, the timeline is durable in remote storage.
+            let kind = ancestor_timeline_id
+                .map(|_| "branched")
+                .unwrap_or("bootstrapped");
+            remote_client.wait_completion().await.with_context(|| {
+                format!("wait for {} timeline initial uploads to complete", kind)
+            })?;
+        }
 
         Ok(Some(loaded_timeline))
     }
@@ -1607,6 +1598,8 @@ impl Tenant {
 
     /// Changes tenant status to active, unless shutdown was already requested.
     pub async fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let mut result = Ok(());
         Self::state_send_modify_async(&self.state, |current_state| {
             match &*current_state {
@@ -2146,6 +2139,7 @@ impl Tenant {
             // enough to just fsync it always.
 
             crashsafe::fsync(target_config_parent)?;
+            // XXX we're not fsyncing the parent dir, need to do that in case `creating_tenant`
             Ok(())
         };
 
@@ -2432,9 +2426,10 @@ impl Tenant {
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
-        let mut timelines = self.timelines.lock().await;
-        let new_timeline = self
-            .prepare_timeline(
+
+        let new_timeline = {
+            let mut timelines = self.timelines.lock().await;
+            self.prepare_timeline(
                 dst_id,
                 &metadata,
                 timeline_uninit_mark,
@@ -2443,8 +2438,8 @@ impl Tenant {
             )
             .await?
             .initialize_with_lock(ctx, &mut timelines, true, true)
-            .await?;
-        drop(timelines);
+            .await?
+        };
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
         // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
@@ -2705,6 +2700,7 @@ impl Tenant {
         // `max_retention_period` overrides the cutoff that is used to calculate the size
         // (only if it is shorter than the real cutoff).
         max_retention_period: Option<u64>,
+        cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
     ) -> anyhow::Result<size::ModelInputs> {
         let logical_sizes_at_once = self
@@ -2726,6 +2722,7 @@ impl Tenant {
             logical_sizes_at_once,
             max_retention_period,
             &mut shared_cache,
+            cause,
             ctx,
         )
         .await
@@ -2735,8 +2732,12 @@ impl Tenant {
     /// This is periodically called by background worker.
     /// result is cached in tenant struct
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
-    pub async fn calculate_synthetic_size(&self, ctx: &RequestContext) -> anyhow::Result<u64> {
-        let inputs = self.gather_size_inputs(None, ctx).await?;
+    pub async fn calculate_synthetic_size(
+        &self,
+        cause: LogicalSizeCalculationCause,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<u64> {
+        let inputs = self.gather_size_inputs(None, cause, ctx).await?;
 
         let size = inputs.calculate()?;
 
@@ -2788,15 +2789,23 @@ fn remove_timeline_and_uninit_mark(timeline_dir: &Path, uninit_mark: &Path) -> a
     Ok(())
 }
 
+pub(crate) enum CreateTenantFilesMode {
+    Create,
+    Attach,
+}
+
 pub(crate) fn create_tenant_files(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    mode: CreateTenantFilesMode,
 ) -> anyhow::Result<PathBuf> {
     let target_tenant_directory = conf.tenant_path(&tenant_id);
     anyhow::ensure!(
-        !target_tenant_directory.exists(),
-        "cannot create new tenant repo: '{tenant_id}' directory already exists",
+        !target_tenant_directory
+            .try_exists()
+            .context("check existence of tenant directory")?,
+        "tenant directory already exists",
     );
 
     let temporary_tenant_dir =
@@ -2818,6 +2827,7 @@ pub(crate) fn create_tenant_files(
         conf,
         tenant_conf,
         tenant_id,
+        mode,
         &temporary_tenant_dir,
         &target_tenant_directory,
     );
@@ -2842,9 +2852,28 @@ fn try_create_target_tenant_dir(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    mode: CreateTenantFilesMode,
     temporary_tenant_dir: &Path,
     target_tenant_directory: &Path,
 ) -> Result<(), anyhow::Error> {
+    match mode {
+        CreateTenantFilesMode::Create => {} // needs no attach marker, writing tenant conf + atomic rename of dir is good enough
+        CreateTenantFilesMode::Attach => {
+            let attach_marker_path = temporary_tenant_dir.join(TENANT_ATTACHING_MARKER_FILENAME);
+            let file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&attach_marker_path)
+                .with_context(|| {
+                    format!("could not create attach marker file {attach_marker_path:?}")
+                })?;
+            file.sync_all().with_context(|| {
+                format!("could not sync attach marker file: {attach_marker_path:?}")
+            })?;
+            // fsync of the directory in which the file resides comes later in this function
+        }
+    }
+
     let temporary_tenant_timelines_dir = rebase_directory(
         &conf.timelines_path(&tenant_id),
         target_tenant_directory,
@@ -2870,6 +2899,11 @@ fn try_create_target_tenant_dir(
     fail::fail_point!("tenant-creation-before-tmp-rename", |_| {
         anyhow::bail!("failpoint tenant-creation-before-tmp-rename");
     });
+
+    // Make sure the current tenant directory entries are durable before renaming.
+    // Without this, a crash may reorder any of the directory entry creations above.
+    crashsafe::fsync(temporary_tenant_dir)
+        .with_context(|| format!("sync temporary tenant directory {temporary_tenant_dir:?}"))?;
 
     fs::rename(temporary_tenant_dir, target_tenant_directory).with_context(|| {
         format!(
@@ -3534,14 +3568,26 @@ mod tests {
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
             .await?;
 
+        // The branchpoints should contain all timelines, even ones marked
+        // as Broken.
+        {
+            let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
+            assert_eq!(branchpoints.len(), 1);
+            assert_eq!(branchpoints[0], Lsn(0x40));
+        }
+
+        // You can read the key from the child branch even though the parent is
+        // Broken, as long as you don't need to access data from the parent.
         assert_eq!(
-            newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await?,
-            TEST_IMG(&format!("foo at {}", Lsn(0x40)))
+            newtline.get(*TEST_KEY, Lsn(0x70), &ctx).await?,
+            TEST_IMG(&format!("foo at {}", Lsn(0x70)))
         );
 
-        let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
-        assert_eq!(branchpoints.len(), 1);
-        assert_eq!(branchpoints[0], Lsn(0x40));
+        // This needs to traverse to the parent, and fails.
+        let err = newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("will not become active. Current state: Broken"));
 
         Ok(())
     }
@@ -4076,5 +4122,30 @@ mod tests {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_id() {}
+
+#[cfg(debug_assertions)]
+pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
+    utils::tracing_span_assert::MultiNameExtractor<2>,
+> = once_cell::sync::Lazy::new(|| {
+    utils::tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
+});
+
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_id() {
+    use utils::tracing_span_assert;
+
+    match tracing_span_assert::check_fields_present([&*TENANT_ID_EXTRACTOR]) {
+        Ok(()) => (),
+        Err(missing) => panic!(
+            "missing extractors: {:?}",
+            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
+        ),
     }
 }

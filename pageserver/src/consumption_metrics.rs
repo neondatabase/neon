@@ -5,7 +5,7 @@
 //!
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
-use crate::tenant::mgr;
+use crate::tenant::{mgr, LogicalSizeCalculationCause};
 use anyhow;
 use chrono::Utc;
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
@@ -335,7 +335,9 @@ pub async fn calculate_synthetic_size_worker(
 
                     if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await
                     {
-                        if let Err(e) = tenant.calculate_synthetic_size(ctx).await {
+                        if let Err(e) = tenant.calculate_synthetic_size(
+                            LogicalSizeCalculationCause::ConsumptionMetricsSyntheticSize,
+                            ctx).await {
                             error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
                         }
                     }

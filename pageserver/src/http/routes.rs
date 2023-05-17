@@ -19,13 +19,14 @@ use super::models::{
 };
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::disk_usage_eviction_task;
+use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::mgr::{TenantMapInsertError, TenantStateError};
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
 use utils::{
     auth::JwtAuth,
@@ -104,6 +105,9 @@ impl From<PageReconstructError> for ApiError {
             }
             PageReconstructError::Cancelled => {
                 ApiError::InternalServerError(anyhow::anyhow!("request was cancelled"))
+            }
+            PageReconstructError::AncestorStopping(_) => {
+                ApiError::InternalServerError(anyhow::Error::new(pre))
             }
             PageReconstructError::WalRedo(pre) => {
                 ApiError::InternalServerError(anyhow::Error::new(pre))
@@ -396,9 +400,17 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
     let state = get_state(&request);
 
     if let Some(remote_storage) = &state.remote_storage {
-        mgr::attach_tenant(state.conf, tenant_id, remote_storage.clone(), &ctx)
-            .instrument(info_span!("tenant_attach", tenant = %tenant_id))
-            .await?;
+        mgr::attach_tenant(
+            state.conf,
+            tenant_id,
+            // XXX: Attach should provide the config, especially during tenant migration.
+            //      See https://github.com/neondatabase/neon/issues/1555
+            TenantConfOpt::default(),
+            remote_storage.clone(),
+            &ctx,
+        )
+        .instrument(info_span!("tenant_attach", tenant = %tenant_id))
+        .await?;
     } else {
         return Err(ApiError::BadRequest(anyhow!(
             "attach_tenant is not possible because pageserver was configured without remote storage"
@@ -536,7 +548,11 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
 
     // this can be long operation
     let inputs = tenant
-        .gather_size_inputs(retention_period, &ctx)
+        .gather_size_inputs(
+            retention_period,
+            LogicalSizeCalculationCause::TenantSizeHandler,
+            &ctx,
+        )
         .await
         .map_err(ApiError::InternalServerError)?;
 
@@ -703,11 +719,17 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
+    let _timer = STORAGE_TIME_GLOBAL
+        .get_metric_with_label_values(&[StorageTimeOperation::CreateTenant.into()])
+        .expect("bug")
+        .start_timer();
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
-    let tenant_conf = TenantConfOpt::try_from(&request_data).map_err(ApiError::BadRequest)?;
+    let tenant_conf =
+        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let target_tenant_id = request_data
         .new_tenant_id
@@ -738,6 +760,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         res.context("created tenant failed to become active")
             .map_err(ApiError::InternalServerError)?;
     }
+
     json_response(
         StatusCode::CREATED,
         TenantCreateResponse(new_tenant.tenant_id()),
@@ -775,7 +798,8 @@ async fn update_tenant_config_handler(
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant_conf = TenantConfOpt::try_from(&request_data).map_err(ApiError::BadRequest)?;
+    let tenant_conf =
+        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)
