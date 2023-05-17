@@ -3764,9 +3764,15 @@ impl Timeline {
 
         let mut layers_to_remove = Vec::new();
         let mut wanted_image_layers = KeySpaceRandomAccum::default();
-        let keyspace = self
-            .collect_keyspace(self.get_last_record_lsn(), ctx)
-            .await?;
+        // Do not collect keyspace for Unit tests
+        let gc_keyspace = if ctx.task_kind() == TaskKind::GarbageCollector {
+            Some(
+                self.collect_keyspace(self.get_last_record_lsn(), ctx)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -3857,10 +3863,12 @@ impl Timeline {
                 // But image layers are in any case less sparse than delta layers. Also we need some
                 // protection from replacing recent image layers with new one after each GC iteration.
                 if l.is_incremental() && !LayerMap::is_l0(&*l) {
-                    let layer_logical_size = keyspace.get_logical_size(&l.get_key_range());
-                    let layer_age = new_gc_cutoff.0 - l.get_lsn_range().end.0;
-                    if layer_logical_size < layer_age {
-                        wanted_image_layers.add_range(l.get_key_range());
+                    if let Some(keyspace) = &gc_keyspace {
+                        let layer_logical_size = keyspace.get_logical_size(&l.get_key_range());
+                        let layer_age = new_gc_cutoff.0 - l.get_lsn_range().end.0;
+                        if layer_logical_size < layer_age {
+                            wanted_image_layers.add_range(l.get_key_range());
+                        }
                     }
                 }
                 result.layers_not_updated += 1;
