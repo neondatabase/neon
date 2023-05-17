@@ -98,11 +98,16 @@ def test_ondemand_download_large_rel(
 
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
-    # wait until pageserver receives that data
     wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
-    # stop pg before checkpoint to stop wal generation
+    # stop endpoint before checkpoint to stop wal generation
     endpoint.stop()
+
+    # stopping of safekeepers now will help us not to calculate logical size
+    # after startup, so page requests should be the only one on-demand
+    # downloading the layers
+    for sk in env.safekeepers:
+        sk.stop()
 
     # run checkpoint manually to be sure that data landed in remote storage
     client.timeline_checkpoint(tenant_id, timeline_id)
@@ -122,8 +127,13 @@ def test_ondemand_download_large_rel(
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    endpoint.start()
+    # start a readonly endpoint which we'll use to check the database.
+    # readonly (with lsn=) is required so that we don't try to connect to
+    # safekeepers, that have now been shut down.
+    endpoint = env.endpoints.create_start("main", lsn=current_lsn)
+
     before_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
+    assert before_downloads != 0, "basebackup should on-demand non-zero layers"
 
     # Probe in the middle of the table. There's a high chance that the beginning
     # and end of the table was stored together in the same layer files with data
