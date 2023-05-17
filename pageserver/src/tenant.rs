@@ -459,7 +459,7 @@ pub enum DeleteTimelineError {
     Other(#[from] anyhow::Error),
 }
 
-#[derive(Debug, thiserror::Error, Clone)]
+#[derive(Debug, thiserror::Error, Clone, Copy)]
 enum InnerDeleteTimelineError {
     #[error("upload queue is uninitialized, likely the timeline was in Broken state prior to this call because it failed to fetch IndexPart during load or attach, check the logs")]
     QueueUninitialized,
@@ -475,6 +475,9 @@ enum InnerDeleteTimelineError {
 
     #[error("the deleted timeline grew branches while deleting it; tenant should now be broken")]
     DeletedGrewChildren,
+
+    #[error("panicked while removing the timeline from Tenant::timelines")]
+    OtherPanic,
 }
 
 impl utils::shared_retryable::Retryable for InnerDeleteTimelineError {
@@ -486,7 +489,7 @@ impl utils::shared_retryable::Retryable for InnerDeleteTimelineError {
             Failpoint(_) => false,
             FailedToRemoveLocalTimelineDirectory => false,
             UploadFailed => false,
-            DeletedGrewChildren => true,
+            DeletedGrewChildren | OtherPanic => true,
         }
     }
 }
@@ -1643,31 +1646,37 @@ impl Tenant {
                 });
 
                 // Remove the timeline from the map or poison it if we've grown children.
+                // The poisonsed map will make the child's GetPage accesses fail.
+                //
+                // Growing children can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
                 let removed_timeline =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let mut timelines = tenant.timelines.lock().unwrap();
                         let children_exist = timelines.iter().any(|(_, entry)| {
                             entry.get_ancestor_timeline_id() == Some(timeline_id)
                         });
-                        // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
-                        // We already deleted the layer files, so it's probably best to panic.
-                        // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
                         if children_exist {
-                            panic!("Timeline grew children while we removed layer files");
+                            std::panic::panic_any(InnerDeleteTimelineError::DeletedGrewChildren);
                         }
                         timelines.remove(&timeline_id)
                     }));
 
                 match removed_timeline {
-                    Ok(Some(_)) => {}
+                    Ok(Some(_)) => Ok(()),
                     Ok(None) => {
                         // with SharedRetryable this should no longer happen
                         warn!("no other task should had dropped the Timeline");
+                        Ok(())
                     }
-                    Err(_panic) => return Err(InnerDeleteTimelineError::DeletedGrewChildren),
+                    Err(panic) => {
+                        if let Some(err) = panic.downcast_ref::<InnerDeleteTimelineError>() {
+                            Err(*err)
+                        } else {
+                            // the panic has already been formatted by hook, don't worry about it
+                            Err(InnerDeleteTimelineError::OtherPanic)
+                        }
+                    },
                 }
-
-                Ok(())
             }
             // execute in the *winner's* span so we will capture the request id etc.
             .in_current_span()
