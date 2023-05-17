@@ -1,13 +1,17 @@
 import json
 from contextlib import closing
+from typing import Generator
 
 import psycopg2.extras
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     LocalFsStorage,
+    NeonEnv,
     NeonEnvBuilder,
     RemoteStorageKind,
 )
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.types import Lsn
 from fixtures.utils import wait_until
@@ -403,3 +407,62 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     metric = get_metric()
     assert int(metric.labels["low_threshold_secs"]) == 24 * 60 * 60, "label resets to default"
     assert int(metric.value) == 0, "value resets to default"
+
+
+@pytest.fixture
+def unknown_fields_env(neon_env_builder: NeonEnvBuilder) -> Generator[NeonEnv, None, None]:
+    env = neon_env_builder.init_start()
+    yield env
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*/v1/tenant .*Error processing HTTP request: Bad request.*",
+            ".*/v1/tenant/config .*Error processing HTTP request: Bad request.*",
+        ]
+    )
+
+
+def test_unknown_fields_cli_create(unknown_fields_env: NeonEnv):
+    """
+    When specifying an invalid config field during tenant creation on the CLI, the CLI should fail with an error.
+    """
+
+    with pytest.raises(Exception, match="Unrecognized tenant settings"):
+        unknown_fields_env.neon_cli.create_tenant(conf={"unknown_field": "unknown_value"})
+
+
+def test_unknown_fields_http_create(unknown_fields_env: NeonEnv):
+    """
+    When specifying an invalid config field during tenant creation on the HTTP API, the API should fail with an error.
+    """
+
+    ps_http = unknown_fields_env.pageserver.http_client()
+
+    with pytest.raises(PageserverApiException) as excinfo:
+        ps_http.tenant_create(conf={"unknown_field": "unknown_value"})
+    assert excinfo.value.status_code == 400
+
+
+def test_unknown_fields_cli_config(unknown_fields_env: NeonEnv):
+    """
+    When specifying an invalid config field during tenant configuration on the CLI, the CLI should fail with an error.
+    """
+
+    (tenant_id, _) = unknown_fields_env.neon_cli.create_tenant()
+
+    with pytest.raises(Exception, match="Unrecognized tenant settings"):
+        unknown_fields_env.neon_cli.config_tenant(
+            tenant_id, conf={"unknown_field": "unknown_value"}
+        )
+
+
+def test_unknown_fields_http_config(unknown_fields_env: NeonEnv):
+    """
+    When specifying an invalid config field during tenant configuration on the HTTP API, the API should fail with an error.
+    """
+
+    (tenant_id, _) = unknown_fields_env.neon_cli.create_tenant()
+    ps_http = unknown_fields_env.pageserver.http_client()
+
+    with pytest.raises(PageserverApiException) as excinfo:
+        ps_http.set_tenant_config(tenant_id, {"unknown_field": "unknown_value"})
+    assert excinfo.value.status_code == 400
