@@ -12,7 +12,7 @@
 //! Example use:
 //! ```
 //! $ ls test_output/test_pgbench\[neon-45-684\]/repo/tenants/$TENANT/timelines/$TIMELINE | \
-//! $   grep "__" | cargo run --release --bin draw_timeline_dir > out.svg
+//! $   grep "__" | cargo run --release --bin pagectl draw-timeline-dir > out.svg
 //! $ firefox out.svg
 //! ```
 //!
@@ -62,7 +62,7 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
     (keys, lsns)
 }
 
-fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     // Parse layer filenames from stdin
     let mut ranges: Vec<(Range<Key>, Range<Lsn>)> = vec![];
     let stdin = io::stdin();

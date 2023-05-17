@@ -77,7 +77,7 @@ use utils::{
     lsn::{Lsn, RecordLsn},
 };
 
-mod blob_io;
+pub mod blob_io;
 pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;

@@ -3,6 +3,7 @@ members = [
     "compute_tools",
     "control_plane",
     "pageserver",
+    "pageserver/ctl",
     "proxy",
     "safekeeper",
     "storage_broker",
