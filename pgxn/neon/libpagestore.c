@@ -192,8 +192,9 @@ retry:
 		{
 			if (!PQconsumeInput(pageserver_conn))
 			{
-				neon_log(LOG, "could not get response from pageserver: %s",
-						 PQerrorMessage(pageserver_conn));
+				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+				neon_log(LOG, "could not get response from pageserver: %s", msg);
+				pfree(msg);
 				return -1;
 			}
 		}
@@ -343,7 +344,7 @@ pageserver_receive(void)
 			resp = NULL;
 		}
 		else if (rc == -2)
-			neon_log(ERROR, "could not read COPY data: %s", PQerrorMessage(pageserver_conn));
+			neon_log(ERROR, "could not read COPY data: %s", pchomp(PQerrorMessage(pageserver_conn)));
 		else
 			neon_log(ERROR, "unexpected PQgetCopyData return value: %d", rc);
 	}
@@ -367,7 +368,7 @@ pageserver_flush(void)
 	}
 	else if (PQflush(pageserver_conn))
 	{
-		char	   *msg = PQerrorMessage(pageserver_conn);
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 
 		pageserver_disconnect();
 		neon_log(ERROR, "failed to flush page requests: %s", msg);

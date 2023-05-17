@@ -98,7 +98,9 @@ mod timeline;
 pub mod size;
 
 pub(crate) use timeline::debug_assert_current_span_has_tenant_and_timeline_id;
-pub use timeline::{LocalLayerInfoForDiskUsageEviction, PageReconstructError, Timeline};
+pub use timeline::{
+    LocalLayerInfoForDiskUsageEviction, LogicalSizeCalculationCause, PageReconstructError, Timeline,
+};
 
 // re-export this function so that page_cache.rs can use it.
 pub use crate::tenant::ephemeral_file::writeback as writeback_ephemeral_file;
@@ -790,6 +792,8 @@ impl Tenant {
         remote_client: RemoteTimelineClient,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
@@ -1054,6 +1058,8 @@ impl Tenant {
         local_metadata: TimelineMetadata,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
             RemoteTimelineClient::new(
                 remote_storage.clone(),
@@ -1220,8 +1226,24 @@ impl Tenant {
             "Cannot create timelines on inactive tenant"
         );
 
-        if self.get_timeline(new_timeline_id, false).is_ok() {
+        if let Ok(existing) = self.get_timeline(new_timeline_id, false) {
             debug!("timeline {new_timeline_id} already exists");
+
+            if let Some(remote_client) = existing.remote_client.as_ref() {
+                // Wait for uploads to complete, so that when we return Ok, the timeline
+                // is known to be durable on remote storage. Just like we do at the end of
+                // this function, after we have created the timeline ourselves.
+                //
+                // We only really care that the initial version of `index_part.json` has
+                // been uploaded. That's enough to remember that the timeline
+                // exists. However, there is no function to wait specifically for that so
+                // we just wait for all in-progress uploads to finish.
+                remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for timeline uploads to complete")?;
+            }
+
             return Ok(None);
         }
 
@@ -1262,6 +1284,17 @@ impl Tenant {
                     .await?
             }
         };
+
+        if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
+            // Wait for the upload of the 'index_part.json` file to finish, so that when we return
+            // Ok, the timeline is durable in remote storage.
+            let kind = ancestor_timeline_id
+                .map(|_| "branched")
+                .unwrap_or("bootstrapped");
+            remote_client.wait_completion().await.with_context(|| {
+                format!("wait for {} timeline initial uploads to complete", kind)
+            })?;
+        }
 
         Ok(Some(loaded_timeline))
     }
@@ -1556,6 +1589,8 @@ impl Tenant {
 
     /// Changes tenant status to active, unless shutdown was already requested.
     fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let mut result = Ok(());
         self.state.send_modify(|current_state| {
             match &*current_state {
@@ -2333,17 +2368,18 @@ impl Tenant {
             src_timeline.initdb_lsn,
             src_timeline.pg_version,
         );
-        let mut timelines = self.timelines.lock().unwrap();
-        let new_timeline = self
-            .prepare_timeline(
+
+        let new_timeline = {
+            let mut timelines = self.timelines.lock().unwrap();
+            self.prepare_timeline(
                 dst_id,
                 &metadata,
                 timeline_uninit_mark,
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
-            .initialize_with_lock(ctx, &mut timelines, true, true)?;
-        drop(timelines);
+            .initialize_with_lock(ctx, &mut timelines, true, true)?
+        };
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
         // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
@@ -2601,6 +2637,7 @@ impl Tenant {
         // `max_retention_period` overrides the cutoff that is used to calculate the size
         // (only if it is shorter than the real cutoff).
         max_retention_period: Option<u64>,
+        cause: LogicalSizeCalculationCause,
         ctx: &RequestContext,
     ) -> anyhow::Result<size::ModelInputs> {
         let logical_sizes_at_once = self
@@ -2622,6 +2659,7 @@ impl Tenant {
             logical_sizes_at_once,
             max_retention_period,
             &mut shared_cache,
+            cause,
             ctx,
         )
         .await
@@ -2631,8 +2669,12 @@ impl Tenant {
     /// This is periodically called by background worker.
     /// result is cached in tenant struct
     #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
-    pub async fn calculate_synthetic_size(&self, ctx: &RequestContext) -> anyhow::Result<u64> {
-        let inputs = self.gather_size_inputs(None, ctx).await?;
+    pub async fn calculate_synthetic_size(
+        &self,
+        cause: LogicalSizeCalculationCause,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<u64> {
+        let inputs = self.gather_size_inputs(None, cause, ctx).await?;
 
         let size = inputs.calculate()?;
 
@@ -3425,14 +3467,26 @@ mod tests {
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
             .await?;
 
+        // The branchpoints should contain all timelines, even ones marked
+        // as Broken.
+        {
+            let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
+            assert_eq!(branchpoints.len(), 1);
+            assert_eq!(branchpoints[0], Lsn(0x40));
+        }
+
+        // You can read the key from the child branch even though the parent is
+        // Broken, as long as you don't need to access data from the parent.
         assert_eq!(
-            newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await?,
-            TEST_IMG(&format!("foo at {}", Lsn(0x40)))
+            newtline.get(*TEST_KEY, Lsn(0x70), &ctx).await?,
+            TEST_IMG(&format!("foo at {}", Lsn(0x70)))
         );
 
-        let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
-        assert_eq!(branchpoints.len(), 1);
-        assert_eq!(branchpoints[0], Lsn(0x40));
+        // This needs to traverse to the parent, and fails.
+        let err = newtline.get(*TEST_KEY, Lsn(0x50), &ctx).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("will not become active. Current state: Broken"));
 
         Ok(())
     }
@@ -3921,5 +3975,30 @@ mod tests {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_id() {}
+
+#[cfg(debug_assertions)]
+pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
+    utils::tracing_span_assert::MultiNameExtractor<2>,
+> = once_cell::sync::Lazy::new(|| {
+    utils::tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
+});
+
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_id() {
+    use utils::tracing_span_assert;
+
+    match tracing_span_assert::check_fields_present([&*TENANT_ID_EXTRACTOR]) {
+        Ok(()) => (),
+        Err(missing) => panic!(
+            "missing extractors: {:?}",
+            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
+        ),
     }
 }

@@ -17,7 +17,7 @@ The Neon storage engine consists of two major components:
 - Pageserver. Scalable storage backend for the compute nodes.
 - Safekeepers. The safekeepers form a redundant WAL service that received WAL from the compute node, and stores it durably until it has been processed by the pageserver and uploaded to cloud storage.
 
-See developer documentation in [/docs/SUMMARY.md](/docs/SUMMARY.md) for more information.
+See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more information.
 
 ## Running local installation
 
@@ -238,9 +238,9 @@ CARGO_BUILD_FLAGS="--features=testing" make
 
 ## Documentation
 
-[/docs/](/docs/) Contains a top-level overview of all available markdown documentation.
+[docs](/docs) Contains a top-level overview of all available markdown documentation.
 
-- [/docs/sourcetree.md](/docs/sourcetree.md) contains overview of source tree layout.
+- [sourcetree.md](/docs/sourcetree.md) contains overview of source tree layout.
 
 To view your `rustdoc` documentation in a browser, try running `cargo doc --no-deps --open`
 
@@ -265,6 +265,6 @@ To get more familiar with this aspect, refer to:
 
 ## Join the development
 
-- Read `CONTRIBUTING.md` to learn about project code style and practices.
-- To get familiar with a source tree layout, use [/docs/sourcetree.md](/docs/sourcetree.md).
+- Read [CONTRIBUTING.md](/CONTRIBUTING.md) to learn about project code style and practices.
+- To get familiar with a source tree layout, use [sourcetree.md](/docs/sourcetree.md).
 - To learn more about PostgreSQL internals, check http://www.interdb.jp/pg/index.html

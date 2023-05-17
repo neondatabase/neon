@@ -217,6 +217,16 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
             labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
             log.info(f"{sample.name}{{{labels}}} {sample.value}")
 
+    # Test that we gather tenant create metric
+    storage_operation_metrics = [
+        "pageserver_storage_operations_seconds_global_bucket",
+        "pageserver_storage_operations_seconds_global_sum",
+        "pageserver_storage_operations_seconds_global_count",
+    ]
+    for metric in storage_operation_metrics:
+        value = ps_metrics.query_all(metric, filter={"operation": "create tenant"})
+        assert value
+
 
 @pytest.mark.parametrize(
     "remote_storage_kind",

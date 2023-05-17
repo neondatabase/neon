@@ -79,7 +79,17 @@ module.exports = async ({ github, context, fetch, report }) => {
     for (const parentSuite of suites.children) {
         for (const suite of parentSuite.children) {
             for (const test of suite.children) {
-                const {groups: {buildType, pgVersion}} = test.name.match(/[\[-](?<buildType>debug|release)-pg(?<pgVersion>\d+)[-\]]/)
+                let buildType, pgVersion
+                const match = test.name.match(/[\[-](?<buildType>debug|release)-pg(?<pgVersion>\d+)[-\]]/)?.groups
+                if (match) {
+                    ({buildType, pgVersion} = match)
+                } else {
+                    // It's ok, we embed BUILD_TYPE and Postgres Version into the test name only for regress suite and do not for other suites (like performance).
+                    console.info(`Cannot get BUILD_TYPE and Postgres Version from test name: "${test.name}", defaulting to "release" and "14"`)
+
+                    buildType = "release"
+                    pgVersion = "14"
+                }
 
                 pgVersions.add(pgVersion)
                 buildTypes.add(buildType)

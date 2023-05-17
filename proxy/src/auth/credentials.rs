@@ -1,6 +1,7 @@
 //! User credentials used in authentication.
 
-use crate::error::UserFacingError;
+use crate::{auth::password_hack::parse_endpoint_param, error::UserFacingError};
+use itertools::Itertools;
 use pq_proto::StartupMessageParams;
 use std::collections::HashSet;
 use thiserror::Error;
@@ -61,7 +62,15 @@ impl<'a> ClientCredentials<'a> {
         // Project name might be passed via PG's command-line options.
         let project_option = params
             .options_raw()
-            .and_then(|mut options| options.find_map(|opt| opt.strip_prefix("project=")))
+            .and_then(|options| {
+                // We support both `project` (deprecated) and `endpoint` options for backward compatibility.
+                // However, if both are present, we don't exactly know which one to use.
+                // Therefore we require that only one of them is present.
+                options
+                    .filter_map(parse_endpoint_param)
+                    .at_most_one()
+                    .ok()?
+            })
             .map(|name| name.to_string());
 
         let project_from_domain = if let Some(sni_str) = sni {
@@ -173,6 +182,51 @@ mod tests {
         let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.project.as_deref(), Some("bar"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_endpoint_from_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "-ckey=1 endpoint=bar -c geqo=off"),
+        ]);
+
+        let creds = ClientCredentials::parse(&options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert_eq!(creds.project.as_deref(), Some("bar"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_three_endpoints_from_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            (
+                "options",
+                "-ckey=1 endpoint=one endpoint=two endpoint=three -c geqo=off",
+            ),
+        ]);
+
+        let creds = ClientCredentials::parse(&options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert!(creds.project.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_when_endpoint_and_project_are_in_options() -> anyhow::Result<()> {
+        let options = StartupMessageParams::new([
+            ("user", "john_doe"),
+            ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
+        ]);
+
+        let creds = ClientCredentials::parse(&options, None, None)?;
+        assert_eq!(creds.user, "john_doe");
+        assert!(creds.project.is_none());
 
         Ok(())
     }

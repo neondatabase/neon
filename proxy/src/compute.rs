@@ -1,4 +1,4 @@
-use crate::{cancellation::CancelClosure, error::UserFacingError};
+use crate::{auth::parse_endpoint_param, cancellation::CancelClosure, error::UserFacingError};
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
@@ -279,7 +279,7 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     #[allow(unstable_name_collisions)]
     let options: String = params
         .options_raw()?
-        .filter(|opt| !opt.starts_with("project="))
+        .filter(|opt| parse_endpoint_param(opt).is_none())
         .intersperse(" ") // TODO: use impl from std once it's stabilized
         .collect();
 
