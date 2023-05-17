@@ -8,12 +8,25 @@ use super::error::ApiError;
 pub async fn json_request<T: for<'de> Deserialize<'de>>(
     request: &mut Request<Body>,
 ) -> Result<T, ApiError> {
-    let whole_body = hyper::body::aggregate(request.body_mut())
+    json_request_or_empty_body(request)
+        .await?
+        .context("missing request body")
+        .map_err(ApiError::BadRequest)
+}
+
+pub async fn json_request_or_empty_body<T: for<'de> Deserialize<'de>>(
+    request: &mut Request<Body>,
+) -> Result<Option<T>, ApiError> {
+    let body = hyper::body::aggregate(request.body_mut())
         .await
         .context("Failed to read request body")
         .map_err(ApiError::BadRequest)?;
-    serde_json::from_reader(whole_body.reader())
+    if body.remaining() == 0 {
+        return Ok(None);
+    }
+    serde_json::from_reader(body.reader())
         .context("Failed to parse json request")
+        .map(Some)
         .map_err(ApiError::BadRequest)
 }
 

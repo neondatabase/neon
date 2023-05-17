@@ -11,6 +11,7 @@ use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::http::endpoint::RequestSpan;
+use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use super::models::{
@@ -390,11 +391,9 @@ async fn tenant_attach_handler(mut request: Request<Body>) -> Result<Response<Bo
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
-    let maybe_body: Option<TenantAttachRequest> = json_request(&mut request).await?;
+    let maybe_body: Option<TenantAttachRequest> = json_request_or_empty_body(&mut request).await?;
     let tenant_conf = match maybe_body {
         Some(request) => TenantConfOpt::try_from(&*request.config).map_err(ApiError::BadRequest)?,
-        // TODO: for robustness, would be nice to check explicitly that the request body 0 bytes
-        // and bail out if it wasn't. Can be covered in python tests, though.
         None => TenantConfOpt::default(),
     };
 
