@@ -2719,7 +2719,8 @@ impl Timeline {
                     .await?
             } else {
                 // normal case, write out a L0 delta layer file.
-                let (delta_path, metadata) = self.create_delta_layer(&frozen_layer)?;
+                let (delta_path, metadata) =
+                    tokio::task::block_in_place(|| self.create_delta_layer(&frozen_layer))?;
                 HashMap::from([(delta_path, metadata)])
             };
 
@@ -3040,7 +3041,10 @@ impl Timeline {
                 self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
             ))
             .collect::<Vec<_>>();
-        par_fsync::par_fsync(&all_paths).context("fsync of newly created layer files")?;
+
+        tokio::task::block_in_place(|| {
+            par_fsync::par_fsync(&all_paths).context("fsync of newly created layer files")
+        })?;
 
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
@@ -3105,7 +3109,7 @@ impl Timeline {
     /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
     /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
     /// start of level0 files compaction, the on-demand download should be revisited as well.
-    async fn compact_level0_phase1(
+    fn compact_level0_phase1(
         &self,
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         target_file_size: u64,
@@ -3451,9 +3455,9 @@ impl Timeline {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = self
-            .compact_level0_phase1(layer_removal_cs, target_file_size, ctx)
-            .await?;
+        } = tokio::task::block_in_place(|| {
+            self.compact_level0_phase1(layer_removal_cs, target_file_size, ctx)
+        })?;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
