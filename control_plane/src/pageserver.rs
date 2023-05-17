@@ -8,9 +8,7 @@ use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, Context};
-use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
-};
+use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -316,8 +314,8 @@ impl PageServerNode {
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
-        let request = TenantCreateRequest {
-            new_tenant_id,
+
+        let config = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -372,6 +370,10 @@ impl PageServerNode {
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
         };
+        let request = models::TenantCreateRequest {
+            new_tenant_id,
+            config,
+        };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
         }
@@ -392,9 +394,9 @@ impl PageServerNode {
     }
 
     pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
-        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
-            .json(&TenantConfigRequest {
-                tenant_id,
+        let config = {
+            // Braces to make the diff easier to read
+            models::TenantConfig {
                 checkpoint_distance: settings
                     .get("checkpoint_distance")
                     .map(|x| x.parse::<u64>())
@@ -451,7 +453,11 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .get("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-            })
+            }
+        };
+
+        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
+            .json(&models::TenantConfigRequest { tenant_id, config })
             .send()?
             .error_from_body()?;
 
@@ -483,7 +489,7 @@ impl PageServerNode {
             Method::POST,
             format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
         )?
-        .json(&TimelineCreateRequest {
+        .json(&models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
             ancestor_timeline_id,
