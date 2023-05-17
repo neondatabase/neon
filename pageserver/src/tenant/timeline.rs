@@ -4416,12 +4416,6 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {}
 pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
     use utils::tracing_span_assert;
 
-    pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
-        tracing_span_assert::MultiNameExtractor<2>,
-    > = once_cell::sync::Lazy::new(|| {
-        tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
-    });
-
     pub static TIMELINE_ID_EXTRACTOR: once_cell::sync::Lazy<
         tracing_span_assert::MultiNameExtractor<2>,
     > = once_cell::sync::Lazy::new(|| {
@@ -4429,7 +4423,7 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
     });
 
     match tracing_span_assert::check_fields_present([
-        &*TENANT_ID_EXTRACTOR,
+        &*super::TENANT_ID_EXTRACTOR,
         &*TIMELINE_ID_EXTRACTOR,
     ]) {
         Ok(()) => (),
