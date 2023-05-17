@@ -1620,7 +1620,7 @@ class NeonPageserver(PgProtocol):
             # this is until #3501
             ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
             # these can happen anytime we do compactions from background task and shutdown pageserver
-            r".*WARN.*ancestor timeline \S+ is being stopped",
+            r".*ERROR.*ancestor timeline \S+ is being stopped",
         ]
 
     def start(
