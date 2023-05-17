@@ -30,13 +30,18 @@ impl PartialOrd for LayerKey {
 
 impl Ord for LayerKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // NOTE we really care about comparing by lsn.start first
+        // NOTE we really care about comparing by lsn.start first, because
+        //      the persistent data structure must be constructed in that order.
+        // NOTE we also care about comparing by (-lsn.end), then key.start, and
+        //      then (-key.end) next to make sure that if one layer contains
+        //      another, the larger one is inserted first and the smaller one
+        //      is detected as redundant.
         self.lsn
             .start
             .cmp(&other.lsn.start)
-            .then(self.lsn.end.cmp(&other.lsn.end))
+            .then(self.lsn.end.cmp(&other.lsn.end).reverse())
             .then(self.key.start.cmp(&other.key.start))
-            .then(self.key.end.cmp(&other.key.end))
+            .then(self.key.end.cmp(&other.key.end).reverse())
             .then(self.is_image.cmp(&other.is_image))
     }
 }
@@ -80,11 +85,11 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         }
     }
 
-    /// Add a layer
+    /// Add a layer, returning whether the operation was a noop.
     ///
     /// Panics if new layer has older lsn.start than an existing layer.
     /// See BufferedHistoricLayerCoverage for a more general insertion method.
-    pub fn insert(&mut self, layer_key: LayerKey, value: Value) {
+    pub fn insert(&mut self, layer_key: LayerKey, value: Value) -> bool {
         // It's only a persistent map, not a retroactive one
         if let Some(last_entry) = self.historic.iter().next_back() {
             let last_lsn = last_entry.0;
@@ -100,10 +105,12 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
             &mut self.head.delta_coverage
         };
 
-        target.insert(layer_key.key, layer_key.lsn.clone(), value);
+        let was_noop = target.insert(layer_key.key, layer_key.lsn.clone(), value);
 
         // Remember history. Clone is O(1)
         self.historic.insert(layer_key.lsn.start, self.head.clone());
+
+        was_noop
     }
 
     /// Query at a particular LSN, inclusive
@@ -509,9 +516,13 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
                 is_image: false,
             }..,
         ) {
-            self.historic_coverage
+            let was_noop = self.historic_coverage
                 .insert(layer_key.clone(), layer.clone());
             num_inserted += 1;
+
+            if was_noop {
+                // TODO keep track
+            }
         }
 
         // TODO maybe only warn if ratio is at least 10

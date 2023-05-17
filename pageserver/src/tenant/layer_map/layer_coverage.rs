@@ -51,10 +51,10 @@ impl<Value: Clone> LayerCoverage<Value> {
         self.nodes.insert_mut(key, value);
     }
 
-    /// Insert a layer.
+    /// Insert a layer, returning whether the operation was a NOOP.
     ///
     /// Complexity: worst case O(N), in practice O(log N). See NOTE in implementation.
-    pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value) {
+    pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value) -> bool {
         // Add nodes at endpoints
         //
         // NOTE The order of lines is important. We add nodes at the start
@@ -89,13 +89,16 @@ impl<Value: Clone> LayerCoverage<Value> {
         }
         if !prev_covered {
             to_remove.push(key.end);
+            // TODO check if key.start is redundant too
         }
-        for k in to_update {
-            self.nodes.insert_mut(k, Some((lsn.end, value.clone())));
+        for k in &to_update {
+            self.nodes.insert_mut(*k, Some((lsn.end, value.clone())));
         }
-        for k in to_remove {
-            self.nodes.remove_mut(&k);
+        for k in &to_remove {
+            self.nodes.remove_mut(k);
         }
+
+        to_update.is_empty()
     }
 
     /// Get the latest (by lsn.end) layer at a given key
