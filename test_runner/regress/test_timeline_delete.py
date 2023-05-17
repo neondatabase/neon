@@ -461,18 +461,9 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     # after disabling the failpoint pause, the original attempt should complete eventually
     ps_http.configure_failpoints((failpoint_name, "off"))
 
-    def timeline_goes_away():
-        try:
-            ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
-            assert False, "expected a 404"
-        except PageserverApiException as e:
-            if e.status_code != 404:
-                raise e
-            else:
-                # 404 received, timeline delete is now complete
-                pass
+    def delete_timeline_completes():
+        assert [env.initial_timeline] == [
+            timeline_id for (_, timeline_id) in env.neon_cli.list_timelines()
+        ]
 
-    wait_until(50, 0.5, timeline_goes_away)
-    env.pageserver.allowed_errors.append(
-        f".*NotFound: Timeline {env.initial_tenant}/{child_timeline_id} was not found"
-    )
+    wait_until(50, 0.5, delete_timeline_completes)
