@@ -3667,7 +3667,7 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+    pub(super) async fn gc(&self, ctx: &RequestContext) -> anyhow::Result<GcResult> {
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
         fail_point!("before-timeline-gc");
@@ -3697,6 +3697,7 @@ impl Timeline {
                 pitr_cutoff,
                 retain_lsns,
                 new_gc_cutoff,
+                ctx,
             )
             .instrument(
                 info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
@@ -3716,6 +3717,7 @@ impl Timeline {
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
         let now = SystemTime::now();
         let mut result: GcResult = GcResult::default();
@@ -3762,6 +3764,7 @@ impl Timeline {
 
         let mut layers_to_remove = Vec::new();
         let mut wanted_image_layers = KeySpaceRandomAccum::default();
+        let keyspace = self.collect_keyspace(new_gc_cutoff, ctx).await?;
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -3852,7 +3855,11 @@ impl Timeline {
                 // But image layers are in any case less sparse than delta layers. Also we need some
                 // protection from replacing recent image layers with new one after each GC iteration.
                 if l.is_incremental() && !LayerMap::is_l0(&*l) {
-                    wanted_image_layers.add_range(l.get_key_range());
+                    let layer_logical_size = keyspace.get_logical_size(&l.get_key_range());
+                    let layer_age = new_gc_cutoff.0 - l.get_lsn_range().end.0;
+                    if layer_logical_size < layer_age {
+                        wanted_image_layers.add_range(l.get_key_range());
+                    }
                 }
                 result.layers_not_updated += 1;
                 continue 'outer;

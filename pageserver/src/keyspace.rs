@@ -62,6 +62,25 @@ impl KeySpace {
         KeyPartitioning { parts }
     }
 
+    pub fn get_logical_size(&self, range: &Range<Key>) -> u64 {
+        let start = match self.ranges.binary_search_by_key(&range.start, |r| r.start) {
+            Err(0) => 0,
+            Ok(index) => index,
+            Err(index) => index - 1,
+        };
+        let mut size = 0u64;
+        for i in start..self.ranges.len() {
+            if self.ranges[i].start >= range.end {
+                break;
+            }
+            let n_blocks = key_range_size(&self.ranges[i]);
+            if n_blocks != u32::MAX {
+                size += n_blocks as u64 * BLCKSZ as u64;
+            }
+        }
+        size
+    }
+
     ///
     /// Check if key space contains overlapping range
     ///

@@ -2195,7 +2195,7 @@ impl Tenant {
                 // made.
                 break;
             }
-            let result = timeline.gc().await?;
+            let result = timeline.gc(ctx).await?;
             totals += result;
         }
 
@@ -3754,7 +3754,7 @@ mod tests {
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&ctx).await?;
-            tline.gc().await?;
+            tline.gc(&ctx).await?;
         }
 
         Ok(())
@@ -3826,7 +3826,7 @@ mod tests {
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&ctx).await?;
-            tline.gc().await?;
+            tline.gc(&ctx).await?;
         }
 
         Ok(())
@@ -3910,7 +3910,7 @@ mod tests {
                 .await?;
             tline.freeze_and_flush().await?;
             tline.compact(&ctx).await?;
-            tline.gc().await?;
+            tline.gc(&ctx).await?;
         }
 
         Ok(())
