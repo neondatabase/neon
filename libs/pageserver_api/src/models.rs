@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     time::SystemTime,
+    unreachable,
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -130,6 +132,24 @@ pub struct TimelineCreateRequest {
     pub pg_version: Option<u32>,
 }
 
+#[serde_as]
+#[derive(Serialize, Deserialize, Default)]
+pub struct TenantCreateRequest {
+    #[serde(default)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub new_tenant_id: Option<TenantId>,
+    #[serde(flatten)]
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+impl std::ops::Deref for TenantCreateRequest {
+    type Target = TenantConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
@@ -152,176 +172,21 @@ pub struct TenantConfig {
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
-}
-
-struct TenantIdPlusFlattenedTenantConfigVisitor<T: TenantIdPlusFlattenedTenantConfig> {
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<T: TenantIdPlusFlattenedTenantConfig> TenantIdPlusFlattenedTenantConfigVisitor<T> {
-    fn new() -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-trait TenantIdPlusFlattenedTenantConfig: Sized {
-    fn tenant_id_key() -> &'static str;
-    fn construct(tenant_id: Option<TenantId>, config: TenantConfig) -> Result<Self, ()>;
-}
-
-impl<'de, T: TenantIdPlusFlattenedTenantConfig> serde::de::Visitor<'de>
-    for TenantIdPlusFlattenedTenantConfigVisitor<T>
-{
-    type Value = T;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            formatter,
-            "a tenant config object plus an additional field {:?} that contains a tenant id",
-            T::tenant_id_key()
-        )
-    }
-
-    #[forbid(unused_variables)]
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        #[serde_as]
-        #[derive(serde::Deserialize)]
-        #[serde(transparent)]
-        struct TenantIdDisplayFromStr(#[serde_as(as = "DisplayFromStr")] pub TenantId);
-
-        let mut tenant_id: Option<TenantIdDisplayFromStr> = None;
-        let mut config = TenantConfig::default();
-        let TenantConfig {
-            checkpoint_distance,
-            checkpoint_timeout,
-            compaction_target_size,
-            compaction_period,
-            compaction_threshold,
-            gc_horizon,
-            gc_period,
-            image_creation_threshold,
-            pitr_interval,
-            walreceiver_connect_timeout,
-            lagging_wal_timeout,
-            max_lsn_wal_lag,
-            trace_read_requests,
-            eviction_policy,
-            min_resident_size_override,
-            evictions_low_residence_duration_metric_threshold,
-        } = &mut config;
-        macro_rules! deny_unknown_fields {
-            (MATCH $key:expr, $( $ident:ident ),*,) => {
-                match $key {
-                    $(stringify!($ident)=> deny_unknown_fields!(RHS IDENT $ident),)*
-                    _ => {
-                        return Err(serde::de::Error::unknown_field($key, &[]));
-                    }
-                }
-            };
-            (RHS $name:expr,  $ident:expr) => {{
-                let name: &'static str = $name;
-                let mutref: &mut Option<_> = $ident;
-                if mutref.is_some() {
-                    return Err(serde::de::Error::duplicate_field(name));
-                }
-                // all fields are type Option<_>
-                let value: Option<_> = map.next_value()?;
-                *mutref = value;
-            }};
-            (RHS IDENT $ident:ident) => {{
-                deny_unknown_fields!(RHS stringify!($ident), $ident);
-            }}
-        }
-        let tenant_id_key = T::tenant_id_key();
-        while let Some(key) = map.next_key::<String>()? {
-            if key == tenant_id_key {
-                deny_unknown_fields!(RHS tenant_id_key, &mut tenant_id);
-                continue;
-            }
-            // If we forget any of the TenantConf fields here, the compiler will complain with `unused variable`.
-            // That will be an error due to the forbid() clause around this function. The exhaustive destructuring
-            // will also cause an error.
-            deny_unknown_fields!(MATCH key.as_str(),
-                checkpoint_distance,
-                checkpoint_timeout,
-                compaction_target_size,
-                compaction_period,
-                compaction_threshold,
-                gc_horizon,
-                gc_period,
-                image_creation_threshold,
-                pitr_interval,
-                walreceiver_connect_timeout,
-                lagging_wal_timeout,
-                max_lsn_wal_lag,
-                trace_read_requests,
-                eviction_policy,
-                min_resident_size_override,
-                evictions_low_residence_duration_metric_threshold,
-            );
-        }
-        let tenant_id = tenant_id.map(|v| v.0);
-        match T::construct(tenant_id, config) {
-            Ok(t) => Ok(t),
-            Err(()) => {
-                assert!(tenant_id.is_none());
-                Err(serde::de::Error::missing_field(tenant_id_key))
-            }
-        }
-    }
-}
-
-macro_rules! impl_deserialize_for_tenant_id_plus_tenant_config {
-    ($typename:ident, $tenant_id_serde_key:literal, $construct:expr) => {
-        impl TenantIdPlusFlattenedTenantConfig for $typename {
-            fn tenant_id_key() -> &'static str {
-                $tenant_id_serde_key
-            }
-            fn construct(tenant_id: Option<TenantId>, config: TenantConfig) -> Result<Self, ()> {
-                $construct(tenant_id, config)
-            }
-        }
-
-        impl<'de> serde::Deserialize<'de> for $typename {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                deserializer
-                    .deserialize_map(TenantIdPlusFlattenedTenantConfigVisitor::<Self>::new())
-            }
-        }
-    };
-}
-#[serde_as]
-#[derive(Serialize, Default)]
-pub struct TenantCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_tenant_id: Option<TenantId>,
     #[serde(flatten)]
-    pub config: TenantConfig,
+    pub other: HashMap<String, RejectValue>,
 }
 
-impl_deserialize_for_tenant_id_plus_tenant_config!(
-    TenantCreateRequest,
-    "new_tenant_id",
-    |tenant_id, config| {
-        // `new_tenant_id` is optional`
-        Ok(TenantCreateRequest {
-            new_tenant_id: tenant_id,
-            config,
-        })
+pub struct RejectValue(PhantomData<()>);
+
+impl<'de> serde::Deserialize<'de> for RejectValue {
+    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom("Unrecognized tenant settings"))
     }
-);
+}
 
-impl std::ops::Deref for TenantCreateRequest {
-    type Target = TenantConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.config
+impl serde::Serialize for RejectValue {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        unreachable!()
     }
 }
 
@@ -345,23 +210,13 @@ impl TenantCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct TenantConfigRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(flatten)]
     pub config: TenantConfig,
 }
-
-impl_deserialize_for_tenant_id_plus_tenant_config!(
-    TenantConfigRequest,
-    "tenant_id",
-    |tenant_id, config| {
-        // for TenantConfigRequest, we _need_ the tenant_id
-        let Some(tenant_id) = tenant_id else { return Err(()) };
-        Ok(TenantConfigRequest { tenant_id, config })
-    }
-);
 
 impl std::ops::Deref for TenantConfigRequest {
     type Target = TenantConfig;
@@ -390,6 +245,7 @@ impl TenantConfigRequest {
             eviction_policy: None,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: None,
+            other: HashMap::new(),
         };
         TenantConfigRequest { tenant_id, config }
     }
