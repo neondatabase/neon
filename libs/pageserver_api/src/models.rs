@@ -134,6 +134,7 @@ pub struct TimelineCreateRequest {
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -172,22 +173,6 @@ pub struct TenantConfig {
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    #[serde(flatten)]
-    pub other: HashMap<String, RejectValue>,
-}
-
-pub struct RejectValue(PhantomData<()>);
-
-impl<'de> serde::Deserialize<'de> for RejectValue {
-    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
-        Err(serde::de::Error::custom("Unrecognized tenant settings"))
-    }
-}
-
-impl serde::Serialize for RejectValue {
-    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-        unreachable!()
-    }
 }
 
 #[serde_as]
@@ -211,6 +196,7 @@ impl TenantCreateRequest {
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TenantConfigRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
@@ -245,7 +231,6 @@ impl TenantConfigRequest {
             eviction_policy: None,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: None,
-            other: HashMap::new(),
         };
         TenantConfigRequest { tenant_id, config }
     }
