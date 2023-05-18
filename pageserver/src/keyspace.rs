@@ -63,17 +63,32 @@ impl KeySpace {
     }
 
     pub fn get_logical_size(&self, range: &Range<Key>) -> u64 {
-        let start = match self.ranges.binary_search_by_key(&range.start, |r| r.start) {
-            Err(0) => 0,
-            Ok(index) => index,
-            Err(index) => index - 1,
+        let mut start_key = range.start;
+        let n_ranges = self.ranges.len();
+        let start_index = match self.ranges.binary_search_by_key(&start_key, |r| r.start) {
+            Ok(index) => index, // keyspace range begins with start_key
+            Err(index) => {
+                if index != 0 && self.ranges[index - 1].end > start_key {
+                    index - 1 // previous keyspace range overlaps with specified
+                } else if index == n_ranges {
+                    return 0; // no interscation with specified range
+                } else {
+                    start_key = self.ranges[index].start;
+                    index
+                }
+            }
         };
         let mut size = 0u64;
-        for i in start..self.ranges.len() {
+        for i in start_index..n_ranges {
             if self.ranges[i].start >= range.end {
                 break;
             }
-            let n_blocks = key_range_size(&self.ranges[i]);
+            let end_key = if self.ranges[i].end < range.end {
+                self.ranges[i].end
+            } else {
+                range.end
+            };
+            let n_blocks = key_range_size(&(start_key..end_key));
             if n_blocks != u32::MAX {
                 size += n_blocks as u64 * BLCKSZ as u64;
             }
