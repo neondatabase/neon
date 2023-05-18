@@ -1,17 +1,14 @@
 import json
 from contextlib import closing
-from typing import Generator
 
 import psycopg2.extras
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     LocalFsStorage,
-    NeonEnv,
     NeonEnvBuilder,
     RemoteStorageKind,
 )
-from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.types import Lsn
 from fixtures.utils import wait_until
