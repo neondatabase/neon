@@ -1,9 +1,7 @@
 use std::{
     collections::HashMap,
-    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     time::SystemTime,
-    unreachable,
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -133,7 +131,8 @@ pub struct TimelineCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
@@ -150,7 +149,7 @@ impl std::ops::Deref for TenantCreateRequest {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
@@ -172,22 +171,6 @@ pub struct TenantConfig {
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    #[serde(flatten)]
-    pub other: HashMap<String, RejectValue>,
-}
-
-pub struct RejectValue(PhantomData<()>);
-
-impl<'de> serde::Deserialize<'de> for RejectValue {
-    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
-        Err(serde::de::Error::custom("Unrecognized tenant settings"))
-    }
-}
-
-impl serde::Serialize for RejectValue {
-    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-        unreachable!()
-    }
 }
 
 #[serde_as]
@@ -210,12 +193,13 @@ impl TenantCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct TenantConfigRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(flatten)]
-    pub config: TenantConfig,
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 impl std::ops::Deref for TenantConfigRequest {
@@ -245,7 +229,6 @@ impl TenantConfigRequest {
             eviction_policy: None,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: None,
-            other: HashMap::new(),
         };
         TenantConfigRequest { tenant_id, config }
     }
@@ -786,5 +769,32 @@ mod tests {
         );
         assert!(format!("{:?}", &original_broken.state).contains("reason"));
         assert!(format!("{:?}", &original_broken.state).contains("backtrace info"));
+    }
+
+    #[test]
+    fn test_reject_unknown_field() {
+        let id = TenantId::generate();
+        let create_request = json!({
+            "new_tenant_id": id.to_string(),
+            "unknown_field": "unknown_value".to_string(),
+        });
+        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
+
+        let id = TenantId::generate();
+        let config_request = json!({
+            "tenant_id": id.to_string(),
+            "unknown_field": "unknown_value".to_string(),
+        });
+        let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
     }
 }

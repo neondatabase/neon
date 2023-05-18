@@ -369,7 +369,6 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
-            other: Default::default(),
         };
         let request = models::TenantCreateRequest {
             new_tenant_id,
@@ -460,7 +459,6 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-                other: Default::default(),
             }
         };
 
