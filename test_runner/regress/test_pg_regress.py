@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
-from fixtures.pg_version import PgVersion, xfail_on_postgres
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -72,7 +71,6 @@ def test_pg_regress(
 #
 # This runs for a long time, especially in debug mode, so use a larger-than-default
 # timeout.
-@xfail_on_postgres(PgVersion.V15, reason="https://github.com/neondatabase/neon/pull/4213")
 @pytest.mark.timeout(1800)
 def test_isolation(
     neon_simple_env: NeonEnv,
