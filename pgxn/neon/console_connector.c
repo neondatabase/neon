@@ -458,7 +458,7 @@ static void HandleCreateRole(CreateRoleStmt *stmt)
     }
     if(!found)
         memset(entry->old_name, 0, sizeof(entry->old_name));
-    if(dpass)
+    if(dpass && dpass->arg)
         entry->password = MemoryContextStrdup(CurTransactionContext, strVal(dpass->arg));
     else
         entry->password = NULL;
@@ -487,7 +487,10 @@ static void HandleAlterRole(AlterRoleStmt *stmt)
         &found);
     if(!found)
         memset(entry->old_name, 0, sizeof(entry->old_name));
-    entry->password = MemoryContextStrdup(CurTransactionContext, strVal(dpass->arg));
+    if(dpass->arg)
+        entry->password = MemoryContextStrdup(CurTransactionContext, strVal(dpass->arg));
+    else
+        entry->password = NULL;
     entry->type = Op_Set;
 }
 
