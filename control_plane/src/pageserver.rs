@@ -2,12 +2,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Write};
-use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::{io, result};
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
@@ -378,9 +377,6 @@ impl PageServerNode {
             new_tenant_id,
             config,
         };
-        if !settings.is_empty() {
-            bail!("Unrecognized tenant settings: {settings:?}")
-        }
         self.http_request(Method::POST, format!("{}/tenant", self.http_base_url))?
             .json(&request)
             .send()?
@@ -400,76 +396,10 @@ impl PageServerNode {
     pub fn tenant_config(
         &self,
         tenant_id: TenantId,
-        mut settings: HashMap<&str, &str>,
+        settings: HashMap<&str, &str>,
     ) -> anyhow::Result<()> {
-        let config = {
-            // Braces to make the diff easier to read
-            models::TenantConfig {
-                checkpoint_distance: settings
-                    .remove("checkpoint_distance")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'checkpoint_distance' as an integer")?,
-                checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
-                compaction_target_size: settings
-                    .remove("compaction_target_size")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'compaction_target_size' as an integer")?,
-                compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
-                compaction_threshold: settings
-                    .remove("compaction_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()
-                    .context("Failed to parse 'compaction_threshold' as an integer")?,
-                gc_horizon: settings
-                    .remove("gc_horizon")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'gc_horizon' as an integer")?,
-                gc_period: settings.remove("gc_period").map(|x| x.to_string()),
-                image_creation_threshold: settings
-                    .remove("image_creation_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()
-                    .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
-                pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
-                walreceiver_connect_timeout: settings
-                    .remove("walreceiver_connect_timeout")
-                    .map(|x| x.to_string()),
-                lagging_wal_timeout: settings
-                    .remove("lagging_wal_timeout")
-                    .map(|x| x.to_string()),
-                max_lsn_wal_lag: settings
-                    .remove("max_lsn_wal_lag")
-                    .map(|x| x.parse::<NonZeroU64>())
-                    .transpose()
-                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-                trace_read_requests: settings
-                    .remove("trace_read_requests")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'trace_read_requests' as bool")?,
-                eviction_policy: settings
-                    .remove("eviction_policy")
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .context("Failed to parse 'eviction_policy' json")?,
-                min_resident_size_override: settings
-                    .remove("min_resident_size_override")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'min_resident_size_override' as an integer")?,
-                evictions_low_residence_duration_metric_threshold: settings
-                    .remove("evictions_low_residence_duration_metric_threshold")
-                    .map(|x| x.to_string()),
-            }
-        };
-
-        if !settings.is_empty() {
-            bail!("Unrecognized tenant settings: {settings:?}")
-        }
-
+        println!("{:#?}", settings);
+        let config = models::TenantConfig::deserialize_from_settings(settings)?;
         self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
             .json(&models::TenantConfigRequest { tenant_id, config })
             .send()?
