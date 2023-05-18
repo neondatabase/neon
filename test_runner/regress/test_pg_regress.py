@@ -33,8 +33,8 @@ def test_pg_regress(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
-    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/regress"
-    src_path = base_dir / f"vendor/postgres-v{env.pg_version}/src/test/regress"
+    build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/regress"
+    src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/regress"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "parallel_schedule"
     pg_regress = build_path / "pg_regress"
@@ -97,8 +97,8 @@ def test_isolation(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_isolation_regress will need.
-    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/isolation"
-    src_path = base_dir / f"vendor/postgres-v{env.pg_version}/src/test/isolation"
+    build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/isolation"
+    src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/isolation"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "isolation_schedule"
     pg_isolation_regress = build_path / "pg_isolation_regress"
