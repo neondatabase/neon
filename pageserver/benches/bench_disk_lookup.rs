@@ -39,12 +39,6 @@ impl MockLayer {
 
 // cargo bench --bench bench_disk_lookup
 fn bench_disk_lookup(c: &mut Criterion) {
-    // TODO why go through the trouble of writing to disk if we read the index
-    // into memory always?
-
-    // TODO stack 100 disk btrees
-    let _timeline = 0;
-
     virtual_file::init(10);
     page_cache::init(10000);
 
