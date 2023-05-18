@@ -88,3 +88,7 @@ harness = false
 [[bench]]
 name = "bench_walredo"
 harness = false
+
+[[bench]]
+name = "bench_disk_lookup"
+harness = false

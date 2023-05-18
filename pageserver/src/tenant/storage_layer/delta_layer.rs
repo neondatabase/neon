@@ -709,6 +709,9 @@ impl DeltaLayerWriterInner {
         // FIXME: throw an error instead?
         let path = DeltaLayer::temp_path_for(conf, timeline_id, tenant_id, key_start, &lsn_range);
 
+        // HACK
+        fs::create_dir_all(path.clone().parent().unwrap())?;
+
         let mut file = VirtualFile::create(&path)?;
         // make room for the header block
         file.seek(SeekFrom::Start(PAGE_SZ as u64))?;
