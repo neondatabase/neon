@@ -30,9 +30,6 @@ class PgVersion(str, enum.Enum):
     def __str__(self) -> str:
         return self.value
 
-    def __str__(self) -> str:
-        return self.value
-
     # In GitHub workflows we use Postgres version with v-prefix (e.g. v14 instead of just 14),
     # sometime we need to do so in tests.
     @property
