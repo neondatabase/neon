@@ -30,7 +30,7 @@ impl MockLayer {
             if key == key_bytes {
                 result = Some(value);
             }
-            return true
+            return false
         }).unwrap();
 
         result
