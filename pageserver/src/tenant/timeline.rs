@@ -2708,21 +2708,22 @@ impl Timeline {
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        let layer_paths_to_upload =
-            if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
-                // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
-                // require downloading anything during initial import.
-                let (partitioning, _lsn) = self
-                    .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
-                    .await?;
-                self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
-                    .await?
-            } else {
-                // normal case, write out a L0 delta layer file.
-                let (delta_path, metadata) =
-                    tokio::task::block_in_place(|| self.create_delta_layer(&frozen_layer))?;
-                HashMap::from([(delta_path, metadata)])
-            };
+        let layer_paths_to_upload = if lsn_range.start == self.initdb_lsn
+            && lsn_range.end == Lsn(self.initdb_lsn.0 + 1)
+        {
+            // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
+            // require downloading anything during initial import.
+            let (partitioning, _lsn) = self
+                .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
+                .await?;
+            self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
+                .await?
+        } else {
+            // normal case, write out a L0 delta layer file.
+            let (delta_path, metadata) =
+                tokio::task::spawn_blocking(|| self.create_delta_layer(&frozen_layer)).await??;
+            HashMap::from([(delta_path, metadata)])
+        };
 
         fail_point!("flush-frozen-before-sync");
 
@@ -3455,9 +3456,10 @@ impl Timeline {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = tokio::task::block_in_place(|| {
+        } = tokio::task::spawn_blocking(|| {
             self.compact_level0_phase1(layer_removal_cs, target_file_size, ctx)
-        })?;
+        })
+        .await??;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
