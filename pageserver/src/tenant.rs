@@ -80,6 +80,7 @@ use utils::{
 mod blob_io;
 pub mod block_io;
 pub mod disk_btree;
+pub mod disk_persistent_bst;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
 
