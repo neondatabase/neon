@@ -25,10 +25,10 @@ class PgVersion(str, enum.Enum):
 
     # Make it less confusing in logs
     def __repr__(self) -> str:
-        return f"{self.value}"
+        return f"'{self.value}'"
 
     def __str__(self) -> str:
-        return repr(self)
+        return self.value
 
     def __str__(self) -> str:
         return self.value
