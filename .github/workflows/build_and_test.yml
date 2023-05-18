@@ -364,7 +364,7 @@ jobs:
       # Default shared memory is 64mb
       options: --init --shm-size=512mb
     needs: [ build-neon ]
-    if: github.ref_name == 'main' || contains(github.event.pull_request.labels.*.name, 'run-benchmarks')
+    if: github.ref_name == 'main' || contains(github.event.pull_request_target.labels.*.name, 'run-benchmarks')
     strategy:
       fail-fast: false
       matrix:
@@ -429,7 +429,7 @@ jobs:
       - name: Store Allure test stat in the DB
         if: ${{ !cancelled() && steps.create-allure-report.outputs.report-json-url }}
         env:
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT_SHA: ${{ github.event.pull_request_target.head.sha || github.sha }}
           REPORT_JSON_URL: ${{ steps.create-allure-report.outputs.report-json-url }}
           TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR }}
         run: |
@@ -491,7 +491,7 @@ jobs:
 
       - name: Build coverage report
         env:
-          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request_target.head.sha || github.sha }}
         run: |
           scripts/coverage \
             --dir=/tmp/coverage report \
@@ -503,7 +503,7 @@ jobs:
         id: upload-coverage-report
         env:
           BUCKET: neon-github-public-dev
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT_SHA: ${{ github.event.pull_request_target.head.sha || github.sha }}
         run: |
           aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://neon-github-public-dev/code-coverage/${COMMIT_SHA}
 
@@ -513,7 +513,7 @@ jobs:
       - uses: actions/github-script@v6
         env:
           REPORT_URL: ${{ steps.upload-coverage-report.outputs.report-url }}
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT_SHA: ${{ github.event.pull_request_target.head.sha || github.sha }}
         with:
           script: |
             const { REPORT_URL, COMMIT_SHA } = process.env
@@ -539,7 +539,7 @@ jobs:
           # For pull requests, GH Actions set "github.sha" variable to point at a fake merge commit
           # but we need to use a real sha of a latest commit in the PR's branch for the e2e job,
           # to place a job run status update later.
-          COMMIT_SHA=${{ github.event.pull_request.head.sha }}
+          COMMIT_SHA=${{ github.event.pull_request_target.head.sha }}
           # For non-PR kinds of runs, the above will produce an empty variable, pick the original sha value for those
           COMMIT_SHA=${COMMIT_SHA:-${{ github.sha }}}
 
