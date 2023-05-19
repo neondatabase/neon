@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
-from fixtures.pg_version import PgVersion, xfail_on_postgres
 
 
 # Run the main PostgreSQL regression tests, in src/test/regress.
@@ -33,8 +32,8 @@ def test_pg_regress(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_regress will need.
-    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/regress"
-    src_path = base_dir / f"vendor/postgres-v{env.pg_version}/src/test/regress"
+    build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/regress"
+    src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/regress"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "parallel_schedule"
     pg_regress = build_path / "pg_regress"
@@ -72,7 +71,6 @@ def test_pg_regress(
 #
 # This runs for a long time, especially in debug mode, so use a larger-than-default
 # timeout.
-@xfail_on_postgres(PgVersion.V15, reason="https://github.com/neondatabase/neon/pull/4213")
 @pytest.mark.timeout(1800)
 def test_isolation(
     neon_simple_env: NeonEnv,
@@ -97,8 +95,8 @@ def test_isolation(
     (runpath / "testtablespace").mkdir(parents=True)
 
     # Compute all the file locations that pg_isolation_regress will need.
-    build_path = pg_distrib_dir / f"build/v{env.pg_version}/src/test/isolation"
-    src_path = base_dir / f"vendor/postgres-v{env.pg_version}/src/test/isolation"
+    build_path = pg_distrib_dir / f"build/{env.pg_version.v_prefixed}/src/test/isolation"
+    src_path = base_dir / f"vendor/postgres-{env.pg_version.v_prefixed}/src/test/isolation"
     bindir = pg_distrib_dir / f"v{env.pg_version}/bin"
     schedule = src_path / "isolation_schedule"
     pg_isolation_regress = build_path / "pg_isolation_regress"

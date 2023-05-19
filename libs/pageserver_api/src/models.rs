@@ -131,13 +131,14 @@ pub struct TimelineCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub new_tenant_id: Option<TenantId>,
     #[serde(flatten)]
-    pub config: TenantConfig,
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 impl std::ops::Deref for TenantCreateRequest {
@@ -148,7 +149,7 @@ impl std::ops::Deref for TenantCreateRequest {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
@@ -192,12 +193,13 @@ impl TenantCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct TenantConfigRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
     #[serde(flatten)]
-    pub config: TenantConfig,
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
 
 impl std::ops::Deref for TenantConfigRequest {
@@ -785,5 +787,32 @@ mod tests {
         );
         assert!(format!("{:?}", &original_broken.state).contains("reason"));
         assert!(format!("{:?}", &original_broken.state).contains("backtrace info"));
+    }
+
+    #[test]
+    fn test_reject_unknown_field() {
+        let id = TenantId::generate();
+        let create_request = json!({
+            "new_tenant_id": id.to_string(),
+            "unknown_field": "unknown_value".to_string(),
+        });
+        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
+
+        let id = TenantId::generate();
+        let config_request = json!({
+            "tenant_id": id.to_string(),
+            "unknown_field": "unknown_value".to_string(),
+        });
+        let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
     }
 }
