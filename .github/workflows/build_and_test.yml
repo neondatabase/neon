@@ -339,6 +339,12 @@ jobs:
           submodules: true
           fetch-depth: 1
 
+      - name: 🔎 Check IP
+        run: curl https://api.ipify.org
+      
+      - name: Trace S3
+        run: apt install traceroute && timeout 60s traceroute -n -T -p 443 s3.amazonaws.com
+
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
         with:
