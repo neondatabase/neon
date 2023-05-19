@@ -1,17 +1,15 @@
-use proxy::auth;
-use proxy::console;
-use proxy::http;
-use proxy::metrics;
-
 use anyhow::{bail, Context};
 use clap::{self, Arg};
-use proxy::config::{self, MetricCollectionConfig, ProxyConfig, TlsConfig};
-use std::sync::atomic::Ordering;
-use std::{borrow::Cow, net::SocketAddr};
+use futures::future::try_join_all;
+use proxy::{
+    auth,
+    config::{self, MetricCollectionConfig, ProxyConfig, TlsConfig},
+    console, http, metrics,
+};
+use std::{borrow::Cow, net::SocketAddr, sync::atomic::Ordering};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
-use tracing::warn;
+use tracing::{info, warn};
 use utils::{project_git_version, sentry_init::init_sentry};
 
 project_git_version!(GIT_VERSION);
@@ -27,7 +25,6 @@ async fn main() -> anyhow::Result<()> {
 
     let args = cli().get_matches();
     let config: &ProxyConfig = Box::leak(Box::new(build_config(&args)?));
-
     info!("Authentication backend: {}", config.auth_backend);
 
     // Check that we can bind to address before further initialization
@@ -82,14 +79,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let tasks = futures::future::try_join_all(tasks.into_iter().map(proxy::flatten_err));
-    let client_tasks =
-        futures::future::try_join_all(client_tasks.into_iter().map(proxy::flatten_err));
+    let tasks = try_join_all(tasks.into_iter().map(proxy::flatten_err));
+    let client_tasks = try_join_all(client_tasks.into_iter().map(proxy::flatten_err));
     tokio::select! {
         // We are only expecting an error from these forever tasks
         res = tasks => { res?; },
         res = client_tasks => { res?; },
     }
+
     Ok(())
 }
 
@@ -169,7 +166,6 @@ fn build_auth_config(args: &clap::ArgMatches) -> anyhow::Result<auth::BackendTyp
         "console" => {
             let url = args.get_one::<String>("auth-endpoint").unwrap().parse()?;
             let endpoint = http::Endpoint::new(url, http::new_client());
-
             let caches = Box::leak(Box::new(make_caches(args)?));
             let api = console::provider::neon::Api::new(endpoint, caches);
             auth::BackendType::Console(Cow::Owned(api), ())
