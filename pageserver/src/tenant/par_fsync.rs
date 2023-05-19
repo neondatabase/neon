@@ -4,6 +4,8 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use futures::{stream, StreamExt};
+
 use crate::virtual_file::VirtualFile;
 
 fn fsync_path(path: &Path) -> io::Result<()> {
@@ -20,6 +22,8 @@ fn parallel_worker(paths: &[PathBuf], next_path_idx: &AtomicUsize) -> io::Result
 }
 
 fn fsync_in_thread_pool(paths: &[PathBuf]) -> io::Result<()> {
+    // TODO: remove this function in favor of `fsync_in_tokio_worker` once we asyncify everything.
+
     /// Use at most this number of threads.
     /// Increasing this limit will
     /// - use more memory
@@ -27,8 +31,6 @@ fn fsync_in_thread_pool(paths: &[PathBuf]) -> io::Result<()> {
     const MAX_NUM_THREADS: usize = 64;
     let num_threads = paths.len().min(MAX_NUM_THREADS);
     let next_path_idx = AtomicUsize::new(0);
-
-    // TODO: refactor to FuturesUnordered once we use async for virtual file.
 
     crossbeam_utils::thread::scope(|s| -> io::Result<()> {
         let mut handles = vec![];
@@ -48,6 +50,18 @@ fn fsync_in_thread_pool(paths: &[PathBuf]) -> io::Result<()> {
     .unwrap()
 }
 
+async fn fsync_in_tokio_worker(paths: &[PathBuf]) -> io::Result<()> {
+    const MAX_CONCURRENT_FSYNC: usize = 64;
+    let mut s = stream::iter(paths.to_vec())
+        .map(|path| async move { tokio::task::spawn_blocking(move || fsync_path(&path)).await })
+        .buffer_unordered(MAX_CONCURRENT_FSYNC);
+    while let Some(res) = s.next().await {
+        res??;
+    }
+    Ok(())
+}
+
+/// Parallel fsync all files. Can be used in non-async context as it is using rayon thread pool.
 pub fn par_fsync(paths: &[PathBuf]) -> io::Result<()> {
     const PARALLEL_PATH_THRESHOLD: usize = 1;
     if paths.len() <= PARALLEL_PATH_THRESHOLD {
@@ -60,8 +74,8 @@ pub fn par_fsync(paths: &[PathBuf]) -> io::Result<()> {
     fsync_in_thread_pool(paths)
 }
 
-/// fsync asynchronously. If number of files are less than PARALLEL_PATH_THRESHOLD, fsync is done in the current
-/// execution thread. Otherwise, we will spawn_blocking and run it in rayon thread pool.
+/// Parallel fsync asynchronously. If number of files are less than PARALLEL_PATH_THRESHOLD, fsync is done in the current
+/// execution thread. Otherwise, we will spawn_blocking and run it in tokio.
 pub async fn par_fsync_async(paths: &[PathBuf]) -> io::Result<()> {
     const PARALLEL_PATH_THRESHOLD: usize = 1;
     if paths.len() <= PARALLEL_PATH_THRESHOLD {
@@ -71,8 +85,5 @@ pub async fn par_fsync_async(paths: &[PathBuf]) -> io::Result<()> {
         return Ok(());
     }
 
-    let paths = paths.to_vec();
-    tokio::task::spawn_blocking(move || fsync_in_thread_pool(&paths))
-        .await
-        .unwrap()
+    fsync_in_tokio_worker(paths).await
 }
