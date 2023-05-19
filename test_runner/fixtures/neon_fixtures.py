@@ -1845,13 +1845,15 @@ class VanillaPostgres(PgProtocol):
             ]
         )
 
-    def configure(self, options: List[str]):
+    def configure(self, options: List[str]) -> "VanillaPostgres":
         """Append lines into postgresql.conf file."""
         assert not self.running
         with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
 
-    def start(self, log_path: Optional[str] = None):
+        return self
+
+    def start(self, log_path: Optional[str] = None) -> "VanillaPostgres":
         assert not self.running
         self.running = True
 
@@ -1862,10 +1864,14 @@ class VanillaPostgres(PgProtocol):
             ["pg_ctl", "-w", "-D", str(self.pgdatadir), "-l", log_path, "start"]
         )
 
-    def stop(self):
+        return self
+
+    def stop(self) -> "VanillaPostgres":
         assert self.running
         self.running = False
         self.pg_bin.run_capture(["pg_ctl", "-w", "-D", str(self.pgdatadir), "stop"])
+
+        return self
 
     def get_subdir_size(self, subdir) -> int:
         """Return size of pgdatadir subdirectory in bytes."""
@@ -2033,6 +2039,17 @@ class NeonProxy(PgProtocol):
                 # Postgres auth backend params
                 *["--auth-backend", "postgres"],
                 *["--auth-endpoint", self.pg_conn_url],
+            ]
+
+    @dataclass(frozen=True)
+    class Console(AuthBackend):
+        console_url: str
+
+        def extra_args(self) -> list[str]:
+            return [
+                # Postgres auth backend params
+                *["--auth-backend", "console"],
+                *["--auth-endpoint", self.console_url],
             ]
 
     def __init__(
@@ -2235,6 +2252,33 @@ def link_proxy(
         mgmt_port=mgmt_port,
         external_http_port=external_http_port,
         auth_backend=NeonProxy.Link(),
+    ) as proxy:
+        proxy.start()
+        yield proxy
+
+
+@pytest.fixture(scope="function")
+def console_proxy(
+    port_distributor: PortDistributor, neon_binpath: Path, test_output_dir: Path
+) -> Iterator[NeonProxy]:
+    """Neon proxy that routes through link auth."""
+
+    http_port = port_distributor.get_port()
+    proxy_port = port_distributor.get_port()
+    mgmt_port = port_distributor.get_port()
+    console_port = port_distributor.get_port()
+    external_http_port = port_distributor.get_port()
+
+    console_url = f"http://127.0.0.1:{console_port}"
+
+    with NeonProxy(
+        neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
+        proxy_port=proxy_port,
+        http_port=http_port,
+        mgmt_port=mgmt_port,
+        external_http_port=external_http_port,
+        auth_backend=NeonProxy.Console(console_url),
     ) as proxy:
         proxy.start()
         yield proxy

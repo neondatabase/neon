@@ -2,10 +2,12 @@ import json
 import subprocess
 from typing import Any, List
 
+import logging
 import psycopg2
 import pytest
 import requests
-from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres
+from aiohttp import web
+from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres, PortDistributor
 
 
 def test_proxy_select_1(static_proxy: NeonProxy):
@@ -225,3 +227,77 @@ def test_sql_over_http(static_proxy: NeonProxy):
     res = q("drop table t")
     assert res["command"] == "DROP"
     assert res["rowCount"] is None
+
+
+@pytest.mark.asyncio
+async def test_compute_cache_invalidation(
+    port_distributor: PortDistributor, vanilla_pg: VanillaPostgres, console_proxy: NeonProxy
+):
+    console_url = console_proxy.auth_backend.console_url
+    logging.info(f"mocked console's url is {console_url}")
+    console_port = int(console_url.split(":")[-1])
+    logging.info(f"mocked console's port is {console_port}")
+
+    routes = web.RouteTableDef()
+
+    @routes.get("/proxy_get_role_secret")
+    async def get_role_secret(request):
+        # corresponds to password "password"
+        secret = ":".join(
+            [
+                "SCRAM-SHA-256$4096",
+                "t33UQcz/cs1D+n9INqThsw==$1NYlCbuxtK7YF2sgECBDTv1Myf8PpHJCT3RgKSXlZL0=",
+                "9iLeGY91MqBQ4ez1389Smo7h+STsJJ5jvu7kNofxj08=",
+            ]
+        )
+
+        return web.json_response({"role_secret": secret})
+
+    @routes.get("/proxy_wake_compute")
+    async def wake_compute(request):
+        nonlocal wake_compute_called
+        wake_compute_called += 1
+
+        nonlocal postgres_port
+        logging.info(f"compute's port is {postgres_port}")
+
+        return web.json_response(
+            {
+                "address": f"127.0.0.1:{postgres_port}",
+                "aux": {
+                    "endpoint_id": "",
+                    "project_id": "",
+                    "branch_id": "",
+                },
+            }
+        )
+
+    console = web.Application()
+    console.add_routes(routes)
+
+    runner = web.AppRunner(console)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", console_port).start()
+
+    # Create a user we're going to use in the test sequence
+    (user, password) = ("borat", "password")
+    vanilla_pg.start().safe_psql(f"create role {user} with login password '{password}'")
+
+    async def try_connect():
+        magic = f"endpoint=irrelevant;{password}"
+        await console_proxy.connect_async(user=user, password=magic, dbname="postgres")
+
+    wake_compute_called = 0
+    postgres_port = vanilla_pg.default_options["port"]
+
+    # Try connecting to compute
+    await try_connect()
+    assert wake_compute_called == 1
+
+    # Change compute's port
+    postgres_port = port_distributor.get_port()
+    vanilla_pg.stop().configure([f"port = {postgres_port}"]).start()
+
+    # Try connecting to compute
+    await try_connect()
+    assert wake_compute_called == 2
