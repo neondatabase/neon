@@ -187,7 +187,7 @@ pub struct Timeline {
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
     /// and [`Tenant::delete_timeline`].
-    pub(super) layer_removal_cs: tokio::sync::Mutex<()>,
+    pub(super) layer_removal_cs: Arc<tokio::sync::Mutex<()>>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
     pub latest_gc_cutoff_lsn: Rcu<Lsn>,
@@ -650,7 +650,7 @@ impl Timeline {
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
-    pub async fn compact(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub async fn compact(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
         const ROUNDS: usize = 2;
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -739,7 +739,7 @@ impl Timeline {
     }
 
     /// Compaction which might need to be retried after downloading remote layers.
-    async fn compact_inner(&self, ctx: &RequestContext) -> Result<(), CompactionError> {
+    async fn compact_inner(self: &Arc<Self>, ctx: &RequestContext) -> Result<(), CompactionError> {
         //
         // High level strategy for compaction / image creation:
         //
@@ -774,7 +774,7 @@ impl Timeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let layer_removal_cs = self.layer_removal_cs.lock().await;
+        let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
         let state = *self.state.borrow();
         if state == TimelineState::Stopping {
@@ -808,7 +808,7 @@ impl Timeline {
 
                 // 3. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                self.compact_level0(&layer_removal_cs, target_file_size, ctx)
+                self.compact_level0(layer_removal_cs.clone(), target_file_size, ctx)
                     .await?;
                 timer.stop_and_record();
             }
@@ -2144,7 +2144,7 @@ impl Timeline {
     fn delete_historic_layer(
         &self,
         // we cannot remove layers otherwise, since gc and compaction will race
-        _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
+        _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         layer: Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
     ) -> anyhow::Result<()> {
@@ -2608,7 +2608,7 @@ impl Timeline {
 
     /// Layer flusher task's main loop.
     async fn flush_loop(
-        &self,
+        self: &Arc<Self>,
         mut layer_flush_start_rx: tokio::sync::watch::Receiver<u64>,
         ctx: &RequestContext,
     ) {
@@ -2699,7 +2699,7 @@ impl Timeline {
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
     #[instrument(skip(self, frozen_layer, ctx), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
     async fn flush_frozen_layer(
-        &self,
+        self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -2708,22 +2708,24 @@ impl Timeline {
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        let layer_paths_to_upload = if lsn_range.start == self.initdb_lsn
-            && lsn_range.end == Lsn(self.initdb_lsn.0 + 1)
-        {
-            // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
-            // require downloading anything during initial import.
-            let (partitioning, _lsn) = self
-                .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
-                .await?;
-            self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
-                .await?
-        } else {
-            // normal case, write out a L0 delta layer file.
-            let (delta_path, metadata) =
-                tokio::task::spawn_blocking(|| self.create_delta_layer(&frozen_layer)).await??;
-            HashMap::from([(delta_path, metadata)])
-        };
+        let layer_paths_to_upload =
+            if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
+                // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
+                // require downloading anything during initial import.
+                let (partitioning, _lsn) = self
+                    .repartition(self.initdb_lsn, self.get_compaction_target_size(), ctx)
+                    .await?;
+                self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
+                    .await?
+            } else {
+                // normal case, write out a L0 delta layer file.
+                let this = self.clone();
+                let frozen_layer = frozen_layer.clone();
+                let (delta_path, metadata) =
+                    tokio::task::spawn_blocking(move || this.create_delta_layer(&frozen_layer))
+                        .await??;
+                HashMap::from([(delta_path, metadata)])
+            };
 
         fail_point!("flush-frozen-before-sync");
 
@@ -2825,7 +2827,7 @@ impl Timeline {
 
     // Write out the given frozen in-memory layer as a new L0 delta file
     fn create_delta_layer(
-        &self,
+        self: &Arc<Self>,
         frozen_layer: &InMemoryLayer,
     ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
         // Write it out
@@ -3043,9 +3045,9 @@ impl Timeline {
             ))
             .collect::<Vec<_>>();
 
-        tokio::task::block_in_place(|| {
-            par_fsync::par_fsync(&all_paths).context("fsync of newly created layer files")
-        })?;
+        par_fsync::par_fsync_async(&all_paths)
+            .await
+            .context("fsync of newly created layer files")?;
 
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
@@ -3112,7 +3114,7 @@ impl Timeline {
     /// start of level0 files compaction, the on-demand download should be revisited as well.
     fn compact_level0_phase1(
         &self,
-        _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
+        _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
@@ -3448,18 +3450,22 @@ impl Timeline {
     /// as Level 1 files.
     ///
     async fn compact_level0(
-        &self,
-        layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
+        self: &Arc<Self>,
+        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
+        let this = self.clone();
+        let ctx_inner = ctx.clone();
+        let layer_removal_cs_inner = layer_removal_cs.clone();
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = tokio::task::spawn_blocking(|| {
-            self.compact_level0_phase1(layer_removal_cs, target_file_size, ctx)
+        } = tokio::task::spawn_blocking(move || {
+            this.compact_level0_phase1(layer_removal_cs_inner, target_file_size, &ctx_inner)
         })
-        .await??;
+        .await
+        .unwrap()?;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
@@ -3517,7 +3523,7 @@ impl Timeline {
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
             layer_names_to_delete.push(l.filename());
-            self.delete_historic_layer(layer_removal_cs, l, &mut updates)?;
+            self.delete_historic_layer(layer_removal_cs.clone(), l, &mut updates)?;
         }
         updates.flush();
         drop(layers);
@@ -3637,7 +3643,7 @@ impl Timeline {
 
         fail_point!("before-timeline-gc");
 
-        let layer_removal_cs = self.layer_removal_cs.lock().await;
+        let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
         let state = *self.state.borrow();
         if state == TimelineState::Stopping {
@@ -3657,7 +3663,7 @@ impl Timeline {
 
         let res = self
             .gc_timeline(
-                &layer_removal_cs,
+                layer_removal_cs.clone(),
                 horizon_cutoff,
                 pitr_cutoff,
                 retain_lsns,
@@ -3676,7 +3682,7 @@ impl Timeline {
 
     async fn gc_timeline(
         &self,
-        layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
+        layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         horizon_cutoff: Lsn,
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
@@ -3835,7 +3841,11 @@ impl Timeline {
             {
                 for doomed_layer in layers_to_remove {
                     layer_names_to_delete.push(doomed_layer.filename());
-                    self.delete_historic_layer(layer_removal_cs, doomed_layer, &mut updates)?; // FIXME: schedule succeeded deletions before returning?
+                    self.delete_historic_layer(
+                        layer_removal_cs.clone(),
+                        doomed_layer,
+                        &mut updates,
+                    )?; // FIXME: schedule succeeded deletions before returning?
                     result.layers_removed += 1;
                 }
             }
