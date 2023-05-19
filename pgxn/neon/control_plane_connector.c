@@ -51,7 +51,7 @@ static char CurlErrorBuf[CURL_ERROR_SIZE];
 
 typedef enum
 {
-	Op_Set, //An upsert:Either a creation or an alter
+	Op_Set,						/* An upsert: Either a creation or an alter */
 	Op_Delete,
 }			OpType;
 
@@ -190,10 +190,9 @@ ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
 	ErrorString *str = userdata;
 	char	   *alloced = repalloc(str->ptr, str->size + nmemb + 1);
 
-	//+1 for null
-		terminator
-			if (!alloced)
-			return 0;
+	/* +1 for null terminator */
+	if (!alloced)
+		return 0;
 	str->ptr = alloced;
 	memcpy(str->ptr + str->size, ptr, nmemb);
 	str->size += nmemb;
