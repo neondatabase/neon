@@ -3865,8 +3865,8 @@ impl Timeline {
                 if l.is_incremental() && !LayerMap::is_l0(&*l) {
                     if let Some(keyspace) = &gc_keyspace {
                         let layer_logical_size = keyspace.get_logical_size(&l.get_key_range());
-                        let layer_age = new_gc_cutoff.0 - l.get_lsn_range().end.0;
-                        if layer_logical_size < layer_age {
+                        let layer_age = new_gc_cutoff.0 - l.get_lsn_range().start.0;
+                        if layer_logical_size <= layer_age {
                             wanted_image_layers.add_range(l.get_key_range());
                         }
                     }

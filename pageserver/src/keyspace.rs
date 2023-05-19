@@ -62,16 +62,19 @@ impl KeySpace {
         KeyPartitioning { parts }
     }
 
+    ///
+    /// Calculate logical size of delta layers: total size of all blocks covered by it's key range
+    ///
     pub fn get_logical_size(&self, range: &Range<Key>) -> u64 {
         let mut start_key = range.start;
         let n_ranges = self.ranges.len();
         let start_index = match self.ranges.binary_search_by_key(&start_key, |r| r.start) {
-            Ok(index) => index, // keyspace range begins with start_key
+            Ok(index) => index, // keyspace range starts with start_key
             Err(index) => {
                 if index != 0 && self.ranges[index - 1].end > start_key {
                     index - 1 // previous keyspace range overlaps with specified
                 } else if index == n_ranges {
-                    return 0; // no interscation with specified range
+                    return 0; // no intersection with specified range
                 } else {
                     start_key = self.ranges[index].start;
                     index
@@ -91,6 +94,9 @@ impl KeySpace {
             let n_blocks = key_range_size(&(start_key..end_key));
             if n_blocks != u32::MAX {
                 size += n_blocks as u64 * BLCKSZ as u64;
+            }
+            if i + 1 < n_ranges {
+                start_key = self.ranges[i + 1].start;
             }
         }
         size
