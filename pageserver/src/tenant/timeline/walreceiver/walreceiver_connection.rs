@@ -21,11 +21,13 @@ use postgres_types::PgLsn;
 use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn, Instrument};
 
 use super::TaskStateUpdate;
-use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::{context::RequestContext, metrics::WALRECEIVER_STARTED_CONNECTIONS};
+use crate::{
+    metrics::LIVE_CONNECTIONS_COUNT, tenant::debug_assert_current_span_has_tenant_and_timeline_id,
+};
 use crate::{
     task_mgr,
     task_mgr::TaskKind,
@@ -71,6 +73,8 @@ pub(super) async fn handle_walreceiver_connection(
     ctx: RequestContext,
     node: NodeId,
 ) -> anyhow::Result<()> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+
     WALRECEIVER_STARTED_CONNECTIONS.inc();
 
     // Connect to the database in replication mode.
@@ -140,7 +144,11 @@ pub(super) async fn handle_walreceiver_connection(
                 _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
             }
             Ok(())
-        },
+        }
+        // Enrich the log lines emitted by this closure with meaningful context.
+        // TODO: technically, this task outlives the surrounding function, so, the
+        // spans won't be properly nested.
+        .in_current_span(),
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.

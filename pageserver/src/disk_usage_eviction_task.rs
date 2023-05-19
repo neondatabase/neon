@@ -106,7 +106,6 @@ pub fn launch_disk_usage_global_eviction_task(
                 task_mgr::shutdown_token(),
             )
             .await;
-            info!("disk usage based eviction task finishing");
             Ok(())
         },
     );
@@ -122,6 +121,10 @@ async fn disk_usage_eviction_task(
     tenants_dir: &Path,
     cancel: CancellationToken,
 ) {
+    scopeguard::defer! {
+        info!("disk usage based eviction task finishing");
+    };
+
     use crate::tenant::tasks::random_init_delay;
     {
         if random_init_delay(task_config.period, &cancel)
