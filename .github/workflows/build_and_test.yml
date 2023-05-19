@@ -711,7 +711,11 @@ jobs:
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.2-debug
+    container:
+      image: gcr.io/kaniko-project/executor:v1.9.2-debug
+      # Workaround for "Resolving download.osgeo.org (download.osgeo.org)... failed: Temporary failure in name resolution.""
+      # Should be prevented by https://github.com/neondatabase/neon/issues/4281
+      options: --add-host=download.osgeo.org:140.211.15.30
     needs: [ tag ]
     strategy:
       fail-fast: false
@@ -957,7 +961,7 @@ jobs:
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
     needs: [ promote-images, tag, regress-tests ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
@@ -968,11 +972,13 @@ jobs:
           PREFIX: artifacts/latest
         run: |
           # Update compatibility snapshot for the release
-          for build_type in debug release; do
-            OLD_FILENAME=compatibility-snapshot-${build_type}-pg14-${GITHUB_RUN_ID}.tar.zst
-            NEW_FILENAME=compatibility-snapshot-${build_type}-pg14.tar.zst
+          for pg_version in v14 v15; do
+            for build_type in debug release; do
+              OLD_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}-${GITHUB_RUN_ID}.tar.zst
+              NEW_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}.tar.zst
 
-            time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+              time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+            done
           done
 
           # Update Neon artifact for the release (reuse already uploaded artifact)

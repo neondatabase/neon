@@ -27,6 +27,12 @@ class PgVersion(str, enum.Enum):
     def __repr__(self) -> str:
         return f"'{self.value}'"
 
+    # In GitHub workflows we use Postgres version with v-prefix (e.g. v14 instead of just 14),
+    # sometime we need to do so in tests.
+    @property
+    def v_prefixed(self) -> str:
+        return f"v{self.value}"
+
     @classmethod
     def _missing_(cls, value) -> Optional["PgVersion"]:
         known_values = {v.value for _, v in cls.__members__.items()}
