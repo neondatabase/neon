@@ -711,7 +711,11 @@ jobs:
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.2-debug
+    container:
+      image: gcr.io/kaniko-project/executor:v1.9.2-debug
+      # Workaround for "Resolving download.osgeo.org (download.osgeo.org)... failed: Temporary failure in name resolution.""
+      # Should be prevented by https://github.com/neondatabase/neon/issues/4281
+      options: --add-host=download.osgeo.org:140.211.15.30
     needs: [ tag ]
     strategy:
       fail-fast: false
