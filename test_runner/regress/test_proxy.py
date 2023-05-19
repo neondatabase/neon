@@ -1,13 +1,13 @@
 import json
+import logging
 import subprocess
 from typing import Any, List
 
-import logging
 import psycopg2
 import pytest
 import requests
 from aiohttp import web
-from fixtures.neon_fixtures import PSQL, NeonProxy, VanillaPostgres, PortDistributor
+from fixtures.neon_fixtures import PSQL, NeonProxy, PortDistributor, VanillaPostgres
 
 
 def test_proxy_select_1(static_proxy: NeonProxy):
