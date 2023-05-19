@@ -2,8 +2,10 @@
 
 use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo, PgEndpoint,
+    ConsoleReqExtra, PgEndpoint,
 };
+use super::{AuthInfo, NodeInfo};
+use super::{CachedAuthInfo, CachedNodeInfo};
 use crate::{auth::ClientCredentials, error::io_error, scram, url::ApiUrl};
 use async_trait::async_trait;
 use futures::TryFutureExt;
@@ -102,8 +104,9 @@ impl super::Api for Api {
         &self,
         _extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
-    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
-        self.do_get_auth_info(creds).await
+    ) -> Result<Option<CachedAuthInfo>, GetAuthInfoError> {
+        let res = self.do_get_auth_info(creds).await?;
+        Ok(res.map(CachedAuthInfo::new_uncached))
     }
 
     #[tracing::instrument(skip_all)]
@@ -112,9 +115,8 @@ impl super::Api for Api {
         _extra: &ConsoleReqExtra<'_>,
         _creds: &ClientCredentials<'_>,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        self.do_wake_compute()
-            .map_ok(CachedNodeInfo::new_uncached)
-            .await
+        let res = self.do_wake_compute().await?;
+        Ok(CachedNodeInfo::new_uncached(res))
     }
 }
 

@@ -3,8 +3,10 @@
 use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    ApiCaches, AuthInfo, CachedNodeInfo, ConsoleReqExtra, NodeInfo,
+    ApiCaches, ConsoleReqExtra,
 };
+use super::{AuthInfo, NodeInfo};
+use super::{CachedAuthInfo, CachedNodeInfo};
 use crate::{auth::ClientCredentials, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
@@ -110,8 +112,10 @@ impl super::Api for Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
-    ) -> Result<Option<AuthInfo>, GetAuthInfoError> {
-        self.do_get_auth_info(extra, creds).await
+    ) -> Result<Option<CachedAuthInfo>, GetAuthInfoError> {
+        // FIXME: add cache!
+        let res = self.do_get_auth_info(extra, creds).await?;
+        Ok(res.map(CachedAuthInfo::new_uncached))
     }
 
     #[tracing::instrument(skip_all)]

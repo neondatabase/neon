@@ -166,6 +166,9 @@ pub struct NodeInfo {
 pub type NodeInfoCache = TimedLru<Box<str>, NodeInfo>;
 pub type CachedNodeInfo = Cached<NodeInfo>;
 
+pub type AuthInfoCache = TimedLru<Box<str>, AuthInfo>;
+pub type CachedAuthInfo = Cached<AuthInfo>;
+
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
 #[async_trait]
@@ -175,7 +178,7 @@ pub trait Api {
         &self,
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
-    ) -> Result<Option<AuthInfo>, errors::GetAuthInfoError>;
+    ) -> Result<Option<CachedAuthInfo>, errors::GetAuthInfoError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
