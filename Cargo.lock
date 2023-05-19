@@ -5391,6 +5391,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls 0.20.8",
+ "rustls 0.21.0",
  "scopeguard",
  "serde",
  "serde_json",

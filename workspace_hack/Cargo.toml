@@ -42,7 +42,8 @@ regex = { version = "1" }
 regex-syntax = { version = "0.6" }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 ring = { version = "0.16", features = ["std"] }
-rustls = { version = "0.20", features = ["dangerous_configuration"] }
+rustls-56bd22fc3884b12 = { package = "rustls", version = "0.20", features = ["dangerous_configuration"] }
+rustls-647d43efb71741da = { package = "rustls", version = "0.21" }
 scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
