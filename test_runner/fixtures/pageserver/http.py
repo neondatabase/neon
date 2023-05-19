@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -109,6 +110,10 @@ class PageserverHttpClient(requests.Session):
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
 
+    @property
+    def base_url(self) -> str:
+        return f"http://localhost:{self.port}"
+
     def verbose_error(self, res: requests.Response):
         try:
             res.raise_for_status()
@@ -168,8 +173,19 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(new_tenant_id, str)
         return TenantId(new_tenant_id)
 
-    def tenant_attach(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach")
+    def tenant_attach(
+        self, tenant_id: TenantId, config: None | Dict[str, Any] = None, config_null: bool = False
+    ):
+        if config_null:
+            assert config is None
+            body = "null"
+        else:
+            body = json.dumps({"config": config})
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
         self.verbose_error(res)
 
     def tenant_detach(self, tenant_id: TenantId, detach_ignored=False):

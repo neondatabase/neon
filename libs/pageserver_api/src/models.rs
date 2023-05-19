@@ -234,23 +234,27 @@ impl TenantConfigRequest {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TenantAttachRequest {
     pub config: TenantAttachConfig,
 }
 
-#[derive(Serialize, Deserialize)]
+/// Newtype to enforce deny_unknown_fields on TenantConfig for
+/// its usage inside `TenantAttachRequest`.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TenantAttachConfig(TenantConfig);
+pub struct TenantAttachConfig {
+    #[serde(flatten)]
+    allowing_unknown_fields: TenantConfig,
+}
 
 impl std::ops::Deref for TenantAttachConfig {
     type Target = TenantConfig;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.allowing_unknown_fields
     }
 }
-
 
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
 #[derive(Serialize, Deserialize, Clone)]
@@ -809,6 +813,18 @@ mod tests {
             "unknown_field": "unknown_value".to_string(),
         });
         let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
+
+        let attach_request = json!({
+            "config": {
+                "unknown_field": "unknown_value".to_string(),
+            },
+        });
+        let err = serde_json::from_value::<TenantAttachRequest>(attach_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
             "expect unknown field `unknown_field` error, got: {}",

@@ -940,6 +940,8 @@ components:
               format: hex
     TenantAttachRequest:
       type: object
+      required:
+        - config
       properties:
         config:
           $ref: '#/components/schemas/TenantConfig'
