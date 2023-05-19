@@ -74,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let auth::BackendType::Console(api, _) = &config.auth_backend {
         if let Some(url) = args.get_one::<String>("redis-notifications") {
+            info!("Starting redis notifications listener ({url})");
             tasks.push(tokio::spawn(console::notifications::task_main(
                 url.to_owned(),
                 api.caches,
