@@ -12,8 +12,11 @@ pub use provider::{CachedAuthInfo, CachedNodeInfo};
 
 /// Various cache-related types.
 pub mod caches {
-    pub use super::provider::{ApiCaches, AuthInfoCache, NodeInfoCache};
+    pub use super::provider::{ApiCaches, AuthInfoCache, AuthInfoCacheKey, NodeInfoCache};
 }
 
 /// Console's management API.
 pub mod mgmt;
+
+/// Console's notification bus.
+pub mod notifications;

@@ -37,6 +37,7 @@ prometheus.workspace = true
 rand.workspace = true
 ref-cast.workspace = true
 regex.workspace = true
+redis.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 reqwest-middleware.workspace = true
 reqwest-tracing.workspace = true

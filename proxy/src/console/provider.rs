@@ -166,7 +166,13 @@ pub struct NodeInfo {
 pub type NodeInfoCache = TimedLru<Box<str>, NodeInfo>;
 pub type CachedNodeInfo = Cached<NodeInfo>;
 
-pub type AuthInfoCache = TimedLru<(Box<str>, Box<str>), AuthInfo>;
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct AuthInfoCacheKey {
+    pub project: Box<str>,
+    pub role: Box<str>,
+}
+
+pub type AuthInfoCache = TimedLru<AuthInfoCacheKey, AuthInfo>;
 pub type CachedAuthInfo = Cached<AuthInfo>;
 
 /// This will allocate per each call, but the http requests alone

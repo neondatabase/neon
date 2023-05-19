@@ -78,10 +78,11 @@ prometheus = {version = "0.13", default_features=false, features = ["process"]} 
 prost = "0.11"
 rand = "0.8"
 ref-cast = "1.0"
+redis = { version = "0.23.0", features = ["tokio-rustls-comp"] }
 regex = "1.4"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_18"] }
 reqwest-middleware = "0.2.0"
+reqwest-tracing = { version = "0.4.0", features = ["opentelemetry_0_18"] }
 routerify = "3"
 rpds = "0.13"
 rustls = "0.20"

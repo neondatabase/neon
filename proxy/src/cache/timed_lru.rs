@@ -172,6 +172,19 @@ impl<K: Hash + Eq, V> TimedLru<K, V> {
 
         (old, created_at)
     }
+
+    #[tracing::instrument(level = "debug", fields(cache = self.name), skip_all)]
+    fn remove_raw<Q>(&self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let key: &Query<Q> = RefCast::ref_cast(key);
+        let mut cache = self.cache.lock();
+        cache.remove(key);
+
+        debug!("removed a cache entry");
+    }
 }
 
 /// Convenient wrappers for raw methods.
@@ -207,6 +220,14 @@ where
         };
 
         (old, cached)
+    }
+
+    pub fn remove<Q>(&self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.remove_raw(key)
     }
 }
 

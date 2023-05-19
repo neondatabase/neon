@@ -5,8 +5,8 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ConsoleReqExtra,
 };
-use super::{AuthInfo, NodeInfo};
-use super::{CachedAuthInfo, CachedNodeInfo};
+use super::{AuthInfo, AuthInfoCacheKey, CachedAuthInfo};
+use super::{CachedNodeInfo, NodeInfo};
 use crate::{auth::ClientCredentials, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
@@ -14,8 +14,8 @@ use tracing::{error, info, info_span, warn, Instrument};
 
 #[derive(Clone)]
 pub struct Api {
-    endpoint: http::Endpoint,
-    caches: &'static ApiCaches,
+    pub endpoint: http::Endpoint,
+    pub caches: &'static ApiCaches,
 }
 
 impl Api {
@@ -113,8 +113,10 @@ impl super::Api for Api {
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
     ) -> Result<Option<CachedAuthInfo>, GetAuthInfoError> {
-        let project = creds.project().expect("impossible");
-        let key: (Box<str>, Box<str>) = (project.into(), creds.user.into());
+        let key = AuthInfoCacheKey {
+            project: creds.project().expect("impossible").into(),
+            role: creds.user.into(),
+        };
 
         // Check if we already have a cached auth info for this project + user combo.
         // Beware! We shouldn't flush this for unsuccessful auth attempts, otherwise

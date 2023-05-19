@@ -3,9 +3,9 @@ use proxy::console;
 use proxy::http;
 use proxy::metrics;
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use clap::{self, Arg};
-use proxy::config::{self, ProxyConfig};
+use proxy::config::{self, MetricCollectionConfig, ProxyConfig, TlsConfig};
 use std::sync::atomic::Ordering;
 use std::{borrow::Cow, net::SocketAddr};
 use tokio::net::TcpListener;
@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
     ::metrics::set_build_info_metric(GIT_VERSION);
 
     let args = cli().get_matches();
-    let config = build_config(&args)?;
+    let config: &ProxyConfig = Box::leak(Box::new(build_config(&args)?));
 
     info!("Authentication backend: {}", config.auth_backend);
 
@@ -72,6 +72,15 @@ async fn main() -> anyhow::Result<()> {
         tasks.push(tokio::spawn(metrics::task_main(metrics_config)));
     }
 
+    if let auth::BackendType::Console(api, _) = &config.auth_backend {
+        if let Some(url) = args.get_one::<String>("redis-notifications") {
+            tasks.push(tokio::spawn(console::notifications::task_main(
+                url.to_owned(),
+                api.caches,
+            )));
+        }
+    }
+
     let tasks = futures::future::try_join_all(tasks.into_iter().map(proxy::flatten_err));
     let client_tasks =
         futures::future::try_join_all(client_tasks.into_iter().map(proxy::flatten_err));
@@ -83,9 +92,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// ProxyConfig is created at proxy startup, and lives forever.
-fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig> {
-    let tls_config = match (
+fn build_tls_config(args: &clap::ArgMatches) -> anyhow::Result<Option<TlsConfig>> {
+    let config = match (
         args.get_one::<String>("tls-key"),
         args.get_one::<String>("tls-cert"),
     ) {
@@ -102,17 +110,22 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         .get_one::<String>("allow-self-signed-compute")
         .unwrap()
         .parse()?;
+
     if allow_self_signed_compute {
         warn!("allowing self-signed compute certificates");
         proxy::compute::ALLOW_SELF_SIGNED_COMPUTE.store(true, Ordering::Relaxed);
     }
 
-    let metric_collection = match (
-        args.get_one::<String>("metric-collection-endpoint"),
-        args.get_one::<String>("metric-collection-interval"),
-    ) {
+    Ok(config)
+}
+
+fn build_metrics_config(args: &clap::ArgMatches) -> anyhow::Result<Option<MetricCollectionConfig>> {
+    let endpoint = args.get_one::<String>("metric-collection-endpoint");
+    let interval = args.get_one::<String>("metric-collection-interval");
+
+    let config = match (endpoint, interval) {
         (Some(endpoint), Some(interval)) => Some(config::MetricCollectionConfig {
-            endpoint: endpoint.parse()?,
+            endpoint: endpoint.parse().context("bad metrics endpoint")?,
             interval: humantime::parse_duration(interval)?,
         }),
         (None, None) => None,
@@ -122,32 +135,41 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         ),
     };
 
-    let auth_backend = match args.get_one::<String>("auth-backend").unwrap().as_str() {
+    Ok(config)
+}
+
+fn make_caches(args: &clap::ArgMatches) -> anyhow::Result<console::caches::ApiCaches> {
+    let config::CacheOptions { size, ttl } = args
+        .get_one::<String>("get-auth-info-cache")
+        .unwrap()
+        .parse()?;
+
+    info!("Using AuthInfoCache (get_auth_info) with size={size} ttl={ttl:?}");
+    let auth_info = console::caches::AuthInfoCache::new("auth_info_cache", size, ttl);
+
+    let config::CacheOptions { size, ttl } = args
+        .get_one::<String>("wake-compute-cache")
+        .unwrap()
+        .parse()?;
+
+    info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
+    let node_info = console::caches::NodeInfoCache::new("node_info_cache", size, ttl);
+
+    let caches = console::caches::ApiCaches {
+        auth_info,
+        node_info,
+    };
+
+    Ok(caches)
+}
+
+fn build_auth_config(args: &clap::ArgMatches) -> anyhow::Result<auth::BackendType<'static, ()>> {
+    let config = match args.get_one::<String>("auth-backend").unwrap().as_str() {
         "console" => {
-            let config::CacheOptions { size, ttl } = args
-                .get_one::<String>("get-auth-info-cache")
-                .unwrap()
-                .parse()?;
-
-            info!("Using AuthInfoCache (get_auth_info) with size={size} ttl={ttl:?}");
-            let auth_info = console::caches::AuthInfoCache::new("auth_info_cache", size, ttl);
-
-            let config::CacheOptions { size, ttl } = args
-                .get_one::<String>("wake-compute-cache")
-                .unwrap()
-                .parse()?;
-
-            info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
-            let node_info = console::caches::NodeInfoCache::new("node_info_cache", size, ttl);
-
-            let caches = Box::leak(Box::new(console::caches::ApiCaches {
-                auth_info,
-                node_info,
-            }));
-
             let url = args.get_one::<String>("auth-endpoint").unwrap().parse()?;
             let endpoint = http::Endpoint::new(url, http::new_client());
 
+            let caches = Box::leak(Box::new(make_caches(args)?));
             let api = console::provider::neon::Api::new(endpoint, caches);
             auth::BackendType::Console(Cow::Owned(api), ())
         }
@@ -163,11 +185,16 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
         other => bail!("unsupported auth backend: {other}"),
     };
 
-    let config = Box::leak(Box::new(ProxyConfig {
-        tls_config,
-        auth_backend,
-        metric_collection,
-    }));
+    Ok(config)
+}
+
+/// ProxyConfig is created at proxy startup, and lives forever.
+fn build_config(args: &clap::ArgMatches) -> anyhow::Result<ProxyConfig> {
+    let config = ProxyConfig {
+        tls_config: build_tls_config(args)?,
+        auth_backend: build_auth_config(args)?,
+        metric_collection: build_metrics_config(args)?,
+    };
 
     Ok(config)
 }
@@ -250,6 +277,11 @@ fn cli() -> clap::Command {
             Arg::new("metric-collection-interval")
                 .long("metric-collection-interval")
                 .help("how often metrics should be sent to a collection endpoint"),
+        )
+        .arg(
+            Arg::new("redis-notifications")
+                .long("redis-notifications")
+                .help("for receiving notifications from console (e.g. redis://127.0.0.1:6379)"),
         )
         .arg(
             Arg::new("get-auth-info-cache")
