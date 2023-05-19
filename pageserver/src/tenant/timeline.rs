@@ -1492,7 +1492,8 @@ impl Timeline {
                 initial_logical_size_can_start,
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
             };
-            result.repartition_threshold = result.get_checkpoint_distance() / 10;
+            result.repartition_threshold =
+                result.get_checkpoint_distance() / result.get_compaction_threshold() as u64;
             result
                 .metrics
                 .last_record_gauge
