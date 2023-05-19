@@ -12,7 +12,7 @@ OBJS = \
 	relsize_cache.o \
 	walproposer.o \
 	walproposer_utils.o \
-	console_connector.o
+	control_plane_connector.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)

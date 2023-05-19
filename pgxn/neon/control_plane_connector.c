@@ -1,3 +1,23 @@
+/*-------------------------------------------------------------------------
+ *
+ * control_plane_connector.c
+ *	  Captures updates to roles/databases and sends them to the control
+ *        plane using ProcessUtility_hook. The changes are sent via HTTP
+ *        to the URL specified by the GUC neon.console_url when the
+ *        transaction commits. Forwarding may be disabled temporarily by
+ *        setting neon.forward_ddl to false. 
+ *
+ *        Currently, the transaction may abort AFTER
+ *        changes are forwarded, and that case is not handled.
+ *        Subtransactions are handled using a stack of hash tables, which
+ *        accumulate changes. On subtransaction commit, the top of the stack
+ *        is merged with the table below it. 
+ *
+ * IDENTIFICATION
+ *	 contrib/neon/control_plane_connector.c
+ *
+ *-------------------------------------------------------------------------
+ */
 #include "postgres.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
@@ -14,14 +34,24 @@
 #include "utils/jsonb.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
+
+/* GUCs */
 static char *ConsoleURL = NULL;
 static bool ForwardDDL = true;
+
+/* Curl structures for sending the HTTP requests */
 static CURL *CurlHandle;
 static struct curl_slist *ContentHeader = NULL;
 
+/*
+ * CURL docs say that this buffer must exist until we call curl_easy_cleanup
+ * (which we never do), so we make this a static
+ */
+static char CurlErrorBuf[CURL_ERROR_SIZE]; 
+
 typedef enum
 {
-    Op_Set,
+    Op_Set,   // An upsert: Either a creation or an alter
     Op_Delete,
 } OpType;
 
@@ -41,6 +71,11 @@ typedef struct
     OpType type;
 } RoleEntry;
 
+/*
+ * We keep one of these for each subtransaction in the form a of a stack. When a subtransaction
+ * commits, we merge the top of the stack into the table below it. It is allocated in the
+ * subtransaction's context. 
+ */
 typedef struct DdlHashTable
 {
     struct DdlHashTable *prev_table;
@@ -132,7 +167,27 @@ static char *ConstructDeltaMessage()
     return JsonbToCString(NULL, &jsonb->root, 0 /*estimated_len*/);
 }
 
-static void SendDeltasToConsole()
+typedef struct
+{
+    char *ptr;
+    size_t size;
+} ErrorString;
+
+static size_t ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    // Docs say size is always 1
+    ErrorString *str = userdata;
+    char *alloced = repalloc(str->ptr, str->size + nmemb + 1); // +1 for null terminator
+    if(!alloced)
+        return 0;
+    str->ptr = alloced;
+    memcpy(str->ptr + str->size, ptr, nmemb);
+    str->size += nmemb;
+    str->ptr[str->size] = '\0';
+    return nmemb;
+}
+
+static void SendDeltasToControlPlane()
 {
     if(!RootTable.db_table && !RootTable.role_table)
         return;
@@ -145,11 +200,16 @@ static void SendDeltasToConsole()
         return;
 
     char *message = ConstructDeltaMessage();
+    ErrorString str = {};
 
     curl_easy_setopt(CurlHandle, CURLOPT_CUSTOMREQUEST, "PATCH");
     curl_easy_setopt(CurlHandle, CURLOPT_HTTPHEADER, ContentHeader);
     curl_easy_setopt(CurlHandle, CURLOPT_POSTFIELDS, message);
     curl_easy_setopt(CurlHandle, CURLOPT_URL, ConsoleURL);
+    curl_easy_setopt(CurlHandle, CURLOPT_ERRORBUFFER, CurlErrorBuf);
+    curl_easy_setopt(CurlHandle, CURLOPT_TIMEOUT, 3L /* seconds */);
+    curl_easy_setopt(CurlHandle, CURLOPT_WRITEDATA, &str);
+    curl_easy_setopt(CurlHandle, CURLOPT_WRITEFUNCTION, ErrorWriteCallback);
 
     const int num_retries = 5;
     int curl_status;
@@ -157,21 +217,28 @@ static void SendDeltasToConsole()
     {
         if((curl_status = curl_easy_perform(CurlHandle)) == 0)
             break;
+        elog(LOG, "Curl request failed on attempt %d: %s", i, CurlErrorBuf);
         pg_usleep(1000 * 1000);
     }
     if(curl_status != 0)
     {
-        elog(ERROR, "Failed to perform curl request");
+        elog(ERROR, "Failed to perform curl request: %s", CurlErrorBuf);
     }
     else
     {
         long response_code;
-        curl_easy_getinfo(CurlHandle, CURLINFO_RESPONSE_CODE, &response_code);
-        if(response_code != 200)
+        if(curl_easy_getinfo(CurlHandle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_UNKNOWN_OPTION)
         {
-            elog(ERROR, "Received HTTP code %ld from console", response_code);
+            if(response_code != 200)
+                elog(ERROR,
+                     "Received HTTP code %ld from control plane%s%s",
+                     response_code,
+                     str.ptr ? ": " : "",
+                     str.ptr ? str.ptr : "");
         }
     }
+    if(str.ptr)
+        pfree(str.ptr);
 }
 
 static void InitDbTableIfNeeded()
@@ -335,7 +402,7 @@ static void NeonXactCallback(XactEvent event, void *arg)
 {
     if(event == XACT_EVENT_PRE_COMMIT || event == XACT_EVENT_PARALLEL_PRE_COMMIT)
     {
-        SendDeltasToConsole();
+        SendDeltasToControlPlane();
     }
     RootTable.role_table = NULL;
     RootTable.db_table = NULL;
@@ -371,9 +438,9 @@ static void HandleCreateDb(CreatedbStmt *stmt)
 
 static void HandleAlterOwner(AlterOwnerStmt *stmt)
 {
-    InitDbTableIfNeeded();
     if(stmt->objectType != OBJECT_DATABASE)
         return;
+    InitDbTableIfNeeded();
     const char *name = strVal(stmt->object);
     bool found = false;
     DbEntry *entry = hash_search(
@@ -476,7 +543,7 @@ static void HandleAlterRole(AlterRoleStmt *stmt)
         if(strcmp(defel->defname, "password") == 0)
             dpass = defel;
     }
-    // We're not updating the password
+    // We only care about updates to the password
     if(!dpass)
         return;
     bool found = false;
@@ -623,7 +690,7 @@ static void NeonProcessUtility(
     }
 }
 
-void InitConsoleConnector()
+extern void InitControlPlaneConnector()
 {
     PreviousProcessUtilityHook = ProcessUtility_hook;
     ProcessUtility_hook = NeonProcessUtility;
@@ -644,7 +711,7 @@ void InitConsoleConnector()
 
     DefineCustomBoolVariable(
         "neon.forward_ddl",
-        "Controls whether to forward DDL to the console",
+        "Controls whether to forward DDL to the control plane",
         NULL,
         &ForwardDDL,
         true,

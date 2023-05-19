@@ -49,8 +49,13 @@ def handle_role(dbs, roles, operation):
         raise ValueError("Invalid op")
 
 
+fail = False
+
+
 def ddl_forward_handler(request: Request, dbs: Dict[str, str], roles: Dict[str, str]) -> Response:
     log.info(f"Received request with data {request.get_data(as_text=True)}")
+    if fail:
+        return Response(status=500, response="Failed just cuz")
     if request.json is None:
         log.info("Received invalid JSON")
         return Response(status=400)
@@ -202,4 +207,8 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     cur.execute("ALTER ROLE bork RENAME TO cork")
     ddl.wait()
     assert ddl.dbs == {"stork": "cork"}
+
+    cur.execute("CREATE DATABASE failure WITH OWNER=cork")
+    ddl.wait()
+
     conn.close()

@@ -121,8 +121,6 @@ impl RoleExt for Role {
     /// string of arguments.
     fn to_pg_options(&self) -> String {
         // XXX: consider putting LOGIN as a default option somewhere higher, e.g. in control-plane.
-        // For now, we do not use generic `options` for roles. Once used, add
-        // `self.options.as_pg_options()` somewhere here.
         let mut params: String = self.options.as_pg_options();
         params.push_str(" LOGIN");
 
