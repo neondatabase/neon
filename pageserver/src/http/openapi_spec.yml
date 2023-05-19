@@ -373,7 +373,9 @@ paths:
         guarantee a specific PITR setting across detach/attach cycles.
         The pageserver will reject the request if it cannot parse the config, or
         if there are any unknown fields in it.
+
         If the client does not supply a config, the pageserver will use its defaults.
+        This behavior is deprecated: https://github.com/neondatabase/neon/issues/4282
       requestBody:
         required: false
         content:
