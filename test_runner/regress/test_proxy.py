@@ -1,7 +1,7 @@
 import json
 import logging
 import subprocess
-from typing import Any, List
+from typing import Any, cast, List
 
 import psycopg2
 import pytest
@@ -233,7 +233,7 @@ def test_sql_over_http(static_proxy: NeonProxy):
 async def test_compute_cache_invalidation(
     port_distributor: PortDistributor, vanilla_pg: VanillaPostgres, console_proxy: NeonProxy
 ):
-    console_url = console_proxy.auth_backend.console_url
+    console_url = cast(NeonProxy.Console, console_proxy.auth_backend).console_url
     logging.info(f"mocked console's url is {console_url}")
     console_port = int(console_url.split(":")[-1])
     logging.info(f"mocked console's port is {console_port}")
@@ -252,6 +252,9 @@ async def test_compute_cache_invalidation(
         )
 
         return web.json_response({"role_secret": secret})
+
+    wake_compute_called = 0
+    postgres_port = vanilla_pg.default_options["port"]
 
     @routes.get("/proxy_wake_compute")
     async def wake_compute(request):
@@ -287,8 +290,7 @@ async def test_compute_cache_invalidation(
         magic = f"endpoint=irrelevant;{password}"
         await console_proxy.connect_async(user=user, password=magic, dbname="postgres")
 
-    wake_compute_called = 0
-    postgres_port = vanilla_pg.default_options["port"]
+    assert wake_compute_called == 0
 
     # Try connecting to compute
     await try_connect()
