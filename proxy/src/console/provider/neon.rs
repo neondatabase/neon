@@ -113,9 +113,25 @@ impl super::Api for Api {
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
     ) -> Result<Option<CachedAuthInfo>, GetAuthInfoError> {
-        // FIXME: add cache!
-        let res = self.do_get_auth_info(extra, creds).await?;
-        Ok(res.map(CachedAuthInfo::new_uncached))
+        let project = creds.project().expect("impossible");
+        let key: (Box<str>, Box<str>) = (project.into(), creds.user.into());
+
+        // Check if we already have a cached auth info for this project + user combo.
+        // Beware! We shouldn't flush this for unsuccessful auth attempts, otherwise
+        // the cache makes no sense whatsoever in the presence of unfaithful clients.
+        // Instead, we snoop an invalidation queue to keep the cache up-to-date.
+        if let Some(cached) = self.caches.auth_info.get(&key) {
+            info!(key = ?key, "found cached auth info");
+            return Ok(Some(cached));
+        }
+
+        let info = self.do_get_auth_info(extra, creds).await?;
+
+        Ok(info.map(|info| {
+            info!(key = ?key, "creating a cache entry for auth info");
+            let (_, cached) = self.caches.auth_info.insert(key.into(), info.into());
+            cached
+        }))
     }
 
     #[tracing::instrument(skip_all)]
@@ -124,22 +140,21 @@ impl super::Api for Api {
         extra: &ConsoleReqExtra<'_>,
         creds: &ClientCredentials<'_>,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
-        let key = creds.project().expect("impossible");
+        let key: Box<str> = creds.project().expect("impossible").into();
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(key) {
-            info!(key, "found cached compute node info");
+        if let Some(cached) = self.caches.node_info.get(&key) {
+            info!(key = ?key, "found cached compute node info");
             return Ok(cached);
         }
 
         let info = self.do_wake_compute(extra, creds).await?;
 
-        let owned_key = Box::<str>::from(key);
-        let (_, cached) = self.caches.node_info.insert(owned_key.into(), info.into());
-        info!(key, "created a cache entry for compute node info");
+        info!(key = ?key, "creating a cache entry for compute node info");
+        let (_, cached) = self.caches.node_info.insert(key.into(), info.into());
 
         Ok(cached)
     }

@@ -166,7 +166,7 @@ pub struct NodeInfo {
 pub type NodeInfoCache = TimedLru<Box<str>, NodeInfo>;
 pub type CachedNodeInfo = Cached<NodeInfo>;
 
-pub type AuthInfoCache = TimedLru<Box<str>, AuthInfo>;
+pub type AuthInfoCache = TimedLru<(Box<str>, Box<str>), AuthInfo>;
 pub type CachedAuthInfo = Cached<AuthInfo>;
 
 /// This will allocate per each call, but the http requests alone
@@ -190,6 +190,8 @@ pub trait Api {
 
 /// Various caches for [`console`].
 pub struct ApiCaches {
-    /// Cache for the `wake_compute` API method.
+    /// Cache for the `get_auth_info` method.
+    pub auth_info: AuthInfoCache,
+    /// Cache for the `wake_compute` method.
     pub node_info: NodeInfoCache,
 }

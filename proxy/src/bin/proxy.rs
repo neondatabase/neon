@@ -125,13 +125,24 @@ fn build_config(args: &clap::ArgMatches) -> anyhow::Result<&'static ProxyConfig>
     let auth_backend = match args.get_one::<String>("auth-backend").unwrap().as_str() {
         "console" => {
             let config::CacheOptions { size, ttl } = args
+                .get_one::<String>("get-auth-info-cache")
+                .unwrap()
+                .parse()?;
+
+            info!("Using AuthInfoCache (get_auth_info) with size={size} ttl={ttl:?}");
+            let auth_info = console::caches::AuthInfoCache::new("auth_info_cache", size, ttl);
+
+            let config::CacheOptions { size, ttl } = args
                 .get_one::<String>("wake-compute-cache")
                 .unwrap()
                 .parse()?;
 
             info!("Using NodeInfoCache (wake_compute) with size={size} ttl={ttl:?}");
+            let node_info = console::caches::NodeInfoCache::new("node_info_cache", size, ttl);
+
             let caches = Box::leak(Box::new(console::caches::ApiCaches {
-                node_info: console::caches::NodeInfoCache::new("node_info_cache", size, ttl),
+                auth_info,
+                node_info,
             }));
 
             let url = args.get_one::<String>("auth-endpoint").unwrap().parse()?;
@@ -241,10 +252,16 @@ fn cli() -> clap::Command {
                 .help("how often metrics should be sent to a collection endpoint"),
         )
         .arg(
+            Arg::new("get-auth-info-cache")
+                .long("get-auth-info-cache")
+                .help("cache for `get_auth_info` api method (use `size=0` to disable)")
+                .default_value(config::CacheOptions::DEFAULT_AUTH_INFO),
+        )
+        .arg(
             Arg::new("wake-compute-cache")
                 .long("wake-compute-cache")
                 .help("cache for `wake_compute` api method (use `size=0` to disable)")
-                .default_value(config::CacheOptions::DEFAULT_OPTIONS_NODE_INFO),
+                .default_value(config::CacheOptions::DEFAULT_NODE_INFO),
         )
         .arg(
             Arg::new("allow-self-signed-compute")
