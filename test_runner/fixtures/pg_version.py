@@ -27,6 +27,7 @@ class PgVersion(str, enum.Enum):
     def __repr__(self) -> str:
         return f"'{self.value}'"
 
+    # Make this explicit for Python 3.11 compatibility, which changes the behavior of enums
     def __str__(self) -> str:
         return self.value
 
