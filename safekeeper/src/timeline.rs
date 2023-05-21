@@ -656,7 +656,10 @@ impl Timeline {
         let remover: Box<dyn Fn(u64) -> Result<(), anyhow::Error>>;
         {
             let shared_state = self.write_shared_state();
-            horizon_segno = shared_state.sk.get_horizon_segno(wal_backup_enabled);
+            horizon_segno = shared_state.sk.get_horizon_segno(
+                wal_backup_enabled,
+                self.walsenders.get_remote_consistent_lsn(),
+            );
             remover = shared_state.sk.wal_store.remove_up_to();
             if horizon_segno <= 1 || horizon_segno <= shared_state.last_removed_segno {
                 return Ok(());
