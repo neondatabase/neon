@@ -4,6 +4,8 @@
 //!
 //! Separate, `metadata` subcommand allows to print and update pageserver's metadata file.
 use std::{
+    fs,
+    io::Write,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -85,7 +87,7 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
     let metadata_bytes = std::fs::read(path)?;
     let mut meta = TimelineMetadata::from_bytes(&metadata_bytes)?;
     println!("Current metadata:\n{meta:?}");
-    let mut update_meta = false;
+
     if let Some(disk_consistent_lsn) = arg_matches.get_one::<String>("disk_consistent_lsn") {
         meta = TimelineMetadata::new(
             Lsn::from_str(disk_consistent_lsn)?,
@@ -96,7 +98,6 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
             meta.initdb_lsn(),
             meta.pg_version(),
         );
-        update_meta = true;
     }
     if let Some(prev_record_lsn) = arg_matches.get_one::<String>("prev_record_lsn") {
         meta = TimelineMetadata::new(
@@ -108,13 +109,22 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
             meta.initdb_lsn(),
             meta.pg_version(),
         );
-        update_meta = true;
+    }
+    if let Some(latest_gc_cuttoff) = arg_matches.get_one::<String>("latest_gc_cuttoff") {
+        meta = TimelineMetadata::new(
+            meta.disk_consistent_lsn(),
+            meta.prev_record_lsn(),
+            meta.ancestor_timeline(),
+            meta.ancestor_lsn(),
+            Lsn::from_str(latest_gc_cuttoff)?,
+            meta.initdb_lsn(),
+            meta.pg_version(),
+        );
     }
 
-    if update_meta {
-        let metadata_bytes = meta.to_bytes()?;
-        std::fs::write(path, metadata_bytes)?;
-    }
+    let metadata_bytes = meta.to_bytes()?;
+    let mut file = fs::OpenOptions::new().write(true).open(path)?;
+    file.write_all(&metadata_bytes)?;
 
     Ok(())
 }
@@ -147,6 +157,11 @@ fn cli() -> Command {
                     Arg::new("prev_record_lsn")
                         .long("prev_record_lsn")
                         .help("Replace previous record Lsn"),
+                )
+                .arg(
+                    Arg::new("latest_gc_cuttoff")
+                        .long("latest_gc_cuttoff")
+                        .help("Replace latest gc cuttoff"),
                 ),
         )
 }
