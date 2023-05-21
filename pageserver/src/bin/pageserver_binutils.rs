@@ -4,8 +4,6 @@
 //!
 //! Separate, `metadata` subcommand allows to print and update pageserver's metadata file.
 use std::{
-    fs,
-    io::Write,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -127,8 +125,7 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
 
     if update_meta {
         let metadata_bytes = meta.to_bytes()?;
-        let mut file = fs::OpenOptions::new().write(true).open(path)?;
-        file.write_all(&metadata_bytes)?;
+        std::fs::write(path, metadata_bytes)?;
     }
 
     Ok(())
