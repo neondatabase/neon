@@ -22,7 +22,7 @@ fn parallel_worker(paths: &[PathBuf], next_path_idx: &AtomicUsize) -> io::Result
 }
 
 fn fsync_in_thread_pool(paths: &[PathBuf]) -> io::Result<()> {
-    // TODO: remove this function in favor of `fsync_in_tokio_worker` once we asyncify everything.
+    // TODO: remove this function in favor of `par_fsync_async` once we asyncify everything.
 
     /// Use at most this number of threads.
     /// Increasing this limit will
@@ -50,17 +50,6 @@ fn fsync_in_thread_pool(paths: &[PathBuf]) -> io::Result<()> {
     .unwrap()
 }
 
-async fn fsync_in_tokio_worker(paths: &[PathBuf]) -> io::Result<()> {
-    const MAX_CONCURRENT_FSYNC: usize = 64;
-    let mut s = stream::iter(paths.to_vec())
-        .map(|path| async move { tokio::task::spawn_blocking(move || fsync_path(&path)).await })
-        .buffer_unordered(MAX_CONCURRENT_FSYNC);
-    while let Some(res) = s.next().await {
-        res??;
-    }
-    Ok(())
-}
-
 /// Parallel fsync all files. Can be used in non-async context as it is using rayon thread pool.
 pub fn par_fsync(paths: &[PathBuf]) -> io::Result<()> {
     const PARALLEL_PATH_THRESHOLD: usize = 1;
@@ -77,13 +66,12 @@ pub fn par_fsync(paths: &[PathBuf]) -> io::Result<()> {
 /// Parallel fsync asynchronously. If number of files are less than PARALLEL_PATH_THRESHOLD, fsync is done in the current
 /// execution thread. Otherwise, we will spawn_blocking and run it in tokio.
 pub async fn par_fsync_async(paths: &[PathBuf]) -> io::Result<()> {
-    const PARALLEL_PATH_THRESHOLD: usize = 1;
-    if paths.len() <= PARALLEL_PATH_THRESHOLD {
-        for path in paths {
-            tokio::task::block_in_place(|| fsync_path(path))?;
-        }
-        return Ok(());
+    const MAX_CONCURRENT_FSYNC: usize = 64;
+    let mut s = stream::iter(paths.to_vec())
+        .map(|path| async move { tokio::task::spawn_blocking(move || fsync_path(&path)).await })
+        .buffer_unordered(MAX_CONCURRENT_FSYNC);
+    while let Some(res) = s.next().await {
+        res??;
     }
-
-    fsync_in_tokio_worker(paths).await
+    Ok(())
 }
