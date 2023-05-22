@@ -1,14 +1,14 @@
 /*-------------------------------------------------------------------------
  *
  * control_plane_connector.c
- *	  Captures updates to roles/databases and sends them to the control
- *        plane using ProcessUtility_hook. The changes are sent via HTTP
- *        to the URL specified by the GUC neon.console_url when the
+ *	  Captures updates to roles/databases using ProcessUtility_hook and
+ *        sends them to the control ProcessUtility_hook. The changes are sent
+ *        via HTTP to the URL specified by the GUC neon.console_url when the
  *        transaction commits. Forwarding may be disabled temporarily by
  *        setting neon.forward_ddl to false.
  *
  *        Currently, the transaction may abort AFTER
- *        changes are forwarded, and that case is not handled.
+ *        changes have already been forwarded, and that case is not handled.
  *        Subtransactions are handled using a stack of hash tables, which
  *        accumulate changes. On subtransaction commit, the top of the stack
  *        is merged with the table below it.
@@ -72,7 +72,7 @@ typedef struct
 }			RoleEntry;
 
 /*
- * We keep one of these for each subtransaction in the form a of a stack. When a subtransaction
+ * We keep one of these for each subtransaction in a stack. When a subtransaction
  * commits, we merge the top of the stack into the table below it. It is allocated in the
  * subtransaction's context.
  */
@@ -177,9 +177,11 @@ ConstructDeltaMessage()
 	return JsonbToCString(NULL, &jsonb->root, 0 /* estimated_len */ );
 }
 
+static const size_t ERROR_SIZE = 1024;
+
 typedef struct
 {
-	char	   *ptr;
+	char		str[ERROR_SIZE];
 	size_t		size;
 }			ErrorString;
 
@@ -188,15 +190,19 @@ ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
 	/* Docs say size is always 1 */
 	ErrorString *str = userdata;
-	char	   *alloced = repalloc(str->ptr, str->size + nmemb + 1);
 
 	/* +1 for null terminator */
-	if (!alloced)
-		return 0;
-	str->ptr = alloced;
-	memcpy(str->ptr + str->size, ptr, nmemb);
-	str->size += nmemb;
-	str->ptr[str->size] = '\0';
+	size_t		to_write = nmemb;
+
+	if (str->size + nmemb + 1 >= ERROR_SIZE)
+		to_write = ERROR_SIZE - str->size - 1;
+
+	/* Ignore everyrthing past the first ERROR_SIZE bytes */
+	if (to_write == 0)
+		return nmemb;
+	memcpy(str->str + str->size, ptr, to_write);
+	str->size += to_write;
+	str->str[str->size] = '\0';
 	return nmemb;
 }
 
@@ -245,16 +251,16 @@ SendDeltasToControlPlane()
 
 		if (curl_easy_getinfo(CurlHandle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_UNKNOWN_OPTION)
 		{
+			bool		error_exists = str.size != 0;
+
 			if (response_code != 200)
 				elog(ERROR,
 					 "Received HTTP code %ld from control plane%s%s",
 					 response_code,
-					 str.ptr ? ": " : "",
-					 str.ptr ? str.ptr : "");
+					 error_exists ? ": " : "",
+					 error_exists ? str.str : "");
 		}
 	}
-	if (str.ptr)
-		pfree(str.ptr);
 }
 
 static void

@@ -1,6 +1,7 @@
 from types import TracebackType
 from typing import Any, Dict, List, Optional, Tuple, Type
 
+import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -55,6 +56,7 @@ fail = False
 def ddl_forward_handler(request: Request, dbs: Dict[str, str], roles: Dict[str, str]) -> Response:
     log.info(f"Received request with data {request.get_data(as_text=True)}")
     if fail:
+        log.info("FAILING")
         return Response(status=500, response="Failed just cuz")
     if request.json is None:
         log.info("Received invalid JSON")
@@ -208,7 +210,10 @@ def test_ddl_forwarding(ddl: DdlForwardingContext):
     ddl.wait()
     assert ddl.dbs == {"stork": "cork"}
 
-    cur.execute("CREATE DATABASE failure WITH OWNER=cork")
-    ddl.wait()
+    with pytest.raises(psycopg2.InternalError):
+        global fail
+        fail = True
+        cur.execute("CREATE DATABASE failure WITH OWNER=cork")
+        ddl.wait()
 
     conn.close()
