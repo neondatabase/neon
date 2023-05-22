@@ -186,7 +186,8 @@ pub struct Timeline {
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
-    /// and [`Tenant::delete_timeline`].
+    /// and [`Tenant::delete_timeline`]. This is an `Arc<Mutex>` lock because we need an owned
+    /// lock guard in functions that will be spawned to tokio I/O pool (which requires `'static`).
     pub(super) layer_removal_cs: Arc<tokio::sync::Mutex<()>>,
 
     // Needed to ensure that we can't create a branch at a point that was already garbage collected
@@ -2843,10 +2844,13 @@ impl Timeline {
         // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
         // files to flush, it might be better to first write them all, and then fsync
         // them all in parallel.
-        par_fsync::par_fsync(&[
-            new_delta_path.clone(),
-            self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-        ])?;
+
+        // First sync the delta layer. We still use par_fsync here to keep everything consistent. Feel free to replace
+        // this with a single fsync in future refactors.
+        par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
+        // Then sync the parent directory.
+        par_fsync::par_fsync(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
+            .context("fsync of timeline dir")?;
 
         // Add it to the layer map
         let l = Arc::new(new_delta);
@@ -3040,14 +3044,15 @@ impl Timeline {
         let all_paths = image_layers
             .iter()
             .map(|layer| layer.path())
-            .chain(std::iter::once(
-                self.conf.timeline_path(&self.timeline_id, &self.tenant_id),
-            ))
             .collect::<Vec<_>>();
 
         par_fsync::par_fsync_async(&all_paths)
             .await
             .context("fsync of newly created layer files")?;
+
+        par_fsync::par_fsync_async(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
+            .await
+            .context("fsync of timeline dir")?;
 
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
@@ -3427,12 +3432,12 @@ impl Timeline {
         if !new_layers.is_empty() {
             let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
 
-            // also sync the directory
-            layer_paths.push(self.conf.timeline_path(&self.timeline_id, &self.tenant_id));
-
             // Fsync all the layer files and directory using multiple threads to
             // minimize latency.
             par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
+
+            par_fsync::par_fsync(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
+                .context("fsync of timeline dir")?;
 
             layer_paths.pop().unwrap();
         }

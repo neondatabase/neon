@@ -52,11 +52,8 @@ fn fsync_in_thread_pool(paths: &[PathBuf]) -> io::Result<()> {
 
 /// Parallel fsync all files. Can be used in non-async context as it is using rayon thread pool.
 pub fn par_fsync(paths: &[PathBuf]) -> io::Result<()> {
-    const PARALLEL_PATH_THRESHOLD: usize = 1;
-    if paths.len() <= PARALLEL_PATH_THRESHOLD {
-        for path in paths {
-            fsync_path(path)?;
-        }
+    if paths.len() == 1 {
+        fsync_path(&paths[0])?;
         return Ok(());
     }
 
