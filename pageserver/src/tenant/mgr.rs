@@ -1,7 +1,7 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use std::cell::Cell;
+use scopeguard::ScopeGuard;
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -280,29 +280,25 @@ pub async fn create_tenant(
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
     tenant_map_insert(tenant_id, |vacant_entry| {
-        let succeed = Cell::new(false);
-
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
         let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Create)?;
 
-        scopeguard::defer! {
-            if !succeed.get() {
-                std::fs::remove_dir_all(&tenant_directory).ok(); // ignore the error
+        let guard_fs = scopeguard::guard((), |_| {
+            if let Err(e) = std::fs::remove_dir_all(&tenant_directory) {
+                // log the error but not throwing it somewhere
+                warn!("failed to cleanup when tenant {tenant_id} fails to start: {e}");
             }
-        }
+        });
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+        schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+        let created_tenant = scopeguard::guard(created_tenant, |tenant| {
+            // As we might have removed the directory, the tenant should directly go into the broken state.
+            tenant.set_broken("failed to create".into());
+        });
 
-        let tenant_cloned = Arc::clone(&created_tenant);
-        scopeguard::defer! {
-            if !succeed.get() {
-                // As we might have removed the directory, the tenant should directly go into the broken state.
-                tenant_cloned.set_broken("failed to create".into());
-            }
-        }
 
         fail::fail_point!("tenant-create-fail", |_| {
             anyhow::bail!("failpoint: tenant-create-fail");
@@ -316,9 +312,9 @@ pub async fn create_tenant(
 
         vacant_entry.insert(Arc::clone(&created_tenant));
 
-        succeed.set(true);
+        ScopeGuard::into_inner(guard_fs);
 
-        Ok(created_tenant)
+        Ok(ScopeGuard::into_inner(created_tenant))
     }).await
 }
 

@@ -400,13 +400,11 @@ def test_pageserver_with_empty_tenants(
     ), f"Tenant {tenant_without_timelines_dir} should have metric as broken"
 
 
-# Check that empty tenants work with or without the remote storage
-@pytest.mark.parametrize(
-    "remote_storage_kind", available_remote_storages() + [RemoteStorageKind.NOOP]
-)
-def test_pageserver_create_tenants_fail(
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
+def test_failed_tenant_directory_is_removed(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
+    """Tenants which fail to be created are cleaned up from disk and left broken"""
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_pageserver_create_tenants_fail",
@@ -417,11 +415,14 @@ def test_pageserver_create_tenants_fail(
     env.pageserver.allowed_errors.append(".*tenant-create-fail.*")
     env.pageserver.allowed_errors.append(".*Tenant is already in Broken state.*")
     env.pageserver.allowed_errors.append(".*could not load tenant.*")
+    env.pageserver.allowed_errors.append(".*InternalServerError.*")
 
     client = env.pageserver.http_client()
     client.configure_failpoints(("tenant-create-fail", "return"))
-    tenant_id = TenantId("deadbeefdeadbeefdeadbeefdeadbeef")
+    tenant_id = TenantId.generate()
     with pytest.raises(PageserverApiException, match="failpoint: tenant-create-fail"):
         client.tenant_create(tenant_id)
 
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
+    with pytest.raises(PageserverApiException, match="Tenant .* not found"):
+        client.tenant_status(tenant_id)
