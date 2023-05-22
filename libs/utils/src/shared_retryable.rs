@@ -124,14 +124,15 @@ where
     /// Many futures can call this function and get the terminal result from an earlier attempt or
     /// start a new attempt, or join an existing one.
     ///
-    /// If a task calling this method is cancelled, at worst, a new attempt which is immediatedly
-    /// deemed as having panicked will happen, but without a panic ever happening.
+    /// If a task calling this method is cancelled before spawning the returned future, this
+    /// attempt is immediatedly deemed as having panicked will happen, but without a panic ever
+    /// happening.
     ///
     /// Returns one future for waiting for the result and possibly another which needs to be
     /// spawned when `Some`. Spawning has to happen before waiting is started, otherwise the first
     /// future will never make progress.
     ///
-    /// This complication exists because on pageserver we cannot use `tokio::spawn` directly
+    /// This complication exists because on `pageserver` we cannot use `tokio::spawn` directly
     /// at this time.
     pub async fn try_restart<E2>(
         &self,
