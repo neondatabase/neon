@@ -543,8 +543,6 @@ impl Tenant {
             }
         };
 
-        timeline.init_logical_size().await;
-
         if self.remote_storage.is_some() {
             // Reconcile local state with remote storage, downloading anything that's
             // missing locally, and scheduling uploads for anything that's missing
@@ -1043,8 +1041,26 @@ impl Tenant {
         // The loops will shut themselves down when they notice that the tenant is inactive.
         self.activate(ctx)?;
 
+        self.load_logical_sizes().await?;
+
         info!("Done");
 
+        Ok(())
+    }
+
+    async fn load_logical_sizes(&self) -> anyhow::Result<()> {
+        let not_broken_timelines: Vec<Arc<Timeline>>;
+        {
+            let timelines_accessor = self.timelines.lock().unwrap();
+            not_broken_timelines = timelines_accessor
+                .values()
+                .filter(|timeline| timeline.current_state() != TimelineState::Broken)
+                .cloned()
+                .collect();
+        }
+        for timeline in not_broken_timelines {
+            timeline.load_inmem_logical_size().await?;
+        }
         Ok(())
     }
 
@@ -2516,7 +2532,6 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
     ) -> anyhow::Result<UninitializedTimeline> {
         let tenant_id = self.tenant_id;
-
         let remote_client = if let Some(remote_storage) = self.remote_storage.as_ref() {
             let remote_client = RemoteTimelineClient::new(
                 remote_storage.clone(),

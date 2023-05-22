@@ -713,13 +713,19 @@ impl Timeline {
         self.current_logical_size.load(AtomicOrdering::Relaxed) as u64
     }
 
-    pub async fn init_logical_size(&self) {
-        let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Error);
-        let last_record_lsn = self.get_last_record_lsn();
-        if let Ok(size) = self.get_logical_size(last_record_lsn, &ctx).await {
-            self.current_logical_size
-                .store(size as i64, AtomicOrdering::Relaxed);
+    /// Load from KV storage value of logical timeline size and store it in inmemory atomic variable
+    pub async fn load_inmem_logical_size(&self) -> anyhow::Result<()> {
+        let lsn = self.get_disk_consistent_lsn();
+        if lsn != Lsn::INVALID {
+            let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Error);
+            match self.get_logical_size(lsn, &ctx).await {
+                Ok(size) => self
+                    .current_logical_size
+                    .store(size as i64, AtomicOrdering::Relaxed),
+                Err(e) => info!("Failed to load logical size: {:?}", e),
+            }
         }
+        Ok(())
     }
 
     /// Check if more than 'checkpoint_distance' of WAL has been accumulated in
