@@ -1,8 +1,8 @@
 use std::ops::Range;
 
-// TODO the `im` crate has 20x more downloads and also has
-// persistent/immutable BTree. It also runs a bit faster but
-// results are not the same on some tests.
+// NOTE the `im` crate has 20x more downloads and also has
+// persistent/immutable BTree. But it's bugged so rpds is a
+// better choice https://github.com/neondatabase/neon/issues/3395
 use rpds::RedBlackTreeMapSync;
 
 /// Data structure that can efficiently:
