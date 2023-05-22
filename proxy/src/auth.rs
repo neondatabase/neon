@@ -7,6 +7,7 @@ mod credentials;
 pub use credentials::ClientCredentials;
 
 mod password_hack;
+pub use password_hack::parse_endpoint_param;
 use password_hack::PasswordHackPayload;
 
 mod flow;
@@ -44,10 +45,10 @@ pub enum AuthErrorImpl {
     #[error(
         "Endpoint ID is not specified. \
         Either please upgrade the postgres client library (libpq) for SNI support \
-        or pass the endpoint ID (first part of the domain name) as a parameter: '?options=project%3D<endpoint-id>'. \
+        or pass the endpoint ID (first part of the domain name) as a parameter: '?options=endpoint%3D<endpoint-id>'. \
         See more at https://neon.tech/sni"
     )]
-    MissingProjectName,
+    MissingEndpointName,
 
     #[error("password authentication failed for user '{0}'")]
     AuthFailed(Box<str>),
@@ -88,7 +89,7 @@ impl UserFacingError for AuthError {
             AuthFailed(_) => self.to_string(),
             BadAuthMethod(_) => self.to_string(),
             MalformedPassword(_) => self.to_string(),
-            MissingProjectName => self.to_string(),
+            MissingEndpointName => self.to_string(),
             Io(_) => "Internal error".to_string(),
         }
     }

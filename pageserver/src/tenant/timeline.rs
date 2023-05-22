@@ -396,6 +396,9 @@ pub enum PageReconstructError {
     /// The operation was cancelled
     Cancelled,
 
+    /// The ancestor of this is being stopped
+    AncestorStopping(TimelineId),
+
     /// An error happened replaying WAL records
     #[error(transparent)]
     WalRedo(#[from] crate::walredo::WalRedoError),
@@ -414,6 +417,9 @@ impl std::fmt::Debug for PageReconstructError {
                 )
             }
             Self::Cancelled => write!(f, "cancelled"),
+            Self::AncestorStopping(timeline_id) => {
+                write!(f, "ancestor timeline {timeline_id} is being stopped")
+            }
             Self::WalRedo(err) => err.fmt(f),
         }
     }
@@ -432,6 +438,9 @@ impl std::fmt::Display for PageReconstructError {
                 )
             }
             Self::Cancelled => write!(f, "cancelled"),
+            Self::AncestorStopping(timeline_id) => {
+                write!(f, "ancestor timeline {timeline_id} is being stopped")
+            }
             Self::WalRedo(err) => err.fmt(f),
         }
     }
@@ -932,6 +941,31 @@ impl Timeline {
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
         self.state.subscribe()
+    }
+
+    pub async fn wait_to_become_active(
+        &self,
+        _ctx: &RequestContext, // Prepare for use by cancellation
+    ) -> Result<(), TimelineState> {
+        let mut receiver = self.state.subscribe();
+        loop {
+            let current_state = *receiver.borrow_and_update();
+            match current_state {
+                TimelineState::Loading => {
+                    receiver
+                        .changed()
+                        .await
+                        .expect("holding a reference to self");
+                }
+                TimelineState::Active { .. } => {
+                    return Ok(());
+                }
+                TimelineState::Broken { .. } | TimelineState::Stopping => {
+                    // There's no chance the timeline can transition back into ::Active
+                    return Err(current_state);
+                }
+            }
+        }
     }
 
     pub fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
@@ -1853,12 +1887,25 @@ impl Timeline {
                     Ok(s) => s,
                     Err(CalculateLogicalSizeError::Cancelled) => {
                         // Don't make noise, this is a common task.
-                        // In the unlikely case that there ihs another call to this function, we'll retry
+                        // In the unlikely case that there is another call to this function, we'll retry
                         // because initial_logical_size is still None.
                         info!("initial size calculation cancelled, likely timeline delete / tenant detach");
                         return Ok(());
                     }
-                    x @ Err(_) => x.context("Failed to calculate logical size")?,
+                    Err(CalculateLogicalSizeError::Other(err)) => {
+                        if let Some(e @ PageReconstructError::AncestorStopping(_)) =
+                            err.root_cause().downcast_ref()
+                        {
+                            // This can happen if the timeline parent timeline switches to
+                            // Stopping state while we're still calculating the initial
+                            // timeline size for the child, for example if the tenant is
+                            // being detached or the pageserver is shut down. Like with
+                            // CalculateLogicalSizeError::Cancelled, don't make noise.
+                            info!("initial size calculation failed because the timeline or its ancestor is Stopping, likely because the tenant is being detached: {e:#}");
+                            return Ok(());
+                        }
+                        return Err(err.context("Failed to calculate logical size"));
+                    }
                 };
 
                 // we cannot query current_logical_size.current_size() to know the current
@@ -2240,6 +2287,46 @@ impl Timeline {
                     Ok(timeline) => timeline,
                     Err(e) => return Err(PageReconstructError::from(e)),
                 };
+
+                // It's possible that the ancestor timeline isn't active yet, or
+                // is active but hasn't yet caught up to the branch point. Wait
+                // for it.
+                //
+                // This cannot happen while the pageserver is running normally,
+                // because you cannot create a branch from a point that isn't
+                // present in the pageserver yet. However, we don't wait for the
+                // branch point to be uploaded to cloud storage before creating
+                // a branch. I.e., the branch LSN need not be remote consistent
+                // for the branching operation to succeed.
+                //
+                // Hence, if we try to load a tenant in such a state where
+                // 1. the existence of the branch was persisted (in IndexPart and/or locally)
+                // 2. but the ancestor state is behind branch_lsn because it was not yet persisted
+                // then we will need to wait for the ancestor timeline to
+                // re-stream WAL up to branch_lsn before we access it.
+                //
+                // How can a tenant get in such a state?
+                // - ungraceful pageserver process exit
+                // - detach+attach => this is a bug, https://github.com/neondatabase/neon/issues/4219
+                //
+                // NB: this could be avoided by requiring
+                //   branch_lsn >= remote_consistent_lsn
+                // during branch creation.
+                match ancestor.wait_to_become_active(ctx).await {
+                    Ok(()) => {}
+                    Err(state) if state == TimelineState::Stopping => {
+                        return Err(PageReconstructError::AncestorStopping(ancestor.timeline_id));
+                    }
+                    Err(state) => {
+                        return Err(PageReconstructError::Other(anyhow::anyhow!(
+                            "Timeline {} will not become active. Current state: {:?}",
+                            ancestor.timeline_id,
+                            &state,
+                        )));
+                    }
+                }
+                ancestor.wait_lsn(timeline.ancestor_lsn, ctx).await?;
+
                 timeline_owned = ancestor;
                 timeline = &*timeline_owned;
                 prev_lsn = Lsn(u64::MAX);
@@ -4329,12 +4416,6 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {}
 pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
     use utils::tracing_span_assert;
 
-    pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
-        tracing_span_assert::MultiNameExtractor<2>,
-    > = once_cell::sync::Lazy::new(|| {
-        tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
-    });
-
     pub static TIMELINE_ID_EXTRACTOR: once_cell::sync::Lazy<
         tracing_span_assert::MultiNameExtractor<2>,
     > = once_cell::sync::Lazy::new(|| {
@@ -4342,7 +4423,7 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
     });
 
     match tracing_span_assert::check_fields_present([
-        &*TENANT_ID_EXTRACTOR,
+        &*super::TENANT_ID_EXTRACTOR,
         &*TIMELINE_ID_EXTRACTOR,
     ]) {
         Ok(()) => (),

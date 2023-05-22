@@ -8,6 +8,7 @@ use metrics::{
 use once_cell::sync::Lazy;
 use pageserver_api::models::TenantState;
 use strum::VariantNames;
+use strum_macros::{EnumVariantNames, IntoStaticStr};
 use utils::id::{TenantId, TimelineId};
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -24,16 +25,33 @@ const CRITICAL_OP_BUCKETS: &[f64] = &[
 ];
 
 // Metrics collected on operations on the storage repository.
-const STORAGE_TIME_OPERATIONS: &[&str] = &[
-    "layer flush",
-    "compact",
-    "create images",
-    "init logical size",
-    "logical size",
-    "imitate logical size",
-    "load layer map",
-    "gc",
-];
+#[derive(Debug, EnumVariantNames, IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+pub enum StorageTimeOperation {
+    #[strum(serialize = "layer flush")]
+    LayerFlush,
+
+    #[strum(serialize = "compact")]
+    Compact,
+
+    #[strum(serialize = "create images")]
+    CreateImages,
+
+    #[strum(serialize = "logical size")]
+    LogicalSize,
+
+    #[strum(serialize = "imitate logical size")]
+    ImitateLogicalSize,
+
+    #[strum(serialize = "load layer map")]
+    LoadLayerMap,
+
+    #[strum(serialize = "gc")]
+    Gc,
+
+    #[strum(serialize = "create tenant")]
+    CreateTenant,
+}
 
 pub static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
@@ -672,7 +690,9 @@ pub struct StorageTimeMetrics {
 }
 
 impl StorageTimeMetrics {
-    pub fn new(operation: &str, tenant_id: &str, timeline_id: &str) -> Self {
+    pub fn new(operation: StorageTimeOperation, tenant_id: &str, timeline_id: &str) -> Self {
+        let operation: &'static str = operation.into();
+
         let timeline_sum = STORAGE_TIME_SUM_PER_TIMELINE
             .get_metric_with_label_values(&[operation, tenant_id, timeline_id])
             .unwrap();
@@ -736,16 +756,23 @@ impl TimelineMetrics {
         let materialized_page_cache_hit_counter = MATERIALIZED_PAGE_CACHE_HIT
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let flush_time_histo = StorageTimeMetrics::new("layer flush", &tenant_id, &timeline_id);
-        let compact_time_histo = StorageTimeMetrics::new("compact", &tenant_id, &timeline_id);
+        let flush_time_histo =
+            StorageTimeMetrics::new(StorageTimeOperation::LayerFlush, &tenant_id, &timeline_id);
+        let compact_time_histo =
+            StorageTimeMetrics::new(StorageTimeOperation::Compact, &tenant_id, &timeline_id);
         let create_images_time_histo =
-            StorageTimeMetrics::new("create images", &tenant_id, &timeline_id);
-        let logical_size_histo = StorageTimeMetrics::new("logical size", &tenant_id, &timeline_id);
-        let imitate_logical_size_histo =
-            StorageTimeMetrics::new("imitate logical size", &tenant_id, &timeline_id);
+            StorageTimeMetrics::new(StorageTimeOperation::CreateImages, &tenant_id, &timeline_id);
+        let logical_size_histo =
+            StorageTimeMetrics::new(StorageTimeOperation::LogicalSize, &tenant_id, &timeline_id);
+        let imitate_logical_size_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::ImitateLogicalSize,
+            &tenant_id,
+            &timeline_id,
+        );
         let load_layer_map_histo =
-            StorageTimeMetrics::new("load layer map", &tenant_id, &timeline_id);
-        let garbage_collect_histo = StorageTimeMetrics::new("gc", &tenant_id, &timeline_id);
+            StorageTimeMetrics::new(StorageTimeOperation::LoadLayerMap, &tenant_id, &timeline_id);
+        let garbage_collect_histo =
+            StorageTimeMetrics::new(StorageTimeOperation::Gc, &tenant_id, &timeline_id);
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
@@ -813,7 +840,7 @@ impl Drop for TimelineMetrics {
             .write()
             .unwrap()
             .remove(tenant_id, timeline_id);
-        for op in STORAGE_TIME_OPERATIONS {
+        for op in StorageTimeOperation::VARIANTS {
             let _ =
                 STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
             let _ =

@@ -741,13 +741,16 @@ paths:
                 $ref: "#/components/schemas/Error"
     post:
       description: |
-        Create a tenant. Returns new tenant id on success.\
+        Create a tenant. Returns new tenant id on success.
+
         If no new tenant id is specified in parameters, it would be generated. It's an error to recreate the same tenant.
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantCreateInfo"
+              $ref: "#/components/schemas/TenantCreateRequest"
       responses:
         "201":
           description: New tenant created successfully
@@ -790,11 +793,13 @@ paths:
     put:
       description: |
         Update tenant's config.
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantConfigInfo"
+              $ref: "#/components/schemas/TenantConfigRequest"
       responses:
         "200":
           description: OK
@@ -846,7 +851,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TenantConfig"
+                $ref: "#/components/schemas/TenantConfigResponse"
         "400":
           description: Malformed get tenanant config request
           content:
@@ -909,35 +914,27 @@ components:
             See the tenant `/attach` endpoint for more information.
           type: string
           enum: [ "maybe", "attached" ]
-    TenantCreateInfo:
+    TenantCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/TenantConfig'
+        - type: object
+          properties:
+            new_tenant_id:
+              type: string
+              format: hex
+    TenantConfigRequest:
+      allOf:
+        - $ref: '#/components/schemas/TenantConfig'
+        - type: object
+          required:
+            - tenant_id
+          properties:
+            tenant_id:
+              type: string
+              format: hex
+    TenantConfig:
       type: object
       properties:
-        new_tenant_id:
-          type: string
-          format: hex
-        tenant_id:
-          type: string
-          format: hex
-        gc_period:
-          type: string
-        gc_horizon:
-          type: integer
-        pitr_interval:
-          type: string
-        checkpoint_distance:
-          type: integer
-        checkpoint_timeout:
-          type: string
-        compaction_period:
-          type: string
-        compaction_threshold:
-          type: string
-    TenantConfigInfo:
-      type: object
-      properties:
-        tenant_id:
-          type: string
-          format: hex
         gc_period:
           type: string
         gc_horizon:
@@ -964,13 +961,13 @@ components:
           type: integer
         trace_read_requests:
           type: boolean
-    TenantConfig:
+    TenantConfigResponse:
       type: object
       properties:
         tenant_specific_overrides:
-          $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfig"
         effective_config:
-          $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfig"
     TimelineInfo:
       type: object
       required:

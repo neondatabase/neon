@@ -20,6 +20,7 @@ from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_for_upload_queue_empty,
     wait_until_tenant_state,
 )
 from fixtures.types import Lsn
@@ -63,12 +64,15 @@ def test_ondemand_download_large_rel(
     tenant, _ = env.neon_cli.create_tenant(
         conf={
             # disable background GC
-            "gc_period": "10 m",
+            "gc_period": "0s",
             "gc_horizon": f"{10 * 1024 ** 3}",  # 10 GB
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{10 * 1024 ** 2}",  # 10 MB
+            # allow compaction with the checkpoint
             "compaction_threshold": "3",
             "compaction_target_size": f"{10 * 1024 ** 2}",  # 10 MB
+            # but don't run compaction in background or on restart
+            "compaction_period": "0s",
         }
     )
     env.initial_tenant = tenant
@@ -95,8 +99,16 @@ def test_ondemand_download_large_rel(
 
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
-    # wait until pageserver receives that data
     wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
+
+    # stop endpoint before checkpoint to stop wal generation
+    endpoint.stop()
+
+    # stopping of safekeepers now will help us not to calculate logical size
+    # after startup, so page requests should be the only one on-demand
+    # downloading the layers
+    for sk in env.safekeepers:
+        sk.stop()
 
     # run checkpoint manually to be sure that data landed in remote storage
     client.timeline_checkpoint(tenant_id, timeline_id)
@@ -106,7 +118,6 @@ def test_ondemand_download_large_rel(
     log.info("uploads have finished")
 
     ##### Stop the first pageserver instance, erase all its data
-    endpoint.stop()
     env.pageserver.stop()
 
     # remove all the layer files
@@ -117,8 +128,13 @@ def test_ondemand_download_large_rel(
     ##### Second start, restore the data and ensure it's the same
     env.pageserver.start()
 
-    endpoint.start()
+    # start a readonly endpoint which we'll use to check the database.
+    # readonly (with lsn=) is required so that we don't try to connect to
+    # safekeepers, that have now been shut down.
+    endpoint = env.endpoints.create_start("main", lsn=current_lsn)
+
     before_downloads = get_num_downloaded_layers(client, tenant_id, timeline_id)
+    assert before_downloads != 0, "basebackup should on-demand non-zero layers"
 
     # Probe in the middle of the table. There's a high chance that the beginning
     # and end of the table was stored together in the same layer files with data
@@ -149,6 +165,7 @@ def test_ondemand_download_timetravel(
 
     ##### First start, insert data and upload it to the remote storage
     env = neon_env_builder.init_start()
+    pageserver_http = env.pageserver.http_client()
 
     # Override defaults, to create more layers
     tenant, _ = env.neon_cli.create_tenant(
@@ -225,7 +242,8 @@ def test_ondemand_download_timetravel(
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
     # Wait until generated image layers are uploaded to S3
-    time.sleep(3)
+    if remote_storage_kind is not None:
+        wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
 
     env.pageserver.stop()
 

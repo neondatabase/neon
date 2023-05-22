@@ -118,6 +118,11 @@ class EvictionEnv:
 
         wait_until(10, 1, statvfs_called)
 
+        # these can sometimes happen during startup before any tenants have been
+        # loaded, so nothing can be evicted, we just wait for next iteration which
+        # is able to evict.
+        self.neon_env.pageserver.allowed_errors.append(".*WARN.* disk usage still high.*")
+
 
 @pytest.fixture
 def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> EvictionEnv:
@@ -136,9 +141,7 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
     env.pageserver.allowed_errors.append(r".* running disk usage based eviction due to pressure.*")
 
     # remove the initial tenant
-    ## why wait for upload queue? => https://github.com/neondatabase/neon/issues/3865
     assert env.initial_timeline
-    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, env.initial_timeline)
     pageserver_http.tenant_detach(env.initial_tenant)
     assert isinstance(env.remote_storage, LocalFsStorage)
     tenant_remote_storage = env.remote_storage.root / "tenants" / str(env.initial_tenant)

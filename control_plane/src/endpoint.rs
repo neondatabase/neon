@@ -134,6 +134,7 @@ pub struct Endpoint {
 
     // port and address of the Postgres server
     pub address: SocketAddr,
+    // postgres major version in the format: 14, 15, etc.
     pg_version: u32,
 
     // These are not part of the endpoint as such, but the environment
@@ -381,6 +382,11 @@ impl Endpoint {
                 conf.append("primary_conninfo", connstr.as_str());
                 conf.append("primary_slot_name", slot_name.as_str());
                 conf.append("hot_standby", "on");
+                // prefetching of blocks referenced in WAL doesn't make sense for us
+                // Neon hot standby ignores pages that are not in the shared_buffers
+                if self.pg_version >= 15 {
+                    conf.append("recovery_prefetch", "off");
+                }
             }
         }
 

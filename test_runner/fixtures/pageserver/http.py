@@ -149,11 +149,16 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(self, new_tenant_id: Optional[TenantId] = None) -> TenantId:
+    def tenant_create(
+        self, new_tenant_id: Optional[TenantId] = None, conf: Optional[Dict[str, Any]] = None
+    ) -> TenantId:
+        if conf is not None:
+            assert "new_tenant_id" not in conf.keys()
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
                 "new_tenant_id": str(new_tenant_id) if new_tenant_id else None,
+                **(conf or {}),
             },
         )
         self.verbose_error(res)
@@ -272,6 +277,7 @@ class PageserverHttpClient(requests.Session):
         new_timeline_id: Optional[TimelineId] = None,
         ancestor_timeline_id: Optional[TimelineId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
+        **kwargs,
     ) -> Dict[Any, Any]:
         body: Dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
@@ -281,7 +287,9 @@ class PageserverHttpClient(requests.Session):
         if pg_version != PgVersion.NOT_SET:
             body["pg_version"] = int(pg_version)
 
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body)
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body, **kwargs
+        )
         self.verbose_error(res)
         if res.status_code == 409:
             raise Exception(f"could not create timeline: already exists for id {new_timeline_id}")
