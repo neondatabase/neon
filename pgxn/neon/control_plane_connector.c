@@ -177,7 +177,7 @@ ConstructDeltaMessage()
 	return JsonbToCString(NULL, &jsonb->root, 0 /* estimated_len */ );
 }
 
-static const size_t ERROR_SIZE = 1024;
+#define ERROR_SIZE 1024
 
 typedef struct
 {
