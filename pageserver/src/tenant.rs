@@ -1588,7 +1588,7 @@ impl Tenant {
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
-    fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    fn activate(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
 
         let mut result = Ok(());
@@ -1621,7 +1621,7 @@ impl Tenant {
 
                     // Spawn gc and compaction loops. The loops will shut themselves
                     // down when they notice that the tenant is inactive.
-                    tasks::start_background_loops(self.tenant_id);
+                    tasks::start_background_loops(self);
 
                     let mut activated_timelines = 0;
                     let mut timelines_broken_during_activation = 0;
