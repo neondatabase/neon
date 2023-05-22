@@ -1750,7 +1750,7 @@ impl Tenant {
         });
     }
 
-    pub async fn wait_to_become_active(&self) -> Result<(), WaitToBecomeActiveError> {
+    pub async fn wait_to_become_active(&self) -> anyhow::Result<()> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
