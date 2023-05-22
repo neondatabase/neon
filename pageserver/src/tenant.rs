@@ -18,6 +18,7 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::crashsafe::path_with_suffix_extension;
 
@@ -154,6 +155,8 @@ pub struct Tenant {
     cached_synthetic_tenant_size: Arc<AtomicU64>,
 
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
+
+    background_loops_cancel: Mutex<Option<CancellationToken>>,
 }
 
 /// A timeline with some of its files on disk, being initialized.
@@ -1620,8 +1623,15 @@ impl Tenant {
                         .filter(|timeline| timeline.current_state() != TimelineState::Broken);
 
                     // Spawn gc and compaction loops. The loops will shut themselves
-                    // down when they notice that the tenant is inactive.
-                    tasks::start_background_loops(self);
+                    // down in response to the cancellation token getting dropped.
+                    let background_loops_cancel = CancellationToken::new();
+                    let existing = self
+                        .background_loops_cancel
+                        .lock()
+                        .unwrap()
+                        .replace(background_loops_cancel.clone());
+                    assert!(existing.is_none(), "we don't support re-activation");
+                    tasks::start_background_loops(self, background_loops_cancel.clone());
 
                     let mut activated_timelines = 0;
                     let mut timelines_broken_during_activation = 0;
@@ -1677,6 +1687,10 @@ impl Tenant {
                 TenantState::Active | TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Stopping;
 
+                    if let Some(cancel) = self.background_loops_cancel.lock().unwrap().take() {
+                        cancel.cancel();
+                    }
+
                     // FIXME: If the tenant is still Loading or Attaching, new timelines
                     // might be created after this. That's harmless, as the Timelines
                     // won't be accessible to anyone, when the Tenant is in Stopping
@@ -1711,6 +1725,10 @@ impl Tenant {
                     // we can, but it shouldn't happen.
                     warn!("Changing Active tenant to Broken state, reason: {}", reason);
                     *current_state = TenantState::broken_from_reason(reason);
+
+                    if let Some(cancel) = self.background_loops_cancel.lock().unwrap().take() {
+                        cancel.cancel();
+                    }
                 }
                 TenantState::Broken { .. } => {
                     // This shouldn't happen either
@@ -1732,11 +1750,7 @@ impl Tenant {
         });
     }
 
-    pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TenantState> {
-        self.state.subscribe()
-    }
-
-    pub async fn wait_to_become_active(&self) -> anyhow::Result<()> {
+    pub async fn wait_to_become_active(&self) -> Result<(), WaitToBecomeActiveError> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
@@ -1982,6 +1996,7 @@ impl Tenant {
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),
             eviction_task_tenant_state: tokio::sync::Mutex::new(EvictionTaskTenantState::default()),
+            background_loops_cancel: Mutex::new(None),
         }
     }
 
