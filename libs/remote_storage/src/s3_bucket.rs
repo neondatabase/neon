@@ -21,10 +21,7 @@ use aws_sdk_s3::{
 };
 use aws_smithy_http::body::SdkBody;
 use hyper::Body;
-use tokio::{
-    io::{self, AsyncRead},
-    sync::Semaphore,
-};
+use tokio::io;
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
@@ -107,7 +104,7 @@ pub struct S3Bucket {
     // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
     // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.
     // The helps to ensure we don't exceed the thresholds.
-    concurrency_limiter: Arc<Semaphore>,
+    concurrency_limiter: Arc<leaky_bucket::RateLimiter>,
 }
 
 #[derive(Default)]
@@ -158,12 +155,24 @@ impl S3Bucket {
             }
             prefix
         });
+
+        let rps = aws_config.concurrency_limit.get();
+        let concurrency_limiter = leaky_bucket::RateLimiter::builder()
+            .max(rps)
+            .initial(0)
+            // refill it by rps every second. this means the (rps+1)th request will have to wait for
+            // 1 second from earliest.
+            .refill(rps)
+            .interval(std::time::Duration::from_secs(1))
+            .fair(true)
+            .build();
+
         Ok(Self {
             client,
             bucket_name: aws_config.bucket_name.clone(),
             max_keys_per_list_response: aws_config.max_keys_per_list_response,
             prefix_in_bucket,
-            concurrency_limiter: Arc::new(Semaphore::new(aws_config.concurrency_limit.get())),
+            concurrency_limiter: Arc::new(concurrency_limiter),
         })
     }
 
@@ -195,13 +204,10 @@ impl S3Bucket {
     }
 
     async fn download_object(&self, request: GetObjectRequest) -> Result<Download, DownloadError> {
-        let permit = self
-            .concurrency_limiter
-            .clone()
-            .acquire_owned()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 download")
-            .map_err(DownloadError::Other)?;
+        // while the download could take a long time with `leaky_bucket` we have nothing to release
+        // once the download is done. this is because with "requests per second" rate limiting on
+        // s3, there should be no meaning for the long requests.
+        self.concurrency_limiter.clone().acquire_owned(1).await;
 
         metrics::inc_get_object();
 
@@ -219,10 +225,9 @@ impl S3Bucket {
                 let metadata = object_output.metadata().cloned().map(StorageMetadata);
                 Ok(Download {
                     metadata,
-                    download_stream: Box::pin(io::BufReader::new(RatelimitedAsyncRead::new(
-                        permit,
+                    download_stream: Box::pin(io::BufReader::new(
                         object_output.body.into_async_read(),
-                    ))),
+                    )),
                 })
             }
             Err(SdkError::ServiceError(e)) if matches!(e.err(), GetObjectError::NoSuchKey(_)) => {
@@ -235,32 +240,6 @@ impl S3Bucket {
                 )))
             }
         }
-    }
-}
-
-pin_project_lite::pin_project! {
-    /// An `AsyncRead` adapter which carries a permit for the lifetime of the value.
-    struct RatelimitedAsyncRead<S> {
-        permit: tokio::sync::OwnedSemaphorePermit,
-        #[pin]
-        inner: S,
-    }
-}
-
-impl<S: AsyncRead> RatelimitedAsyncRead<S> {
-    fn new(permit: tokio::sync::OwnedSemaphorePermit, inner: S) -> Self {
-        RatelimitedAsyncRead { permit, inner }
-    }
-}
-
-impl<S: AsyncRead> AsyncRead for RatelimitedAsyncRead<S> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let this = self.project();
-        this.inner.poll_read(cx, buf)
     }
 }
 
@@ -289,12 +268,7 @@ impl RemoteStorage for S3Bucket {
 
         let mut continuation_token = None;
         loop {
-            let _guard = self
-                .concurrency_limiter
-                .acquire()
-                .await
-                .context("Concurrency limiter semaphore got closed during S3 list")
-                .map_err(DownloadError::Other)?;
+            self.concurrency_limiter.acquire_one().await;
 
             metrics::inc_list_objects();
 
@@ -339,11 +313,9 @@ impl RemoteStorage for S3Bucket {
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
     ) -> anyhow::Result<()> {
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 upload")?;
+        // similarly to downloads, the permit does not have live through the upload, but instead we
+        // are rate limiting requests per second.
+        self.concurrency_limiter.acquire_one().await;
 
         metrics::inc_put_object();
 
@@ -398,11 +370,7 @@ impl RemoteStorage for S3Bucket {
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
-        let _guard = self
-            .concurrency_limiter
-            .acquire()
-            .await
-            .context("Concurrency limiter semaphore got closed during S3 delete")?;
+        self.concurrency_limiter.acquire_one().await;
 
         metrics::inc_delete_object();
 
