@@ -20,7 +20,8 @@ use std::sync::Arc;
 /// ```
 ///
 /// Implementation is cancel safe. Implementation and internal structure are hurt by the inability
-/// to just spawn the task, but this is needed for pageserver usage.
+/// to just spawn the task, but this is needed for `pageserver` usage. Within `pageserver`, the
+/// `task_mgr` must be used to spawn the future because it will cause awaiting during shutdown.
 ///
 /// Implementation exposes a fully decomposed [`SharedRetryable::try_restart`] which requires the
 /// caller to do the spawning before awaiting for the result. If the caller is dropped while this
