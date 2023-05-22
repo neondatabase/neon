@@ -1,8 +1,13 @@
-use std::{sync::{Mutex, Arc}, collections::VecDeque};
+use std::{
+    sync::{Arc},
+};
 
-use anyhow::Result;
 
-use super::{world::{NodeId, Node, NetworkEvent}, proto::AnyMessage};
+
+use super::{
+    proto::AnyMessage,
+    world::{Node, NodeEvent},
+};
 
 /// Simplistic simulation of a bidirectional network stream without reordering (TCP).
 /// There are almost no errors, writes are always successful (but may end up in void).
@@ -15,15 +20,13 @@ pub struct Tcp {
 
 impl Tcp {
     pub fn new(dst: Arc<Node>) -> Tcp {
-        Tcp{
-            dst,
-        }
+        Tcp { dst }
     }
 
     /// Send a message to the other side. It's guaranteed that it will not arrive
     /// before the arrival of all messages sent earlier.
     pub fn send(&self, msg: AnyMessage) {
         // TODO: send to the internal TCP buffer
-        self.dst.network_chan().send(NetworkEvent::Message(msg));
+        self.dst.network_chan().send(NodeEvent::Message(msg));
     }
 }

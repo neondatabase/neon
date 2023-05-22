@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::sync::Mutex;
+use super::sync::{Mutex, Park};
 
 pub trait Storage<T> {
     fn flush_pos(&self) -> u32;
@@ -12,7 +12,7 @@ pub trait Storage<T> {
 
 #[derive(Clone)]
 pub struct SharedStorage<T> {
-    state: Arc<Mutex<InMemoryStorage<T>>>,
+    pub state: Arc<Mutex<InMemoryStorage<T>>>,
 }
 
 impl<T> SharedStorage<T> {
@@ -29,17 +29,19 @@ impl<T> Storage<T> for SharedStorage<T> {
     }
 
     fn flush(&mut self) -> Result<()> {
+        Park::yield_thread();
         self.state.lock().flush()
     }
 
     fn write(&mut self, t: T) {
+        Park::yield_thread();
         self.state.lock().write(t);
     }
 }
 
 pub struct InMemoryStorage<T> {
-    data: Vec<T>,
-    flush_pos: u32,
+    pub data: Vec<T>,
+    pub flush_pos: u32,
 }
 
 impl<T> InMemoryStorage<T> {

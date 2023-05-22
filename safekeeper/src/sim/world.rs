@@ -1,7 +1,18 @@
-use std::{sync::{atomic::AtomicI32, Arc}, cell::RefCell};
-use rand::{rngs::StdRng, SeedableRng, Rng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::{
+    cell::RefCell,
+    sync::{Arc},
+};
 
-use super::{tcp::Tcp, sync::{Mutex, Park}, chan::Chan, proto::AnyMessage, node_os::NodeOs, wait_group::WaitGroup};
+use super::{
+    chan::Chan,
+    node_os::NodeOs,
+    proto::AnyMessage,
+    sync::{Mutex, Park},
+    tcp::Tcp,
+    time::Timing,
+    wait_group::WaitGroup,
+};
 
 pub type NodeId = u32;
 
@@ -18,15 +29,19 @@ pub struct World {
 
     /// Random number generator.
     rng: Mutex<StdRng>,
+
+    /// Timers and stuff.
+    timing: Mutex<Timing>,
 }
 
 impl World {
     pub fn new() -> World {
-        World{
+        World {
             nodes: Mutex::new(Vec::new()),
             unconditional_parking: Mutex::new(Vec::new()),
             wait_group: WaitGroup::new(),
             rng: Mutex::new(StdRng::seed_from_u64(1337)),
+            timing: Mutex::new(Timing::new()),
         }
     }
 
@@ -52,7 +67,7 @@ impl World {
     }
 
     /// Returns a writable end of a TCP connection, to send src->dst messages.
-    pub fn open_tcp(&self, src: &Arc<Node>, dst: NodeId) -> Tcp {
+    pub fn open_tcp(&self, _src: &Arc<Node>, dst: NodeId) -> Tcp {
         // TODO: replace unwrap() with /dev/null socket.
         let dst = self.get_node(dst).unwrap();
 
@@ -64,37 +79,70 @@ impl World {
         self.wait_group.wait();
     }
 
-    pub fn step(&self) -> bool {
-        self.await_all();
-
+    /// Take a random unconditionally parked thread and return it.
+    fn thread_to_unpark(&self) -> Option<Arc<Park>> {
         let mut parking = self.unconditional_parking.lock();
         if parking.is_empty() {
             // nothing to do, all threads have finished
-            return false;
+            return None;
         }
 
         let chosen_one = self.rng.lock().gen_range(0..parking.len());
         let park = parking.swap_remove(chosen_one);
         drop(parking);
+        Some(park)
+    }
 
-        println!("Waking up park at node {:?}", park.node_id());
-
-        // Wake up the chosen thread. To do that:
-        // 1. Increment the counter of running threads.
-        // 2. Send a singal to continue the thread.
-        self.wait_group.add(1);
-        park.internal_world_wake();
-
-        // to have a clean state after each step, wait for all threads to finish
+    pub fn step(&self) -> bool {
         self.await_all();
-        return true;
+
+        // First try to wake up unconditional thread.
+        let to_resume = self.thread_to_unpark();
+        if let Some(park) = to_resume {
+            println!("Waking up park at node {:?}", park.node_id());
+
+            // Wake up the chosen thread. To do that:
+            // 1. Increment the counter of running threads.
+            // 2. Send a singal to continue the thread.
+            self.wait_group.add(1);
+            park.internal_world_wake();
+
+            // to have a clean state after each step, wait for all threads to finish
+            self.await_all();
+            return true;
+        }
+
+        // Otherwise, all threads are probably waiting for some event.
+        // We'll try to advance virtual time to the next available event.
+        //
+        // This way all code running in simulation is considered to be
+        // instant in terms of "virtual time", and time is advanced only
+        // when code is waiting for external events.
+        let mut timing = self.timing.lock();
+        if let Some(event) = timing.step() {
+            println!("Processing event: {:?}", event.event);
+            event.process();
+            // to have a clean state after each step, wait for all threads to finish
+            self.await_all();
+            return true;
+        }
+
+        false
     }
 
     /// Print full world state to stdout.
     pub fn debug_print_state(&self) {
-        println!("[DEBUG] World state, nodes.len()={:?}, parking.len()={:?}", self.nodes.lock().len(), self.unconditional_parking.lock().len());
+        println!(
+            "[DEBUG] World state, nodes.len()={:?}, parking.len()={:?}",
+            self.nodes.lock().len(),
+            self.unconditional_parking.lock().len()
+        );
         for node in self.nodes.lock().iter() {
-            println!("[DEBUG] node id={:?} status={:?}", node.id, node.status.lock());
+            println!(
+                "[DEBUG] node id={:?} status={:?}",
+                node.id,
+                node.status.lock()
+            );
         }
         for park in self.unconditional_parking.lock().iter() {
             park.debug_print();
@@ -109,7 +157,7 @@ thread_local! {
 /// Internal node state.
 pub struct Node {
     pub id: NodeId,
-    network: Chan<NetworkEvent>,
+    network: Chan<NodeEvent>,
     status: Mutex<NodeStatus>,
     world: Arc<World>,
     join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -127,7 +175,7 @@ pub enum NodeStatus {
 
 impl Node {
     pub fn new(id: NodeId, world: Arc<World>) -> Node {
-        Node{
+        Node {
             id,
             network: Chan::new(),
             status: Mutex::new(NodeStatus::NotStarted),
@@ -176,7 +224,7 @@ impl Node {
     }
 
     /// Returns a channel to receive events from the network.
-    pub fn network_chan(&self) -> Chan<NetworkEvent> {
+    pub fn network_chan(&self) -> Chan<NodeEvent> {
         self.network.clone()
     }
 
@@ -220,14 +268,13 @@ impl Node {
 
     /// Get the current node, panics if called from outside of a node thread.
     pub fn current() -> Arc<Node> {
-        CURRENT_NODE.with(|current_node| {
-            current_node.borrow().clone().unwrap()
-        })
+        CURRENT_NODE.with(|current_node| current_node.borrow().clone().unwrap())
     }
 }
 
+/// Network events and timers.
 #[derive(Clone, Debug)]
-pub enum NetworkEvent {
+pub enum NodeEvent {
     Accept,
     Message(AnyMessage),
     // TODO: close?

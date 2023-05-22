@@ -1,6 +1,8 @@
-use std::{sync::Arc, thread::sleep_ms, time::Duration};
+use std::{sync::Arc};
 
-use super::{world::World, client::run_client, disklog::run_server, disk::SharedStorage};
+use super::{
+    client::run_client, disk::SharedStorage, disklog::run_server, proto::ReplCell, world::World,
+};
 
 #[test]
 fn start_simulation() {
@@ -10,17 +12,14 @@ fn start_simulation() {
     let server_id = server_node.id;
 
     // start the client thread
-    let data = [1, 2, 3, 4, 5];
-    client_node.launch(move |os| {
-        run_client(os, &data, server_id)
-    });
+    let u32_data = &[1, 2, 3, 4, 5];
+    let data = u32_to_cells(u32_data, 1);
+    client_node.launch(move |os| run_client(os, &data, server_id));
 
     // start the server thread
     let shared_storage = SharedStorage::new();
     let server_storage = shared_storage.clone();
-    server_node.launch(move |os| {
-        run_server(os, Box::new(server_storage))
-    });
+    server_node.launch(move |os| run_server(os, Box::new(server_storage)));
 
     world.debug_print_state();
     world.await_all();
@@ -30,4 +29,31 @@ fn start_simulation() {
         println!("made a step!");
         world.debug_print_state();
     }
+
+    let disk_data = shared_storage.state.lock().data.clone();
+    assert!(verify_data(&disk_data, &u32_data[..]));
+}
+
+fn u32_to_cells(data: &[u32], client_id: u32) -> Vec<ReplCell> {
+    let mut res = Vec::new();
+    for i in 0..data.len() {
+        res.push(ReplCell {
+            client_id,
+            seqno: i as u32,
+            value: data[i],
+        });
+    }
+    res
+}
+
+fn verify_data(disk_data: &[u32], data: &[u32]) -> bool {
+    if disk_data.len() != data.len() {
+        return false;
+    }
+    for i in 0..data.len() {
+        if disk_data[i] != data[i] {
+            return false;
+        }
+    }
+    true
 }

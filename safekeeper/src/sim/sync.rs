@@ -1,6 +1,9 @@
-use std::{sync::Arc, backtrace::Backtrace, io::{self, Write}};
+use std::{
+    backtrace::Backtrace,
+    sync::Arc,
+};
 
-use parking_lot::MutexGuard;
+
 
 use super::world::{Node, NodeId};
 
@@ -19,7 +22,9 @@ struct CondvarState {
 impl Condvar {
     pub fn new() -> Condvar {
         Condvar {
-            waiters: Mutex::new(CondvarState { waiters: Vec::new() }),
+            waiters: Mutex::new(CondvarState {
+                waiters: Vec::new(),
+            }),
         }
     }
 
@@ -83,17 +88,15 @@ struct ParkState {
 
 impl Park {
     pub fn new(can_continue: bool) -> Arc<Park> {
-        Arc::new(
-            Park {
-                lock: Mutex::new(ParkState {
-                    can_continue,
-                    finished: false,
-                    node_id: None,
-                    backtrace: None,
-                }),
-                cvar: parking_lot::Condvar::new(),
-            }
-        )
+        Arc::new(Park {
+            lock: Mutex::new(ParkState {
+                can_continue,
+                finished: false,
+                node_id: None,
+                backtrace: None,
+            }),
+            cvar: parking_lot::Condvar::new(),
+        })
     }
 
     fn init_state(state: &mut ParkState, node: &Arc<Node>) {
@@ -175,14 +178,17 @@ impl Park {
 
         let mut state = self.lock.lock();
         if state.can_continue {
-            println!("WARN wake() called on a thread that is already waked, node {:?}", state.node_id);
+            println!(
+                "WARN wake() called on a thread that is already waked, node {:?}",
+                state.node_id
+            );
             return;
         }
         state.can_continue = true;
         // and here we park the waiting thread
         self.cvar.notify_all();
         drop(state);
-        
+
         // and here we block the thread that called wake() by defer
         let node = Node::current();
         let mut state = self_park.lock.lock();
@@ -193,7 +199,10 @@ impl Park {
     pub fn internal_world_wake(&self) {
         let mut state = self.lock.lock();
         if state.finished {
-            println!("WARN internal_world_wake() called on a thread that is already waked, node {:?}", state.node_id);
+            println!(
+                "WARN internal_world_wake() called on a thread that is already waked, node {:?}",
+                state.node_id
+            );
             return;
         }
         state.finished = true;
@@ -202,7 +211,7 @@ impl Park {
 
     /// Print debug info about the parked thread.
     pub fn debug_print(&self) {
-        let state = self.lock.lock();
+        let _state = self.lock.lock();
         // println!("PARK: node {:?} wake1={} wake2={}", state.node_id, state.can_continue, state.finished);
         // println!("DEBUG: node {:?} wake1={} wake2={}, trace={:?}", state.node_id, state.can_continue, state.finished, state.backtrace);
     }

@@ -1,11 +1,13 @@
-pub mod client;
-pub mod disklog;
-pub mod proto;
-pub mod disk;
-pub mod node_os;
-pub mod world;
-pub mod tcp;
 pub mod chan;
-pub mod sync;
+pub mod client;
+pub mod disk;
+pub mod disklog;
+pub mod node_os;
+pub mod proto;
+#[cfg(test)]
 pub mod start_test;
+pub mod sync;
+pub mod tcp;
+pub mod time;
 pub mod wait_group;
+pub mod world;

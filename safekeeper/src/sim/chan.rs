@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use super::sync::{Mutex, Condvar, Park};
+use super::sync::{Condvar, Mutex, Park};
 
 /// FIFO channel with blocking send and receive. Can be cloned and shared between threads.
 #[derive(Clone)]
@@ -15,11 +15,11 @@ struct ChanState<T> {
 
 impl<T: Clone> Chan<T> {
     pub fn new() -> Chan<T> {
-        Chan{
-            shared: Arc::new(ChanState{
+        Chan {
+            shared: Arc::new(ChanState {
                 queue: Mutex::new(VecDeque::new()),
                 condvar: Condvar::new(),
-            })
+            }),
         }
     }
 

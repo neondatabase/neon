@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{node_os::NodeOs, disk::Storage, world::NetworkEvent, proto::AnyMessage};
+use super::{disk::Storage, node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
 
 pub struct DiskLog {
     pub map: HashMap<String, u32>,
@@ -25,19 +25,18 @@ impl DiskLog {
 pub fn run_server(os: NodeOs, mut storage: Box<dyn Storage<u32>>) {
     println!("started server");
 
-    let epoll = os.network_epoll();
+    let epoll = os.epoll();
     loop {
         let event = epoll.recv();
         println!("got event: {:?}", event);
         match event {
-            NetworkEvent::Message(msg) => {
-                match msg {
-                    AnyMessage::Just32(num) => {
-                        storage.write(num);
-                    }
+            NodeEvent::Message(msg) => match msg {
+                AnyMessage::ReplCell(num) => {
+                    storage.write(num.value);
                 }
-            }
-            _ => {},
+                _ => {}
+            },
+            _ => {}
         }
     }
 }
