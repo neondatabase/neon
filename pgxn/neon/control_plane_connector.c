@@ -191,9 +191,9 @@ ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
 	/* Docs say size is always 1 */
 	ErrorString *str = userdata;
 
-	/* +1 for null terminator */
 	size_t		to_write = nmemb;
 
+	/* +1 for null terminator */
 	if (str->size + nmemb + 1 >= ERROR_SIZE)
 		to_write = ERROR_SIZE - str->size - 1;
 
