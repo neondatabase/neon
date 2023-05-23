@@ -529,14 +529,14 @@ pub async fn attach_tenant(
             tenant_id == attached_tenant_id,
             "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
         );
-        vacant_entry.insert(Arc::clone(&attached_tenant));
 
         // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
         ScopeGuard::into_inner(guard_fs);
         Ok(ScopeGuard::into_inner(attached_tenant))
     };
 
-    tenant_map_insert(tenant_id, func).await
+    tenant_map_insert(tenant_id, func).await?;
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
