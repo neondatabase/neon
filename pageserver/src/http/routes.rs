@@ -1247,10 +1247,18 @@ where
     match result {
         Ok(result) => result,
         Err(e) => {
-            error!("HTTP request handler task panicked: {e:?}");
-            Err(ApiError::InternalServerError(anyhow!(
-                "HTTP request handler task panicked"
-            )))
+            // The handler task panicked. We have a global panic handler that logs the
+            // panic with its backtrace, so no need to log that here. Only log a brief
+            // message to make it clear that we returned the error to the client.
+            error!("HTTP request handler task panicked: {e:#}");
+
+            // Don't return an Error here, because then fallback error handler that was
+            // installed in make_router() will print the error. Instead, construct the
+            // HTTP error response and return that.
+            Ok(
+                ApiError::InternalServerError(anyhow!("HTTP request handler task panicked"))
+                    .into_response(),
+            )
         }
     }
 }
