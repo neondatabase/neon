@@ -630,7 +630,8 @@ impl Tenant {
                     }
                 }
                 Ok(())
-            },
+            }
+            .instrument(tracing::info_span!("attach", tenant_id=%tenant_id)),
         );
         Ok(tenant)
     }
@@ -638,8 +639,9 @@ impl Tenant {
     ///
     /// Background task that downloads all data for a tenant and brings it to Active state.
     ///
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     async fn attach(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
         if !tokio::fs::try_exists(&marker_file)
             .await
@@ -900,7 +902,8 @@ impl Tenant {
                 }
                 info!("initial load for tenant {tenant_id} finished!");
                 Ok(())
-            },
+            }
+            .instrument(info_span!("load", tenant_id=%tenant_id)),
         );
 
         info!("spawned load into background");
@@ -912,8 +915,9 @@ impl Tenant {
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
     ///
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         info!("loading tenant task");
 
         utils::failpoint_sleep_millis_async!("before-loading-tenant");
@@ -3212,7 +3216,10 @@ pub mod harness {
                 let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
-            tenant.load(ctx).await?;
+            tenant
+                .load(ctx)
+                .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
+                .await?;
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
                 timeline.set_state(TimelineState::Active);
