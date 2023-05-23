@@ -167,7 +167,7 @@ impl Timeline {
             return Ok(0);
         }
 
-        let key = rel_size_to_key(tag);
+        let key = self.rel_size_to_key(tag);
         let mut buf = self.get(key, lsn, ctx).await?;
         let nblocks = buf.get_u32_le();
 
@@ -516,7 +516,7 @@ impl Timeline {
                 if cancel.is_cancelled() {
                     return Err(CalculateLogicalSizeError::Cancelled);
                 }
-                let relsize_key = rel_size_to_key(rel);
+                let relsize_key = self.rel_size_to_key(rel);
                 let mut buf = self
                     .get(relsize_key, lsn, ctx)
                     .await
@@ -561,7 +561,7 @@ impl Timeline {
                 .collect();
             rels.sort_unstable();
             for rel in rels {
-                let relsize_key = rel_size_to_key(rel);
+                let relsize_key = self.rel_size_to_key(rel);
                 let mut buf = self.get(relsize_key, lsn, ctx).await?;
                 let relsize = buf.get_u32_le();
 
@@ -647,6 +647,22 @@ impl Timeline {
     pub fn remove_cached_rel_size(&self, tag: &RelTag) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
         rel_size_cache.remove(tag);
+    }
+
+    fn rel_size_to_key(&self, rel: RelTag) -> Key {
+        let field1 = if self.format_version == 4 {
+            0x00u8
+        } else {
+            0x04u8
+        };
+        Key {
+            field1,
+            field2: rel.spcnode,
+            field3: rel.dbnode,
+            field4: rel.relnode,
+            field5: rel.forknum,
+            field6: 0xffffffff,
+        }
     }
 }
 
@@ -890,7 +906,7 @@ impl<'a> DatadirModification<'a> {
         );
 
         // Put size
-        let size_key = rel_size_to_key(rel);
+        let size_key = self.tline.rel_size_to_key(rel);
         let buf = nblocks.to_le_bytes();
         self.put(size_key, Value::Image(Bytes::from(buf.to_vec())));
 
@@ -914,7 +930,7 @@ impl<'a> DatadirModification<'a> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
         let last_lsn = self.tline.get_last_record_lsn();
         if self.tline.get_rel_exists(rel, last_lsn, true, ctx).await? {
-            let size_key = rel_size_to_key(rel);
+            let size_key = self.tline.rel_size_to_key(rel);
             // Fetch the old size first
             let old_size = self.get(size_key, ctx).await?.get_u32_le();
 
@@ -945,7 +961,7 @@ impl<'a> DatadirModification<'a> {
         anyhow::ensure!(rel.relnode != 0, "invalid relnode");
 
         // Put size
-        let size_key = rel_size_to_key(rel);
+        let size_key = self.tline.rel_size_to_key(rel);
         let old_size = self.get(size_key, ctx).await?.get_u32_le();
 
         // only extend relation here. never decrease the size
@@ -977,7 +993,7 @@ impl<'a> DatadirModification<'a> {
         }
 
         // update logical size
-        let size_key = rel_size_to_key(rel);
+        let size_key = self.tline.rel_size_to_key(rel);
         let old_size = self.get(size_key, ctx).await?.get_u32_le();
         self.pending_nblocks -= old_size as i64;
 
@@ -1291,7 +1307,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 // 00 SPCNODE  DBNODE   RELNODE  FORK BLKNUM
 //
 // RelSize:
-// 00 SPCNODE  DBNODE   RELNODE  FORK FFFFFFFF
+// 04 SPCNODE  DBNODE   RELNODE  FORK FFFFFFFF
 //
 // SlruDir:
 // 01 kind     00000000 00000000 00   00000000
@@ -1372,17 +1388,6 @@ fn rel_block_to_key(rel: RelTag, blknum: BlockNumber) -> Key {
         field4: rel.relnode,
         field5: rel.forknum,
         field6: blknum,
-    }
-}
-
-fn rel_size_to_key(rel: RelTag) -> Key {
-    Key {
-        field1: 0x00,
-        field2: rel.spcnode,
-        field3: rel.dbnode,
-        field4: rel.relnode,
-        field5: rel.forknum,
-        field6: 0xffffffff,
     }
 }
 

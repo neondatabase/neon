@@ -120,6 +120,7 @@ pub struct Timeline {
     pub timeline_id: TimelineId,
 
     pub pg_version: u32,
+    pub format_version: u16,
 
     pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
 
@@ -1353,6 +1354,7 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
+                format_version: metadata.format_version(),
                 layers: RwLock::new(LayerMap::default()),
 
                 walredo_mgr,

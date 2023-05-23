@@ -23,7 +23,7 @@ use crate::config::PageServerConf;
 use crate::virtual_file::VirtualFile;
 
 /// Use special format number to enable backward compatibility.
-const METADATA_FORMAT_VERSION: u16 = 4;
+const METADATA_FORMAT_VERSION: u16 = 5;
 
 /// Previous supported format versions.
 const METADATA_OLD_FORMAT_VERSION: u16 = 3;
@@ -226,6 +226,10 @@ impl TimelineMetadata {
 
     pub fn pg_version(&self) -> u32 {
         self.body.pg_version
+    }
+
+    pub fn format_version(&self) -> u16 {
+        self.hdr.format_version
     }
 }
 
