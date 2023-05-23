@@ -717,7 +717,7 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
     let target_tenant_id = request_data.new_tenant_id;
-    check_permission(&request, None)?;
+    check_permission(&request, Some(target_tenant_id))?;
 
     let _timer = STORAGE_TIME_GLOBAL
         .get_metric_with_label_values(&[StorageTimeOperation::CreateTenant.into()])
