@@ -131,12 +131,11 @@ pub struct TimelineCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_tenant_id: Option<TenantId>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub new_tenant_id: TenantId,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -184,10 +183,10 @@ pub struct StatusResponse {
 }
 
 impl TenantCreateRequest {
-    pub fn new(new_tenant_id: Option<TenantId>) -> TenantCreateRequest {
+    pub fn new(new_tenant_id: TenantId) -> TenantCreateRequest {
         TenantCreateRequest {
             new_tenant_id,
-            ..Default::default()
+            config: TenantConfig::default(),
         }
     }
 }

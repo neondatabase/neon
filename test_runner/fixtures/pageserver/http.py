@@ -155,7 +155,7 @@ class PageserverHttpClient(requests.Session):
         return res_json
 
     def tenant_create(
-        self, new_tenant_id: Optional[TenantId] = None, conf: Optional[Dict[str, Any]] = None
+        self, new_tenant_id: TenantId, conf: Optional[Dict[str, Any]] = None
     ) -> TenantId:
         if conf is not None:
             assert "new_tenant_id" not in conf.keys()

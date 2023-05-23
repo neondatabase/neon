@@ -53,14 +53,14 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         )
 
     # create tenant using management token
-    pageserver_http_client.tenant_create()
+    pageserver_http_client.tenant_create(TenantId.generate())
 
     # fail to create tenant using tenant token
     with pytest.raises(
         PageserverApiException,
         match="Forbidden: Attempt to access management api with tenant scope. Permission denied",
     ):
-        tenant_http_client.tenant_create()
+        tenant_http_client.tenant_create(TenantId.generate())
 
 
 def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
