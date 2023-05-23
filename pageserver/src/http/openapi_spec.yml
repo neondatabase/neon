@@ -918,6 +918,8 @@ components:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
         - type: object
+          required:
+            - new_tenant_id
           properties:
             new_tenant_id:
               type: string

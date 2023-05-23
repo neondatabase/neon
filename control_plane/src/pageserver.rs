@@ -370,6 +370,10 @@ impl PageServerNode {
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
         };
+
+        // If tenant ID was not specified, generate one
+        let new_tenant_id = new_tenant_id.unwrap_or(TenantId::generate());
+
         let request = models::TenantCreateRequest {
             new_tenant_id,
             config,

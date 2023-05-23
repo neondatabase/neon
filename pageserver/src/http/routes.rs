@@ -715,6 +715,8 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
 }
 
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let request_data: TenantCreateRequest = json_request(&mut request).await?;
+    let target_tenant_id = request_data.new_tenant_id;
     check_permission(&request, None)?;
 
     let _timer = STORAGE_TIME_GLOBAL
@@ -722,17 +724,10 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         .expect("bug")
         .start_timer();
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    let request_data: TenantCreateRequest = json_request(&mut request).await?;
-
     let tenant_conf =
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
-    let target_tenant_id = request_data
-        .new_tenant_id
-        .map(TenantId::from)
-        .unwrap_or_else(TenantId::generate);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let state = get_state(&request);
 
