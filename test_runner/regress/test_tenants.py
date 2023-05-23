@@ -404,7 +404,7 @@ def test_pageserver_with_empty_tenants(
 def test_failed_tenant_directory_is_removed(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
 ):
-    """Tenants which fail to be created are cleaned up from disk and left broken"""
+    """Tenants which fail to be created are cleaned up from disk and not created"""
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_pageserver_create_tenants_fail",
@@ -425,4 +425,5 @@ def test_failed_tenant_directory_is_removed(
 
     assert not (env.repo_dir / "tenants" / str(tenant_id)).exists()
     with pytest.raises(PageserverApiException, match="Tenant .* not found"):
+        # the tenant creation is not successful and should not be found
         client.tenant_status(tenant_id)
