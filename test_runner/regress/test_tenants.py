@@ -413,6 +413,7 @@ def test_failed_tenant_directory_is_removed(
     env = neon_env_builder.init_start()
 
     env.pageserver.allowed_errors.append(".*tenant-create-fail.*")
+    env.pageserver.allowed_errors.append(".*tenant-attach-fail.*")
     env.pageserver.allowed_errors.append(".*Tenant is already in Broken state.*")
     env.pageserver.allowed_errors.append(".*could not load tenant.*")
     env.pageserver.allowed_errors.append(".*InternalServerError.*")

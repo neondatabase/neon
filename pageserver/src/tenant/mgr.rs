@@ -498,21 +498,33 @@ pub async fn attach_tenant(
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, |vacant_entry| {
-        let tenant_dir = create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Attach)?;
-        // TODO: tenant directory remains on disk if we bail out from here on.
-        //       See https://github.com/neondatabase/neon/issues/4233
+    let func = |vacant_entry: hash_map::VacantEntry<_, _>| {
+        let tenant_dir =
+            create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Attach)?;
+
+        let guard_fs = scopeguard::guard((), |_| {
+            if let Err(e) = std::fs::remove_dir_all(&tenant_dir) {
+                // log the error but not throwing it somewhere
+                warn!("failed to cleanup when tenant {tenant_id} fails to start: {e}");
+            }
+        });
 
         // Without the attach marker, schedule_local_tenant_processing will treat the attached tenant as fully attached
         let marker_file_exists = conf
             .tenant_attaching_mark_file_path(&tenant_id)
             .try_exists()
             .context("check for attach marker file existence")?;
-        anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
+        anyhow::ensure!(
+            marker_file_exists,
+            "create_tenant_files should have created the attach marker file"
+        );
 
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, Some(remote_storage), ctx)?;
-        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
-        //      See https://github.com/neondatabase/neon/issues/4233
+        let attached_tenant =
+            schedule_local_tenant_processing(conf, &tenant_dir, Some(remote_storage), ctx)?;
+        let attached_tenant = scopeguard::guard(attached_tenant, |tenant| {
+            // As we might have removed the directory, the tenant should directly go into the broken state.
+            tenant.set_broken("failed to attach".into());
+        });
 
         let attached_tenant_id = attached_tenant.tenant_id();
         anyhow::ensure!(
@@ -520,9 +532,14 @@ pub async fn attach_tenant(
             "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
         );
         vacant_entry.insert(Arc::clone(&attached_tenant));
+
+        // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
+        ScopeGuard::into_inner(guard_fs);
+        ScopeGuard::into_inner(attached_tenant);
         Ok(())
-    })
-    .await
+    };
+
+    tenant_map_insert(tenant_id, func).await
 }
 
 #[derive(Debug, thiserror::Error)]
