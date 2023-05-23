@@ -279,11 +279,16 @@ pub async fn create_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    tenant_map_insert(tenant_id, |vacant_entry| {
+    let func = |vacant_entry: hash_map::VacantEntry<_, _>| {
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
-        let tenant_directory = super::create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Create)?;
+        let tenant_directory = super::create_tenant_files(
+            conf,
+            tenant_conf,
+            tenant_id,
+            CreateTenantFilesMode::Create,
+        )?;
 
         let guard_fs = scopeguard::guard((), |_| {
             if let Err(e) = std::fs::remove_dir_all(&tenant_directory) {
@@ -293,12 +298,11 @@ pub async fn create_tenant(
         });
 
         let created_tenant =
-        schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
         let created_tenant = scopeguard::guard(created_tenant, |tenant| {
             // As we might have removed the directory, the tenant should directly go into the broken state.
             tenant.set_broken("failed to create".into());
         });
-
 
         fail::fail_point!("tenant-create-fail", |_| {
             anyhow::bail!("failpoint: tenant-create-fail");
@@ -312,10 +316,11 @@ pub async fn create_tenant(
 
         vacant_entry.insert(Arc::clone(&created_tenant));
 
+        // Ok, we're good. Disarm the cleanup scopeguards and return the tenant.
         ScopeGuard::into_inner(guard_fs);
-
         Ok(ScopeGuard::into_inner(created_tenant))
-    }).await
+    };
+    tenant_map_insert(tenant_id, func).await
 }
 
 pub async fn set_new_tenant_config(
