@@ -1687,7 +1687,9 @@ impl Tenant {
         Ok(())
     }
 
-    /// Change tenant status to Stopping, to mark that it is being shut down
+    /// Change tenant status to Stopping, to mark that it is being shut down.
+    ///
+    /// This function is not cancel-safe!
     pub async fn set_stopping(&self) {
         // Get the rx before checking state inside send_if_modified.
         // This way, when we later rx.changed().await, we won't have missed
@@ -1698,24 +1700,20 @@ impl Tenant {
                 .await
                 .expect("we're a method on Tenant, so, we're keeping self.state alive here");
         }
+        let mut stopping = false;
         self.state.send_modify(|current_state| {
             match current_state {
                 TenantState::Activating => unreachable!("we checked above and never transition back into Activating state"),
+                // FIXME: If the tenant is still Loading or Attaching, new timelines
+                // might be created after this. That's harmless, as the Timelines
+                // won't be accessible to anyone, when the Tenant is in Stopping
+                // state.
                 TenantState::Active | TenantState::Loading | TenantState::Attaching => {
                     *current_state = TenantState::Stopping;
-
-                    // FIXME: If the tenant is still Loading or Attaching, new timelines
-                    // might be created after this. That's harmless, as the Timelines
-                    // won't be accessible to anyone, when the Tenant is in Stopping
-                    // state.
-                    let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
-                    for timeline in not_broken_timelines {
-                        timeline.set_state(TimelineState::Stopping);
-                    }
-                }
+                    stopping = true;
+                    // Continue outside the closure. We need to grab timelines.lock()
+                    // and we plan to turn it into a tokio::sync::Mutex in a future patch.
+              }
                 TenantState::Broken { reason, .. } => {
                     info!("Cannot set tenant to Stopping state, it is in Broken state due to: {reason}");
                 }
@@ -1725,7 +1723,17 @@ impl Tenant {
                     info!("Tenant is already in Stopping state");
                 }
             }
-        })
+        });
+
+        if stopping {
+            let timelines_accessor = self.timelines.lock().unwrap();
+            let not_broken_timelines = timelines_accessor
+                .values()
+                .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+            for timeline in not_broken_timelines {
+                timeline.set_state(TimelineState::Stopping);
+            }
+        }
     }
 
     pub async fn set_broken(&self, reason: String) {
