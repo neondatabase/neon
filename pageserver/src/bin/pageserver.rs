@@ -9,6 +9,7 @@ use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
+use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
@@ -274,7 +275,8 @@ fn start_pageserver(
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
     // Launch broker client
-    let broker_client = pageserver::broker_client::init_broker_client(conf)?;
+    let broker_client = WALRECEIVER_RUNTIME
+        .block_on(async { pageserver::broker_client::init_broker_client(conf) })?;
 
     // Initialize authentication for incoming connections
     let http_auth;
