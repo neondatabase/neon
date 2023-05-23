@@ -37,6 +37,8 @@ pub enum TenantState {
     Loading,
     /// This tenant is being downloaded from cloud storage.
     Attaching,
+    /// The tenant is transitioning from Loading/Attaching to Active.
+    Activating,
     /// Tenant is fully operational
     Active,
     /// A tenant is recognized by pageserver, but it is being detached or the
@@ -60,6 +62,7 @@ impl TenantState {
             // tenant mgr startup distinguishes attaching from loading via marker file.
             // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
             Self::Loading => Attached,
+            Self::Activating => todo!(),
             // We only reach Active after successful load / attach.
             // So, call atttachment status Attached.
             Self::Active => Attached,

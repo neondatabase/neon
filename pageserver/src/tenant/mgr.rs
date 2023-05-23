@@ -248,7 +248,7 @@ pub async fn shutdown_all_tenants() {
     for (_, tenant) in tenants_to_shut_down {
         if tenant.is_active() {
             // updates tenant state, forbidding new GC and compaction iterations from starting
-            tenant.set_stopping();
+            tenant.set_stopping().await;
             tenants_to_freeze_and_flush.push(tenant);
         }
     }
@@ -575,8 +575,9 @@ where
             Some(tenant) => match tenant.current_state() {
                 TenantState::Attaching
                 | TenantState::Loading
+                | TenantState::Activating
                 | TenantState::Broken { .. }
-                | TenantState::Active => tenant.set_stopping(),
+                | TenantState::Active => tenant.set_stopping().await,
                 TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
             },
             None => return Err(TenantStateError::NotFound(tenant_id)),
@@ -603,7 +604,7 @@ where
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
                 Some(tenant) => {
-                    tenant.set_broken(e.to_string());
+                    tenant.set_broken(e.to_string()).await;
                 }
                 None => {
                     warn!("Tenant {tenant_id} got removed from memory");
