@@ -95,6 +95,16 @@ static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+static GET_RECONSTRUCT_DATA_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_getpage_get_reconstruct_data_seconds",
+        "Time spent in get_reconstruct_value_data",
+        &["tenant_id", "timeline_id"],
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric")
+});
+
 static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_materialized_cache_hits_total",
@@ -723,6 +733,7 @@ pub struct TimelineMetrics {
     tenant_id: String,
     timeline_id: String,
     pub reconstruct_time_histo: Histogram,
+    pub get_reconstruct_data_time_histo: Histogram,
     pub materialized_page_cache_hit_counter: GenericCounter<AtomicU64>,
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
@@ -751,6 +762,9 @@ impl TimelineMetrics {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
         let reconstruct_time_histo = RECONSTRUCT_TIME
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
+        let get_reconstruct_data_time_histo = GET_RECONSTRUCT_DATA_TIME
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
         let materialized_page_cache_hit_counter = MATERIALIZED_PAGE_CACHE_HIT
@@ -801,6 +815,7 @@ impl TimelineMetrics {
             tenant_id,
             timeline_id,
             reconstruct_time_histo,
+            get_reconstruct_data_time_histo,
             materialized_page_cache_hit_counter,
             flush_time_histo,
             compact_time_histo,
@@ -828,6 +843,7 @@ impl Drop for TimelineMetrics {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let _ = RECONSTRUCT_TIME.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = GET_RECONSTRUCT_DATA_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = MATERIALIZED_PAGE_CACHE_HIT.remove_label_values(&[tenant_id, timeline_id]);
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
