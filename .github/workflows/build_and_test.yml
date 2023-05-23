@@ -346,8 +346,8 @@ jobs:
           test_selection: regress
           needs_postgres_source: true
           run_with_real_s3: true
-          real_s3_bucket: ci-tests-s3
-          real_s3_region: us-west-2
+          real_s3_bucket: neon-github-ci-tests
+          real_s3_region: eu-central-1
           real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
           real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
           rerun_flaky: true
