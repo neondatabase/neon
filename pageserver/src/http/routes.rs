@@ -7,6 +7,7 @@ use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use remote_storage::GenericRemoteStorage;
+use storage_broker::BrokerClientChannel;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -50,6 +51,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 }
 
@@ -58,6 +60,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
+        broker_client: &'static storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
@@ -69,6 +72,7 @@ impl State {
             auth,
             allowlist_routes,
             remote_storage,
+            broker_client,
             disk_usage_eviction_state,
         })
     }
@@ -270,6 +274,8 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
 
+    let state = get_state(&request);
+
     async {
         let tenant = mgr::get_tenant(tenant_id, true).await?;
         match tenant.create_timeline(
@@ -277,6 +283,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
             request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+            state.broker_client,
             &ctx,
         )
         .await {
@@ -404,6 +411,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
             // XXX: Attach should provide the config, especially during tenant migration.
             //      See https://github.com/neondatabase/neon/issues/1555
             TenantConfOpt::default(),
+            state.broker_client,
             remote_storage.clone(),
             &ctx,
         )
@@ -453,9 +461,15 @@ async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, A
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let state = get_state(&request);
-    mgr::load_tenant(state.conf, tenant_id, state.remote_storage.clone(), &ctx)
-        .instrument(info_span!("load", tenant = %tenant_id))
-        .await?;
+    mgr::load_tenant(
+        state.conf,
+        tenant_id,
+        state.broker_client,
+        state.remote_storage.clone(),
+        &ctx,
+    )
+    .instrument(info_span!("load", tenant = %tenant_id))
+    .await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -740,6 +754,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         state.conf,
         tenant_conf,
         target_tenant_id,
+        state.broker_client,
         state.remote_storage.clone(),
         &ctx,
     )
@@ -1095,6 +1110,7 @@ pub fn make_router(
     conf: &'static PageServerConf,
     launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
+    broker_client: &'static BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
@@ -1141,8 +1157,14 @@ pub fn make_router(
 
     Ok(router
         .data(Arc::new(
-            State::new(conf, auth, remote_storage, disk_usage_eviction_state)
-                .context("Failed to initialize router state")?,
+            State::new(
+                conf,
+                auth,
+                remote_storage,
+                broker_client,
+                disk_usage_eviction_state,
+            )
+            .context("Failed to initialize router state")?,
         ))
         .get("/v1/status", |r| RequestSpan(status_handler).handle(r))
         .put(

@@ -18,9 +18,7 @@ use pageserver::{
     context::{DownloadBehavior, RequestContext},
     http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
-    task_mgr::{
-        BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
-    },
+    task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
     tenant::mgr,
     virtual_file,
 };
@@ -276,7 +274,7 @@ fn start_pageserver(
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
     // Launch broker client
-    WALRECEIVER_RUNTIME.block_on(pageserver::broker_client::init_broker_client(conf))?;
+    let broker_client = pageserver::broker_client::init_broker_client(conf)?;
 
     // Initialize authentication for incoming connections
     let http_auth;
@@ -326,7 +324,11 @@ fn start_pageserver(
     let remote_storage = create_remote_storage_client(conf)?;
 
     // Scan the local 'tenants/' directory and start loading the tenants
-    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
+    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+        conf,
+        broker_client,
+        remote_storage.clone(),
+    ))?;
 
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
@@ -351,6 +353,7 @@ fn start_pageserver(
             conf,
             launch_ts,
             http_auth,
+            broker_client,
             remote_storage,
             disk_usage_eviction_state,
         )?
@@ -427,6 +430,7 @@ fn start_pageserver(
             async move {
                 page_service::libpq_listener_main(
                     conf,
+                    broker_client,
                     pg_auth,
                     pageserver_listener,
                     conf.pg_auth_type,

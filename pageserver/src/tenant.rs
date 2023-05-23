@@ -16,6 +16,7 @@ use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::*;
@@ -238,6 +239,7 @@ impl UninitializedTimeline<'_> {
         self,
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
+        broker_client: &'static storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
@@ -264,7 +266,7 @@ impl UninitializedTimeline<'_> {
         // updated it for the layers that we created during the import.
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         let tl = self.initialize_with_lock(ctx, &mut timelines, false)?;
-        tl.activate(ctx)?;
+        tl.activate(broker_client, ctx)?;
         Ok(tl)
     }
 
@@ -585,6 +587,7 @@ impl Tenant {
     pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
+        broker_client: &'static storage_broker::BrokerClientChannel,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -614,10 +617,13 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
-                match tenant_clone.attach(&ctx).await {
-                    Ok(_) => {
-                        tenant_clone.activate(&ctx).unwrap(); // WIP
-                    }
+                let doit = async {
+                    tenant_clone.attach(&ctx).await?;
+                    tenant_clone.activate(broker_client, &ctx)?;
+                    anyhow::Ok(())
+                };
+                match doit.await {
+                    Ok(_) => {}
                     Err(e) => {
                         tenant_clone.set_broken(e.to_string());
                         error!("error attaching tenant: {:?}", e);
@@ -845,6 +851,7 @@ impl Tenant {
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
+        broker_client: &'static storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
@@ -879,10 +886,13 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
-                match tenant_clone.load(&ctx).await {
-                    Ok(()) => {
-                        tenant_clone.activate(&ctx).unwrap(); // WIP
-                    }
+                let doit = async {
+                    tenant_clone.load(&ctx).await?;
+                    tenant_clone.activate(broker_client, &ctx)?;
+                    anyhow::Ok(())
+                };
+                match doit.await {
+                    Ok(()) => {}
                     Err(err) => {
                         tenant_clone.set_broken(err.to_string());
                         error!("could not load tenant {tenant_id}: {err:?}");
@@ -902,7 +912,7 @@ impl Tenant {
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
     ///
-    #[instrument(skip(self, ctx), fields(tenant_id=%self.tenant_id))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
     async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
         info!("loading tenant task");
 
@@ -1216,6 +1226,7 @@ impl Tenant {
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
+        broker_client: &'static storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<Option<Arc<Timeline>>> {
         anyhow::ensure!(
@@ -1282,7 +1293,7 @@ impl Tenant {
             }
         };
 
-        loaded_timeline.activate(ctx).context("activate timeline")?;
+        loaded_timeline.activate(broker_client, ctx)?;
 
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
             // Wait for the upload of the 'index_part.json` file to finish, so that when we return
@@ -1587,7 +1598,11 @@ impl Tenant {
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
-    fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    fn activate(
+        &self,
+        broker_client: &'static BrokerClientChannel,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
 
         let mut result = Ok(());
@@ -1627,7 +1642,7 @@ impl Tenant {
 
                     for timeline in not_broken_timelines {
                         match timeline
-                            .activate(ctx)
+                            .activate(broker_client, ctx)
                             .context("timeline activation for activating tenant")
                         {
                             Ok(()) => {

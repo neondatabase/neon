@@ -172,6 +172,7 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 ///
 pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
@@ -213,7 +214,14 @@ pub async fn libpq_listener_main(
                     None,
                     "serving compute connection task",
                     false,
-                    page_service_conn_main(conf, local_auth, socket, auth_type, connection_ctx),
+                    page_service_conn_main(
+                        conf,
+                        broker_client,
+                        local_auth,
+                        socket,
+                        auth_type,
+                        connection_ctx,
+                    ),
                 );
             }
             Err(err) => {
@@ -230,6 +238,7 @@ pub async fn libpq_listener_main(
 
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
@@ -266,7 +275,7 @@ async fn page_service_conn_main(
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler = PageServerHandler::new(conf, auth, connection_ctx);
+    let mut conn_handler = PageServerHandler::new(conf, broker_client, auth, connection_ctx);
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
@@ -324,6 +333,7 @@ impl PageRequestMetrics {
 
 struct PageServerHandler {
     _conf: &'static PageServerConf,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 
@@ -337,11 +347,13 @@ struct PageServerHandler {
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
+        broker_client: &'static storage_broker::BrokerClientChannel,
         auth: Option<Arc<JwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {
             _conf: conf,
+            broker_client,
             auth,
             claims: None,
             connection_ctx,
@@ -494,7 +506,7 @@ impl PageServerHandler {
 
         let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
         timeline
-            .import_basebackup_from_tar(&mut copyin_reader, base_lsn, &ctx)
+            .import_basebackup_from_tar(&mut copyin_reader, base_lsn, self.broker_client, &ctx)
             .await?;
 
         // Read the end of the tar archive.

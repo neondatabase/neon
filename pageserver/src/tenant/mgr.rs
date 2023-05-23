@@ -58,9 +58,10 @@ static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::
 /// Initialize repositories with locally available timelines.
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
 /// are scheduled for download and added to the tenant once download is completed.
-#[instrument(skip(conf, remote_storage))]
+#[instrument(skip_all)]
 pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
@@ -116,6 +117,7 @@ pub async fn init_tenant_mgr(
                     match schedule_local_tenant_processing(
                         conf,
                         &tenant_dir_path,
+                        broker_client,
                         remote_storage.clone(),
                         &ctx,
                     ) {
@@ -150,6 +152,7 @@ pub async fn init_tenant_mgr(
 pub fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
@@ -186,7 +189,7 @@ pub fn schedule_local_tenant_processing(
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
         if let Some(remote_storage) = remote_storage {
-            match Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx) {
+            match Tenant::spawn_attach(conf, tenant_id, broker_client, remote_storage, ctx) {
                 Ok(tenant) => tenant,
                 Err(e) => {
                     error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
@@ -204,7 +207,7 @@ pub fn schedule_local_tenant_processing(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, remote_storage, ctx)
+        Tenant::spawn_load(conf, tenant_id, broker_client, remote_storage, ctx)
     };
     Ok(tenant)
 }
@@ -275,6 +278,7 @@ pub async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
@@ -287,7 +291,7 @@ pub async fn create_tenant(
         //       See https://github.com/neondatabase/neon/issues/4233
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -404,6 +408,7 @@ pub async fn detach_tenant(
 pub async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
@@ -415,7 +420,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, remote_storage, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -472,6 +477,7 @@ pub async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     tenant_conf: TenantConfOpt,
+    broker_client: &'static storage_broker::BrokerClientChannel,
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
@@ -487,7 +493,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, Some(remote_storage), ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 

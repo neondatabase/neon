@@ -13,7 +13,9 @@ static BROKER_CLIENT: OnceCell<BrokerClientChannel> = OnceCell::new();
 ///
 /// Initialize the broker client. This must be called once at page server startup.
 ///
-pub async fn init_broker_client(conf: &'static PageServerConf) -> anyhow::Result<()> {
+pub fn init_broker_client(
+    conf: &'static PageServerConf,
+) -> anyhow::Result<&'static BrokerClientChannel> {
     let broker_endpoint = conf.broker_endpoint.clone();
 
     // Note: we do not attempt connecting here (but validate endpoints sanity).
@@ -33,16 +35,5 @@ pub async fn init_broker_client(conf: &'static PageServerConf) -> anyhow::Result
         "Initialized broker client with endpoints: {}",
         broker_endpoint
     );
-    Ok(())
-}
-
-///
-/// Get a handle to the broker client
-///
-pub fn get_broker_client() -> &'static BrokerClientChannel {
-    BROKER_CLIENT.get().expect("broker client not initialized")
-}
-
-pub fn is_broker_client_initialized() -> bool {
-    BROKER_CLIENT.get().is_some()
+    Ok(BROKER_CLIENT.get().unwrap())
 }

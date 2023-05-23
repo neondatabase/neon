@@ -32,7 +32,6 @@ use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::broker_client::{get_broker_client, is_broker_client_initialized};
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::tenant::remote_timeline_client::{self, index::LayerFileMetadata};
 use crate::tenant::storage_layer::{
@@ -897,15 +896,12 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn activate(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
-        if is_broker_client_initialized() {
-            self.launch_wal_receiver(ctx, get_broker_client().clone())?;
-        } else if cfg!(test) {
-            info!("not launching WAL receiver because broker client hasn't been initialized");
-        } else {
-            anyhow::bail!("broker client not initialized");
-        }
-
+    pub fn activate(
+        self: &Arc<Self>,
+        broker_client: &'static BrokerClientChannel,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        self.launch_wal_receiver(ctx, (*broker_client).clone())?;
         self.set_state(TimelineState::Active);
         self.launch_eviction_task();
         Ok(())
