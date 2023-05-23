@@ -149,7 +149,7 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
 
 @pytest.fixture(scope="session")
 def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
-    versioned_dir = pg_distrib_dir / f"v{pg_version}"
+    versioned_dir = pg_distrib_dir / pg_version.v_prefixed
 
     psql_bin_path = versioned_dir / "bin/psql"
     postgres_bin_path = versioned_dir / "bin/postgres"
@@ -1745,8 +1745,8 @@ class PgBin:
     def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion):
         self.log_dir = log_dir
         self.pg_version = pg_version
-        self.pg_bin_path = pg_distrib_dir / f"v{pg_version}" / "bin"
-        self.pg_lib_dir = pg_distrib_dir / f"v{pg_version}" / "lib"
+        self.pg_bin_path = pg_distrib_dir / pg_version.v_prefixed / "bin"
+        self.pg_lib_dir = pg_distrib_dir / pg_version.v_prefixed / "lib"
         self.env = os.environ.copy()
         self.env["LD_LIBRARY_PATH"] = str(self.pg_lib_dir)
 
@@ -2042,15 +2042,19 @@ class NeonProxy(PgProtocol):
         proxy_port: int,
         http_port: int,
         mgmt_port: int,
+        external_http_port: int,
         auth_backend: NeonProxy.AuthBackend,
         metric_collection_endpoint: Optional[str] = None,
         metric_collection_interval: Optional[str] = None,
     ):
         host = "127.0.0.1"
-        super().__init__(dsn=auth_backend.default_conn_url, host=host, port=proxy_port)
+        domain = "proxy.localtest.me"  # resolves to 127.0.0.1
+        super().__init__(dsn=auth_backend.default_conn_url, host=domain, port=proxy_port)
 
+        self.domain = domain
         self.host = host
         self.http_port = http_port
+        self.external_http_port = external_http_port
         self.neon_binpath = neon_binpath
         self.test_output_dir = test_output_dir
         self.proxy_port = proxy_port
@@ -2062,11 +2066,42 @@ class NeonProxy(PgProtocol):
 
     def start(self) -> NeonProxy:
         assert self._popen is None
+
+        # generate key of it doesn't exist
+        crt_path = self.test_output_dir / "proxy.crt"
+        key_path = self.test_output_dir / "proxy.key"
+
+        if not key_path.exists():
+            r = subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-new",
+                    "-x509",
+                    "-days",
+                    "365",
+                    "-nodes",
+                    "-text",
+                    "-out",
+                    str(crt_path),
+                    "-keyout",
+                    str(key_path),
+                    "-subj",
+                    "/CN=*.localtest.me",
+                    "-addext",
+                    "subjectAltName = DNS:*.localtest.me",
+                ]
+            )
+            assert r.returncode == 0
+
         args = [
             str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--mgmt", f"{self.host}:{self.mgmt_port}"],
+            *["--wss", f"{self.host}:{self.external_http_port}"],
+            *["-c", str(crt_path)],
+            *["-k", str(key_path)],
             *self.auth_backend.extra_args(),
         ]
 
@@ -2190,6 +2225,7 @@ def link_proxy(
     http_port = port_distributor.get_port()
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
+    external_http_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
@@ -2197,6 +2233,7 @@ def link_proxy(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        external_http_port=external_http_port,
         auth_backend=NeonProxy.Link(),
     ) as proxy:
         proxy.start()
@@ -2224,6 +2261,7 @@ def static_proxy(
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
+    external_http_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
@@ -2231,6 +2269,7 @@ def static_proxy(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        external_http_port=external_http_port,
         auth_backend=NeonProxy.Postgres(auth_endpoint),
     ) as proxy:
         proxy.start()

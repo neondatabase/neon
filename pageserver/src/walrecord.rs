@@ -379,17 +379,6 @@ impl XlXactParsedRecord {
                 });
             }
         }
-        if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
-            let nmsgs = buf.get_i32_le();
-            for _i in 0..nmsgs {
-                let sizeof_shared_invalidation_message = 0;
-                buf.advance(sizeof_shared_invalidation_message);
-            }
-        }
-        if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
-            xid = buf.get_u32_le();
-            trace!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE");
-        }
 
         if xinfo & postgres_ffi::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS != 0 {
             let nitems = buf.get_i32_le();
@@ -397,7 +386,23 @@ impl XlXactParsedRecord {
                 "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
                 nitems
             );
-            //FIXME: do we need to handle dropped stats here?
+            let sizeof_xl_xact_stats_item = 12;
+            buf.advance((nitems * sizeof_xl_xact_stats_item).try_into().unwrap());
+        }
+
+        if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
+            let nmsgs = buf.get_i32_le();
+            let sizeof_shared_invalidation_message = 16;
+            buf.advance(
+                (nmsgs * sizeof_shared_invalidation_message)
+                    .try_into()
+                    .unwrap(),
+            );
+        }
+
+        if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
+            xid = buf.get_u32_le();
+            debug!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE xid {}", xid);
         }
 
         XlXactParsedRecord {

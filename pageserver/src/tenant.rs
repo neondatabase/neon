@@ -792,6 +792,8 @@ impl Tenant {
         remote_client: RemoteTimelineClient,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
@@ -1056,6 +1058,8 @@ impl Tenant {
         local_metadata: TimelineMetadata,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
             RemoteTimelineClient::new(
                 remote_storage.clone(),
@@ -1585,6 +1589,8 @@ impl Tenant {
 
     /// Changes tenant status to active, unless shutdown was already requested.
     fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let mut result = Ok(());
         self.state.send_modify(|current_state| {
             match &*current_state {
@@ -3969,5 +3975,30 @@ mod tests {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(not(debug_assertions))]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_id() {}
+
+#[cfg(debug_assertions)]
+pub static TENANT_ID_EXTRACTOR: once_cell::sync::Lazy<
+    utils::tracing_span_assert::MultiNameExtractor<2>,
+> = once_cell::sync::Lazy::new(|| {
+    utils::tracing_span_assert::MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"])
+});
+
+#[cfg(debug_assertions)]
+#[inline]
+pub(crate) fn debug_assert_current_span_has_tenant_id() {
+    use utils::tracing_span_assert;
+
+    match tracing_span_assert::check_fields_present([&*TENANT_ID_EXTRACTOR]) {
+        Ok(()) => (),
+        Err(missing) => panic!(
+            "missing extractors: {:?}",
+            missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
+        ),
     }
 }

@@ -726,7 +726,8 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
 
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
 
-    let tenant_conf = TenantConfOpt::try_from(&request_data).map_err(ApiError::BadRequest)?;
+    let tenant_conf =
+        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let target_tenant_id = request_data
         .new_tenant_id
@@ -795,7 +796,8 @@ async fn update_tenant_config_handler(
     let tenant_id = request_data.tenant_id;
     check_permission(&request, Some(tenant_id))?;
 
-    let tenant_conf = TenantConfOpt::try_from(&request_data).map_err(ApiError::BadRequest)?;
+    let tenant_conf =
+        TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
     let state = get_state(&request);
     mgr::set_new_tenant_config(state.conf, tenant_conf, tenant_id)

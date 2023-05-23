@@ -3,6 +3,7 @@
 //! directly relying on deps like `reqwest` (think loose coupling).
 
 pub mod server;
+pub mod sql_over_http;
 pub mod websocket;
 
 pub use reqwest::{Request, Response, StatusCode};

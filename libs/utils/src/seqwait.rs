@@ -144,6 +144,8 @@ where
     ///
     /// This call won't complete until someone has called `advance`
     /// with a number greater than or equal to the one we're waiting for.
+    ///
+    /// This function is async cancellation-safe.
     pub async fn wait_for(&self, num: V) -> Result<(), SeqWaitError> {
         match self.queue_for_wait(num) {
             Ok(None) => Ok(()),
@@ -159,6 +161,8 @@ where
     ///
     /// If that hasn't happened after the specified timeout duration,
     /// [`SeqWaitError::Timeout`] will be returned.
+    ///
+    /// This function is async cancellation-safe.
     pub async fn wait_for_timeout(
         &self,
         num: V,
