@@ -266,7 +266,7 @@ impl UninitializedTimeline<'_> {
         // updated it for the layers that we created during the import.
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         let tl = self.initialize_with_lock(ctx, &mut timelines, false)?;
-        tl.activate(broker_client, ctx)?;
+        tl.activate(broker_client, ctx);
         Ok(tl)
     }
 
@@ -1293,7 +1293,7 @@ impl Tenant {
             }
         };
 
-        loaded_timeline.activate(broker_client, ctx)?;
+        loaded_timeline.activate(broker_client, ctx);
 
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
             // Wait for the upload of the 'index_part.json` file to finish, so that when we return
@@ -1441,7 +1441,10 @@ impl Tenant {
 
         // Stop the walreceiver first.
         debug!("waiting for wal receiver to shutdown");
-        timeline.walreceiver.stop().await;
+        let maybe_started_walreceiver = { timeline.walreceiver.lock().unwrap().take() };
+        if let Some(walreceiver) = maybe_started_walreceiver {
+            walreceiver.stop().await;
+        }
         debug!("wal receiver shutdown confirmed");
 
         // Prevent new uploads from starting.
@@ -1638,30 +1641,10 @@ impl Tenant {
                     tasks::start_background_loops(self.tenant_id);
 
                     let mut activated_timelines = 0;
-                    let mut timelines_broken_during_activation = 0;
 
                     for timeline in not_broken_timelines {
-                        match timeline
-                            .activate(broker_client, ctx)
-                            .context("timeline activation for activating tenant")
-                        {
-                            Ok(()) => {
-                                activated_timelines += 1;
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to activate timeline {}: {:#}",
-                                    timeline.timeline_id, e
-                                );
-                                timeline.set_state(TimelineState::Broken);
-                                *current_state = TenantState::broken_from_reason(format!(
-                                    "failed to activate timeline {}: {}",
-                                    timeline.timeline_id, e
-                                ));
-
-                                timelines_broken_during_activation += 1;
-                            }
-                        }
+                        timeline.activate(broker_client, ctx);
+                        activated_timelines += 1;
                     }
 
                     let elapsed = self.loading_started_at.elapsed();
@@ -1673,7 +1656,6 @@ impl Tenant {
                         since_creation_millis = elapsed.as_millis(),
                         tenant_id = %self.tenant_id,
                         activated_timelines,
-                        timelines_broken_during_activation,
                         total_timelines,
                         post_state = <&'static str>::from(&*current_state),
                         "activation attempt finished"

@@ -29,7 +29,6 @@ use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use storage_broker::BrokerClientChannel;
 use storage_broker::Streaming;
 use tokio::select;
-use tokio::sync::RwLock;
 use tracing::*;
 
 use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
@@ -48,7 +47,7 @@ pub(super) async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     connection_manager_state: &mut ConnectionManagerState,
     ctx: &RequestContext,
-    manager_status: &RwLock<Option<ConnectionManagerStatus>>,
+    manager_status: &std::sync::RwLock<Option<ConnectionManagerStatus>>,
 ) -> ControlFlow<(), ()> {
     match connection_manager_state
         .timeline
@@ -195,7 +194,7 @@ pub(super) async fn connection_manager_loop_step(
                 .change_connection(new_candidate, ctx)
                 .await
         }
-        *manager_status.write().await = Some(connection_manager_state.manager_status());
+        *manager_status.write().unwrap() = Some(connection_manager_state.manager_status());
     }
 }
 
