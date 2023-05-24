@@ -37,9 +37,9 @@ aiohttp = "3.7.4"
 pytest-rerunfailures = "^11.1.2"
 
 [tool.poetry.group.dev.dependencies]
-black = "^23.1.0"
+black = "^23.3.0"
 mypy = "==1.1.1"
-ruff = "^0.0.255"
+ruff = "^0.0.269"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
