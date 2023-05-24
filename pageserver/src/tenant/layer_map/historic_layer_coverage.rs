@@ -528,12 +528,14 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
                 is_image: false,
             }..,
         ) {
-            let was_noop = self.historic_coverage
+            let was_noop = self
+                .historic_coverage
                 .insert(layer_key.clone(), layer.clone());
             num_inserted += 1;
 
             if was_noop {
-                self.redundant_layers.insert(layer_key.clone(), layer.clone());
+                self.redundant_layers
+                    .insert(layer_key.clone(), layer.clone());
             }
         }
 
@@ -556,13 +558,13 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     }
 
     /// Returns whether the layer with the given key was already inserted as redundant
-    #[allow(dead_code)]  // This function should be used on startup to clean up.
+    #[allow(dead_code)] // This function should be used on startup to clean up.
     pub fn is_redundant(&self, key: &LayerKey) -> bool {
         if !self.buffer.is_empty() {
             panic!("rebuild pls")
         }
 
-        return self.redundant_layers.contains_key(key)
+        return self.redundant_layers.contains_key(key);
     }
 
     /// Return a reference to a queryable map, assuming all updates
@@ -709,8 +711,8 @@ fn test_redundant_layers() {
     for i in 0..10 {
         for j in 0..10 {
             let key1 = LayerKey {
-                key: i..(i+2),
-                lsn: j..(j+2),
+                key: i..(i + 2),
+                lsn: j..(j + 2),
                 is_image: false,
             };
             let key2 = LayerKey {
