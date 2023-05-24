@@ -1,6 +1,6 @@
-use std::{cmp::Ordering, collections::BinaryHeap};
+use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug};
 
-
+use super::chan::Chan;
 
 pub struct Timing {
     /// Current world's time.
@@ -39,10 +39,14 @@ impl Timing {
     }
 
     /// TODO: write docs
-    pub fn schedule(&mut self, time: u64, event: Event) {
+    pub fn schedule_future(&mut self, ms: u64, event: Box<dyn Event + Send + Sync>) {
         self.nonce += 1;
         let nonce = self.nonce;
-        self.timers.push(Pending { time, nonce, event })
+        self.timers.push(Pending {
+            time: self.current_time + ms,
+            nonce,
+            event,
+        })
     }
 
     /// Return true if there is a ready event.
@@ -56,7 +60,7 @@ impl Timing {
 pub struct Pending {
     pub time: u64,
     pub nonce: u32,
-    pub event: Event,
+    pub event: Box<dyn Event + Send + Sync>,
 }
 
 impl Pending {
@@ -87,11 +91,31 @@ impl PartialEq for Pending {
 
 impl Eq for Pending {}
 
-#[derive(Debug)]
-pub enum Event {}
+pub trait Event: Debug {
+    fn process(&self);
+}
 
-impl Event {
+pub struct SendMessageEvent<T: Debug + Clone> {
+    chan: Chan<T>,
+    msg: T,
+}
+
+impl<T: Debug + Clone> SendMessageEvent<T> {
+    pub fn new(chan: Chan<T>, msg: T) -> Box<SendMessageEvent<T>> {
+        Box::new(SendMessageEvent { chan, msg })
+    }
+}
+
+impl<T: Debug + Clone> Event for SendMessageEvent<T> {
     fn process(&self) {
-        // TODO:
+        self.chan.send(self.msg.clone());
+    }
+}
+
+impl<T: Debug + Clone> Debug for SendMessageEvent<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendMessageEvent")
+            .field("msg", &self.msg)
+            .finish()
     }
 }

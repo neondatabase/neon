@@ -1,11 +1,6 @@
-use std::{
-    backtrace::Backtrace,
-    sync::Arc,
-};
+use std::{backtrace::Backtrace, sync::Arc};
 
-
-
-use super::world::{Node, NodeId};
+use super::world::{Node, NodeId, World};
 
 pub type Mutex<T> = parking_lot::Mutex<T>;
 
@@ -52,18 +47,28 @@ impl Condvar {
         }
     }
 
-    /// Wakes up one blocked thread on this condvar, can be called only from the node thread.
+    /// Wakes up one blocked thread on this condvar. Usually can be called only from the node thread,
+    /// because we have a global running threads counter and we transfer it from the current thread
+    /// to the woken up thread. But we have a HACK here to allow calling it from the world thread.
     pub fn notify_one(&self) {
         // TODO: wake up random thread
 
         let to_wake = self.waiters.lock().waiters.pop();
 
-        if let Some(waiter) = to_wake {
-            // block (park) the current thread, wake the other thread
-            waiter.wake();
+        if Node::is_node_thread() {
+            if let Some(waiter) = to_wake {
+                // block (park) the current thread, wake the other thread
+                waiter.wake();
+            } else {
+                // block (park) the current thread just in case
+                Park::yield_thread()
+            }
         } else {
-            // block (park) the current thread just in case
-            Park::yield_thread()
+            // HACK: custom notify_one implementation for the world thread
+            if let Some(waiter) = to_wake {
+                // block (park) the current thread, wake the other thread
+                waiter.external_wake();
+            }
         }
     }
 }
@@ -193,6 +198,28 @@ impl Park {
         let node = Node::current();
         let mut state = self_park.lock.lock();
         self_park.park_wait_the_world(node, &mut state);
+    }
+
+    /// Will wake up the thread that is currently conditionally parked. Can be called only
+    /// from the world threads. What it will do:
+    /// 1. Increase the running threads counter
+    /// 2. Wake up the waiting thread (it will park itself in the world)
+    pub fn external_wake(&self) {
+        let world = World::current();
+        world.internal_parking_wake();
+
+        let mut state = self.lock.lock();
+        if state.can_continue {
+            println!(
+                "WARN wake() called on a thread that is already waked, node {:?}",
+                state.node_id
+            );
+            return;
+        }
+        state.can_continue = true;
+        // and here we park the waiting thread
+        self.cvar.notify_all();
+        drop(state);
     }
 
     /// Will wake up the thread that is currently unconditionally parked.

@@ -2,13 +2,18 @@ mod client;
 mod disk;
 mod server;
 
-use std::{sync::Arc};
+use std::sync::Arc;
 
-use crate::{simlib::{world::World, proto::ReplCell}, simtest::{client::run_client, disk::SharedStorage, server::run_server}};
+use crate::{
+    simlib::{proto::ReplCell, world::World},
+    simtest::{client::run_client, disk::SharedStorage, server::run_server},
+};
 
 #[test]
 fn start_simulation() {
     let world = Arc::new(World::new());
+    world.register_world();
+
     let client_node = world.new_node();
     let server_node = world.new_node();
     let server_id = server_node.id;

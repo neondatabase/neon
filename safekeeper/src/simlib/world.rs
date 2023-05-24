@@ -1,8 +1,5 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::{
-    cell::RefCell,
-    sync::{Arc},
-};
+use std::{cell::RefCell, ops::DerefMut, sync::Arc};
 
 use super::{
     chan::Chan,
@@ -10,7 +7,7 @@ use super::{
     proto::AnyMessage,
     sync::{Mutex, Park},
     tcp::Tcp,
-    time::Timing,
+    time::{Event, Timing},
     wait_group::WaitGroup,
 };
 
@@ -45,14 +42,28 @@ impl World {
         }
     }
 
+    /// Create a new random number generator.
+    pub fn new_rng(&self) -> StdRng {
+        let mut rng = self.rng.lock();
+        StdRng::from_rng(rng.deref_mut()).unwrap()
+    }
+
     /// Create a new node.
     pub fn new_node(self: &Arc<Self>) -> Arc<Node> {
         // TODO: verify
         let mut nodes = self.nodes.lock();
         let id = nodes.len() as NodeId;
-        let node = Arc::new(Node::new(id, self.clone()));
+        let node = Arc::new(Node::new(id, self.clone(), self.new_rng()));
         nodes.push(node.clone());
         node
+    }
+
+    /// Register world for the current thread. This is required before calling
+    /// step().
+    pub fn register_world(self: &Arc<Self>) {
+        CURRENT_WORLD.with(|world| {
+            *world.borrow_mut() = Some(self.clone());
+        });
     }
 
     /// Get an internal node state by id.
@@ -122,6 +133,7 @@ impl World {
         if let Some(event) = timing.step() {
             println!("Processing event: {:?}", event.event);
             event.process();
+
             // to have a clean state after each step, wait for all threads to finish
             self.await_all();
             return true;
@@ -148,10 +160,33 @@ impl World {
             park.debug_print();
         }
     }
+
+    /// Schedule an event to be processed after `ms` milliseconds of global time.
+    pub fn schedule(&self, ms: u64, e: Box<dyn Event + Send + Sync>) {
+        let mut timing = self.timing.lock();
+        timing.schedule_future(ms, e);
+    }
+
+    /// Get the current world, panics if called from outside of a world thread.
+    pub fn current() -> Arc<World> {
+        CURRENT_WORLD.with(|world| {
+            world
+                .borrow()
+                .as_ref()
+                .expect("World::current() called from outside of a world thread")
+                .clone()
+        })
+    }
+
+    pub fn internal_parking_wake(&self) {
+        // waking node with condition, increase the running threads counter
+        self.wait_group.add(1);
+    }
 }
 
 thread_local! {
     pub static CURRENT_NODE: RefCell<Option<Arc<Node>>> = RefCell::new(None);
+    pub static CURRENT_WORLD: RefCell<Option<Arc<World>>> = RefCell::new(None);
 }
 
 /// Internal node state.
@@ -161,6 +196,7 @@ pub struct Node {
     status: Mutex<NodeStatus>,
     world: Arc<World>,
     join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    pub rng: Mutex<StdRng>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,13 +210,14 @@ pub enum NodeStatus {
 }
 
 impl Node {
-    pub fn new(id: NodeId, world: Arc<World>) -> Node {
+    pub fn new(id: NodeId, world: Arc<World>, rng: StdRng) -> Node {
         Node {
             id,
             network: Chan::new(),
             status: Mutex::new(NodeStatus::NotStarted),
             world: world.clone(),
             join_handle: Mutex::new(None),
+            rng: Mutex::new(rng),
         }
     }
 
@@ -269,6 +306,10 @@ impl Node {
     /// Get the current node, panics if called from outside of a node thread.
     pub fn current() -> Arc<Node> {
         CURRENT_NODE.with(|current_node| current_node.borrow().clone().unwrap())
+    }
+
+    pub fn is_node_thread() -> bool {
+        CURRENT_NODE.with(|current_node| current_node.borrow().is_some())
     }
 }
 

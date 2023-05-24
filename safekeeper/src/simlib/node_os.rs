@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
+use rand::Rng;
+
 use super::{
     chan::Chan,
     tcp::Tcp,
+    time::SendMessageEvent,
     world::{Node, NodeEvent, NodeId, World},
 };
 
@@ -31,5 +34,20 @@ impl NodeOs {
     /// Returns a channel to receive timers and events from the network.
     pub fn epoll(&self) -> Chan<NodeEvent> {
         self.internal.network_chan()
+    }
+
+    /// Sleep for a given number of milliseconds.
+    /// Currently matches the global virtual time, TODO may be good to
+    /// introduce a separate clocks for each node.
+    pub fn sleep(&self, ms: u64) {
+        let chan: Chan<()> = Chan::new();
+        self.world
+            .schedule(ms, SendMessageEvent::new(chan.clone(), ()));
+        chan.recv();
+    }
+
+    /// Generate a random number in range [0, max).
+    pub fn random(&self, max: u64) -> u64 {
+        self.internal.rng.lock().gen_range(0..max)
     }
 }

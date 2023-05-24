@@ -24,12 +24,14 @@ impl<T: Clone> Chan<T> {
     }
 
     /// Append a message to the end of the queue.
+    /// Can be called from any thread.
     pub fn send(&self, t: T) {
         self.shared.queue.lock().push_back(t);
         self.shared.condvar.notify_one();
     }
 
     /// Get a message from the front of the queue, or block if the queue is empty.
+    /// Can be called only from the node thread.
     pub fn recv(&self) -> T {
         // interrupt the receiver to prevent consuming everything at once
         Park::yield_thread();

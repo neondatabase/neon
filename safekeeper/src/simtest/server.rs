@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::simlib::{node_os::NodeOs, world::NodeEvent, proto::AnyMessage};
+use crate::simlib::{node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
 
 use super::disk::Storage;
 
@@ -29,6 +29,7 @@ pub fn run_server(os: NodeOs, mut storage: Box<dyn Storage<u32>>) {
 
     let epoll = os.epoll();
     loop {
+        os.sleep(os.random(10000));
         let event = epoll.recv();
         println!("got event: {:?}", event);
         match event {
