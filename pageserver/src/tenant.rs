@@ -614,10 +614,13 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
-                match tenant_clone.attach(&ctx).await {
-                    Ok(_) => {
-                        tenant_clone.activate(&ctx).unwrap(); // WIP
-                    }
+                let doit = async {
+                    tenant_clone.attach(&ctx).await?;
+                    tenant_clone.activate(&ctx)?;
+                    anyhow::Ok(())
+                };
+                match doit.await {
+                    Ok(_) => {}
                     Err(e) => {
                         tenant_clone.set_broken(e.to_string());
                         error!("error attaching tenant: {:?}", e);
@@ -881,10 +884,13 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
-                match tenant_clone.load(&ctx).await {
-                    Ok(()) => {
-                        tenant_clone.activate(&ctx).unwrap(); // WIP
-                    }
+                let doit = async {
+                    tenant_clone.load(&ctx).await?;
+                    tenant_clone.activate(&ctx)?;
+                    anyhow::Ok(())
+                };
+                match doit.await {
+                    Ok(()) => {}
                     Err(err) => {
                         tenant_clone.set_broken(err.to_string());
                         error!("could not load tenant {tenant_id}: {err:?}");
