@@ -539,7 +539,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         }
 
         let state = tenant.current_state();
-        Ok(TenantInfo {
+        Result::<_, ApiError>::Ok(TenantInfo {
             id: tenant_id,
             state: state.clone(),
             current_physical_size: Some(current_physical_size),
@@ -547,8 +547,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         })
     }
     .instrument(info_span!("tenant_status_handler", tenant = %tenant_id))
-    .await
-    .map_err(ApiError::InternalServerError)?;
+    .await?;
 
     json_response(StatusCode::OK, tenant_info)
 }
