@@ -145,7 +145,7 @@ impl TimelineMetadata {
             pg_version: 14, // All timelines created before this version had pg_version 14
         };
 
-        hdr.format_version = METADATA_FORMAT_VERSION;
+        hdr.format_version = 4;
 
         Ok(Self { hdr, body })
     }
@@ -168,7 +168,7 @@ impl TimelineMetadata {
             "metadata checksum mismatch"
         );
 
-        if hdr.format_version != METADATA_FORMAT_VERSION {
+        if hdr.format_version == METADATA_OLD_FORMAT_VERSION {
             // If metadata has the old format,
             // upgrade it and return the result
             TimelineMetadata::upgrade_timeline_metadata(metadata_bytes)
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(
             deserialized_metadata.body, expected_metadata.body,
             "Metadata of the old version {} should be upgraded to the latest version {}",
-            METADATA_OLD_FORMAT_VERSION, METADATA_FORMAT_VERSION
+            METADATA_OLD_FORMAT_VERSION, 4
         );
     }
 }
