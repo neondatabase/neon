@@ -175,14 +175,9 @@ pub async fn handle(
         application_name: Some(APP_NAME),
     };
     let node = creds.wake_compute(&extra).await?.expect("msg");
-    let conf = node.value.config;
-    let port = *conf.get_ports().first().expect("no port");
-    let host = match conf.get_hosts().first().expect("no host") {
-        tokio_postgres::config::Host::Tcp(host) => host,
-        tokio_postgres::config::Host::Unix(_) => {
-            return Err(anyhow::anyhow!("unix socket is not supported"));
-        }
-    };
+    let pg_endpoint = &node.value.address;
+    let port = pg_endpoint.port;
+    let host = &pg_endpoint.host;
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -206,7 +201,7 @@ pub async fn handle(
     // Connenct to the destination
     //
     let (client, connection) = tokio_postgres::Config::new()
-        .host(host)
+        .host(&host)
         .port(port)
         .user(&username)
         .password(&password)
