@@ -18,10 +18,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_ffi::ControlFileData;
-use std::{
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::path::{Path, PathBuf};
 use utils::{lsn::Lsn, project_git_version};
 
 project_git_version!(GIT_VERSION);
@@ -54,11 +51,11 @@ struct MetadataCmd {
     /// Input metadata file path
     metadata_path: PathBuf,
     /// Replace disk consistent Lsn
-    disk_consistent_lsn: Option<String>,
+    disk_consistent_lsn: Option<Lsn>,
     /// Replace previous record Lsn
-    prev_record_lsn: Option<String>,
+    prev_record_lsn: Option<Lsn>,
     /// Replace latest gc cuttoff
-    latest_gc_cuttoff: Option<String>,
+    latest_gc_cuttoff: Option<Lsn>,
 }
 
 #[derive(Parser)]
@@ -129,6 +126,7 @@ fn handle_metadata(
         metadata_path: path,
         disk_consistent_lsn,
         prev_record_lsn,
+        latest_gc_cuttoff,
     }: &MetadataCmd,
 ) -> Result<(), anyhow::Error> {
     let metadata_bytes = std::fs::read(path)?;
@@ -137,7 +135,7 @@ fn handle_metadata(
     let mut update_meta = false;
     if let Some(disk_consistent_lsn) = disk_consistent_lsn {
         meta = TimelineMetadata::new(
-            Lsn::from_str(disk_consistent_lsn)?,
+            *disk_consistent_lsn,
             meta.prev_record_lsn(),
             meta.ancestor_timeline(),
             meta.ancestor_lsn(),
@@ -150,7 +148,7 @@ fn handle_metadata(
     if let Some(prev_record_lsn) = prev_record_lsn {
         meta = TimelineMetadata::new(
             meta.disk_consistent_lsn(),
-            Some(Lsn::from_str(prev_record_lsn)?),
+            Some(*prev_record_lsn),
             meta.ancestor_timeline(),
             meta.ancestor_lsn(),
             meta.latest_gc_cutoff_lsn(),
@@ -159,13 +157,13 @@ fn handle_metadata(
         );
         update_meta = true;
     }
-    if let Some(latest_gc_cuttoff) = arg_matches.get_one::<String>("latest_gc_cuttoff") {
+    if let Some(latest_gc_cuttoff) = latest_gc_cuttoff {
         meta = TimelineMetadata::new(
             meta.disk_consistent_lsn(),
             meta.prev_record_lsn(),
             meta.ancestor_timeline(),
             meta.ancestor_lsn(),
-            Lsn::from_str(latest_gc_cuttoff)?,
+            *latest_gc_cuttoff,
             meta.initdb_lsn(),
             meta.pg_version(),
         );
