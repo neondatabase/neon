@@ -57,6 +57,8 @@ struct MetadataCmd {
     disk_consistent_lsn: Option<String>,
     /// Replace previous record Lsn
     prev_record_lsn: Option<String>,
+    /// Replace latest gc cuttoff
+    latest_gc_cuttoff: Option<String>,
 }
 
 #[derive(Parser)]
@@ -152,6 +154,18 @@ fn handle_metadata(
             meta.ancestor_timeline(),
             meta.ancestor_lsn(),
             meta.latest_gc_cutoff_lsn(),
+            meta.initdb_lsn(),
+            meta.pg_version(),
+        );
+        update_meta = true;
+    }
+    if let Some(latest_gc_cuttoff) = arg_matches.get_one::<String>("latest_gc_cuttoff") {
+        meta = TimelineMetadata::new(
+            meta.disk_consistent_lsn(),
+            meta.prev_record_lsn(),
+            meta.ancestor_timeline(),
+            meta.ancestor_lsn(),
+            Lsn::from_str(latest_gc_cuttoff)?,
             meta.initdb_lsn(),
             meta.pg_version(),
         );

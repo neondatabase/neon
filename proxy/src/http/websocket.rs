@@ -4,12 +4,17 @@ use crate::{
 use bytes::{Buf, Bytes};
 use futures::{Sink, Stream, StreamExt};
 use hyper::{
-    server::{accept, conn::AddrIncoming},
+    server::{
+        accept,
+        conn::{AddrIncoming, AddrStream},
+    },
     upgrade::Upgraded,
-    Body, Request, Response, StatusCode,
+    Body, Method, Request, Response, StatusCode,
 };
 use hyper_tungstenite::{tungstenite::Message, HyperWebsocket, WebSocketStream};
 use pin_project_lite::pin_project;
+use serde_json::{json, Value};
+
 use std::{
     convert::Infallible,
     future::ready,
@@ -21,6 +26,7 @@ use tls_listener::TlsListener;
 use tokio::{
     io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
+    select,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -29,6 +35,8 @@ use utils::http::{error::ApiError, json::json_response};
 // TODO: use `std::sync::Exclusive` once it's stabilized.
 // Tracking issue: https://github.com/rust-lang/rust/issues/98407.
 use sync_wrapper::SyncWrapper;
+
+use super::sql_over_http;
 
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
@@ -159,6 +167,7 @@ async fn ws_handler(
     config: &'static ProxyConfig,
     cancel_map: Arc<CancelMap>,
     session_id: uuid::Uuid,
+    sni_hostname: Option<String>,
 ) -> Result<Response<Body>, ApiError> {
     let host = request
         .headers()
@@ -181,8 +190,44 @@ async fn ws_handler(
 
         // Return the response so the spawned future can continue.
         Ok(response)
+    // TODO: that deserves a refactor as now this function also handles http json client besides websockets.
+    // Right now I don't want to blow up sql-over-http patch with file renames and do that as a follow up instead.
+    } else if request.uri().path() == "/sql" && request.method() == Method::POST {
+        let result = select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                Err(anyhow::anyhow!("Query timed out"))
+            }
+            response = sql_over_http::handle(config, request, sni_hostname) => {
+                response
+            }
+        };
+        let status_code = match result {
+            Ok(_) => StatusCode::OK,
+            Err(_) => StatusCode::BAD_REQUEST,
+        };
+        let json = match result {
+            Ok(r) => r,
+            Err(e) => {
+                let message = format!("{:?}", e);
+                let code = match e.downcast_ref::<tokio_postgres::Error>() {
+                    Some(e) => match e.code() {
+                        Some(e) => serde_json::to_value(e.code()).unwrap(),
+                        None => Value::Null,
+                    },
+                    None => Value::Null,
+                };
+                json!({ "message": message, "code": code })
+            }
+        };
+        json_response(status_code, json).map(|mut r| {
+            r.headers_mut().insert(
+                "Access-Control-Allow-Origin",
+                hyper::http::HeaderValue::from_static("*"),
+            );
+            r
+        })
     } else {
-        json_response(StatusCode::OK, "Connect with a websocket client")
+        json_response(StatusCode::BAD_REQUEST, "query is not supported")
     }
 }
 
@@ -216,20 +261,27 @@ pub async fn task_main(
         }
     });
 
-    let make_svc = hyper::service::make_service_fn(|_stream| async move {
-        Ok::<_, Infallible>(hyper::service::service_fn(
-            move |req: Request<Body>| async move {
-                let cancel_map = Arc::new(CancelMap::default());
-                let session_id = uuid::Uuid::new_v4();
-                ws_handler(req, config, cancel_map, session_id)
-                    .instrument(info_span!(
-                        "ws-client",
-                        session = format_args!("{session_id}")
-                    ))
-                    .await
-            },
-        ))
-    });
+    let make_svc =
+        hyper::service::make_service_fn(|stream: &tokio_rustls::server::TlsStream<AddrStream>| {
+            let sni_name = stream.get_ref().1.sni_hostname().map(|s| s.to_string());
+
+            async move {
+                Ok::<_, Infallible>(hyper::service::service_fn(move |req: Request<Body>| {
+                    let sni_name = sni_name.clone();
+                    async move {
+                        let cancel_map = Arc::new(CancelMap::default());
+                        let session_id = uuid::Uuid::new_v4();
+
+                        ws_handler(req, config, cancel_map, session_id, sni_name)
+                            .instrument(info_span!(
+                                "ws-client",
+                                session = format_args!("{session_id}")
+                            ))
+                            .await
+                    }
+                }))
+            }
+        });
 
     hyper::Server::builder(accept::from_stream(tls_listener))
         .serve(make_svc)

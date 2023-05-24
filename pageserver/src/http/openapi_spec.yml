@@ -741,8 +741,11 @@ paths:
                 $ref: "#/components/schemas/Error"
     post:
       description: |
-        Create a tenant. Returns new tenant id on success.\
+        Create a tenant. Returns new tenant id on success.
+
         If no new tenant id is specified in parameters, it would be generated. It's an error to recreate the same tenant.
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
         content:
           application/json:
@@ -790,6 +793,8 @@ paths:
     put:
       description: |
         Update tenant's config.
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
         content:
           application/json:
