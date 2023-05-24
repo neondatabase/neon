@@ -550,7 +550,9 @@ impl Timeline {
 
         let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
         dbs.sort_unstable();
-        for (spcnode, dbnode) in dbs {
+        for (spcnode, dbnode) in &dbs {
+            let spcnode = *spcnode;
+            let dbnode = *dbnode;
             result.add_key(relmap_file_key(spcnode, dbnode));
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
@@ -566,7 +568,9 @@ impl Timeline {
                 let relsize = buf.get_u32_le();
 
                 result.add_range(rel_block_to_key(rel, 0)..rel_block_to_key(rel, relsize));
-                result.add_key(relsize_key);
+                if self.format_version == 4 {
+                    result.add_key(relsize_key);
+                }
             }
         }
 
@@ -606,6 +610,22 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
+
+        if self.format_version > 4 {
+            // Store relation metadata
+            for (spcnode, dbnode) in dbs {
+                let mut rels: Vec<RelTag> = self
+                    .list_rels(spcnode, dbnode, lsn, ctx)
+                    .await?
+                    .into_iter()
+                    .collect();
+                rels.sort_unstable();
+                for rel in rels {
+                    let relsize_key = self.rel_size_to_key(rel);
+                    result.add_key(relsize_key);
+                }
+            }
+        }
 
         Ok(result.to_keyspace())
     }
