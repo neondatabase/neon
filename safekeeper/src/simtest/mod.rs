@@ -1,8 +1,10 @@
+mod client;
+mod disk;
+mod server;
+
 use std::{sync::Arc};
 
-use super::{
-    client::run_client, disk::SharedStorage, disklog::run_server, proto::ReplCell, world::World,
-};
+use crate::{simlib::{world::World, proto::ReplCell}, simtest::{client::run_client, disk::SharedStorage, server::run_server}};
 
 #[test]
 fn start_simulation() {

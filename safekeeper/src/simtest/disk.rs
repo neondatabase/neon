@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::sync::{Mutex, Park};
+use crate::simlib::sync::{Mutex, Park};
 
 pub trait Storage<T> {
     fn flush_pos(&self) -> u32;

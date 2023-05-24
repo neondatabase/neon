@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use super::{disk::Storage, node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
+use crate::simlib::{node_os::NodeOs, world::NodeEvent, proto::AnyMessage};
+
+use super::disk::Storage;
 
 pub struct DiskLog {
     pub map: HashMap<String, u32>,
