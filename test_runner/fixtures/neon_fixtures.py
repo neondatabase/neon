@@ -149,7 +149,7 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
 
 @pytest.fixture(scope="session")
 def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
-    versioned_dir = pg_distrib_dir / f"v{pg_version}"
+    versioned_dir = pg_distrib_dir / pg_version.v_prefixed
 
     psql_bin_path = versioned_dir / "bin/psql"
     postgres_bin_path = versioned_dir / "bin/postgres"
@@ -1745,8 +1745,8 @@ class PgBin:
     def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion):
         self.log_dir = log_dir
         self.pg_version = pg_version
-        self.pg_bin_path = pg_distrib_dir / f"v{pg_version}" / "bin"
-        self.pg_lib_dir = pg_distrib_dir / f"v{pg_version}" / "lib"
+        self.pg_bin_path = pg_distrib_dir / pg_version.v_prefixed / "bin"
+        self.pg_lib_dir = pg_distrib_dir / pg_version.v_prefixed / "lib"
         self.env = os.environ.copy()
         self.env["LD_LIBRARY_PATH"] = str(self.pg_lib_dir)
 

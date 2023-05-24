@@ -83,9 +83,7 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
     # we have a bunch of pytest.raises for these below
     env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
     env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
