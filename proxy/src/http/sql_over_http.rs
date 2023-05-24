@@ -201,7 +201,7 @@ pub async fn handle(
     // Connenct to the destination
     //
     let (client, connection) = tokio_postgres::Config::new()
-        .host(&host)
+        .host(host)
         .port(port)
         .user(&username)
         .password(&password)
