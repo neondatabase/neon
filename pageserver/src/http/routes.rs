@@ -5,13 +5,14 @@ use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
-use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
+use pageserver_api::models::{DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest};
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::http::endpoint::RequestSpan;
+use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use super::models::{
@@ -51,7 +52,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 }
 
@@ -60,7 +61,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
-        broker_client: &'static storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
@@ -283,7 +284,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
             request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
-            state.broker_client,
+            state.broker_client.clone(),
             &ctx,
         )
         .await {
@@ -393,10 +394,15 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     json_response(StatusCode::OK, result)
 }
 
-// TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
-async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_attach_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
+
+    let maybe_body: Option<TenantAttachRequest> = json_request_or_empty_body(&mut request).await?;
+    let tenant_conf = match maybe_body {
+        Some(request) => TenantConfOpt::try_from(&*request.config).map_err(ApiError::BadRequest)?,
+        None => TenantConfOpt::default(),
+    };
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
@@ -408,10 +414,8 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         mgr::attach_tenant(
             state.conf,
             tenant_id,
-            // XXX: Attach should provide the config, especially during tenant migration.
-            //      See https://github.com/neondatabase/neon/issues/1555
-            TenantConfOpt::default(),
-            state.broker_client,
+            tenant_conf,
+            state.broker_client.clone(),
             remote_storage.clone(),
             &ctx,
         )
@@ -464,7 +468,7 @@ async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, A
     mgr::load_tenant(
         state.conf,
         tenant_id,
-        state.broker_client,
+        state.broker_client.clone(),
         state.remote_storage.clone(),
         &ctx,
     )
@@ -754,7 +758,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         state.conf,
         tenant_conf,
         target_tenant_id,
-        state.broker_client,
+        state.broker_client.clone(),
         state.remote_storage.clone(),
         &ctx,
     )
@@ -1110,7 +1114,7 @@ pub fn make_router(
     conf: &'static PageServerConf,
     launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
-    broker_client: &'static BrokerClientChannel,
+    broker_client: BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {

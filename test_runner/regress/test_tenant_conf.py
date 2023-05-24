@@ -62,6 +62,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             log.info(f"show {env.initial_tenant}")
             pscur.execute(f"show {env.initial_tenant}")
             res = pscur.fetchone()
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -101,6 +102,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -151,6 +153,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         "eviction_policy": json.dumps(
             {"kind": "LayerAccessThreshold", "period": "80s", "threshold": "42h"}
         ),
+        "max_lsn_wal_lag": "13000000",
     }
     env.neon_cli.config_tenant(
         tenant_id=tenant,
@@ -162,6 +165,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after config res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -206,6 +210,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
     assert updated_effective_config["gc_horizon"] == 67108864
     assert updated_effective_config["image_creation_threshold"] == 2
     assert updated_effective_config["pitr_interval"] == "7days"
+    assert updated_effective_config["max_lsn_wal_lag"] == 13000000
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -216,6 +221,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after restart res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -265,6 +271,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         "period": "20s",
         "threshold": "23h",
     }
+    assert final_effective_config["max_lsn_wal_lag"] == 10 * 1024 * 1024
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
@@ -275,6 +282,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after restart res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {

@@ -61,7 +61,7 @@ static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::
 #[instrument(skip_all)]
 pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
@@ -117,7 +117,7 @@ pub async fn init_tenant_mgr(
                     match schedule_local_tenant_processing(
                         conf,
                         &tenant_dir_path,
-                        broker_client,
+                        broker_client.clone(),
                         remote_storage.clone(),
                         &ctx,
                     ) {
@@ -152,7 +152,7 @@ pub async fn init_tenant_mgr(
 pub fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
@@ -278,7 +278,7 @@ pub async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
@@ -408,7 +408,7 @@ pub async fn detach_tenant(
 pub async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
@@ -477,7 +477,7 @@ pub async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     tenant_conf: TenantConfOpt,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
