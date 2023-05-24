@@ -1,6 +1,6 @@
-use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug};
+use std::{cmp::Ordering, collections::BinaryHeap, fmt::Debug, sync::Arc};
 
-use super::chan::Chan;
+use super::{chan::Chan, network::VirtualConnection};
 
 pub struct Timing {
     /// Current world's time.
@@ -20,6 +20,11 @@ impl Timing {
         }
     }
 
+    /// Return the current world's time.
+    pub fn now(&self) -> u64 {
+        self.current_time
+    }
+
     /// Tick-tock the global clock. Return the event ready to be processed
     /// or move the clock forward and then return the event.
     pub fn step(&mut self) -> Option<Pending> {
@@ -30,7 +35,7 @@ impl Timing {
 
         if !self.is_event_ready() {
             let next_time = self.timers.peek().unwrap().time;
-            println!("Advancing time from {} to {}", self.current_time, next_time);
+            println!("CLK(time={})", next_time);
             self.current_time = next_time;
             assert!(self.is_event_ready());
         }
@@ -114,8 +119,27 @@ impl<T: Debug + Clone> Event for SendMessageEvent<T> {
 
 impl<T: Debug + Clone> Debug for SendMessageEvent<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // TODO: add more context about receiver channel
         f.debug_struct("SendMessageEvent")
             .field("msg", &self.msg)
+            .finish()
+    }
+}
+
+pub struct NetworkEvent(pub Arc<VirtualConnection>);
+
+impl Event for NetworkEvent {
+    fn process(&self) {
+        self.0.process();
+    }
+}
+
+impl Debug for NetworkEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Network")
+            .field("conn", &self.0.connection_id)
+            .field("node[0]", &self.0.nodes[0].id)
+            .field("node[1]", &self.0.nodes[1].id)
             .finish()
     }
 }

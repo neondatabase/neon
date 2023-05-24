@@ -4,7 +4,7 @@ use rand::Rng;
 
 use super::{
     chan::Chan,
-    tcp::Tcp,
+    network::TCP,
     time::SendMessageEvent,
     world::{Node, NodeEvent, NodeId, World},
 };
@@ -27,7 +27,7 @@ impl NodeOs {
 
     /// Returns a writable pipe. All incoming messages should be polled
     /// with [`network_epoll`]. Always successful.
-    pub fn open_tcp(&self, dst: NodeId) -> Tcp {
+    pub fn open_tcp(&self, dst: NodeId) -> TCP {
         self.world.open_tcp(&self.internal, dst)
     }
 

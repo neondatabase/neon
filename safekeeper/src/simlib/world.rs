@@ -1,12 +1,12 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::{cell::RefCell, ops::DerefMut, sync::Arc};
+use std::{cell::RefCell, ops::DerefMut, sync::{Arc, atomic::AtomicU64}};
 
 use super::{
     chan::Chan,
     node_os::NodeOs,
     proto::AnyMessage,
     sync::{Mutex, Park},
-    tcp::Tcp,
+    network::{TCP, VirtualConnection},
     time::{Event, Timing},
     wait_group::WaitGroup,
 };
@@ -29,6 +29,9 @@ pub struct World {
 
     /// Timers and stuff.
     timing: Mutex<Timing>,
+
+    /// Network connection counter.
+    connection_counter: AtomicU64,
 }
 
 impl World {
@@ -39,6 +42,7 @@ impl World {
             wait_group: WaitGroup::new(),
             rng: Mutex::new(StdRng::seed_from_u64(1337)),
             timing: Mutex::new(Timing::new()),
+            connection_counter: AtomicU64::new(0),
         }
     }
 
@@ -78,11 +82,15 @@ impl World {
     }
 
     /// Returns a writable end of a TCP connection, to send src->dst messages.
-    pub fn open_tcp(&self, _src: &Arc<Node>, dst: NodeId) -> Tcp {
+    pub fn open_tcp(self: &Arc<World>, src: &Arc<Node>, dst: NodeId) -> TCP {
         // TODO: replace unwrap() with /dev/null socket.
         let dst = self.get_node(dst).unwrap();
 
-        Tcp::new(dst)
+        let id = self.connection_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let conn = VirtualConnection::new(id, self.clone(), src.clone(), dst);
+        
+        // MessageDirection(0) is src->dst
+        TCP::new(conn, 0)
     }
 
     /// Blocks the current thread until all nodes will park or finish.
@@ -110,7 +118,7 @@ impl World {
         // First try to wake up unconditional thread.
         let to_resume = self.thread_to_unpark();
         if let Some(park) = to_resume {
-            println!("Waking up park at node {:?}", park.node_id());
+            // println!("Waking up park at node {:?}", park.node_id());
 
             // Wake up the chosen thread. To do that:
             // 1. Increment the counter of running threads.
@@ -129,8 +137,8 @@ impl World {
         // This way all code running in simulation is considered to be
         // instant in terms of "virtual time", and time is advanced only
         // when code is waiting for external events.
-        let mut timing = self.timing.lock();
-        if let Some(event) = timing.step() {
+        let time_event = self.timing.lock().step();
+        if let Some(event) = time_event {
             println!("Processing event: {:?}", event.event);
             event.process();
 
@@ -165,6 +173,12 @@ impl World {
     pub fn schedule(&self, ms: u64, e: Box<dyn Event + Send + Sync>) {
         let mut timing = self.timing.lock();
         timing.schedule_future(ms, e);
+    }
+
+    /// Get current time.
+    pub fn now(&self) -> u64 {
+        let timing = self.timing.lock();
+        timing.now()
     }
 
     /// Get the current world, panics if called from outside of a world thread.
@@ -317,6 +331,6 @@ impl Node {
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
     Accept,
-    Message(AnyMessage),
+    Message((AnyMessage, TCP)),
     // TODO: close?
 }

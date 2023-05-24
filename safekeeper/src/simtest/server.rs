@@ -33,7 +33,7 @@ pub fn run_server(os: NodeOs, mut storage: Box<dyn Storage<u32>>) {
         let event = epoll.recv();
         println!("got event: {:?}", event);
         match event {
-            NodeEvent::Message(msg) => match msg {
+            NodeEvent::Message((msg, _)) => match msg {
                 AnyMessage::ReplCell(num) => {
                     storage.write(num.value);
                 }

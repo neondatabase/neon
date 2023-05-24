@@ -28,14 +28,9 @@ fn start_simulation() {
     let server_storage = shared_storage.clone();
     server_node.launch(move |os| run_server(os, Box::new(server_storage)));
 
-    world.debug_print_state();
     world.await_all();
-    world.debug_print_state();
 
-    while world.step() {
-        println!("made a step!");
-        world.debug_print_state();
-    }
+    while world.step() {}
 
     let disk_data = shared_storage.state.lock().data.clone();
     assert!(verify_data(&disk_data, &u32_data[..]));

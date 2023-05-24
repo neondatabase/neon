@@ -13,9 +13,8 @@ pub fn run_client(os: NodeOs, data: &[ReplCell], dst: NodeId) {
     let sock = os.open_tcp(dst);
     for num in data {
         os.sleep(os.random(10000));
-        println!("start send data from client");
+        println!("sending data: {:?}", num.clone());
         sock.send(AnyMessage::ReplCell(num.clone()));
-        println!("finish send data from client");
     }
 
     println!("sent all data and finished client");
