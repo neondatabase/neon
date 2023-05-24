@@ -254,11 +254,21 @@ SendDeltasToControlPlane()
 			bool		error_exists = str.size != 0;
 
 			if (response_code != 200)
-				elog(ERROR,
-					 "Received HTTP code %ld from control plane%s%s",
-					 response_code,
-					 error_exists ? ": " : "",
-					 error_exists ? str.str : "");
+			{
+				if (error_exists)
+				{
+					elog(ERROR,
+						 "Received HTTP code %ld from control plane: %s",
+						 response_code,
+						 str.str);
+				}
+				else
+				{
+					elog(ERROR,
+						 "Received HTTP code %ld from control plane",
+						 response_code);
+				}
+			}
 		}
 	}
 }
@@ -412,9 +422,8 @@ PopTable()
 {
 	/*
 	 * Current table gets freed because it is allocated in aborted
-	 * subtransaction's
+	 * subtransaction's memory context.
 	 */
-	/* memory context */
 	CurrentDdlTable = CurrentDdlTable->prev_table;
 }
 

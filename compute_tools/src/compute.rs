@@ -404,8 +404,6 @@ impl ComputeNode {
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
         self.pg_reload_conf(&mut client)?;
 
-        // Disable DDL forwarding
-
         // Proceed with post-startup configuration. Note, that order of operations is important.
         // Disable DDL forwarding because control plane already knows about these roles/databases.
         if spec.mode == ComputeMode::Primary {
