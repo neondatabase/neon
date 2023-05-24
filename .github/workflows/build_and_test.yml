@@ -872,7 +872,7 @@ jobs:
 
       - name: Add latest tag to images
         if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.ref_name == 'main' &&
            github.event_name != 'workflow_dispatch'
         run: |
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} latest
@@ -884,7 +884,7 @@ jobs:
 
       - name: Push images to production ECR
         if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.ref_name == 'main' &&
            github.event_name != 'workflow_dispatch'
         run: |
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/neon:latest
@@ -907,7 +907,7 @@ jobs:
 
       - name: Push latest tags to Docker Hub
         if: |
-          (github.ref_name == 'main' || github.ref_name == 'release') &&
+          github.ref_name == 'main' &&
           github.event_name != 'workflow_dispatch'
         run: |
           crane tag neondatabase/neon:${{needs.tag.outputs.build-tag}} latest
