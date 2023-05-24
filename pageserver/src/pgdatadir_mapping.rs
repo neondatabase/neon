@@ -568,7 +568,7 @@ impl Timeline {
                 let relsize = buf.get_u32_le();
 
                 result.add_range(rel_block_to_key(rel, 0)..rel_block_to_key(rel, relsize));
-                if self.format_version == 4 {
+                if self.format_version <= 4 {
                     result.add_key(relsize_key);
                 }
             }
@@ -670,7 +670,7 @@ impl Timeline {
     }
 
     fn rel_size_to_key(&self, rel: RelTag) -> Key {
-        let field1 = if self.format_version == 4 {
+        let field1 = if self.format_version <= 4 {
             0x00u8
         } else {
             0x04u8
