@@ -556,6 +556,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     }
 
     /// Returns whether the layer with the given key was already inserted as redundant
+    #[allow(dead_code)]  // This function should be used on startup to clean up.
     pub fn is_redundant(&self, key: &LayerKey) -> bool {
         if !self.buffer.is_empty() {
             panic!("rebuild pls")
@@ -705,31 +706,29 @@ fn test_retroactive_simple() {
 
 #[test]
 fn test_redundant_layers() {
-    let mut map = BufferedHistoricLayerCoverage::new();
+    for i in 0..10 {
+        for j in 0..10 {
+            let key1 = LayerKey {
+                key: i..(i+2),
+                lsn: j..(j+2),
+                is_image: false,
+            };
+            let key2 = LayerKey {
+                key: 3..6,
+                lsn: 3..6,
+                is_image: false,
+            };
+            let is_redundant = i >= 3 && i + 2 <= 6 && j >= 3 && j + 2 <= 6;
 
-    let key1 = LayerKey {
-        key: 3..5,
-        lsn: 3..5,
-        is_image: false,
-    };
-    let key2 = LayerKey {
-        key: 0..10,
-        lsn: 0..10,
-        is_image: false,
-    };
-
-    // Append some images in increasing LSN order
-    map.insert(key1.clone(), "Delta 1".to_string());
-    map.insert(key2.clone(), "Delta 2".to_string());
-
-    // Rebuild so we can start querying
-    map.rebuild();
-
-    // Check that key1 is redundant
-    assert_eq!(map.is_redundant(&key1), true);
-    assert_eq!(map.is_redundant(&key2), false);
+            let mut map = BufferedHistoricLayerCoverage::new();
+            map.insert(key1.clone(), "Delta 1".to_string());
+            map.insert(key2.clone(), "Delta 2".to_string());
+            map.rebuild();
+            assert_eq!(map.is_redundant(&key1), is_redundant);
+            assert_eq!(map.is_redundant(&key2), false);
+        }
+    }
 }
-
 
 #[test]
 fn test_retroactive_replacement() {
