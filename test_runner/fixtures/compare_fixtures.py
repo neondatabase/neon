@@ -312,6 +312,6 @@ def neon_with_baseline(request: FixtureRequest) -> PgCompare:
     implementation-specific logic is widely useful across multiple tests, it might
     make sense to add methods to the PgCompare class.
     """
-    fixture = request.getfixturevalue(request.param)  # type: ignore
+    fixture = request.getfixturevalue(request.param)
     assert isinstance(fixture, PgCompare), f"test error: fixture {fixture} is not PgCompare"
     return fixture
