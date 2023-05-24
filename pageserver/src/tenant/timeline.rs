@@ -621,7 +621,8 @@ impl Timeline {
             .await
         {
             Ok(()) => Ok(()),
-            seqwait_error => {
+            Err(e) => {
+                // walreceiver.status() locks internally, don't count that towards the wait_lsn_time_histo
                 drop(_timer);
                 let walreceiver_status = {
                     match &*self.walreceiver.lock().unwrap() {
@@ -632,13 +633,15 @@ impl Timeline {
                         },
                     }
                 };
-                seqwait_error.with_context(|| format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
-                    lsn,
-                    self.get_last_record_lsn(),
-                    self.get_disk_consistent_lsn(),
-                    walreceiver_status,
-                ))
+                Err(anyhow::Error::new(e).context({
+                    format!(
+                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
+                        lsn,
+                        self.get_last_record_lsn(),
+                        self.get_disk_consistent_lsn(),
+                        walreceiver_status,
+                    )
+                }))
             }
         }
     }
