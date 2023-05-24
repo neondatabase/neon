@@ -628,7 +628,11 @@ impl Tenant {
                 }
                 Ok(())
             }
-            .instrument(tracing::info_span!("attach", tenant_id=%tenant_id)),
+            .instrument({
+                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_id);
+                span.follows_from(Span::current());
+                span
+            }),
         );
         Ok(tenant)
     }
@@ -899,7 +903,11 @@ impl Tenant {
                 info!("initial load for tenant {tenant_id} finished!");
                 Ok(())
             }
-            .instrument(info_span!("load", tenant_id=%tenant_id)),
+            .instrument({
+                let span = tracing::info_span!(parent: None, "load", tenant_id=%tenant_id);
+                span.follows_from(Span::current());
+                span
+            }),
         );
 
         info!("spawned load into background");
