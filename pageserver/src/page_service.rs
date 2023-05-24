@@ -172,7 +172,7 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 ///
 pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
@@ -216,7 +216,7 @@ pub async fn libpq_listener_main(
                     false,
                     page_service_conn_main(
                         conf,
-                        broker_client,
+                        broker_client.clone(),
                         local_auth,
                         socket,
                         auth_type,
@@ -238,7 +238,7 @@ pub async fn libpq_listener_main(
 
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
@@ -333,7 +333,7 @@ impl PageRequestMetrics {
 
 struct PageServerHandler {
     _conf: &'static PageServerConf,
-    broker_client: &'static storage_broker::BrokerClientChannel,
+    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 
@@ -347,7 +347,7 @@ struct PageServerHandler {
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
-        broker_client: &'static storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::BrokerClientChannel,
         auth: Option<Arc<JwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
@@ -506,7 +506,12 @@ impl PageServerHandler {
 
         let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
         timeline
-            .import_basebackup_from_tar(&mut copyin_reader, base_lsn, self.broker_client, &ctx)
+            .import_basebackup_from_tar(
+                &mut copyin_reader,
+                base_lsn,
+                self.broker_client.clone(),
+                &ctx,
+            )
             .await?;
 
         // Read the end of the tar archive.

@@ -239,7 +239,7 @@ impl UninitializedTimeline<'_> {
         self,
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
-        broker_client: &'static storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
@@ -587,7 +587,7 @@ impl Tenant {
     pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        broker_client: &'static storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::BrokerClientChannel,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -631,7 +631,11 @@ impl Tenant {
                 }
                 Ok(())
             }
-            .instrument(tracing::info_span!("attach", tenant_id=%tenant_id)),
+            .instrument({
+                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_id);
+                span.follows_from(Span::current());
+                span
+            }),
         );
         Ok(tenant)
     }
@@ -853,7 +857,7 @@ impl Tenant {
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
-        broker_client: &'static storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
@@ -903,7 +907,11 @@ impl Tenant {
                 info!("initial load for tenant {tenant_id} finished!");
                 Ok(())
             }
-            .instrument(info_span!("load", tenant_id=%tenant_id)),
+            .instrument({
+                let span = tracing::info_span!(parent: None, "load", tenant_id=%tenant_id);
+                span.follows_from(Span::current());
+                span
+            }),
         );
 
         info!("spawned load into background");
@@ -1230,7 +1238,7 @@ impl Tenant {
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
-        broker_client: &'static storage_broker::BrokerClientChannel,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<Option<Arc<Timeline>>> {
         anyhow::ensure!(
@@ -1607,7 +1615,7 @@ impl Tenant {
     /// Changes tenant status to active, unless shutdown was already requested.
     fn activate(
         &self,
-        broker_client: &'static BrokerClientChannel,
+        broker_client: BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
@@ -1647,7 +1655,7 @@ impl Tenant {
                     let mut activated_timelines = 0;
 
                     for timeline in not_broken_timelines {
-                        timeline.activate(broker_client, ctx);
+                        timeline.activate(broker_client.clone(), ctx);
                         activated_timelines += 1;
                     }
 

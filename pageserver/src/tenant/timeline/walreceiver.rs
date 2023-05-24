@@ -67,7 +67,7 @@ impl WalReceiver {
     pub fn start(
         timeline: Arc<Timeline>,
         conf: WalReceiverConf,
-        broker_client: &'static BrokerClientChannel,
+        mut broker_client: BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Self {
         let tenant_id = timeline.tenant_id;
@@ -90,7 +90,6 @@ impl WalReceiver {
                     timeline,
                     conf,
                 );
-                let mut broker_client = broker_client.clone();
                 loop {
                     select! {
                         _ = task_mgr::shutdown_watcher() => {

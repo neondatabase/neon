@@ -35,7 +35,7 @@ def get_connection_cursor():
     connstr = os.getenv("DATABASE_URL")
     if not connstr:
         err("DATABASE_URL environment variable is not set")
-    with psycopg2.connect(connstr) as conn:
+    with psycopg2.connect(connstr, connect_timeout=30) as conn:
         with conn.cursor() as cur:
             yield cur
 
