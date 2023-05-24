@@ -1,6 +1,5 @@
 mod auth;
 pub mod basebackup;
-pub mod broker_client;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;

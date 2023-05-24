@@ -276,7 +276,16 @@ fn start_pageserver(
 
     // Launch broker client
     let broker_client = WALRECEIVER_RUNTIME
-        .block_on(async { pageserver::broker_client::init_broker_client(conf) })?;
+        .block_on(async {
+            // Note: we do not attempt connecting here (but validate endpoints sanity).
+            storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)
+        })
+        .with_context(|| {
+            format!(
+                "create broker client for uri={:?} keepalive_interval={:?}",
+                &conf.broker_endpoint, conf.broker_keepalive_interval,
+            )
+        })?;
 
     // Initialize authentication for incoming connections
     let http_auth;
@@ -328,7 +337,7 @@ fn start_pageserver(
     // Scan the local 'tenants/' directory and start loading the tenants
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
-        broker_client,
+        broker_client.clone(),
         remote_storage.clone(),
     ))?;
 
@@ -355,7 +364,7 @@ fn start_pageserver(
             conf,
             launch_ts,
             http_auth,
-            broker_client,
+            broker_client.clone(),
             remote_storage,
             disk_usage_eviction_state,
         )?

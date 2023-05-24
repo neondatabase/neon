@@ -908,10 +908,10 @@ impl Timeline {
 
     pub fn activate(
         self: &Arc<Self>,
-        broker_client: &'static BrokerClientChannel,
+        broker_client: BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.launch_wal_receiver(ctx, (*broker_client).clone())?;
+        self.launch_wal_receiver(ctx, broker_client)?;
         self.set_state(TimelineState::Active);
         self.launch_eviction_task();
         Ok(())
