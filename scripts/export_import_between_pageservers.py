@@ -162,7 +162,7 @@ class PgProtocol:
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
-        conn = psycopg2.connect(**self.conn_options(**kwargs))
+        conn: PgConnection = psycopg2.connect(**self.conn_options(**kwargs))
 
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit

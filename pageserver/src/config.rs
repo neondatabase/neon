@@ -797,7 +797,8 @@ impl PageServerConf {
             )?);
         }
         if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
-            t_conf.max_lsn_wal_lag = Some(parse_toml_from_str("max_lsn_wal_lag", max_lsn_wal_lag)?);
+            t_conf.max_lsn_wal_lag =
+                Some(deserialize_from_item("max_lsn_wal_lag", max_lsn_wal_lag)?);
         }
         if let Some(trace_read_requests) = item.get("trace_read_requests") {
             t_conf.trace_read_requests =

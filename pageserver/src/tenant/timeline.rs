@@ -22,8 +22,7 @@ use tracing::*;
 use utils::id::TenantTimelineId;
 
 use std::cmp::{max, min, Ordering};
-use std::collections::BinaryHeap;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs;
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
@@ -48,7 +47,7 @@ use crate::tenant::{
 };
 
 use crate::config::PageServerConf;
-use crate::keyspace::{KeyPartitioning, KeySpace};
+use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
 use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
@@ -122,6 +121,17 @@ pub struct Timeline {
     pub pg_version: u32,
 
     pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
+
+    /// Set of key ranges which should be covered by image layers to
+    /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
+    /// It is used by compaction task when it checks if new image layer should be created.
+    /// Newly created image layer doesn't help to remove the delta layer, until the
+    /// newly created image layer falls off the PITR horizon. So on next GC cycle,
+    /// gc_timeline may still want the new image layer to be created. To avoid redundant
+    /// image layers creation we should check if image layer exists but beyond PITR horizon.
+    /// This is why we need remember GC cutoff LSN.
+    ///
+    wanted_image_layers: Mutex<Option<(Lsn, KeySpace)>>,
 
     last_freeze_at: AtomicLsn,
     // Atomic would be more appropriate here.
@@ -1355,6 +1365,7 @@ impl Timeline {
                 tenant_id,
                 pg_version,
                 layers: RwLock::new(LayerMap::default()),
+                wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
                 walreceiver,
@@ -2912,6 +2923,30 @@ impl Timeline {
         let layers = self.layers.read().unwrap();
 
         let mut max_deltas = 0;
+        {
+            let wanted_image_layers = self.wanted_image_layers.lock().unwrap();
+            if let Some((cutoff_lsn, wanted)) = &*wanted_image_layers {
+                let img_range =
+                    partition.ranges.first().unwrap().start..partition.ranges.last().unwrap().end;
+                if wanted.overlaps(&img_range) {
+                    //
+                    // gc_timeline only pays attention to image layers that are older than the GC cutoff,
+                    // but create_image_layers creates image layers at last-record-lsn.
+                    // So it's possible that gc_timeline wants a new image layer to be created for a key range,
+                    // but the range is already covered by image layers at more recent LSNs. Before we
+                    // create a new image layer, check if the range is already covered at more recent LSNs.
+                    if !layers
+                        .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))?
+                    {
+                        debug!(
+                            "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
+                            img_range.start, img_range.end, cutoff_lsn, lsn
+                        );
+                        return Ok(true);
+                    }
+                }
+            }
+        }
 
         for part_range in &partition.ranges {
             let image_coverage = layers.image_coverage(part_range, lsn)?;
@@ -3031,6 +3066,12 @@ impl Timeline {
                 image_layers.push(image_layer);
             }
         }
+        // All layers that the GC wanted us to create have now been created.
+        //
+        // It's possible that another GC cycle happened while we were compacting, and added
+        // something new to wanted_image_layers, and we now clear that before processing it.
+        // That's OK, because the next GC iteration will put it back in.
+        *self.wanted_image_layers.lock().unwrap() = None;
 
         // Sync the new layer to disk before adding it to the layer map, to make sure
         // we don't garbage collect something based on the new layer, before it has
@@ -3737,6 +3778,7 @@ impl Timeline {
         }
 
         let mut layers_to_remove = Vec::new();
+        let mut wanted_image_layers = KeySpaceRandomAccum::default();
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -3820,6 +3862,15 @@ impl Timeline {
                     "keeping {} because it is the latest layer",
                     l.filename().file_name()
                 );
+                // Collect delta key ranges that need image layers to allow garbage
+                // collecting the layers.
+                // It is not so obvious whether we need to propagate information only about
+                // delta layers. Image layers can form "stairs" preventing old image from been deleted.
+                // But image layers are in any case less sparse than delta layers. Also we need some
+                // protection from replacing recent image layers with new one after each GC iteration.
+                if l.is_incremental() && !LayerMap::is_l0(&*l) {
+                    wanted_image_layers.add_range(l.get_key_range());
+                }
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
@@ -3832,6 +3883,10 @@ impl Timeline {
             );
             layers_to_remove.push(Arc::clone(&l));
         }
+        self.wanted_image_layers
+            .lock()
+            .unwrap()
+            .replace((new_gc_cutoff, wanted_image_layers.to_keyspace()));
 
         let mut updates = layers.batch_update();
         if !layers_to_remove.is_empty() {

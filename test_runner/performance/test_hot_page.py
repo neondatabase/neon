@@ -2,7 +2,7 @@ from contextlib import closing
 
 import pytest
 from fixtures.compare_fixtures import PgCompare
-from pytest_lazyfixture import lazy_fixture  # type: ignore
+from pytest_lazyfixture import lazy_fixture
 
 
 @pytest.mark.parametrize(
