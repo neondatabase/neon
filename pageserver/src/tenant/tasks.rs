@@ -1,7 +1,6 @@
 //! This module contains functions to serve per-tenant background processes,
 //! such as compaction and GC
 
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,11 +8,11 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
-use crate::tenant::{Tenant, TenantState};
+use crate::tenant::Tenant;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
-pub fn start_background_loops(tenant: &Arc<Tenant>) {
+pub fn start_background_loops(tenant: &Arc<Tenant>, cancel: CancellationToken) {
     let tenant_id = tenant.tenant_id;
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
@@ -24,8 +23,9 @@ pub fn start_background_loops(tenant: &Arc<Tenant>) {
         false,
         {
             let tenant = Arc::clone(tenant);
+            let cancel = cancel.clone();
             async move {
-                compaction_loop(tenant)
+                compaction_loop(tenant, cancel)
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
                     .await;
                 Ok(())
@@ -41,8 +41,9 @@ pub fn start_background_loops(tenant: &Arc<Tenant>) {
         false,
         {
             let tenant = Arc::clone(tenant);
+            let cancel = cancel.clone();
             async move {
-                gc_loop(tenant)
+                gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_id))
                     .await;
                 Ok(())
@@ -54,27 +55,15 @@ pub fn start_background_loops(tenant: &Arc<Tenant>) {
 ///
 /// Compaction task's main loop
 ///
-async fn compaction_loop(tenant: Arc<Tenant>) {
+async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let wait_duration = Duration::from_secs(2);
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
-        let cancel = task_mgr::shutdown_token();
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         let mut first = true;
         loop {
             trace!("waking up");
-
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    info!("received cancellation request");
-                    return;
-                },
-                tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
-                    ControlFlow::Break(()) => return,
-                    ControlFlow::Continue(()) => (),
-                },
-            }
 
             let period = tenant.get_compaction_period();
 
@@ -124,12 +113,11 @@ async fn compaction_loop(tenant: Arc<Tenant>) {
 ///
 /// GC task's main loop
 ///
-async fn gc_loop(tenant: Arc<Tenant>) {
+async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let wait_duration = Duration::from_secs(2);
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
-        let cancel = task_mgr::shutdown_token();
         // GC might require downloading, to find the cutoff LSN that corresponds to the
         // cutoff specified as time.
         let ctx =
@@ -137,17 +125,6 @@ async fn gc_loop(tenant: Arc<Tenant>) {
         let mut first = true;
         loop {
             trace!("waking up");
-
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    info!("received cancellation request");
-                    return;
-                },
-                tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
-                    ControlFlow::Break(()) => return,
-                    ControlFlow::Continue(()) => (),
-                },
-            }
 
             let period = tenant.get_gc_period();
 
@@ -193,36 +170,6 @@ async fn gc_loop(tenant: Arc<Tenant>) {
     .await;
     TENANT_TASK_EVENTS.with_label_values(&["stop"]).inc();
     trace!("GC loop stopped.");
-}
-
-async fn wait_for_active_tenant(tenant: &Arc<Tenant>) -> ControlFlow<()> {
-    // if the tenant has a proper status already, no need to wait for anything
-    if tenant.current_state() == TenantState::Active {
-        ControlFlow::Continue(())
-    } else {
-        let mut tenant_state_updates = tenant.subscribe_for_state_updates();
-        loop {
-            match tenant_state_updates.changed().await {
-                Ok(()) => {
-                    let new_state = &*tenant_state_updates.borrow();
-                    match new_state {
-                        TenantState::Active => {
-                            debug!("Tenant state changed to active, continuing the task loop");
-                            return ControlFlow::Continue(());
-                        }
-                        state => {
-                            debug!("Not running the task loop, tenant is not active: {state:?}");
-                            continue;
-                        }
-                    }
-                }
-                Err(_sender_dropped_error) => {
-                    info!("Tenant dropped the state updates sender, quitting waiting for tenant and the task loop");
-                    return ControlFlow::Break(());
-                }
-            }
-        }
-    }
 }
 
 #[derive(thiserror::Error, Debug)]
