@@ -283,12 +283,11 @@ async def test_compute_cache_invalidation(
     await web.TCPSite(runner, "127.0.0.1", console_port).start()
 
     # Create a user we're going to use in the test sequence
-    (user, password) = ("borat", "password")
+    user, password = "borat", "password"
     vanilla_pg.start().safe_psql(f"create role {user} with login password '{password}'")
 
     async def try_connect():
-        magic = f"endpoint=irrelevant;{password}"
-        await console_proxy.connect_async(user=user, password=magic, dbname="postgres")
+        await console_proxy.connect_async(user=user, password=password, dbname="postgres")
 
     assert wake_compute_called == 0
 
