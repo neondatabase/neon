@@ -4,7 +4,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Optional, Type
 
-import backoff  # type: ignore
+import backoff
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import PgProtocol, PortDistributor, VanillaPostgres
 

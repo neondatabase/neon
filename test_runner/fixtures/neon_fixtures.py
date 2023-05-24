@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import urlparse
 
 import asyncpg
-import backoff  # type: ignore
+import backoff
 import boto3
 import jwt
 import psycopg2
@@ -354,7 +354,7 @@ class PgProtocol:
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
-        conn = psycopg2.connect(**self.conn_options(**kwargs))
+        conn: PgConnection = psycopg2.connect(**self.conn_options(**kwargs))
 
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
