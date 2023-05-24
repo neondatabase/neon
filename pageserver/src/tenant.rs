@@ -1670,7 +1670,7 @@ impl Tenant {
             let mut activated_timelines = 0;
 
             for timeline in not_broken_timelines {
-                timeline.activate(broker_client, ctx);
+                timeline.activate(broker_client.clone(), ctx);
                 activated_timelines += 1;
             }
 
