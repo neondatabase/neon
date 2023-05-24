@@ -1652,11 +1652,8 @@ impl Tenant {
                     // down when they notice that the tenant is inactive.
                     tasks::start_background_loops(self.tenant_id);
 
-                    let mut activated_timelines = 0;
-
                     for timeline in not_broken_timelines {
                         timeline.activate(broker_client.clone(), ctx);
-                        activated_timelines += 1;
                     }
 
                     let elapsed = self.loading_started_at.elapsed();
@@ -1667,7 +1664,7 @@ impl Tenant {
                     info!(
                         since_creation_millis = elapsed.as_millis(),
                         tenant_id = %self.tenant_id,
-                        activated_timelines,
+                        activated_timelines = not_broken_timelines.len(),
                         total_timelines,
                         post_state = <&'static str>::from(&*current_state),
                         "activation attempt finished"
