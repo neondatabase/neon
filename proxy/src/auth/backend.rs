@@ -139,6 +139,16 @@ async fn auth_quirks(
 }
 
 impl BackendType<'_, ClientCredentials<'_>> {
+    /// Get compute endpoint name from the credentials.
+    pub fn get_endpoint(&self) -> Option<String> {
+        use BackendType::*;
+
+        match self {
+            Console(_, creds) => creds.project.clone(),
+            Postgres(_, creds) => creds.project.clone(),
+            Link(_) => Some("link".to_owned()),
+        }
+    }
     /// Authenticate the client via the requested backend, possibly using credentials.
     #[tracing::instrument(fields(allow_cleartext = allow_cleartext), skip_all)]
     pub async fn authenticate(

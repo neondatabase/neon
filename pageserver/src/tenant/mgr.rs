@@ -278,7 +278,7 @@ pub async fn create_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
-    tenant_map_insert(tenant_id, |vacant_entry| {
+    tenant_map_insert(tenant_id, || {
         // We're holding the tenants lock in write mode while doing local IO.
         // If this section ever becomes contentious, introduce a new `TenantState::Creating`
         // and do the work in that state.
@@ -296,7 +296,6 @@ pub async fn create_tenant(
                 tenant_id == crated_tenant_id,
                 "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {crated_tenant_id})",
             );
-        vacant_entry.insert(Arc::clone(&created_tenant));
         Ok(created_tenant)
     }).await
 }
@@ -408,7 +407,7 @@ pub async fn load_tenant(
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, |vacant_entry| {
+    tenant_map_insert(tenant_id, || {
         let tenant_path = conf.tenant_path(&tenant_id);
         let tenant_ignore_mark = conf.tenant_ignore_mark_file_path(tenant_id);
         if tenant_ignore_mark.exists() {
@@ -421,9 +420,9 @@ pub async fn load_tenant(
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
 
-        vacant_entry.insert(new_tenant);
-        Ok(())
-    }).await
+        Ok(new_tenant)
+    }).await?;
+    Ok(())
 }
 
 pub async fn ignore_tenant(
@@ -476,7 +475,7 @@ pub async fn attach_tenant(
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
-    tenant_map_insert(tenant_id, |vacant_entry| {
+    tenant_map_insert(tenant_id, || {
         let tenant_dir = create_tenant_files(conf, tenant_conf, tenant_id, CreateTenantFilesMode::Attach)?;
         // TODO: tenant directory remains on disk if we bail out from here on.
         //       See https://github.com/neondatabase/neon/issues/4233
@@ -497,10 +496,10 @@ pub async fn attach_tenant(
             tenant_id == attached_tenant_id,
             "loaded created tenant has unexpected tenant id (expect {tenant_id} != actual {attached_tenant_id})",
         );
-        vacant_entry.insert(Arc::clone(&attached_tenant));
-        Ok(())
+        Ok(attached_tenant)
     })
-    .await
+    .await?;
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -521,12 +520,12 @@ pub enum TenantMapInsertError {
 ///
 /// NB: the closure should return quickly because the current implementation of tenants map
 /// serializes access through an `RwLock`.
-async fn tenant_map_insert<F, V>(
+async fn tenant_map_insert<F>(
     tenant_id: TenantId,
     insert_fn: F,
-) -> Result<V, TenantMapInsertError>
+) -> Result<Arc<Tenant>, TenantMapInsertError>
 where
-    F: FnOnce(hash_map::VacantEntry<TenantId, Arc<Tenant>>) -> anyhow::Result<V>,
+    F: FnOnce() -> anyhow::Result<Arc<Tenant>>,
 {
     let mut guard = TENANTS.write().await;
     let m = match &mut *guard {
@@ -539,8 +538,11 @@ where
             tenant_id,
             e.get().current_state(),
         )),
-        hash_map::Entry::Vacant(v) => match insert_fn(v) {
-            Ok(v) => Ok(v),
+        hash_map::Entry::Vacant(v) => match insert_fn() {
+            Ok(tenant) => {
+                v.insert(tenant.clone());
+                Ok(tenant)
+            }
             Err(e) => Err(TenantMapInsertError::Closure(e)),
         },
     }

@@ -110,6 +110,18 @@ fn handle_metadata(path: &Path, arg_matches: &clap::ArgMatches) -> Result<(), an
         );
         update_meta = true;
     }
+    if let Some(latest_gc_cuttoff) = arg_matches.get_one::<String>("latest_gc_cuttoff") {
+        meta = TimelineMetadata::new(
+            meta.disk_consistent_lsn(),
+            meta.prev_record_lsn(),
+            meta.ancestor_timeline(),
+            meta.ancestor_lsn(),
+            Lsn::from_str(latest_gc_cuttoff)?,
+            meta.initdb_lsn(),
+            meta.pg_version(),
+        );
+        update_meta = true;
+    }
 
     if update_meta {
         let metadata_bytes = meta.to_bytes()?;
@@ -147,6 +159,11 @@ fn cli() -> Command {
                     Arg::new("prev_record_lsn")
                         .long("prev_record_lsn")
                         .help("Replace previous record Lsn"),
+                )
+                .arg(
+                    Arg::new("latest_gc_cuttoff")
+                        .long("latest_gc_cuttoff")
+                        .help("Replace latest gc cuttoff"),
                 ),
         )
 }

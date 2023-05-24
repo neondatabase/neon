@@ -5,12 +5,13 @@ use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
-use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
+use pageserver_api::models::{DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest};
 use remote_storage::GenericRemoteStorage;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::http::endpoint::RequestSpan;
+use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use super::models::{
@@ -386,10 +387,15 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     json_response(StatusCode::OK, result)
 }
 
-// TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
-async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_attach_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
+
+    let maybe_body: Option<TenantAttachRequest> = json_request_or_empty_body(&mut request).await?;
+    let tenant_conf = match maybe_body {
+        Some(request) => TenantConfOpt::try_from(&*request.config).map_err(ApiError::BadRequest)?,
+        None => TenantConfOpt::default(),
+    };
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
@@ -401,9 +407,7 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         mgr::attach_tenant(
             state.conf,
             tenant_id,
-            // XXX: Attach should provide the config, especially during tenant migration.
-            //      See https://github.com/neondatabase/neon/issues/1555
-            TenantConfOpt::default(),
+            tenant_conf,
             remote_storage.clone(),
             &ctx,
         )
