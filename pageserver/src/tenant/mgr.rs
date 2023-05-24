@@ -319,7 +319,7 @@ pub async fn set_new_tenant_config(
         new_tenant_conf,
         false,
     )?;
-    tenant.set_new_tenant_config(new_tenant_conf);
+    tenant.set_new_tenant_config(new_tenant_conf).await;
     Ok(())
 }
 
@@ -686,6 +686,7 @@ pub async fn immediate_compact(
 
     let timeline = tenant
         .get_timeline(timeline_id, true)
+        .await
         .map_err(ApiError::NotFound)?;
 
     // Run in task_mgr to avoid race with tenant_detach operation

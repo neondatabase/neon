@@ -508,7 +508,7 @@ async fn collect_eviction_candidates(
         // a little unfair to tenants during shutdown in such a situation is tolerable.
         let mut tenant_candidates = Vec::new();
         let mut max_layer_size = 0;
-        for tl in tenant.list_timelines() {
+        for tl in tenant.list_timelines().await {
             if !tl.is_active() {
                 continue;
             }
