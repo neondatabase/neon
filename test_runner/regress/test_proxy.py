@@ -1,7 +1,7 @@
 import json
 import logging
 import subprocess
-from typing import Any, cast, List
+from typing import Any, List, cast
 
 import psycopg2
 import pytest
