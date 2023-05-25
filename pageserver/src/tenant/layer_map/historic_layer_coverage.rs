@@ -564,7 +564,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
             panic!("rebuild pls")
         }
 
-        return self.redundant_layers.contains_key(key);
+        self.redundant_layers.contains_key(key)
     }
 
     /// Return a reference to a queryable map, assuming all updates
@@ -727,7 +727,7 @@ fn test_redundant_layers() {
             map.insert(key2.clone(), "Delta 2".to_string());
             map.rebuild();
             assert_eq!(map.is_redundant(&key1), is_redundant);
-            assert_eq!(map.is_redundant(&key2), false);
+            assert!(!map.is_redundant(&key2));
         }
     }
 }
