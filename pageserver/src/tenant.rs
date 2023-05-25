@@ -310,15 +310,6 @@ fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
 }
 
 impl TimelineUninitMark {
-    /// Useful for initializing timelines, existing on disk after the restart.
-    pub fn dummy() -> Self {
-        Self {
-            uninit_mark_deleted: true,
-            uninit_mark_path: PathBuf::new(),
-            timeline_path: PathBuf::new(),
-        }
-    }
-
     fn new(uninit_mark_path: PathBuf, timeline_path: PathBuf) -> Self {
         Self {
             uninit_mark_deleted: false,
@@ -512,7 +503,7 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
         init_order: Option<&InitializationOrder>,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
 
@@ -524,53 +515,37 @@ impl Tenant {
         .to_owned();
 
         let timeline = {
-            // avoiding holding it across awaits
-            let mut timelines_accessor = self.timelines.lock().unwrap();
-            if timelines_accessor.contains_key(&timeline_id) {
-                anyhow::bail!(
-                    "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
-                );
-            }
-
-            let dummy_timeline = self.create_timeline_data(
+            let timeline = self.create_timeline_data(
                 timeline_id,
                 up_to_date_metadata,
                 ancestor.clone(),
                 remote_client,
                 init_order,
             )?;
+            let new_disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+            // TODO it would be good to ensure that, but apparently a lot of our testing is dependend on that at least
+            // ensure!(new_disk_consistent_lsn.is_valid(),
+            //     "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
+            timeline
+                .load_layer_map(new_disk_consistent_lsn)
+                .with_context(|| {
+                    format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
+                })?;
 
-            let timeline = UninitializedTimeline {
-                owning_tenant: self,
-                timeline_id,
-                raw_timeline: Some((dummy_timeline, TimelineUninitMark::dummy())),
-            };
-            // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
-            // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
-            // will ingest data which may require looking at the layers which are not yet available locally
-            match timeline.initialize_with_lock(ctx, &mut timelines_accessor, true) {
-                Ok(new_timeline) => new_timeline,
-                Err(e) => {
-                    error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
-                    // FIXME using None is a hack, it wont hurt, just ugly.
-                    //     Ideally initialize_with_lock error should return timeline in the error
-                    //     Or return ownership of itself completely so somethin like into_broken
-                    //     can be called directly on Uninitielized timeline
-                    //     also leades to redundant .clone
-                    let broken_timeline = self
-                        .create_timeline_data(
-                            timeline_id,
-                            up_to_date_metadata,
-                            ancestor.clone(),
-                            None,
-                            None,
-                        )
-                        .with_context(|| {
-                            format!("creating broken timeline data for {tenant_id}/{timeline_id}")
-                        })?;
-                    broken_timeline.set_state(TimelineState::Broken);
-                    timelines_accessor.insert(timeline_id, broken_timeline);
-                    return Err(e);
+            // avoiding holding it across awaits
+            let mut timelines_accessor = self.timelines.lock().unwrap();
+            match timelines_accessor.entry(timeline_id) {
+                Entry::Occupied(_) => {
+                    // The uninit mark file acts as a lock that prevents another task from
+                    // initializing the timeline at the same time.
+                    unreachable!(
+                        "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
+                    );
+                }
+                Entry::Vacant(v) => {
+                    v.insert(Arc::clone(&timeline));
+                    timeline.maybe_spawn_flush_loop();
+                    timeline
                 }
             }
         };
