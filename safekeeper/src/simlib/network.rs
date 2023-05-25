@@ -50,6 +50,7 @@ impl Delay {
     }
 }
 
+#[derive(Clone)]
 pub struct NetworkOptions {
     /// Connection will be automatically closed after this timeout.
     pub timeout: Option<u64>,
@@ -211,11 +212,6 @@ impl VirtualConnection {
         };
 
         let buffer = &mut state.buffers[direction as usize];
-        if close {
-            buffer.send_closed = true;
-            return;
-        }
-
         if buffer.send_closed {
             println!(
                 "NET: TCP #{} dropped message {:?} (broken pipe)",

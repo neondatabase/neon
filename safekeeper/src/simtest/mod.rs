@@ -18,7 +18,7 @@ fn run_test() {
     let delay = Delay {
         min: 1,
         max: 10,
-        fail_prob: 0.0,
+        fail_prob: 0.4,
     };
 
     let network = NetworkOptions {
@@ -27,10 +27,12 @@ fn run_test() {
         send_delay: delay.clone(),
     };
 
-    start_simulation(1337, network);
+    for seed in 0..2000 {
+        start_simulation(seed, network.clone(), 1_000_000);
+    }
 }
 
-fn start_simulation(seed: u64, network: NetworkOptions) {
+fn start_simulation(seed: u64, network: NetworkOptions, time_limit: u64) {
     let network = Arc::new(network);
     let world = Arc::new(World::new(seed, network));
     world.register_world();
@@ -51,7 +53,7 @@ fn start_simulation(seed: u64, network: NetworkOptions) {
 
     world.await_all();
 
-    while world.step() {}
+    while world.step() && world.now() < time_limit {}
 
     let disk_data = shared_storage.state.lock().data.clone();
     assert!(verify_data(&disk_data, &u32_data[..]));
