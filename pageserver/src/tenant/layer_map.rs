@@ -56,6 +56,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
 use utils::lsn::Lsn;
+use tracing::*;
 
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::Replacement;
@@ -275,11 +276,14 @@ where
     ///
     pub(self) fn insert_historic_noflush(&mut self, layer: Arc<L>) {
         // TODO: See #3869, resulting #4088, attempted fix and repro #4094
-        self.historic.insert(
-            historic_layer_coverage::LayerKey::from(&*layer),
-            Arc::clone(&layer),
-        );
-
+        let key = historic_layer_coverage::LayerKey::from(&*layer);
+        if self.historic.contains(&key) {
+            warn!(
+                "Attempt to insert duplicate layer {} in layer map",
+                layer.short_id()
+            );
+        }
+        self.historic.insert(key, Arc::clone(&layer));
         if Self::is_l0(&layer) {
             self.l0_delta_layers.push(layer);
         }
