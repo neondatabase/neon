@@ -11,10 +11,12 @@ OBJS = \
 	pagestore_smgr.o \
 	relsize_cache.o \
 	walproposer.o \
-	walproposer_utils.o
+	walproposer_utils.o \
+	control_plane_connector.o
 
 PG_CPPFLAGS = -I$(libpq_srcdir)
 SHLIB_LINK_INTERNAL = $(libpq)
+SHLIB_LINK = -lcurl
 
 EXTENSION = neon
 DATA = neon--1.0.sql
