@@ -226,7 +226,7 @@ pub struct Timeline {
     /// or None if WAL receiver has not received anything for this timeline
     /// yet.
     pub last_received_wal: Mutex<Option<WalReceiverInfo>>,
-    pub walreceiver: WalReceiver,
+    pub walreceiver: Mutex<Option<WalReceiver>>,
 
     /// Relation size cache
     pub rel_size_cache: RwLock<HashMap<RelTag, (Lsn, BlockNumber)>>,
@@ -621,17 +621,27 @@ impl Timeline {
             .await
         {
             Ok(()) => Ok(()),
-            seqwait_error => {
+            Err(e) => {
+                // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
                 drop(_timer);
-                let walreceiver_status = self.walreceiver.status().await;
-                seqwait_error.with_context(|| format!(
-                    "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, {}",
-                    lsn,
-                    self.get_last_record_lsn(),
-                    self.get_disk_consistent_lsn(),
-                    walreceiver_status.map(|status| status.to_human_readable_string())
-                            .unwrap_or_else(|| "WalReceiver status: Not active".to_string()),
-                ))
+                let walreceiver_status = {
+                    match &*self.walreceiver.lock().unwrap() {
+                        None => "stopping or stopped".to_string(),
+                        Some(walreceiver) => match walreceiver.status() {
+                            Some(status) => status.to_human_readable_string(),
+                            None => "Not active".to_string(),
+                        },
+                    }
+                };
+                Err(anyhow::Error::new(e).context({
+                    format!(
+                        "Timed out while waiting for WAL record at LSN {} to arrive, last_record_lsn {} disk consistent LSN={}, WalReceiver status: {}",
+                        lsn,
+                        self.get_last_record_lsn(),
+                        self.get_disk_consistent_lsn(),
+                        walreceiver_status,
+                    )
+                }))
             }
         }
     }
@@ -906,15 +916,10 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn activate(
-        self: &Arc<Self>,
-        broker_client: BrokerClientChannel,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        self.launch_wal_receiver(ctx, broker_client)?;
+    pub fn activate(self: &Arc<Self>, broker_client: BrokerClientChannel, ctx: &RequestContext) {
+        self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
         self.launch_eviction_task();
-        Ok(())
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -1323,15 +1328,7 @@ impl Timeline {
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
 
         let tenant_conf_guard = tenant_conf.read().unwrap();
-        let wal_connect_timeout = tenant_conf_guard
-            .walreceiver_connect_timeout
-            .unwrap_or(conf.default_tenant_conf.walreceiver_connect_timeout);
-        let lagging_wal_timeout = tenant_conf_guard
-            .lagging_wal_timeout
-            .unwrap_or(conf.default_tenant_conf.lagging_wal_timeout);
-        let max_lsn_wal_lag = tenant_conf_guard
-            .max_lsn_wal_lag
-            .unwrap_or(conf.default_tenant_conf.max_lsn_wal_lag);
+
         let evictions_low_residence_duration_metric_threshold =
             Self::get_evictions_low_residence_duration_metric_threshold(
                 &tenant_conf_guard,
@@ -1340,18 +1337,6 @@ impl Timeline {
         drop(tenant_conf_guard);
 
         Arc::new_cyclic(|myself| {
-            let walreceiver = WalReceiver::new(
-                TenantTimelineId::new(tenant_id, timeline_id),
-                Weak::clone(myself),
-                WalReceiverConf {
-                    wal_connect_timeout,
-                    lagging_wal_timeout,
-                    max_lsn_wal_lag,
-                    auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
-                    availability_zone: conf.availability_zone.clone(),
-                },
-            );
-
             let mut result = Timeline {
                 conf,
                 tenant_conf,
@@ -1363,7 +1348,7 @@ impl Timeline {
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
-                walreceiver,
+                walreceiver: Mutex::new(None),
 
                 remote_client: remote_client.map(Arc::new),
 
@@ -1483,17 +1468,49 @@ impl Timeline {
         *flush_loop_state = FlushLoopState::Running;
     }
 
-    pub(super) fn launch_wal_receiver(
-        &self,
+    /// Creates and starts the wal receiver.
+    ///
+    /// This function is expected to be called at most once per Timeline's lifecycle
+    /// when the timeline is activated.
+    fn launch_wal_receiver(
+        self: &Arc<Self>,
         ctx: &RequestContext,
         broker_client: BrokerClientChannel,
-    ) -> anyhow::Result<()> {
+    ) {
         info!(
             "launching WAL receiver for timeline {} of tenant {}",
             self.timeline_id, self.tenant_id
         );
-        self.walreceiver.start(ctx, broker_client)?;
-        Ok(())
+
+        let tenant_conf_guard = self.tenant_conf.read().unwrap();
+        let wal_connect_timeout = tenant_conf_guard
+            .walreceiver_connect_timeout
+            .unwrap_or(self.conf.default_tenant_conf.walreceiver_connect_timeout);
+        let lagging_wal_timeout = tenant_conf_guard
+            .lagging_wal_timeout
+            .unwrap_or(self.conf.default_tenant_conf.lagging_wal_timeout);
+        let max_lsn_wal_lag = tenant_conf_guard
+            .max_lsn_wal_lag
+            .unwrap_or(self.conf.default_tenant_conf.max_lsn_wal_lag);
+        drop(tenant_conf_guard);
+
+        let mut guard = self.walreceiver.lock().unwrap();
+        assert!(
+            guard.is_none(),
+            "multiple launches / re-launches of WAL receiver are not supported"
+        );
+        *guard = Some(WalReceiver::start(
+            Arc::clone(self),
+            WalReceiverConf {
+                wal_connect_timeout,
+                lagging_wal_timeout,
+                max_lsn_wal_lag,
+                auth_token: crate::config::SAFEKEEPER_AUTH_TOKEN.get().cloned(),
+                availability_zone: self.conf.availability_zone.clone(),
+            },
+            broker_client,
+            ctx,
+        ));
     }
 
     ///
