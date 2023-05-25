@@ -1675,8 +1675,9 @@ impl Tenant {
             }
 
             self.state.send_modify(move |current_state| {
-                assert!(
-                    *current_state == TenantState::Activating,
+                assert_eq!(
+                    *current_state,
+                    TenantState::Activating,
                     "set_stopping and set_broken wait for us to leave Activating state",
                 );
                 *current_state = TenantState::Active;
