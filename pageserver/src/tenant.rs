@@ -1704,12 +1704,15 @@ impl Tenant {
     ///
     /// This function is not cancel-safe!
     pub async fn set_stopping(&self) {
-        // `Activating` is a transient state during which no external state transitions are supported.
+        // Get the rx before checking state inside send_if_modified.
+        // This way, when we later rx.changed().await, we won't have missed
+        // any state changes.
         let mut rx = self.state.subscribe();
-        rx.wait_for(|state| state != TenantState::Activating)
-            .await
-            .expect("cannot drop self.state while on a &self method");
-
+        while *rx.borrow() == TenantState::Activating {
+            rx.changed()
+                .await
+                .expect("we're a method on Tenant, so, we're keeping self.state alive here");
+        }
         let mut stopping = false;
         self.state.send_modify(|current_state| {
             match current_state {
@@ -1747,12 +1750,12 @@ impl Tenant {
     }
 
     pub async fn set_broken(&self, reason: String) {
-        // `Activating` is a transient state during which no external state transitions are supported.
         let mut rx = self.state.subscribe();
-        rx.wait_for(|state| state != TenantState::Activating)
-            .await
-            .expect("cannot drop self.state while on a &self method");
-
+        while *rx.borrow() == TenantState::Activating {
+            rx.changed()
+                .await
+                .expect("we're a method on Tenant, so, we're keeping self.state alive here");
+        }
         self.state.send_modify(|current_state| {
             match *current_state {
                 TenantState::Activating => {
