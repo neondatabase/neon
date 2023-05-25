@@ -1366,6 +1366,7 @@ impl Timeline {
                 ancestor_lsn: metadata.ancestor_lsn(),
 
                 metrics: TimelineMetrics::new(
+                    false,
                     &tenant_id,
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
