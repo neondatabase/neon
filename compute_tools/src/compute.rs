@@ -362,6 +362,8 @@ impl ComputeNode {
         };
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
+        // Disable DDL forwarding because control plane already knows about these roles/databases.
+        client.simple_query("SET neon.forward_ddl = false")?;
         let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
@@ -403,7 +405,9 @@ impl ComputeNode {
         self.pg_reload_conf(&mut client)?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
+        // Disable DDL forwarding because control plane already knows about these roles/databases.
         if spec.mode == ComputeMode::Primary {
+            client.simple_query("SET neon.forward_ddl = false")?;
             handle_roles(&spec, &mut client)?;
             handle_databases(&spec, &mut client)?;
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;

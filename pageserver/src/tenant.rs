@@ -452,6 +452,34 @@ struct RemoteStartupData {
     remote_metadata: TimelineMetadata,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WaitToBecomeActiveError {
+    WillNotBecomeActive {
+        tenant_id: TenantId,
+        state: TenantState,
+    },
+    TenantDropped {
+        tenant_id: TenantId,
+    },
+}
+
+impl std::fmt::Display for WaitToBecomeActiveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaitToBecomeActiveError::WillNotBecomeActive { tenant_id, state } => {
+                write!(
+                    f,
+                    "Tenant {} will not become active. Current state: {:?}",
+                    tenant_id, state
+                )
+            }
+            WaitToBecomeActiveError::TenantDropped { tenant_id } => {
+                write!(f, "Tenant {tenant_id} will not become active (dropped)")
+            }
+        }
+    }
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -1744,25 +1772,30 @@ impl Tenant {
         self.state.subscribe()
     }
 
-    pub async fn wait_to_become_active(&self) -> anyhow::Result<()> {
+    pub(crate) async fn wait_to_become_active(&self) -> Result<(), WaitToBecomeActiveError> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
                 TenantState::Loading | TenantState::Attaching => {
                     // in these states, there's a chance that we can reach ::Active
-                    receiver.changed().await?;
+                    receiver.changed().await.map_err(
+                        |_e: tokio::sync::watch::error::RecvError| {
+                            WaitToBecomeActiveError::TenantDropped {
+                                tenant_id: self.tenant_id,
+                            }
+                        },
+                    )?;
                 }
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
                 TenantState::Broken { .. } | TenantState::Stopping => {
                     // There's no chance the tenant can transition back into ::Active
-                    anyhow::bail!(
-                        "Tenant {} will not become active. Current state: {:?}",
-                        self.tenant_id,
-                        &current_state,
-                    );
+                    return Err(WaitToBecomeActiveError::WillNotBecomeActive {
+                        tenant_id: self.tenant_id,
+                        state: current_state,
+                    });
                 }
             }
         }
