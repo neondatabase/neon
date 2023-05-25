@@ -74,7 +74,7 @@ impl<Value: Clone> LayerCoverage<Value> {
         let mut to_update = Vec::new();
         let mut to_remove = Vec::new();
         let mut prev_covered = false;
-        for (k, node) in self.nodes.range(key.clone()) {
+        for (k, node) in self.nodes.range(key) {
             let needs_cover = match node {
                 None => true,
                 Some((h, _)) => h < &lsn.end,
@@ -87,14 +87,8 @@ impl<Value: Clone> LayerCoverage<Value> {
             }
             prev_covered = needs_cover;
         }
-        if !prev_covered {
-            // TODO This line is commented because there's a bug. If uncommented, the
-            //      pageserver_chaos test fails. I suspect it has to do with improper
-            //      handling of key collisions. Will add more tests.
-            // to_remove.push(key.end);
-
-            // TODO check if key.start is redundant too
-        }
+        // TODO check if the nodes inserted at key.start and key.end are safe
+        //      to remove. It's fine to keep them but they could be redundant.
         for k in &to_update {
             self.nodes.insert_mut(*k, Some((lsn.end, value.clone())));
         }
