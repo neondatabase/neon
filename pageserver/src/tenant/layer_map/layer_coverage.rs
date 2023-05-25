@@ -74,7 +74,7 @@ impl<Value: Clone> LayerCoverage<Value> {
         let mut to_update = Vec::new();
         let mut to_remove = Vec::new();
         let mut prev_covered = false;
-        for (k, node) in self.nodes.range(key.clone()) {
+        for (k, node) in self.nodes.range(key) {
             let needs_cover = match node {
                 None => true,
                 Some((h, _)) => h < &lsn.end,
