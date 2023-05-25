@@ -2,6 +2,8 @@
 /// Grouped by the receiver node.
 #[derive(Clone, Debug)]
 pub enum AnyMessage {
+    /// Used internally for notifying node about new incoming connection.
+    InternalConnect,
     Just32(u32),
     ReplCell(ReplCell),
 }

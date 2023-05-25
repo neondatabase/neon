@@ -28,7 +28,7 @@ impl Timing {
     /// Tick-tock the global clock. Return the event ready to be processed
     /// or move the clock forward and then return the event.
     pub fn step(&mut self) -> Option<Pending> {
-        if self.timers.len() == 0 {
+        if self.timers.is_empty() {
             // no future events
             return None;
         }
@@ -90,7 +90,7 @@ impl Ord for Pending {
 
 impl PartialEq for Pending {
     fn eq(&self, other: &Self) -> bool {
-        &(other.time, other.nonce) == &(self.time, self.nonce)
+        (other.time, other.nonce) == (self.time, self.nonce)
     }
 }
 

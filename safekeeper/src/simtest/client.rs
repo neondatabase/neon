@@ -8,11 +8,8 @@ use crate::simlib::{
 pub fn run_client(os: NodeOs, data: &[ReplCell], dst: NodeId) {
     println!("started client");
 
-    os.sleep(os.random(10000));
-
     let sock = os.open_tcp(dst);
     for num in data {
-        os.sleep(os.random(10000));
         println!("sending data: {:?}", num.clone());
         sock.send(AnyMessage::ReplCell(num.clone()));
     }

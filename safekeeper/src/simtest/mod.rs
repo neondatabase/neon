@@ -5,13 +5,34 @@ mod server;
 use std::sync::Arc;
 
 use crate::{
-    simlib::{proto::ReplCell, world::World},
+    simlib::{
+        network::{Delay, NetworkOptions},
+        proto::ReplCell,
+        world::World,
+    },
     simtest::{client::run_client, disk::SharedStorage, server::run_server},
 };
 
 #[test]
-fn start_simulation() {
-    let world = Arc::new(World::new());
+fn run_test() {
+    let delay = Delay {
+        min: 1,
+        max: 10,
+        fail_prob: 0.0,
+    };
+
+    let network = NetworkOptions {
+        timeout: Some(1000),
+        connect_delay: delay.clone(),
+        send_delay: delay.clone(),
+    };
+
+    start_simulation(1337, network);
+}
+
+fn start_simulation(seed: u64, network: NetworkOptions) {
+    let network = Arc::new(network);
+    let world = Arc::new(World::new(seed, network));
     world.register_world();
 
     let client_node = world.new_node();

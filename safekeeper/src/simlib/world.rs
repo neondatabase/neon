@@ -1,12 +1,16 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::{cell::RefCell, ops::DerefMut, sync::{Arc, atomic::AtomicU64}};
+use std::{
+    cell::RefCell,
+    ops::DerefMut,
+    sync::{atomic::AtomicU64, Arc},
+};
 
 use super::{
     chan::Chan,
+    network::{NetworkOptions, VirtualConnection, TCP},
     node_os::NodeOs,
     proto::AnyMessage,
     sync::{Mutex, Park},
-    network::{TCP, VirtualConnection},
     time::{Event, Timing},
     wait_group::WaitGroup,
 };
@@ -32,17 +36,21 @@ pub struct World {
 
     /// Network connection counter.
     connection_counter: AtomicU64,
+
+    /// Network options.
+    network_options: Arc<NetworkOptions>,
 }
 
 impl World {
-    pub fn new() -> World {
+    pub fn new(seed: u64, network_options: Arc<NetworkOptions>) -> World {
         World {
             nodes: Mutex::new(Vec::new()),
             unconditional_parking: Mutex::new(Vec::new()),
             wait_group: WaitGroup::new(),
-            rng: Mutex::new(StdRng::seed_from_u64(1337)),
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
             timing: Mutex::new(Timing::new()),
             connection_counter: AtomicU64::new(0),
+            network_options,
         }
     }
 
@@ -86,9 +94,17 @@ impl World {
         // TODO: replace unwrap() with /dev/null socket.
         let dst = self.get_node(dst).unwrap();
 
-        let id = self.connection_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let conn = VirtualConnection::new(id, self.clone(), src.clone(), dst);
-        
+        let id = self
+            .connection_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let conn = VirtualConnection::new(
+            id,
+            self.clone(),
+            src.clone(),
+            dst,
+            self.network_options.clone(),
+        );
+
         // MessageDirection(0) is src->dst
         TCP::new(conn, 0)
     }
@@ -139,7 +155,7 @@ impl World {
         // when code is waiting for external events.
         let time_event = self.timing.lock().step();
         if let Some(event) = time_event {
-            println!("Processing event: {:?}", event.event);
+            // println!("Processing event: {:?}", event.event);
             event.process();
 
             // to have a clean state after each step, wait for all threads to finish
@@ -229,7 +245,7 @@ impl Node {
             id,
             network: Chan::new(),
             status: Mutex::new(NodeStatus::NotStarted),
-            world: world.clone(),
+            world,
             join_handle: Mutex::new(None),
             rng: Mutex::new(rng),
         }
@@ -330,7 +346,8 @@ impl Node {
 /// Network events and timers.
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
-    Accept,
+    Accept(TCP),
+    Closed(TCP),
     Message((AnyMessage, TCP)),
     // TODO: close?
 }
