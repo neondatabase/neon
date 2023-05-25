@@ -156,7 +156,9 @@ class LLVM:
              profdata: Path,
              objects: List[str],
              sources: List[str],
-             demangler: Optional[Path] = None) -> None:
+             demangler: Optional[Path] = None,
+             output_file: Optional[Path] = None,
+             ) -> None:
 
         cwd = self.cargo.cwd
         objects = list(intersperse('-object', objects))
@@ -180,14 +182,18 @@ class LLVM:
             *objects,
             *sources,
         ]
-        subprocess.check_call(cmd, cwd=cwd)
+        if output_file is not None:
+            with output_file.open('w') as outfile:
+                subprocess.check_call(cmd, cwd=cwd, stdout=outfile)
+        else:
+            subprocess.check_call(cmd, cwd=cwd)
 
     def cov_report(self, **kwargs) -> None:
         self._cov(subcommand='report', **kwargs)
 
-    def cov_export(self, *, kind: str, **kwargs) -> None:
+    def cov_export(self, *, kind: str, output_file: Optional[Path], **kwargs) -> None:
         extras = (f'-format={kind}', )
-        self._cov(subcommand='export', *extras, **kwargs)
+        self._cov(subcommand='export', *extras, output_file=output_file, **kwargs)
 
     def cov_show(self, *, kind: str, output_dir: Optional[Path] = None, **kwargs) -> None:
         extras = [f'-format={kind}']
@@ -282,10 +288,19 @@ class TextReport(Report):
     def generate(self) -> None:
         self.llvm.cov_show(kind='text', **self._common_kwargs())
 
+@dataclass
+class JsonReport(Report):
+    output_file: Path
 
-class LcovReport(Report):
     def generate(self) -> None:
-        self.llvm.cov_export(kind='lcov', **self._common_kwargs())
+        self.llvm.cov_export(kind='text',  output_file=self.output_file, **self._common_kwargs())
+
+@dataclass
+class LcovReport(Report):
+    output_file: Path
+
+    def generate(self) -> None:
+        self.llvm.cov_export(kind='lcov',  output_file=self.output_file, **self._common_kwargs())
 
 
 @dataclass
@@ -474,8 +489,10 @@ class State:
             lambda: HtmlReport(**params, output_dir=self.report_dir),
             'text':
             lambda: TextReport(**params),
+            'json':
+            lambda: JsonReport(**params, output_file=self.report_dir / 'coverage.json'),
             'lcov':
-            lambda: LcovReport(**params),
+            lambda: LcovReport(**params, output_file=self.report_dir / 'lcov.info'),
             'summary':
             lambda: SummaryReport(**params),
             'github':
@@ -543,7 +560,7 @@ self-contained example:
                           help='cargo build profile')
     p_report.add_argument('--format',
                           default='html',
-                          choices=('html', 'text', 'summary', 'lcov', 'github'),
+                          choices=('html', 'text', 'summary', 'json', 'lcov', 'github'),
                           help='report format')
     p_report.add_argument('--input-objects',
                           metavar='FILE',
