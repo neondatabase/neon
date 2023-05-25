@@ -126,6 +126,7 @@ impl std::fmt::Debug for TenantState {
 /// A state of a timeline in pageserver's memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TimelineState {
+    Creating,
     /// The timeline is recognized by the pageserver but is not yet operational.
     /// In particular, the walreceiver connection loop is not running for this timeline.
     /// It will eventually transition to state Active or Broken.

@@ -270,6 +270,8 @@ pub enum TaskKind {
 
     DebugTool,
 
+    CreateTimeline,
+
     #[cfg(test)]
     UnitTest,
 }

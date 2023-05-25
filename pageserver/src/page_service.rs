@@ -51,6 +51,7 @@ use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant;
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::mgr;
 use crate::tenant::mgr::GetTenantError;
 use crate::tenant::{Tenant, Timeline};
@@ -489,7 +490,10 @@ impl PageServerHandler {
         // Create empty timeline
         info!("creating new timeline");
         let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)?;
+
+        let (uninit_mark, timeline) = tenant
+            .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
+            .await?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -503,21 +507,32 @@ impl PageServerHandler {
 
         // Import basebackup provided via CopyData
         info!("importing basebackup");
-        pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
+        let doit = async {
+            pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
+            pgb.flush().await?;
 
-        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
-        timeline
-            .import_basebackup_from_tar(
-                &mut copyin_reader,
-                base_lsn,
-                self.broker_client.clone(),
-                &ctx,
-            )
-            .await?;
+            let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
+            timeline
+                .import_basebackup_from_tar(&mut copyin_reader, base_lsn, &ctx)
+                .await?;
 
-        // Read the end of the tar archive.
-        read_tar_eof(copyin_reader).await?;
+            // Read the end of the tar archive.
+            read_tar_eof(copyin_reader).await?;
+            anyhow::Ok(())
+        };
+        match doit.await {
+            Ok(()) => {
+                // TODO if we fail anywhere above, then we won't clean up the remote index part which create_empty_timeline already uploaded.
+                uninit_mark
+                    .remove_uninit_mark()
+                    .context("remove uninit mark")?;
+            }
+            Err(e) => {
+                debug_assert_current_span_has_tenant_and_timeline_id();
+                error!("error importing basebackup: {:?}", e);
+                crate::tenant::cleanup_timeline_directory(uninit_mark);
+            }
+        }
 
         // TODO check checksum
         // Meanwhile you can verify client-side by taking fullbackup
@@ -525,7 +540,9 @@ impl PageServerHandler {
         // It wouldn't work if base came from vanilla postgres though,
         // since we discard some log files.
 
-        info!("done");
+        info!("done, activating timeline");
+        timeline.activate(self.broker_client.clone(), &ctx);
+
         Ok(())
     }
 

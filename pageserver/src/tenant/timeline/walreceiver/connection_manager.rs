@@ -148,6 +148,7 @@ pub(super) async fn connection_manager_loop_step(
                         Ok(()) => {
                             let new_state = connection_manager_state.timeline.current_state();
                             match new_state {
+                                TimelineState::Creating => unreachable!("walreceiver should never be launched on a timeline in Creating state"),
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
                                 TimelineState::Broken | TimelineState::Stopping => {
