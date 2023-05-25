@@ -275,6 +275,7 @@ fn start_pageserver(
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
     // Launch broker client
+    // The storage_broker::connect call needs to happen inside a tokio runtime thread.
     let broker_client = WALRECEIVER_RUNTIME
         .block_on(async {
             // Note: we do not attempt connecting here (but validate endpoints sanity).
