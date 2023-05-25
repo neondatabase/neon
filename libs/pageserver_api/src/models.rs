@@ -18,7 +18,29 @@ use crate::reltag::RelTag;
 use anyhow::bail;
 use bytes::{BufMut, Bytes, BytesMut};
 
-/// A state of a tenant in pageserver's memory.
+/// The state of a tenant in this pageserver.
+///
+/// ```mermaid
+/// stateDiagram-v2
+///
+///     [*] --> Loading: spawn_load()
+///     [*] --> Attaching: spawn_attach()
+///
+///     Loading --> Activating: activate()
+///     Attaching --> Activating: activate()
+///     Activating --> Active: infallible
+///
+///     Loading --> Broken: load() failure
+///     Attaching --> Broken: attach() failure
+///
+///     Active --> Stopping: set_stopping(), part of shutdown & detach
+///     Stopping --> Broken: late error in remove_tenant_from_memory
+///
+///     Broken --> [*]: ignore / detach / shutdown
+///     Stopping --> [*]: remove_from_memory complete
+///
+///     Active --> Broken: cfg(testing)-only tenant break point
+/// ```
 #[derive(
     Clone,
     PartialEq,
@@ -35,11 +57,11 @@ use bytes::{BufMut, Bytes, BytesMut};
 pub enum TenantState {
     /// This tenant is being loaded from local disk
     Loading,
-    /// This tenant is being downloaded from cloud storage.
+    /// This tenant is being attached to the pageserver.
     Attaching,
     /// The tenant is transitioning from Loading/Attaching to Active.
     Activating,
-    /// Tenant is fully operational
+    /// The tenant has finished activating and is open for business.
     Active,
     /// A tenant is recognized by pageserver, but it is being detached or the
     /// system is being shut down.

@@ -246,11 +246,9 @@ pub async fn shutdown_all_tenants() {
 
     let mut tenants_to_freeze_and_flush = Vec::with_capacity(tenants_to_shut_down.len());
     for (_, tenant) in tenants_to_shut_down {
-        if tenant.is_active() {
-            // updates tenant state, forbidding new GC and compaction iterations from starting
-            tenant.set_stopping().await;
-            tenants_to_freeze_and_flush.push(tenant);
-        }
+        // updates tenant state, forbidding new GC and compaction iterations from starting
+        tenant.set_stopping().await;
+        tenants_to_freeze_and_flush.push(tenant);
     }
 
     // Shut down all existing walreceiver connections and stop accepting the new ones.
