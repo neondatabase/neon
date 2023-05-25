@@ -88,7 +88,11 @@ impl<Value: Clone> LayerCoverage<Value> {
             prev_covered = needs_cover;
         }
         if !prev_covered {
-            to_remove.push(key.end);
+            // TODO This line is commented because there's a bug. If uncommented, the
+            //      pageserver_chaos test fails. I suspect it has to do with improper
+            //      handling of key collisions. Will add more tests.
+            // to_remove.push(key.end);
+
             // TODO check if key.start is redundant too
         }
         for k in &to_update {
