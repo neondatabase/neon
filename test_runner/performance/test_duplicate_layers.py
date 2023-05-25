@@ -16,7 +16,7 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     # These warnings are expected, when the pageserver is restarted abruptly
     env.pageserver.allowed_errors.append(".*found future image layer.*")
     env.pageserver.allowed_errors.append(".*found future delta layer.*")
-    env.pageserver.allowed_errors.append(".*duplicate layer.*")
+    #env.pageserver.allowed_errors.append(".*duplicate layer.*")
 
     pageserver_http = env.pageserver.http_client()
 
@@ -25,8 +25,8 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
         conf={
             "checkpoint_distance": f"{1024 ** 2}",
             "compaction_target_size": f"{1024 ** 2}",
-            "compaction_period": "1 s",
-            "compaction_threshold": "3",
+            "compaction_period": "5 s",
+            "compaction_threshold": "5",
         }
     )
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
@@ -37,6 +37,7 @@ def test_duplicate_layers(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
     with pytest.raises(Exception):
         pg_bin.run_capture(["pgbench", "-P1", "-N", "-c5", "-T500", "-Mprepared", connstr])
+    time.sleep(6)  # let compaction to be performed
     env.pageserver.stop()
     env.pageserver.start()
-    time.sleep(10)  # let compaction to be performed
+    time.sleep(6)  # let compaction to be performed

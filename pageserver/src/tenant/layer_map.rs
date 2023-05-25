@@ -278,7 +278,7 @@ where
         // TODO: See #3869, resulting #4088, attempted fix and repro #4094
         let key = historic_layer_coverage::LayerKey::from(&*layer);
         if self.historic.contains(&key) {
-            warn!(
+            error!(
                 "Attempt to insert duplicate layer {} in layer map",
                 layer.short_id()
             );
