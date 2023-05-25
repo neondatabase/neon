@@ -661,6 +661,9 @@ jobs:
           project: nrdv0s4kcs
           push: true
           tags: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:depot-${{needs.tag.outputs.build-tag}}
+          build-args: |
+            GIT_VERSION=${{ github.sha }}
+            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
@@ -775,7 +778,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.7.3-alpha3
+      VM_BUILDER_VERSION: v0.8.0
 
     steps:
       - name: Checkout

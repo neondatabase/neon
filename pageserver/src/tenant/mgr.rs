@@ -302,11 +302,19 @@ pub async fn create_tenant(
     }).await
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SetNewTenantConfigError {
+    #[error(transparent)]
+    GetTenant(#[from] GetTenantError),
+    #[error(transparent)]
+    Persist(anyhow::Error),
+}
+
 pub async fn set_new_tenant_config(
     conf: &'static PageServerConf,
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-) -> Result<(), TenantStateError> {
+) -> Result<(), SetNewTenantConfigError> {
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
@@ -316,9 +324,18 @@ pub async fn set_new_tenant_config(
         &tenant_config_path,
         new_tenant_conf,
         false,
-    )?;
+    )
+    .map_err(SetNewTenantConfigError::Persist)?;
     tenant.set_new_tenant_config(new_tenant_conf);
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GetTenantError {
+    #[error("Tenant {0} not found")]
+    NotFound(TenantId),
+    #[error("Tenant {0} is not active")]
+    NotActive(TenantId),
 }
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
@@ -326,13 +343,13 @@ pub async fn set_new_tenant_config(
 pub async fn get_tenant(
     tenant_id: TenantId,
     active_only: bool,
-) -> Result<Arc<Tenant>, TenantStateError> {
+) -> Result<Arc<Tenant>, GetTenantError> {
     let m = TENANTS.read().await;
     let tenant = m
         .get(&tenant_id)
-        .ok_or(TenantStateError::NotFound(tenant_id))?;
+        .ok_or(GetTenantError::NotFound(tenant_id))?;
     if active_only && !tenant.is_active() {
-        Err(TenantStateError::NotActive(tenant_id))
+        Err(GetTenantError::NotActive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
     }
@@ -341,7 +358,7 @@ pub async fn get_tenant(
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteTimelineError {
     #[error("Tenant {0}")]
-    Tenant(#[from] TenantStateError),
+    Tenant(#[from] GetTenantError),
 
     #[error("Timeline {0}")]
     Timeline(#[from] crate::tenant::DeleteTimelineError),

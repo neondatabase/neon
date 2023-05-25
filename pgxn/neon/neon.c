@@ -25,6 +25,7 @@
 #include "neon.h"
 #include "walproposer.h"
 #include "pagestore_client.h"
+#include "control_plane_connector.h"
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);
@@ -34,7 +35,11 @@ _PG_init(void)
 {
 	pg_init_libpagestore();
 	pg_init_walproposer();
+	InitControlPlaneConnector();
 
+        // Important: This must happen after other parts of the extension
+        // are loaded, otherwise any settings to GUCs that were set before
+        // the extension was loaded will be removed.
 	EmitWarningsOnPlaceholders("neon");
 }
 
