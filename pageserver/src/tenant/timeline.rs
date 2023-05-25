@@ -622,7 +622,7 @@ impl Timeline {
         {
             Ok(()) => Ok(()),
             Err(e) => {
-                // walreceiver.status() locks internally, don't count that towards the wait_lsn_time_histo
+                // don't count the time spent waiting for lock below, and also in walreceiver.status(), towards the wait_lsn_time_histo
                 drop(_timer);
                 let walreceiver_status = {
                     match &*self.walreceiver.lock().unwrap() {

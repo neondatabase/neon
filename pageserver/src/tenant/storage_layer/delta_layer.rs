@@ -110,7 +110,7 @@ const WILL_INIT: u64 = 1;
 /// reading/deserializing records themselves.
 ///
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-struct BlobRef(u64);
+pub struct BlobRef(pub u64);
 
 impl BlobRef {
     pub fn will_init(&self) -> bool {
@@ -619,7 +619,7 @@ impl DeltaLayer {
 
     /// Create a DeltaLayer struct representing an existing file on disk.
     ///
-    /// This variant is only used for debugging purposes, by the 'pageserver_binutils' binary.
+    /// This variant is only used for debugging purposes, by the 'pagectl' binary.
     pub fn new_for_path(path: &Path, file: File) -> Result<Self> {
         let mut summary_buf = Vec::new();
         summary_buf.resize(PAGE_SZ, 0);
