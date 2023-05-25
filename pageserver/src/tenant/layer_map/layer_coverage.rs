@@ -87,9 +87,8 @@ impl<Value: Clone> LayerCoverage<Value> {
             }
             prev_covered = needs_cover;
         }
-        if !prev_covered {
-            to_remove.push(key.end);
-        }
+        // TODO check if the nodes inserted at key.start and key.end are safe
+        //      to remove. It's fine to keep them but they could be redundant.
         for k in to_update {
             self.nodes.insert_mut(k, Some((lsn.end, value.clone())));
         }
