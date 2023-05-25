@@ -228,7 +228,6 @@ def proxy_with_metric_collector(
 @pytest.mark.asyncio
 async def test_proxy_metric_collection(
     httpserver: HTTPServer,
-    httpserver_listen_address,
     proxy_with_metric_collector: NeonProxy,
     vanilla_pg: VanillaPostgres,
 ):
