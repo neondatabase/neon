@@ -24,7 +24,9 @@ use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::mgr::{TenantMapInsertError, TenantStateError};
+use crate::tenant::mgr::{
+    GetTenantError, SetNewTenantConfigError, TenantMapInsertError, TenantStateError,
+};
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
@@ -140,6 +142,36 @@ impl From<TenantStateError> for ApiError {
     }
 }
 
+impl From<GetTenantError> for ApiError {
+    fn from(tse: GetTenantError) -> ApiError {
+        match tse {
+            GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid)),
+            e @ GetTenantError::NotActive(_) => {
+                // Why is this not `ApiError::NotFound`?
+                // Because we must be careful to never return 404 for a tenant if it does
+                // in fact exist locally. If we did, the caller could draw the conclusion
+                // that it can attach the tenant to another PS and we'd be in split-brain.
+                //
+                // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
+                ApiError::InternalServerError(anyhow::Error::new(e))
+            }
+        }
+    }
+}
+
+impl From<SetNewTenantConfigError> for ApiError {
+    fn from(e: SetNewTenantConfigError) -> ApiError {
+        match e {
+            SetNewTenantConfigError::GetTenant(tid) => {
+                ApiError::NotFound(anyhow!("tenant {}", tid))
+            }
+            e @ SetNewTenantConfigError::Persist(_) => {
+                ApiError::InternalServerError(anyhow::Error::new(e))
+            }
+        }
+    }
+}
+
 impl From<crate::tenant::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::DeleteTimelineError) -> Self {
         use crate::tenant::DeleteTimelineError::*;
@@ -159,7 +191,7 @@ impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
         match value {
             // Report Precondition failed so client can distinguish between
             // "tenant is missing" case from "timeline is missing"
-            Tenant(TenantStateError::NotFound(..)) => {
+            Tenant(GetTenantError::NotFound(..)) => {
                 ApiError::PreconditionFailed("Requested tenant is missing")
             }
             Tenant(t) => ApiError::from(t),
