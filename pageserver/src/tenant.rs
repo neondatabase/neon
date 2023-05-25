@@ -78,7 +78,7 @@ use utils::{
     lsn::{Lsn, RecordLsn},
 };
 
-mod blob_io;
+pub mod blob_io;
 pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
@@ -1611,7 +1611,7 @@ impl Tenant {
 
     /// Changes tenant status to active, unless shutdown was already requested.
     fn activate(
-        &self,
+        self: &Arc<Self>,
         broker_client: BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -1647,7 +1647,7 @@ impl Tenant {
 
                     // Spawn gc and compaction loops. The loops will shut themselves
                     // down when they notice that the tenant is inactive.
-                    tasks::start_background_loops(self.tenant_id);
+                    tasks::start_background_loops(self);
 
                     let mut activated_timelines = 0;
                     let mut timelines_broken_during_activation = 0;

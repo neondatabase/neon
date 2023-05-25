@@ -2588,6 +2588,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
 
 [[package]]
+name = "pagectl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap 4.2.2",
+ "git-version",
+ "pageserver",
+ "postgres_ffi",
+ "svg_fmt",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "pageserver"
 version = "0.1.0"
 dependencies = [
