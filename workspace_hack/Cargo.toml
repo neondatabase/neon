@@ -27,7 +27,6 @@ futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-hashbrown = { version = "0.12", features = ["raw"] }
 itertools = { version = "0.10" }
 libc = { version = "0.2", features = ["extra_traits"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -39,7 +38,7 @@ num-traits = { version = "0.2", features = ["i128"] }
 prost = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
-regex-syntax = { version = "0.6" }
+regex-syntax = { version = "0.7" }
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 ring = { version = "0.16", features = ["std"] }
 rustls = { version = "0.20", features = ["dangerous_configuration"] }
@@ -62,7 +61,6 @@ url = { version = "2", features = ["serde"] }
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
 either = { version = "1" }
-hashbrown = { version = "0.12", features = ["raw"] }
 itertools = { version = "0.10" }
 libc = { version = "0.2", features = ["extra_traits"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -70,7 +68,7 @@ memchr = { version = "2" }
 nom = { version = "7" }
 prost = { version = "0.11" }
 regex = { version = "1" }
-regex-syntax = { version = "0.6" }
+regex-syntax = { version = "0.7" }
 serde = { version = "1", features = ["alloc", "derive"] }
 syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full", "visit", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "full", "visit-mut"] }
