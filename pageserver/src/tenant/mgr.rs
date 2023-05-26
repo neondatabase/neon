@@ -19,7 +19,9 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
+use crate::tenant::{
+    create_tenant_files, CreateTenantFilesMode, SetStoppingError, Tenant, TenantState,
+};
 use crate::IGNORED_TENANT_FILE_NAME;
 
 use utils::fs_ext::PathExt;
@@ -247,7 +249,7 @@ pub async fn shutdown_all_tenants() {
     let mut tenants_to_freeze_and_flush = Vec::with_capacity(tenants_to_shut_down.len());
     for (_, tenant) in tenants_to_shut_down {
         // updates tenant state, forbidding new GC and compaction iterations from starting
-        tenant.set_stopping().await;
+        let _ = tenant.set_stopping().await; // TODO handle error
         tenants_to_freeze_and_flush.push(tenant);
     }
 
@@ -587,14 +589,20 @@ where
     {
         let tenants_accessor = TENANTS.write().await;
         match tenants_accessor.get(&tenant_id) {
-            Some(tenant) => match tenant.current_state() {
-                TenantState::Attaching
-                | TenantState::Loading
-                | TenantState::Activating
-                | TenantState::Broken { .. }
-                | TenantState::Active => tenant.set_stopping().await,
-                TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
-            },
+            Some(tenant) => {
+                match tenant.set_stopping().await {
+                    Ok(()) => {
+                        // we won, continue stopping procedure
+                    }
+                    Err(SetStoppingError::Broken) => {
+                        // continue the procedure, let's hope the closure can deal with broken tenants
+                    }
+                    Err(SetStoppingError::AlreadyStopping) => {
+                        // the tenant is already stopping or broken, don't do anything
+                        return Err(TenantStateError::IsStopping(tenant_id));
+                    }
+                }
+            }
             None => return Err(TenantStateError::NotFound(tenant_id)),
         }
     }
