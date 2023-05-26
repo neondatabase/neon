@@ -1515,6 +1515,8 @@ impl Tenant {
     ///
     /// Used at graceful shutdown.
     ///
+    // don't have a tenant_id field, freeze_and_flush adds it
+    #[instrument(skip_all)]
     pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
         // Scan through the hashmap and collect a list of all the timelines,
         // while holding the lock. Then drop the lock and actually perform the
@@ -1529,13 +1531,15 @@ impl Tenant {
         };
 
         for timeline in &timelines_to_flush {
-            timeline.freeze_and_flush().await.with_context(|| {
-                format!(
-                    "freeze_and_flush timeline {} (state={:?})",
-                    timeline.timeline_id,
-                    timeline.current_state()
-                )
-            })?;
+            match timeline.freeze_and_flush().await {
+                Ok(()) => (),
+                Err(err) => {
+                    tracing::error!(
+                        timeline_id=%timeline.timeline_id, err=?err,
+                        "freeze_and_flush timeline failed",
+                    );
+                }
+            }
         }
 
         Ok(())

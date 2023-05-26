@@ -24,7 +24,7 @@ pub mod walredo;
 use std::path::Path;
 
 use crate::task_mgr::TaskKind;
-use tracing::info;
+use tracing::{info, instrument};
 
 /// Current storage format version
 ///
@@ -45,6 +45,7 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
 
+#[instrument(skip_all)]
 pub async fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.

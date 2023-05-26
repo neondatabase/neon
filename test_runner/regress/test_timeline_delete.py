@@ -272,7 +272,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         ".*Ignoring new state, equal to the existing one: Stopping"
     )
     env.pageserver.allowed_errors.append(
-        ".*during shutdown: cannot flush frozen layers when flush_loop is not running, state is Exited"
+        ".*shutdown_pageserver:.*freeze_and_flush.*cannot flush frozen layers when flush_loop is not running, state is Exited"
     )
 
     ps_http = env.pageserver.http_client()
