@@ -37,6 +37,8 @@ pub const DEFAULT_REMOTE_STORAGE_MAX_SYNC_ERRORS: u32 = 10;
 /// https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html
 /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
 /// https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/
+///
+/// IAM ratelimit should never be observed with caching credentials provider.
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
 /// No limits on the client side, which currenltly means 1000 for AWS S3.
 /// https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax
