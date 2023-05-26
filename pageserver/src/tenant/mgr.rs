@@ -174,6 +174,7 @@ pub fn schedule_local_tenant_processing(
         })?,
         "Cannot load tenant from empty directory {tenant_path:?}"
     );
+    // TODO ensure there's no uninit mark / handle it correctly during ignore and load
 
     let tenant_id = tenant_path
         .file_name()

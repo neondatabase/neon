@@ -133,9 +133,21 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         with pytest.raises(Exception):
             import_tar(empty_file, empty_file)
 
+    # yet, timeline is created and needs to be removed
+    log.info("deleting timeline")
+    client.timeline_delete(tenant, timeline)
+
+    log.info("importing corrupt_base_tar")
+
     # Importing corrupt backup fails
     with pytest.raises(Exception):
         import_tar(corrupt_base_tar, wal_tar)
+
+    # yet, timeline is created and needs to be removed
+    log.info("deleting timeline")
+    client.timeline_delete(tenant, timeline)
+
+    log.info("importing base_plus_garbage_tar")
 
     # A tar with trailing garbage is currently accepted. It prints a warnings
     # to the pageserver log, however. Check that.

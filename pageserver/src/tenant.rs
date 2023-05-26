@@ -31,7 +31,6 @@ use std::fs;
 use std::fs::DirEntry;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io;
 use std::io::Write;
 use std::ops::Bound::Included;
 use std::path::Path;
@@ -157,81 +156,152 @@ pub struct Tenant {
     eviction_task_tenant_state: tokio::sync::Mutex<EvictionTaskTenantState>,
 }
 
-/// An uninit mark file, created along the timeline dir to ensure the timeline either gets fully initialized and loaded into pageserver's memory,
-/// or gets removed eventually.
-///
-/// XXX: it's important to create it near the timeline dir, not inside it to ensure timeline dir gets removed first.
-#[must_use]
-pub(crate) struct TimelineUninitMark {
-    uninit_mark_deleted: bool,
-    uninit_mark_path: PathBuf,
+/// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
+#[inline(always)]
+fn compare_arced_timeline(left: &Arc<Timeline>, right: &Arc<Timeline>) -> bool {
+    // See: https://github.com/rust-lang/rust/issues/103763
+    // See: https://github.com/rust-lang/rust/pull/106450
+    let left = Arc::as_ptr(left) as *const ();
+    let right = Arc::as_ptr(right) as *const ();
+    left == right
+}
+
+#[derive(Debug, thiserror::Error)]
+enum StartCreatingTimelineError {
+    /// If this variant is returned, no on-disk changes have been made for this timeline yet
+    /// and all in-memory changes have been rolled back.
+    #[error("timeline {timeline_id} already exists ({existing_state:?})")]
+    AlreadyExists {
+        timeline_id: TimelineId,
+        existing_state: &'static str,
+    },
+    /// If this variant is returned, a placeholder timeline in `TimelineState::Creating` is present
+    /// in the `Tenant::timelines` map, and there may or may not be on-disk state for the timeline.
+    ///
+    /// The correct way to handle this error is to
+    /// 1. log the error and
+    /// 2. keep the placeholder timeline in memory and
+    /// 3. instruct the operator to restart pageserver / ignore+load the tenant.
+    ///
+    /// The restart / ignore+load operation will resume the cleanup.
+    ///
+    /// TODO: ignore + load (schedule_local_tenant_processing) need to check for presence of uninit mark.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+pub(crate) struct CreatingTimelineGuard<'t> {
+    owning_tenant: &'t Tenant,
+    timeline_id: TimelineId,
     timeline_path: PathBuf,
+    uninit_mark_path: PathBuf,
+    placeholder_timeline: Arc<Timeline>,
 }
 
-pub(crate) fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
-    let timeline_path = &uninit_mark.timeline_path;
-    match ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
-        Ok(()) => {
-            info!("Timeline dir {timeline_path:?} removed successfully, removing the uninit mark")
-        }
-        Err(e) => {
-            error!("Failed to clean up uninitialized timeline directory {timeline_path:?}: {e:?}")
+impl<'t> CreatingTimelineGuard<'t> {
+    /// If this returns an error, the placeholder may or may not be gone from the FS but it's not guaranteed that the removal is durable yet.
+    /// The correct way forward in this case is to leave the placeholder tenant in place and require manual intervention.
+    /// A log message instructing the operator how to do it is logged.
+    ///
+    /// TODO Pageserver restart in response to an error may result in the timeline loading correctly, but technically, the uninit marker removal might not be durable yet.
+    pub(crate) fn creation_complete_remove_uninit_marker_and_get_placeholder_timeline(
+        self,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let doit = || {
+            let uninit_mark_exists = self
+                .uninit_mark_path
+                .try_exists()
+                .expect("if the filesystem can't answer, let's just die");
+            if uninit_mark_exists {
+                std::fs::remove_file(&self.uninit_mark_path).context("remove uninit mark")?;
+            }
+            // always fsync, we might be a restarted pageserver
+            let uninit_mark_path_parent = self
+                .uninit_mark_path
+                .parent()
+                .expect("uninit mark always has parent");
+            crashsafe::fsync(&uninit_mark_path_parent).with_context(|| {
+                format!("fsync uninit mark parent dir {uninit_mark_path_parent:?}")
+            })?;
+            anyhow::Ok(())
+        };
+        match doit() {
+            Ok(()) => Ok(self.placeholder_timeline),
+            Err(e) => {
+                error!("failed to remove uninit mark, timeline will remain in memory and be undeletable, ignore+fix_manually+load the affected tenant: {:?}", e);
+                Err(e.context("remove unint mark"))
+            }
         }
     }
-    drop(uninit_mark); // mark handles its deletion on drop, gets retained if timeline dir exists
-}
 
-impl TimelineUninitMark {
-    pub(crate) fn new(uninit_mark_path: PathBuf, timeline_path: PathBuf) -> Self {
-        Self {
-            uninit_mark_deleted: false,
-            uninit_mark_path,
-            timeline_path,
-        }
-    }
-
-    pub(crate) fn remove_uninit_mark(mut self) -> anyhow::Result<()> {
-        if !self.uninit_mark_deleted {
-            self.delete_mark_file_if_present()?;
-        }
-
-        Ok(())
-    }
-
-    fn delete_mark_file_if_present(&mut self) -> anyhow::Result<()> {
-        let uninit_mark_file = &self.uninit_mark_path;
-        let uninit_mark_parent = uninit_mark_file
-            .parent()
-            .with_context(|| format!("Uninit mark file {uninit_mark_file:?} has no parent"))?;
-        ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
-            format!("Failed to remove uninit mark file at path {uninit_mark_file:?}")
-        })?;
-        crashsafe::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
-        self.uninit_mark_deleted = true;
-
-        Ok(())
-    }
-}
-
-impl Drop for TimelineUninitMark {
-    fn drop(&mut self) {
-        if !self.uninit_mark_deleted {
+    /// Tries to remove the creating timeline's timeline dir and uninit marker.
+    /// If this suceeeds, the placeholder timeline is removed from the owning tenant's timelines map, enabling a clean retry.
+    /// If the filesystem operations fail, the placeholder timeline will remain in the owning tenant's timelines map, preventing retries.
+    /// In that case, we log an error and instruct the operator to manually remove the timeline dir and uninit marker.
+    /// Pageserver restart will re-attempt the cleanup as well.
+    pub(crate) fn creation_failed(self) {
+        // remove timeline dir and uninit mark before removing from memory, so, subsequent attempts won't get surprised if we fail to remove on-disk state
+        let doit = || {
+            let uninit_mark_exists = self
+                .uninit_mark_path
+                .try_exists()
+                .expect("if the filesystem can't answer, let's just die");
+            assert!(
+                uninit_mark_exists,
+                "uninit mark should exist at {:?}",
+                self.uninit_mark_path
+            );
             if self.timeline_path.exists() {
-                error!(
-                    "Uninit mark {} is not removed, timeline {} stays uninitialized\n{}",
-                    self.uninit_mark_path.display(),
-                    self.timeline_path.display(),
-                    std::backtrace::Backtrace::force_capture(),
-                )
-            } else {
-                // unblock later timeline creation attempts
-                warn!(
-                    "Removing intermediate uninit mark file {}",
-                    self.uninit_mark_path.display()
-                );
-                if let Err(e) = self.delete_mark_file_if_present() {
-                    error!("Failed to remove the uninit mark file: {e}")
+                std::fs::remove_dir_all(&self.timeline_path).context("remove timeline dir")?;
+            }
+            // always fsync before removal, we might be a restarted pageserver
+            let timeline_dir_parent = self
+                .timeline_path
+                .parent()
+                .expect("timeline dir always has parent");
+            crashsafe::fsync(&timeline_dir_parent).with_context(|| {
+                format!("fsync timeline dir parent dir {timeline_dir_parent:?}")
+            })?;
+            std::fs::remove_file(&self.uninit_mark_path).context("remove uninit mark")?;
+            let uninit_mark_path_parent = self
+                .uninit_mark_path
+                .parent()
+                .expect("uninit mark always has parent");
+            crashsafe::fsync(&uninit_mark_path_parent).with_context(|| {
+                format!("fsync uninit mark parent dir {uninit_mark_path_parent:?}")
+            })?;
+            anyhow::Ok(())
+        };
+        match doit() {
+            Ok(()) => {
+                self.remove_placeholder_timeline_object_from_inmemory_map();
+            }
+            Err(e) => {
+                error!(timeline_id=%self.timeline_id, error=?e, "failure during cleanup of creating timeline, it will remain in memory and be undeletable, ignore+fix_manually+load the affected tenant");
+                return;
+            }
+        }
+    }
+
+    fn remove_placeholder_timeline_object_from_inmemory_map(&self) {
+        let Ok(mut timelines) = self.owning_tenant.timelines.lock() else {
+            error!("timelines lock poisoned, not removing placeholder timeline");
+            return;
+        };
+        match timelines.entry(self.timeline_id) {
+            Entry::Occupied(entry) => {
+                if compare_arced_timeline(&self.placeholder_timeline, entry.get()) {
+                    info!("removing placeholder timeline from in-memory map");
+                    entry.remove();
+                } else {
+                    // TODO do we really need this branch?
+                    info!(
+                        "placeholder timeline was replaced with another timeline, not removing it"
+                    );
                 }
+            }
+            Entry::Vacant(_) => {
+                error!("either placeholder timeline or real timeline should be present in the timelines map");
             }
         }
     }
@@ -393,9 +463,9 @@ impl Tenant {
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         cause: TimelineLoadCause,
-        first_save: bool,
+        first_save: bool, // TODO need to think about this
         _ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         let tenant_id = self.tenant_id;
 
         let (up_to_date_metadata, picked_local) = merge_local_remote_metadata(
@@ -432,7 +502,8 @@ impl Tenant {
                         TimelineLoadCause::TenantLoad  |
                         TimelineLoadCause::Attach => unreachable!("when loading a full tenant, the loading entity is responsible for ensuring there are no duplicates, cause={cause:?}"),
                         TimelineLoadCause::TimelineCreate { placeholder_timeline } => {
-                            assert!(Arc::ptr_eq(e.get(), &placeholder_timeline), "when creating a timeline, the placeholder timeline should be the one in the map");
+                            // replace placeholder with real one
+                            assert!(compare_arced_timeline(e.get(), &placeholder_timeline), "when creating a timeline, the placeholder timeline should be the one in the map");
                             e.insert(Arc::clone(&timeline));
                             timeline
                         },
@@ -486,7 +557,7 @@ impl Tenant {
             .context("save_metadata")?;
         }
 
-        Ok(())
+        Ok(timeline)
     }
 
     ///
@@ -738,7 +809,8 @@ impl Tenant {
             true,
             ctx,
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     /// Create a placeholder Tenant object for a broken tenant
@@ -969,7 +1041,7 @@ impl Tenant {
         local_metadata: TimelineMetadata,
         cause: TimelineLoadCause,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<Arc<Timeline>>> {
         debug_assert_current_span_has_tenant_id();
 
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
@@ -1003,7 +1075,7 @@ impl Tenant {
                             )
                             .context("remove_dir_all")?;
 
-                            return Ok(());
+                            return Ok(None);
                         }
                     };
 
@@ -1030,17 +1102,19 @@ impl Tenant {
             None
         };
 
-        self.timeline_init_and_sync(
-            timeline_id,
-            remote_client,
-            remote_startup_data,
-            Some(local_metadata),
-            ancestor,
-            cause,
-            false,
-            ctx,
-        )
-        .await
+        let inserted_timeline = self
+            .timeline_init_and_sync(
+                timeline_id,
+                remote_client,
+                remote_startup_data,
+                Some(local_metadata),
+                ancestor,
+                cause,
+                false,
+                ctx,
+            )
+            .await?;
+        Ok(Some(inserted_timeline))
     }
 
     pub fn tenant_id(&self) -> TenantId {
@@ -1095,28 +1169,14 @@ impl Tenant {
         initdb_lsn: Lsn,
         pg_version: u32,
         ctx: &RequestContext,
-    ) -> anyhow::Result<(TimelineUninitMark, Arc<Timeline>)> {
+    ) -> anyhow::Result<(CreatingTimelineGuard, Arc<Timeline>)> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot create empty timelines on inactive tenant"
         );
         // TODO: dedup with create_timeline
 
-        // Reserve the timeline id, locking out any other tasks that might try to create the timeline.
-        let placeholder_timeline: Arc<Timeline> = {
-            match self.timelines.lock().unwrap().entry(new_timeline_id) {
-                Entry::Occupied(_) => {
-                    anyhow::bail!("timeline {new_timeline_id} already exists");
-                }
-                Entry::Vacant(v) => {
-                    let placeholder = self.new_timeline_creating_placeholder(new_timeline_id);
-                    v.insert(Arc::clone(&placeholder));
-                    placeholder
-                }
-            }
-        };
-
-        let uninit_mark = self.create_timeline_uninit_mark(new_timeline_id)?;
+        let guard = self.start_creating_timeline(new_timeline_id)?;
 
         // Create timeline on-disk & remote state.
         //
@@ -1141,66 +1201,72 @@ impl Tenant {
                 pg_version,
             );
 
-            self.create_timeline_files(&uninit_mark.timeline_path, new_timeline_id, &new_metadata)
+            self.create_timeline_files(&guard.timeline_path, new_timeline_id, &new_metadata)
                 .context("create_timeline_files")?;
 
             if let Some(remote_client) = remote_client.as_ref() {
                 remote_client.init_upload_queue_for_empty_remote(&new_metadata)?;
-            }
-
-            // XXX do we need to remove uninit mark before starting uploads?
-            // If we die with uninit mark present, we'll leak the uploaded state in S3.
-
-            if let Some(remote_client) = remote_client.as_ref() {
-                // The branch_timeline / bootstrap_timeline functions are responsible for initializing
-                // the the upload queue with the right metadata and scheduling an index upload.
-                //
-                // Here, we wait for those uploads to finish so that when we return
-                // Ok, the timeline is durable in remote storage.
+                remote_client
+                    .schedule_index_upload_for_metadata_update(&new_metadata)
+                    .context("branch initial metadata upload")?;
                 remote_client
                     .wait_completion()
                     .await
                     .context("wait for initial uploads to complete")?;
             }
+
+            // XXX do we need to remove uninit mark before starting uploads?
+            // If we die with uninit mark present, we'll leak the uploaded state in S3.
             Ok(())
         };
-        match create_ondisk_state.await {
-            Ok(()) => {}
+        let guard = match create_ondisk_state.await {
+            Ok(()) => {
+                // caller will continue with creation, so, not calling creation complete yet
+                guard
+            }
             Err(err) => {
                 debug_assert_current_span_has_tenant_and_timeline_id();
                 error!(
                     "failed to create on-disk state for new_timeline_id={new_timeline_id}: {err:#}"
                 );
-                cleanup_timeline_directory(uninit_mark);
+                guard.creation_failed();
                 return Err(err);
             }
-        }
+        };
 
         // From here on, it's just like during pageserver startup.
         let metadata = load_metadata(self.conf, new_timeline_id, self.tenant_id)
             .context("load newly created on-disk timeline metadata")?;
-        self.load_local_timeline(
-            new_timeline_id,
-            metadata,
-            TimelineLoadCause::TimelineCreate {
-                placeholder_timeline: Arc::clone(&placeholder_timeline),
-            },
-            ctx,
-        )
-        .await
-        .context("load newly created on-disk timeline state")?;
+        let real_timeline = self
+            .load_local_timeline(
+                new_timeline_id,
+                metadata,
+                TimelineLoadCause::TimelineCreate {
+                    placeholder_timeline: Arc::clone(&guard.placeholder_timeline),
+                },
+                ctx,
+            )
+            .await
+            .context("load newly created on-disk timeline state")?
+            .expect("load_local_timeline should have created the timeline");
 
         let real_timeline = match self.timelines.lock().unwrap().entry(new_timeline_id) {
             Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
             Entry::Occupied(entry) => {
-                assert_eq!(placeholder_timeline.current_state(), TimelineState::Creating);
-                assert!(!Arc::ptr_eq(&placeholder_timeline, entry.get()), "load_local_timeline should have replaced the placeholder with the real timeline");
+                assert_eq!(guard.placeholder_timeline.current_state(), TimelineState::Creating);
+                assert!(compare_arced_timeline(&real_timeline, entry.get()));
+                assert_eq!(real_timeline.current_state(), TimelineState::Loading);
+                assert!(!compare_arced_timeline(&guard.placeholder_timeline, entry.get()), "load_local_timeline should have replaced the placeholder with the real timeline");
                 Arc::clone(entry.get())
             }
         };
 
         // Do not activate, the caller is responsible for that.
-        Ok((uninit_mark, real_timeline))
+        // Also, the caller is still responsible for removing the uninit mark file.
+        // Before that happens, the timeline will be removed during restart.
+        //
+        // TODO: can we just keep the placeholder in there for longer?
+        Ok((guard, real_timeline))
 
         // TODO
         // unfinished_timeline
@@ -1287,7 +1353,7 @@ impl Tenant {
 
     /// This is not cancel-safe. Run inside a task_mgr task.
     async fn create_timeline_task(
-        self: &Arc<Tenant>,
+        self: &Tenant,
         new_timeline_id: TimelineId,
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
@@ -1295,45 +1361,14 @@ impl Tenant {
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<Option<Arc<Timeline>>> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         anyhow::ensure!(
             self.is_active(),
             "Cannot create timelines on inactive tenant"
         );
 
-        // Reserve the timeline id, locking out any other tasks that might try to create the timeline.
-        let placeholder_timeline: Arc<Timeline> = {
-            match self.timelines.lock().unwrap().entry(new_timeline_id) {
-                Entry::Occupied(_) => {
-                    anyhow::bail!("timeline {new_timeline_id} already exists");
-                }
-                Entry::Vacant(v) => {
-                    let placeholder = self.new_timeline_creating_placeholder(new_timeline_id);
-                    v.insert(Arc::clone(&placeholder));
-                    placeholder
-                }
-            }
-        };
-        let _placeholder_guard = scopeguard::guard(self, |self_clone| {
-            let Ok(mut timelines) = self_clone.timelines.lock() else {
-                error!("timelines lock poisoned, not removing placeholder timeline");
-                return;
-            };
-            match timelines.entry(new_timeline_id) {
-                Entry::Occupied(entry) => {
-                    if Arc::ptr_eq(&placeholder_timeline, entry.get()) {
-                        debug!("removing placeholder timeline");
-                        entry.remove();
-                    } else {
-                        info!("placeholder timeline was replaced with another timeline, not removing it");
-                    }
-                }
-                Entry::Vacant(_) => {
-                    error!("either placeholder timeline or real timeline should be present in the timelines map");
-                }
-            }
-        });
-
-        let uninit_mark = self.create_timeline_uninit_mark(new_timeline_id)?;
+        let guard = self.start_creating_timeline(new_timeline_id)?;
 
         // Create timeline on-disk & remote state.
         //
@@ -1383,7 +1418,7 @@ impl Tenant {
                         new_timeline_id,
                         ancestor_start_lsn,
                         remote_client,
-                        &uninit_mark,
+                        &guard,
                         ctx,
                     )
                     .await?;
@@ -1392,7 +1427,7 @@ impl Tenant {
                     self.bootstrap_timeline(
                         new_timeline_id,
                         pg_version,
-                        &uninit_mark,
+                        &guard,
                         remote_client,
                         ctx,
                     )
@@ -1404,21 +1439,26 @@ impl Tenant {
             // If we die with uninit mark present, we'll leak the uploaded state in S3.
             Ok(())
         };
-        match create_ondisk_state.await {
+        let placeholder_timeline = match create_ondisk_state.await {
             Ok(()) => {
-                uninit_mark
-                    .remove_uninit_mark()
-                    .context("remove uninit mark")?;
+                match guard.creation_complete_remove_uninit_marker_and_get_placeholder_timeline() {
+                    Ok(placeholder_timeline) => placeholder_timeline,
+                    Err(err) => {
+                        error!(
+                            "failed to remove uninit marker for new_timeline_id={new_timeline_id}: {err:#}"
+                        );
+                        return Err(err);
+                    }
+                }
             }
             Err(err) => {
-                debug_assert_current_span_has_tenant_and_timeline_id();
                 error!(
                     "failed to create on-disk state for new_timeline_id={new_timeline_id}: {err:#}"
                 );
-                cleanup_timeline_directory(uninit_mark);
+                guard.creation_failed();
                 return Err(err);
             }
-        }
+        };
 
         // From here on, it's just like during pageserver startup.
         let metadata = load_metadata(self.conf, new_timeline_id, self.tenant_id)
@@ -1438,7 +1478,7 @@ impl Tenant {
             Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
             Entry::Occupied(entry) => {
                 assert_eq!(placeholder_timeline.current_state(), TimelineState::Creating);
-                assert!(!Arc::ptr_eq(&placeholder_timeline, entry.get()), "load_local_timeline should have replaced the placeholder with the real timeline");
+                assert!(!compare_arced_timeline(&placeholder_timeline, entry.get()), "load_local_timeline should have replaced the placeholder with the real timeline");
                 Arc::clone(entry.get())
             }
         };
@@ -1574,6 +1614,11 @@ impl Tenant {
             };
 
             let timeline = Arc::clone(timeline_entry.get());
+            if timeline.current_state() == TimelineState::Creating {
+                return Err(DeleteTimelineError::Other(anyhow::anyhow!(
+                    "timeline is creating"
+                )));
+            }
             timeline.set_state(TimelineState::Stopping);
 
             drop(timelines);
@@ -2114,7 +2159,11 @@ impl Tenant {
         ))
     }
 
-    fn new_timeline_creating_placeholder(&self, timeline_id: TimelineId) -> Arc<Timeline> {
+    /// See the error variants for how to handle errors from this function.
+    fn start_creating_timeline(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Result<CreatingTimelineGuard, StartCreatingTimelineError> {
         // copied this from unit tests
         let dummy_metadata = TimelineMetadata::new(
             Lsn(0),
@@ -2127,7 +2176,7 @@ impl Tenant {
             // but it should be consistent with the one in the tests
             crate::DEFAULT_PG_VERSION,
         );
-        Timeline::new(
+        let placeholder = Timeline::new(
             self.conf,
             Arc::clone(&self.tenant_conf),
             &dummy_metadata,
@@ -2138,7 +2187,99 @@ impl Tenant {
             None,
             crate::DEFAULT_PG_VERSION,
             true,
-        )
+        );
+
+        let timeline_path = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+        let uninit_mark_path = self
+            .conf
+            .timeline_uninit_mark_file_path(self.tenant_id, timeline_id);
+
+        let check_uninit_mark_not_exist = || {
+            let exists = uninit_mark_path
+                .try_exists()
+                .context("check uninit mark file existence")?;
+            if exists {
+                return Err(StartCreatingTimelineError::AlreadyExists {
+                    timeline_id,
+                    existing_state: "uninit mark file",
+                });
+            }
+            Ok(())
+        };
+
+        let check_timeline_path_not_exist = || {
+            let exists = timeline_path
+                .try_exists()
+                .context("check timeline directory existence")?;
+            if exists {
+                return Err(StartCreatingTimelineError::AlreadyExists {
+                    timeline_id,
+                    existing_state: "timeline directory",
+                });
+            }
+            Ok(())
+        };
+
+        // TODO should we check for state in s3 as well?
+        // Right now we're overwriting IndexPart but other layer files would remain.
+
+        // do a few opportunistic checks before trying to get out spot
+        check_uninit_mark_not_exist()?;
+        check_timeline_path_not_exist()?;
+
+        // Put the placeholder into the map.
+        let placeholder_timeline: Arc<Timeline> = {
+            match self.timelines.lock().unwrap().entry(timeline_id) {
+                Entry::Occupied(_) => {
+                    return Err(StartCreatingTimelineError::AlreadyExists {
+                        timeline_id,
+                        existing_state: "timelines map entry",
+                    });
+                }
+                Entry::Vacant(v) => {
+                    v.insert(Arc::clone(&placeholder));
+                    placeholder
+                }
+            }
+        };
+
+        // Do all the checks again, now we know that we won.
+        check_timeline_path_not_exist()?;
+        check_uninit_mark_not_exist()?;
+
+        let create_uninit_mark_file = || {
+            fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&uninit_mark_path)
+                .context("create uninit mark file")?;
+            crashsafe::fsync_file_and_parent(&uninit_mark_path)
+                .context("fsync uninit mark file and parent dir")?;
+            Ok(uninit_mark_path)
+        };
+
+        let uninit_mark_path = match create_uninit_mark_file() {
+            Ok(uninit_mark_path) => uninit_mark_path,
+            Err(err) => {
+                // If we failed to create the uninit mark, remove the placeholder
+                // timeline from the map.
+                let removed = self.timelines.lock().unwrap().remove(&timeline_id);
+                assert!(removed.is_some());
+                assert!(compare_arced_timeline(
+                    &removed.unwrap(),
+                    &placeholder_timeline
+                ));
+                return Err(err);
+            }
+        };
+
+        Ok(CreatingTimelineGuard {
+            owning_tenant: self,
+            timeline_id,
+            placeholder_timeline,
+            uninit_mark_path,
+            timeline_path,
+        })
     }
 
     fn new(
@@ -2502,11 +2643,11 @@ impl Tenant {
         start_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let uninit_mark = self
-            .create_timeline_uninit_mark(dst_id)
-            .context("create uninit mark")?;
+        let guard = self
+            .new_timeline_creating_placeholder(dst_id)
+            .context("create creating placeholder timeline")?;
 
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, None, &uninit_mark, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, None, &guard, ctx)
             .await
             .context("branch_timeline_impl")?;
 
@@ -2540,18 +2681,11 @@ impl Tenant {
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
         remote_client: Option<Arc<RemoteTimelineClient>>,
-        uninit_mark: &TimelineUninitMark,
+        guard: &CreatingTimelineGuard<'_>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        self.branch_timeline_impl(
-            src_timeline,
-            dst_id,
-            start_lsn,
-            remote_client,
-            uninit_mark,
-            ctx,
-        )
-        .await
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, remote_client, guard, ctx)
+            .await
     }
 
     async fn branch_timeline_impl(
@@ -2560,7 +2694,7 @@ impl Tenant {
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
         remote_client: Option<Arc<RemoteTimelineClient>>,
-        uninit_mark: &TimelineUninitMark,
+        guard: &CreatingTimelineGuard<'_>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let src_id = src_timeline.timeline_id;
@@ -2639,7 +2773,7 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
-        self.create_timeline_files(&uninit_mark.timeline_path, dst_id, &metadata)
+        self.create_timeline_files(&guard.timeline_path, dst_id, &metadata)
             .context("create timeline files")?;
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
@@ -2672,7 +2806,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         pg_version: u32,
-        uninit_mark: &TimelineUninitMark,
+        guard: &CreatingTimelineGuard<'_>,
         remote_client: Option<Arc<RemoteTimelineClient>>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
@@ -2723,7 +2857,7 @@ impl Tenant {
             pg_version,
         );
 
-        self.create_timeline_files(&uninit_mark.timeline_path, timeline_id, &new_metadata)
+        self.create_timeline_files(&guard.timeline_path, timeline_id, &new_metadata)
             .context("create timeline files")?;
 
         if let Some(remote_client) = remote_client.as_ref() {
@@ -2831,41 +2965,6 @@ impl Tenant {
         .context("Failed to create timeline metadata")?;
 
         Ok(())
-    }
-
-    /// Attempts to create an uninit mark file for the timeline initialization.
-    /// Bails, if the timeline is already loaded into the memory (i.e. initialized before), or the uninit mark file already exists.
-    ///
-    /// This way, we need to hold the timelines lock only for small amount of time during the mark check/creation per timeline init.
-    fn create_timeline_uninit_mark(
-        &self,
-        timeline_id: TimelineId,
-    ) -> anyhow::Result<TimelineUninitMark> {
-        let tenant_id = self.tenant_id;
-
-        let timeline_path = self.conf.timeline_path(&timeline_id, &tenant_id);
-        anyhow::ensure!(
-            !timeline_path.exists(),
-            "Timeline {} already exists, cannot create its uninit mark file",
-            timeline_path.display()
-        );
-
-        let uninit_mark_path = self
-            .conf
-            .timeline_uninit_mark_file_path(tenant_id, timeline_id);
-        fs::File::create(&uninit_mark_path) // XXX create_new
-            .context("Failed to create uninit mark file")
-            .and_then(|_| {
-                crashsafe::fsync_file_and_parent(&uninit_mark_path)
-                    .context("Failed to fsync uninit mark file")
-            })
-            .with_context(|| {
-                format!("Failed to crate uninit mark for timeline {tenant_id}/{timeline_id}")
-            })?;
-
-        let uninit_mark = TimelineUninitMark::new(uninit_mark_path, timeline_path);
-
-        Ok(uninit_mark)
     }
 
     /// Gathers inputs from all of the timelines to produce a sizing model input.
@@ -3191,19 +3290,6 @@ pub fn dump_layerfile_from_path(
     }
 
     Ok(())
-}
-
-fn ignore_absent_files<F>(fs_operation: F) -> io::Result<()>
-where
-    F: Fn() -> io::Result<()>,
-{
-    fs_operation().or_else(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })
 }
 
 #[cfg(test)]

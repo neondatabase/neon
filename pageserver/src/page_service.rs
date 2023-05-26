@@ -491,7 +491,7 @@ impl PageServerHandler {
         info!("creating new timeline");
         let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
 
-        let (uninit_mark, timeline) = tenant
+        let (guard, timeline) = tenant
             .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
             .await?;
 
@@ -522,15 +522,25 @@ impl PageServerHandler {
         };
         match doit.await {
             Ok(()) => {
-                // TODO if we fail anywhere above, then we won't clean up the remote index part which create_empty_timeline already uploaded.
-                uninit_mark
-                    .remove_uninit_mark()
-                    .context("remove uninit mark")?;
+                match guard.creation_complete_remove_uninit_marker_and_get_placeholder_timeline() {
+                    Ok(placeholder_timeline) => {
+                        // create_empty_timeline already replaced the placeholder timeline with the real one.
+                        // However, we still need to remove the placeholder.
+                        let _ = placeholder_timeline; // don't need it anymore
+                    }
+                    Err(err) => {
+                        error!(
+                            "failed to remove uninit marker for new_timeline_id={timeline_id}: {err:#}"
+                        );
+                        return Err(QueryError::Other(err.context("remove uninit marker file")));
+                    }
+                }
             }
             Err(e) => {
                 debug_assert_current_span_has_tenant_and_timeline_id();
                 error!("error importing basebackup: {:?}", e);
-                crate::tenant::cleanup_timeline_directory(uninit_mark);
+                guard.creation_failed();
+                return Err(QueryError::Other(e));
             }
         }
 
