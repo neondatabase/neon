@@ -33,8 +33,10 @@ struct RequestId(String);
 /// Adds a tracing info_span! instrumentation around the handler events,
 /// logs the request start and end events for non-GET requests and non-200 responses.
 ///
+/// Usage: Replace `my_handler` with `|r| request_span(r, my_handler)`
+///
 /// Use this to distinguish between logs of different HTTP requests: every request handler wrapped
-/// in this type will get request info logged in the wrapping span, including the unique request ID.
+/// with this will get request info logged in the wrapping span, including the unique request ID.
 ///
 /// This also handles errors, logging them and converting them to an HTTP error response.
 ///
@@ -54,65 +56,56 @@ struct RequestId(String);
 /// tries to achive with its `.instrument` used in the current approach.
 ///
 /// If needed, a declarative macro to substitute the |r| ... closure boilerplate could be introduced.
-pub struct RequestSpan<R, H>(pub H)
+pub async fn request_span<R, H>(request: Request<Body>, handler: H) -> R::Output
 where
     R: Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static;
-
-impl<R, H> RequestSpan<R, H>
-where
-    R: Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
-    H: Fn(Request<Body>) -> R + Send + Sync + 'static,
+    H: FnOnce(Request<Body>) -> R + Send + Sync + 'static,
 {
-    /// Creates a tracing span around inner request handler and executes the request handler in the contex of that span.
-    /// Use as `|r| RequestSpan(my_handler).handle(r)` instead of `my_handler` as the request handler to get the span enabled.
-    pub async fn handle(self, request: Request<Body>) -> Result<Response<Body>, ApiError> {
-        let request_id = request.context::<RequestId>().unwrap_or_default().0;
-        let method = request.method();
-        let path = request.uri().path();
-        let request_span = info_span!("request", %method, %path, %request_id);
+    let request_id = request.context::<RequestId>().unwrap_or_default().0;
+    let method = request.method();
+    let path = request.uri().path();
+    let request_span = info_span!("request", %method, %path, %request_id);
 
-        let log_quietly = method == Method::GET;
-        async move {
-            let cancellation_guard = RequestCancelled::warn_when_dropped_without_responding();
-            if log_quietly {
-                debug!("Handling request");
-            } else {
-                info!("Handling request");
-            }
-
-            // No special handling for panics here. There's a `tracing_panic_hook` from another
-            // module to do that globally.
-            let res = (self.0)(request).await;
-
-            cancellation_guard.disarm();
-
-            // Log the result if needed.
-            //
-            // We also convert any errors into an Ok response with HTTP error code here.
-            // `make_router` sets a last-resort error handler that would do the same, but
-            // we prefer to do it here, before we exit the request span, so that the error
-            // is still logged with the span.
-            //
-            // (Because we convert errors to Ok response, we never actually return an error,
-            // and we could declare the function to return the never type (`!`). However,
-            // using `routerify::RouterBuilder` requires a proper error type.)
-            match res {
-                Ok(response) => {
-                    let response_status = response.status();
-                    if log_quietly && response_status.is_success() {
-                        debug!("Request handled, status: {response_status}");
-                    } else {
-                        info!("Request handled, status: {response_status}");
-                    }
-                    Ok(response)
-                }
-                Err(err) => Ok(api_error_handler(err)),
-            }
+    let log_quietly = method == Method::GET;
+    async move {
+        let cancellation_guard = RequestCancelled::warn_when_dropped_without_responding();
+        if log_quietly {
+            debug!("Handling request");
+        } else {
+            info!("Handling request");
         }
-        .instrument(request_span)
-        .await
+
+        // No special handling for panics here. There's a `tracing_panic_hook` from another
+        // module to do that globally.
+        let res = handler(request).await;
+
+        cancellation_guard.disarm();
+
+        // Log the result if needed.
+        //
+        // We also convert any errors into an Ok response with HTTP error code here.
+        // `make_router` sets a last-resort error handler that would do the same, but
+        // we prefer to do it here, before we exit the request span, so that the error
+        // is still logged with the span.
+        //
+        // (Because we convert errors to Ok response, we never actually return an error,
+        // and we could declare the function to return the never type (`!`). However,
+        // using `routerify::RouterBuilder` requires a proper error type.)
+        match res {
+            Ok(response) => {
+                let response_status = response.status();
+                if log_quietly && response_status.is_success() {
+                    debug!("Request handled, status: {response_status}");
+                } else {
+                    info!("Request handled, status: {response_status}");
+                }
+                Ok(response)
+            }
+            Err(err) => Ok(api_error_handler(err)),
+        }
     }
+    .instrument(request_span)
+    .await
 }
 
 /// Drop guard to WARN in case the request was dropped before completion.
@@ -212,9 +205,7 @@ pub fn make_router() -> RouterBuilder<hyper::Body, ApiError> {
         .middleware(Middleware::post_with_info(
             add_request_id_header_to_response,
         ))
-        .get("/metrics", |r| {
-            RequestSpan(prometheus_metrics_handler).handle(r)
-        })
+        .get("/metrics", |r| request_span(r, prometheus_metrics_handler))
         .err_handler(route_error_handler)
 }
 
@@ -225,12 +216,14 @@ pub fn attach_openapi_ui(
     ui_mount_path: &'static str,
 ) -> RouterBuilder<hyper::Body, ApiError> {
     router_builder
-        .get(spec_mount_path, move |r| {
-            RequestSpan(move |_| async move { Ok(Response::builder().body(Body::from(spec)).unwrap()) })
-                .handle(r)
-        })
-        .get(ui_mount_path, move |r| RequestSpan( move |_| async move {
-            Ok(Response::builder().body(Body::from(format!(r#"
+        .get(spec_mount_path,
+            move |r| request_span(r, move |_| async move {
+                Ok(Response::builder().body(Body::from(spec)).unwrap())
+            })
+        )
+        .get(ui_mount_path,
+             move |r| request_span(r, move |_| async move {
+                 Ok(Response::builder().body(Body::from(format!(r#"
                 <!DOCTYPE html>
                 <html lang="en">
                 <head>
@@ -260,7 +253,8 @@ pub fn attach_openapi_ui(
                 </body>
                 </html>
             "#, spec_mount_path))).unwrap())
-        }).handle(r))
+             })
+        )
 }
 
 fn parse_token(header_value: &str) -> Result<&str, ApiError> {
