@@ -88,7 +88,6 @@
 use crate::task_mgr::TaskKind;
 
 // The main structure of this module, see module-level comment.
-#[derive(Clone, Debug)]
 pub struct RequestContext {
     task_kind: TaskKind,
     download_behavior: DownloadBehavior,
@@ -96,7 +95,7 @@ pub struct RequestContext {
 
 /// Desired behavior if the operation requires an on-demand download
 /// to proceed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DownloadBehavior {
     /// Download the layer file. It can take a while.
     Download,

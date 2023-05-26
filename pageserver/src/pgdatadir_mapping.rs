@@ -1133,15 +1133,19 @@ impl<'a> DatadirModification<'a> {
         let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let mut result: anyhow::Result<()> = Ok(());
-        self.pending_updates.retain(|&key, value| {
-            if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, self.lsn, value);
-                false
-            } else {
-                true
+        let mut retain = HashSet::new();
+        let result = async {
+            for (key, value) in &self.pending_updates {
+                if is_rel_block_key(*key) || is_slru_block_key(*key) {
+                    writer.put(*key, self.lsn, value).await?;
+                } else {
+                    retain.insert(*key);
+                }
             }
-        });
+            anyhow::Ok(())
+        }
+        .await;
+        self.pending_updates.retain(|key, _| retain.contains(key));
         result?;
 
         if pending_nblocks != 0 {
@@ -1164,10 +1168,10 @@ impl<'a> DatadirModification<'a> {
         self.pending_nblocks = 0;
 
         for (key, value) in self.pending_updates.drain() {
-            writer.put(key, lsn, &value)?;
+            writer.put(key, lsn, &value).await?;
         }
         for key_range in self.pending_deletions.drain(..) {
-            writer.delete(key_range, lsn)?;
+            writer.delete(key_range, lsn).await?;
         }
 
         writer.finish_write(lsn);
