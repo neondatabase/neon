@@ -3209,6 +3209,7 @@ pub mod harness {
                 evictions_low_residence_duration_metric_threshold: Some(
                     tenant_conf.evictions_low_residence_duration_metric_threshold,
                 ),
+                forced_image_creation_limit: Some(tenant_conf.forced_image_creation_limit),
             }
         }
     }

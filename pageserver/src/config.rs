@@ -108,7 +108,7 @@ pub mod defaults {
 
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
-
+#forced_image_creation_limit = {DEFAULT_FORCED_IMAGE_CREATION_LIMIT}
 # [remote_storage]
 
 "###
@@ -825,6 +825,13 @@ impl PageServerConf {
             t_conf.evictions_low_residence_duration_metric_threshold = Some(parse_toml_duration(
                 "evictions_low_residence_duration_metric_threshold",
                 item,
+            )?);
+        }
+
+        if let Some(forced_image_creation_limit) = item.get("forced_image_creation_limit") {
+            t_conf.forced_image_creation_limit = Some(parse_toml_u64(
+                "forced_image_creation_limit",
+                forced_image_creation_limit,
             )?);
         }
 

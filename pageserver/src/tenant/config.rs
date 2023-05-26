@@ -42,6 +42,7 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
+    pub const DEFAULT_FORCED_IMAGE_CREATION_LIMIT: u64 = 1024;
 }
 
 /// Per-tenant configuration options
@@ -99,6 +100,7 @@ pub struct TenantConf {
     // See the corresponding metric's help string.
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
+    pub forced_image_creation_limit: u64,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -175,6 +177,10 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub forced_image_creation_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +248,9 @@ impl TenantConfOpt {
             evictions_low_residence_duration_metric_threshold: self
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
+            forced_image_creation_limit: self
+                .forced_image_creation_limit
+                .unwrap_or(global_conf.forced_image_creation_limit),
         }
     }
 }
@@ -278,6 +287,7 @@ impl Default for TenantConf {
                 DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
+            forced_image_creation_limit: DEFAULT_FORCED_IMAGE_CREATION_LIMIT,
         }
     }
 }
@@ -372,6 +382,7 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
                     ))?,
             );
         }
+        tenant_conf.forced_image_creation_limit = request_data.forced_image_creation_limit;
 
         Ok(tenant_conf)
     }
