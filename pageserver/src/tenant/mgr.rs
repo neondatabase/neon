@@ -264,22 +264,31 @@ pub async fn shutdown_all_tenants() {
     // It's mesed up.
     let mut join_set = JoinSet::new();
     let mut tenants_to_freeze_and_flush = Vec::with_capacity(tenants_to_shut_down.len());
-    for (_, tenant) in tenants_to_shut_down {
-        join_set.spawn(async move {
-            match tenant.set_stopping().await {
-                Ok(()) => Ok(tenant),
-                Err(e) => Err((tenant, e)),
+    for (tenant_id, tenant) in tenants_to_shut_down {
+        join_set.spawn(
+            async move {
+                match tenant.set_stopping().await {
+                    Ok(()) => Ok(tenant),
+                    Err(e) => Err((tenant, e)),
+                }
             }
-        });
+            .instrument(info_span!("set_stopping", %tenant_id)),
+        );
     }
+
+    let mut panicked = 0;
+
     while let Some(res) = join_set.join_next().await {
         match res {
             Err(join_error) if join_error.is_cancelled() => {
                 unreachable!("we are not cancelling any of the futures");
             }
-            Err(join_error) => {
+            Err(join_error) if join_error.is_panic() => {
                 // cannot really do anything, as this panic is likely a bug
-                error!("task that calls set_stopping() panicked, don't know which tenant this is, and probably freeze_and_flush won't work anyways: {join_error:#}");
+                panicked += 1;
+            }
+            Err(join_error) => {
+                warn!("unknown kind of JoinError: {join_error}");
             }
             Ok(retval) => match retval {
                 Ok(tenant) => {
@@ -297,6 +306,10 @@ pub async fn shutdown_all_tenants() {
                 }
             },
         }
+    }
+
+    if panicked > 0 {
+        warn!(panicked, "observed panicks while stopping tenants");
     }
 
     // Shut down all existing walreceiver connections and stop accepting the new ones.
