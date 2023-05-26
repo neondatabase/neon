@@ -118,9 +118,8 @@ pub enum TimelineState {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_timeline_id: Option<TimelineId>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub new_timeline_id: TimelineId,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
@@ -131,12 +130,11 @@ pub struct TimelineCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_tenant_id: Option<TenantId>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub new_tenant_id: TenantId,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -184,10 +182,10 @@ pub struct StatusResponse {
 }
 
 impl TenantCreateRequest {
-    pub fn new(new_tenant_id: Option<TenantId>) -> TenantCreateRequest {
+    pub fn new(new_tenant_id: TenantId) -> TenantCreateRequest {
         TenantCreateRequest {
             new_tenant_id,
-            ..Default::default()
+            config: TenantConfig::default(),
         }
     }
 }
@@ -231,6 +229,28 @@ impl TenantConfigRequest {
             evictions_low_residence_duration_metric_threshold: None,
         };
         TenantConfigRequest { tenant_id, config }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TenantAttachRequest {
+    pub config: TenantAttachConfig,
+}
+
+/// Newtype to enforce deny_unknown_fields on TenantConfig for
+/// its usage inside `TenantAttachRequest`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantAttachConfig {
+    #[serde(flatten)]
+    allowing_unknown_fields: TenantConfig,
+}
+
+impl std::ops::Deref for TenantAttachConfig {
+    type Target = TenantConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.allowing_unknown_fields
     }
 }
 
@@ -791,6 +811,18 @@ mod tests {
             "unknown_field": "unknown_value".to_string(),
         });
         let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
+
+        let attach_request = json!({
+            "config": {
+                "unknown_field": "unknown_value".to_string(),
+            },
+        });
+        let err = serde_json::from_value::<TenantAttachRequest>(attach_request).unwrap_err();
         assert!(
             err.to_string().contains("unknown field `unknown_field`"),
             "expect unknown field `unknown_field` error, got: {}",

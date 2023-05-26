@@ -5,12 +5,14 @@ use anyhow::{anyhow, Context, Result};
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
-use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
+use pageserver_api::models::{DownloadRemoteLayersTaskSpawnRequest, TenantAttachRequest};
 use remote_storage::GenericRemoteStorage;
+use storage_broker::BrokerClientChannel;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::http::endpoint::RequestSpan;
+use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
 use super::models::{
@@ -23,7 +25,9 @@ use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::mgr::{TenantMapInsertError, TenantStateError};
+use crate::tenant::mgr::{
+    GetTenantError, SetNewTenantConfigError, TenantMapInsertError, TenantStateError,
+};
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
@@ -50,6 +54,7 @@ struct State {
     auth: Option<Arc<JwtAuth>>,
     allowlist_routes: Vec<Uri>,
     remote_storage: Option<GenericRemoteStorage>,
+    broker_client: storage_broker::BrokerClientChannel,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 }
 
@@ -58,6 +63,7 @@ impl State {
         conf: &'static PageServerConf,
         auth: Option<Arc<JwtAuth>>,
         remote_storage: Option<GenericRemoteStorage>,
+        broker_client: storage_broker::BrokerClientChannel,
         disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
     ) -> anyhow::Result<Self> {
         let allowlist_routes = ["/v1/status", "/v1/doc", "/swagger.yml"]
@@ -69,6 +75,7 @@ impl State {
             auth,
             allowlist_routes,
             remote_storage,
+            broker_client,
             disk_usage_eviction_state,
         })
     }
@@ -139,6 +146,36 @@ impl From<TenantStateError> for ApiError {
     }
 }
 
+impl From<GetTenantError> for ApiError {
+    fn from(tse: GetTenantError) -> ApiError {
+        match tse {
+            GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid)),
+            e @ GetTenantError::NotActive(_) => {
+                // Why is this not `ApiError::NotFound`?
+                // Because we must be careful to never return 404 for a tenant if it does
+                // in fact exist locally. If we did, the caller could draw the conclusion
+                // that it can attach the tenant to another PS and we'd be in split-brain.
+                //
+                // (We can produce this variant only in `mgr::get_tenant(..., active=true)` calls).
+                ApiError::InternalServerError(anyhow::Error::new(e))
+            }
+        }
+    }
+}
+
+impl From<SetNewTenantConfigError> for ApiError {
+    fn from(e: SetNewTenantConfigError) -> ApiError {
+        match e {
+            SetNewTenantConfigError::GetTenant(tid) => {
+                ApiError::NotFound(anyhow!("tenant {}", tid))
+            }
+            e @ SetNewTenantConfigError::Persist(_) => {
+                ApiError::InternalServerError(anyhow::Error::new(e))
+            }
+        }
+    }
+}
+
 impl From<crate::tenant::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::DeleteTimelineError) -> Self {
         use crate::tenant::DeleteTimelineError::*;
@@ -158,7 +195,7 @@ impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
         match value {
             // Report Precondition failed so client can distinguish between
             // "tenant is missing" case from "timeline is missing"
-            Tenant(TenantStateError::NotFound(..)) => {
+            Tenant(GetTenantError::NotFound(..)) => {
                 ApiError::PreconditionFailed("Requested tenant is missing")
             }
             Tenant(t) => ApiError::from(t),
@@ -264,11 +301,11 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
-    let new_timeline_id = request_data
-        .new_timeline_id
-        .unwrap_or_else(TimelineId::generate);
+    let new_timeline_id = request_data.new_timeline_id;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
+
+    let state = get_state(&request);
 
     async {
         let tenant = mgr::get_tenant(tenant_id, true).await?;
@@ -277,6 +314,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             request_data.ancestor_timeline_id.map(TimelineId::from),
             request_data.ancestor_start_lsn,
             request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
+            state.broker_client.clone(),
             &ctx,
         )
         .await {
@@ -290,7 +328,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             Err(err) => Err(ApiError::InternalServerError(err)),
         }
     }
-    .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
+    .instrument(info_span!("timeline_create", tenant = %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await
 }
 
@@ -386,10 +424,15 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     json_response(StatusCode::OK, result)
 }
 
-// TODO makes sense to provide tenant config right away the same way as it handled in tenant_create
-async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_attach_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
+
+    let maybe_body: Option<TenantAttachRequest> = json_request_or_empty_body(&mut request).await?;
+    let tenant_conf = match maybe_body {
+        Some(request) => TenantConfOpt::try_from(&*request.config).map_err(ApiError::BadRequest)?,
+        None => TenantConfOpt::default(),
+    };
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
@@ -401,9 +444,8 @@ async fn tenant_attach_handler(request: Request<Body>) -> Result<Response<Body>,
         mgr::attach_tenant(
             state.conf,
             tenant_id,
-            // XXX: Attach should provide the config, especially during tenant migration.
-            //      See https://github.com/neondatabase/neon/issues/1555
-            TenantConfOpt::default(),
+            tenant_conf,
+            state.broker_client.clone(),
             remote_storage.clone(),
             &ctx,
         )
@@ -453,9 +495,15 @@ async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, A
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let state = get_state(&request);
-    mgr::load_tenant(state.conf, tenant_id, state.remote_storage.clone(), &ctx)
-        .instrument(info_span!("load", tenant = %tenant_id))
-        .await?;
+    mgr::load_tenant(
+        state.conf,
+        tenant_id,
+        state.broker_client.clone(),
+        state.remote_storage.clone(),
+        &ctx,
+    )
+    .instrument(info_span!("load", tenant = %tenant_id))
+    .await?;
 
     json_response(StatusCode::ACCEPTED, ())
 }
@@ -507,7 +555,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         }
 
         let state = tenant.current_state();
-        Ok(TenantInfo {
+        Result::<_, ApiError>::Ok(TenantInfo {
             id: tenant_id,
             state: state.clone(),
             current_physical_size: Some(current_physical_size),
@@ -515,8 +563,7 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
         })
     }
     .instrument(info_span!("tenant_status_handler", tenant = %tenant_id))
-    .await
-    .map_err(ApiError::InternalServerError)?;
+    .await?;
 
     json_response(StatusCode::OK, tenant_info)
 }
@@ -715,6 +762,8 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
 }
 
 async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let request_data: TenantCreateRequest = json_request(&mut request).await?;
+    let target_tenant_id = request_data.new_tenant_id;
     check_permission(&request, None)?;
 
     let _timer = STORAGE_TIME_GLOBAL
@@ -722,17 +771,10 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         .expect("bug")
         .start_timer();
 
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    let request_data: TenantCreateRequest = json_request(&mut request).await?;
-
     let tenant_conf =
         TenantConfOpt::try_from(&request_data.config).map_err(ApiError::BadRequest)?;
 
-    let target_tenant_id = request_data
-        .new_tenant_id
-        .map(TenantId::from)
-        .unwrap_or_else(TenantId::generate);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
     let state = get_state(&request);
 
@@ -740,6 +782,7 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
         state.conf,
         tenant_conf,
         target_tenant_id,
+        state.broker_client.clone(),
         state.remote_storage.clone(),
         &ctx,
     )
@@ -1095,6 +1138,7 @@ pub fn make_router(
     conf: &'static PageServerConf,
     launch_ts: &'static LaunchTimestamp,
     auth: Option<Arc<JwtAuth>>,
+    broker_client: BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     disk_usage_eviction_state: Arc<disk_usage_eviction_task::State>,
 ) -> anyhow::Result<RouterBuilder<hyper::Body, ApiError>> {
@@ -1141,8 +1185,14 @@ pub fn make_router(
 
     Ok(router
         .data(Arc::new(
-            State::new(conf, auth, remote_storage, disk_usage_eviction_state)
-                .context("Failed to initialize router state")?,
+            State::new(
+                conf,
+                auth,
+                remote_storage,
+                broker_client,
+                disk_usage_eviction_state,
+            )
+            .context("Failed to initialize router state")?,
         ))
         .get("/v1/status", |r| RequestSpan(status_handler).handle(r))
         .put(

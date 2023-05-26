@@ -59,9 +59,10 @@ static TENANTS: Lazy<RwLock<TenantsMap>> = Lazy::new(|| RwLock::new(TenantsMap::
 /// Initialize repositories with locally available timelines.
 /// Timelines that are only partially available locally (remote storage has more data than this pageserver)
 /// are scheduled for download and added to the tenant once download is completed.
-#[instrument(skip(conf, remote_storage))]
+#[instrument(skip_all)]
 pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
@@ -117,6 +118,7 @@ pub async fn init_tenant_mgr(
                     match schedule_local_tenant_processing(
                         conf,
                         &tenant_dir_path,
+                        broker_client.clone(),
                         remote_storage.clone(),
                         &ctx,
                     ) {
@@ -151,6 +153,7 @@ pub async fn init_tenant_mgr(
 pub fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
@@ -187,7 +190,7 @@ pub fn schedule_local_tenant_processing(
     let tenant = if conf.tenant_attaching_mark_file_path(&tenant_id).exists() {
         info!("tenant {tenant_id} has attaching mark file, resuming its attach operation");
         if let Some(remote_storage) = remote_storage {
-            match Tenant::spawn_attach(conf, tenant_id, remote_storage, ctx) {
+            match Tenant::spawn_attach(conf, tenant_id, broker_client, remote_storage, ctx) {
                 Ok(tenant) => tenant,
                 Err(e) => {
                     error!("Failed to spawn_attach tenant {tenant_id}, reason: {e:#}");
@@ -205,7 +208,7 @@ pub fn schedule_local_tenant_processing(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, remote_storage, ctx)
+        Tenant::spawn_load(conf, tenant_id, broker_client, remote_storage, ctx)
     };
     Ok(tenant)
 }
@@ -276,6 +279,7 @@ pub async fn create_tenant(
     conf: &'static PageServerConf,
     tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<Arc<Tenant>, TenantMapInsertError> {
@@ -298,7 +302,7 @@ pub async fn create_tenant(
         });
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, remote_storage, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, ctx)?;
         let created_tenant = scopeguard::guard(created_tenant, |tenant| {
             // As we might have removed the directory, the tenant should directly go into the broken state.
             tenant.set_broken("failed to create".into());
@@ -321,11 +325,19 @@ pub async fn create_tenant(
     tenant_map_insert(tenant_id, func).await
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SetNewTenantConfigError {
+    #[error(transparent)]
+    GetTenant(#[from] GetTenantError),
+    #[error(transparent)]
+    Persist(anyhow::Error),
+}
+
 pub async fn set_new_tenant_config(
     conf: &'static PageServerConf,
     new_tenant_conf: TenantConfOpt,
     tenant_id: TenantId,
-) -> Result<(), TenantStateError> {
+) -> Result<(), SetNewTenantConfigError> {
     info!("configuring tenant {tenant_id}");
     let tenant = get_tenant(tenant_id, true).await?;
 
@@ -335,9 +347,18 @@ pub async fn set_new_tenant_config(
         &tenant_config_path,
         new_tenant_conf,
         false,
-    )?;
+    )
+    .map_err(SetNewTenantConfigError::Persist)?;
     tenant.set_new_tenant_config(new_tenant_conf);
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GetTenantError {
+    #[error("Tenant {0} not found")]
+    NotFound(TenantId),
+    #[error("Tenant {0} is not active")]
+    NotActive(TenantId),
 }
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.
@@ -345,13 +366,13 @@ pub async fn set_new_tenant_config(
 pub async fn get_tenant(
     tenant_id: TenantId,
     active_only: bool,
-) -> Result<Arc<Tenant>, TenantStateError> {
+) -> Result<Arc<Tenant>, GetTenantError> {
     let m = TENANTS.read().await;
     let tenant = m
         .get(&tenant_id)
-        .ok_or(TenantStateError::NotFound(tenant_id))?;
+        .ok_or(GetTenantError::NotFound(tenant_id))?;
     if active_only && !tenant.is_active() {
-        Err(TenantStateError::NotActive(tenant_id))
+        Err(GetTenantError::NotActive(tenant_id))
     } else {
         Ok(Arc::clone(tenant))
     }
@@ -360,7 +381,7 @@ pub async fn get_tenant(
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteTimelineError {
     #[error("Tenant {0}")]
-    Tenant(#[from] TenantStateError),
+    Tenant(#[from] GetTenantError),
 
     #[error("Timeline {0}")]
     Timeline(#[from] crate::tenant::DeleteTimelineError),
@@ -425,6 +446,7 @@ pub async fn detach_tenant(
 pub async fn load_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
@@ -436,7 +458,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, remote_storage, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -493,6 +515,7 @@ pub async fn attach_tenant(
     conf: &'static PageServerConf,
     tenant_id: TenantId,
     tenant_conf: TenantConfOpt,
+    broker_client: storage_broker::BrokerClientChannel,
     remote_storage: GenericRemoteStorage,
     ctx: &RequestContext,
 ) -> Result<(), TenantMapInsertError> {
@@ -518,7 +541,7 @@ pub async fn attach_tenant(
         );
 
         let attached_tenant =
-            schedule_local_tenant_processing(conf, &tenant_dir, Some(remote_storage), ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), ctx)?;
         let attached_tenant = scopeguard::guard(attached_tenant, |tenant| {
             // As we might have removed the directory, the tenant should directly go into the broken state.
             tenant.set_broken("failed to attach".into());

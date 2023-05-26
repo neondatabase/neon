@@ -62,6 +62,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             log.info(f"show {env.initial_tenant}")
             pscur.execute(f"show {env.initial_tenant}")
             res = pscur.fetchone()
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -101,6 +102,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -163,6 +165,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after config res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -218,6 +221,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after restart res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {
@@ -278,6 +282,7 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
             pscur.execute(f"show {tenant}")
             res = pscur.fetchone()
             log.info(f"after restart res: {res}")
+            assert res is not None
             assert all(
                 i in res.items()
                 for i in {

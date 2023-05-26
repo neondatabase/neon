@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import urlparse
 
 import asyncpg
-import backoff  # type: ignore
+import backoff
 import boto3
 import jwt
 import psycopg2
@@ -354,7 +354,7 @@ class PgProtocol:
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
-        conn = psycopg2.connect(**self.conn_options(**kwargs))
+        conn: PgConnection = psycopg2.connect(**self.conn_options(**kwargs))
 
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
@@ -1603,8 +1603,6 @@ class NeonPageserver(PgProtocol):
             # https://github.com/neondatabase/neon/issues/2442
             ".*could not remove ephemeral file.*No such file or directory.*",
             # FIXME: These need investigation
-            ".*gc_loop.*Failed to get a tenant .* Tenant .* not found.*",
-            ".*compaction_loop.*Failed to get a tenant .* Tenant .* not found.*",
             ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
             ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
             ".*Removing intermediate uninit mark file.*",
@@ -1621,6 +1619,8 @@ class NeonPageserver(PgProtocol):
             ".*task iteration took longer than the configured period.*",
             # this is until #3501
             ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
+            # these can happen anytime we do compactions from background task and shutdown pageserver
+            r".*ERROR.*ancestor timeline \S+ is being stopped",
         ]
 
     def start(

@@ -422,7 +422,7 @@ impl ImageLayer {
 
     /// Create an ImageLayer struct representing an existing file on disk.
     ///
-    /// This variant is only used for debugging purposes, by the 'pageserver_binutils' binary.
+    /// This variant is only used for debugging purposes, by the 'pagectl' binary.
     pub fn new_for_path(path: &Path, file: File) -> Result<ImageLayer> {
         let mut summary_buf = Vec::new();
         summary_buf.resize(PAGE_SZ, 0);

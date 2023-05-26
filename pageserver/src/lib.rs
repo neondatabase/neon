@@ -1,6 +1,5 @@
 mod auth;
 pub mod basebackup;
-pub mod broker_client;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;
@@ -36,7 +35,7 @@ use tracing::info;
 /// backwards-compatible changes to the metadata format.
 pub const STORAGE_FORMAT_VERSION: u16 = 3;
 
-pub const DEFAULT_PG_VERSION: u32 = 14;
+pub const DEFAULT_PG_VERSION: u32 = 15;
 
 // Magic constants used to identify different kinds of files
 pub const IMAGE_FILE_MAGIC: u16 = 0x5A60;

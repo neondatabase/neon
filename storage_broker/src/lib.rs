@@ -40,6 +40,9 @@ pub type BrokerClientChannel = BrokerServiceClient<Channel>;
 // Create connection object configured to run TLS if schema starts with https://
 // and plain text otherwise. Connection is lazy, only endpoint sanity is
 // validated here.
+//
+// NB: this function is not async, but still must be run on a tokio runtime thread
+// because that's a requirement of tonic_endpoint.connect_lazy()'s Channel::new call.
 pub fn connect<U>(endpoint: U, keepalive_interval: Duration) -> anyhow::Result<BrokerClientChannel>
 where
     U: std::convert::TryInto<Uri>,
