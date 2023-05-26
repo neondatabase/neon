@@ -1,13 +1,12 @@
 use std::{
     collections::HashMap,
-    fmt::Display,
     num::{NonZeroU64, NonZeroUsize},
-    str::FromStr,
     time::SystemTime,
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
-use serde::{de::value::MapDeserializer, Deserialize, Deserializer, Serialize};
+use clap::Parser;
+use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use strum_macros;
 use utils::{
@@ -149,83 +148,63 @@ impl std::ops::Deref for TenantCreateRequest {
     }
 }
 
-pub fn deserialize_option_number_from_string<'de, T, D>(
-    deserializer: D,
-) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: FromStr + serde::Deserialize<'de>,
-    <T as FromStr>::Err: Display,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum NumericOrNull<'a, T> {
-        String(String),
-        Str(&'a str),
-        FromStr(T),
-        Null,
-    }
-
-    match NumericOrNull::<T>::deserialize(deserializer)? {
-        NumericOrNull::String(s) => match s.as_str() {
-            "" => Ok(None),
-            _ => T::from_str(&s).map(Some).map_err(serde::de::Error::custom),
-        },
-        NumericOrNull::Str(s) => match s {
-            "" => Ok(None),
-            _ => T::from_str(s).map(Some).map_err(serde::de::Error::custom),
-        },
-        NumericOrNull::FromStr(i) => Ok(Some(i)),
-        NumericOrNull::Null => Ok(None),
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, clap::Parser)]
+#[clap(rename_all = "snake_case")]
 pub struct TenantConfig {
-    #[serde(default, deserialize_with = "deserialize_option_number_from_string")]
+    #[clap(long)]
     pub checkpoint_distance: Option<u64>,
+    #[clap(long)]
     pub checkpoint_timeout: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_number_from_string")]
+    #[clap(long)]
     pub compaction_target_size: Option<u64>,
+    #[clap(long)]
     pub compaction_period: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_number_from_string")]
+    #[clap(long)]
     pub compaction_threshold: Option<usize>,
-    #[serde(default, deserialize_with = "deserialize_option_number_from_string")]
+    #[clap(long)]
     pub gc_horizon: Option<u64>,
+    #[clap(long)]
     pub gc_period: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_number_from_string")]
+    #[clap(long)]
     pub image_creation_threshold: Option<usize>,
+    #[clap(long)]
     pub pitr_interval: Option<String>,
+    #[clap(long)]
     pub walreceiver_connect_timeout: Option<String>,
+    #[clap(long)]
     pub lagging_wal_timeout: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_option_number_from_string")]
+    #[clap(long)]
     pub max_lsn_wal_lag: Option<NonZeroU64>,
+    #[clap(long)]
     pub trace_read_requests: Option<bool>,
     // We defer the parsing of the eviction_policy field to the request handler.
     // Otherwise we'd have to move the types for eviction policy into this package.
     // We might do that once the eviction feature has stabilizied.
     // For now, this field is not even documented in the openapi_spec.yml.
+    #[clap(long)]
     pub eviction_policy: Option<serde_json::Value>,
-    #[serde(default)]
-    #[serde(deserialize_with = "deserialize_option_number_from_string")]
+    #[clap(long)]
     pub min_resident_size_override: Option<u64>,
+    #[clap(long)]
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
 }
 
 impl TenantConfig {
-    pub fn deserialize_from_settings(
-        settings: HashMap<&str, &str>,
-    ) -> Result<Self, serde_json::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct TenantConfigWrapper {
-            #[serde(flatten)]
-            config: TenantConfig,
-        }
-        let config = TenantConfigWrapper::deserialize(
-            MapDeserializer::<_, serde_json::Error>::new(settings.into_iter()),
-        )?;
-        Ok(config.config)
+    pub fn deserialize_from_settings(settings: HashMap<&str, &str>) -> Result<Self, anyhow::Error> {
+        let config = TenantConfig::try_parse_from(
+            std::iter::once("argv0".to_string()).chain(
+                settings
+                    .iter()
+                    .flat_map(|(k, v)| [format!("--{k}"), v.to_string()]),
+            ),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse: {}",
+                e.to_string().split('\n').next().unwrap_or_default()
+            ) // only get the first line as other lines in clap errors are not useful
+        })?;
+        Ok(config)
     }
 }
 
@@ -878,26 +857,18 @@ mod tests {
         let config = HashMap::from_iter(std::iter::once(("unknown_field", "unknown_value")));
         let err = TenantConfig::deserialize_from_settings(config).unwrap_err();
         assert!(
-            err.to_string().contains("unknown field `unknown_field`"),
+            err.to_string()
+                .contains("unexpected argument '--unknown_field' found"),
             "expect unknown field `unknown_field` error, got: {}",
             err
         );
 
         let config = HashMap::from_iter(std::iter::once(("checkpoint_distance", "not_a_number")));
         let err = TenantConfig::deserialize_from_settings(config).unwrap_err();
-        assert_eq!(err.to_string(), "invalid digit found in string");
-    }
-
-    #[test]
-    fn test_deserialize_maybe_number() {
-        let res =
-            serde_json::from_str::<TenantConfig>(r#"{ "checkpoint_distance": 233 }"#).unwrap();
-        assert_eq!(res.checkpoint_distance, Some(233));
-        let res =
-            serde_json::from_str::<TenantConfig>(r#"{ "checkpoint_distance": "233" }"#).unwrap();
-        assert_eq!(res.checkpoint_distance, Some(233));
-        let config = HashMap::from_iter(std::iter::once(("checkpoint_distance", "233")));
-        let res = TenantConfig::deserialize_from_settings(config).unwrap();
-        assert_eq!(res.checkpoint_distance, Some(233));
+        assert!(
+            err.to_string().contains("invalid digit found in string") && err.to_string().contains("checkpoint_distance"),
+            "expect error to contain both 'invalid digit found in string' and the field 'checkpoint_distance', got: {}",
+            err
+        );
     }
 }

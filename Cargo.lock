@@ -2628,6 +2628,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "bytes",
+ "clap 4.3.0",
  "const_format",
  "enum-map",
  "postgres_ffi",

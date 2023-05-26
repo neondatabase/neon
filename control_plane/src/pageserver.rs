@@ -312,63 +312,8 @@ impl PageServerNode {
         new_tenant_id: Option<TenantId>,
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
-        let mut settings = settings.clone();
-
-        let config = models::TenantConfig {
-            checkpoint_distance: settings
-                .remove("checkpoint_distance")
-                .map(|x| x.parse::<u64>())
-                .transpose()?,
-            checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
-            compaction_target_size: settings
-                .remove("compaction_target_size")
-                .map(|x| x.parse::<u64>())
-                .transpose()?,
-            compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
-            compaction_threshold: settings
-                .remove("compaction_threshold")
-                .map(|x| x.parse::<usize>())
-                .transpose()?,
-            gc_horizon: settings
-                .remove("gc_horizon")
-                .map(|x| x.parse::<u64>())
-                .transpose()?,
-            gc_period: settings.remove("gc_period").map(|x| x.to_string()),
-            image_creation_threshold: settings
-                .remove("image_creation_threshold")
-                .map(|x| x.parse::<usize>())
-                .transpose()?,
-            pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
-            walreceiver_connect_timeout: settings
-                .remove("walreceiver_connect_timeout")
-                .map(|x| x.to_string()),
-            lagging_wal_timeout: settings
-                .remove("lagging_wal_timeout")
-                .map(|x| x.to_string()),
-            max_lsn_wal_lag: settings
-                .remove("max_lsn_wal_lag")
-                .map(|x| x.parse::<NonZeroU64>())
-                .transpose()
-                .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-            trace_read_requests: settings
-                .remove("trace_read_requests")
-                .map(|x| x.parse::<bool>())
-                .transpose()
-                .context("Failed to parse 'trace_read_requests' as bool")?,
-            eviction_policy: settings
-                .remove("eviction_policy")
-                .map(serde_json::from_str)
-                .transpose()
-                .context("Failed to parse 'eviction_policy' json")?,
-            min_resident_size_override: settings
-                .remove("min_resident_size_override")
-                .map(|x| x.parse::<u64>())
-                .transpose()
-                .context("Failed to parse 'min_resident_size_override' as integer")?,
-            evictions_low_residence_duration_metric_threshold: settings
-                .remove("evictions_low_residence_duration_metric_threshold")
-                .map(|x| x.to_string()),
-        };
+        let settings = settings.clone();
+        let config = models::TenantConfig::deserialize_from_settings(settings)?;
 
         // If tenant ID was not specified, generate one
         let new_tenant_id = new_tenant_id.unwrap_or(TenantId::generate());
@@ -398,7 +343,6 @@ impl PageServerNode {
         tenant_id: TenantId,
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<()> {
-        println!("{:#?}", settings);
         let config = models::TenantConfig::deserialize_from_settings(settings)?;
         self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
             .json(&models::TenantConfigRequest { tenant_id, config })
