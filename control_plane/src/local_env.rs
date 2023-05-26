@@ -364,7 +364,7 @@ impl LocalEnv {
     //
     // Initialize a new Neon repository
     //
-    pub fn init(&mut self, pg_version: u32) -> anyhow::Result<()> {
+    pub fn init(&mut self, pg_version: u32, force: bool) -> anyhow::Result<()> {
         // check if config already exists
         let base_path = &self.base_data_dir;
         ensure!(
@@ -372,11 +372,14 @@ impl LocalEnv {
             "repository base path is missing"
         );
 
-        ensure!(
-            !base_path.exists(),
-            "directory '{}' already exists. Perhaps already initialized?",
-            base_path.display()
-        );
+        if !force {
+            ensure!(
+                !base_path.exists(),
+                "directory '{}' already exists. Perhaps already initialized?",
+                base_path.display()
+            );
+        }
+
         if !self.pg_bin_dir(pg_version)?.join("postgres").exists() {
             bail!(
                 "Can't find postgres binary at {}",
@@ -392,7 +395,7 @@ impl LocalEnv {
             }
         }
 
-        fs::create_dir(base_path)?;
+        fs::create_dir_all(base_path)?;
 
         // Generate keypair for JWT.
         //
