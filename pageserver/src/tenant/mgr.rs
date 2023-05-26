@@ -324,13 +324,30 @@ pub async fn shutdown_all_tenants() {
     // should be no more activity in any of the repositories.
     //
     // On error, log it but continue with the shutdown for other tenants.
+
+    let mut join_set = tokio::task::JoinSet::new();
+
     for tenant in tenants_to_freeze_and_flush {
         let tenant_id = tenant.tenant_id();
-        debug!("freeze_and_flush tenant {tenant_id}");
 
-        // TODO this could probably run in a JoinSet as well?
-        if let Err(err) = tenant.freeze_and_flush().await {
-            error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
+        join_set.spawn(
+            async move {
+                if let Err(err) = tenant.freeze_and_flush().await {
+                    warn!("Could not checkpoint tenant during shutdown: {err:?}");
+                }
+            }
+            .instrument(info_span!("freeze_and_flush", %tenant_id)),
+        );
+    }
+
+    while let Some(next) = join_set.join_next().await {
+        match next {
+            Ok(()) => {}
+            Err(join_error) if join_error.is_cancelled() => {
+                unreachable!("no cancelling")
+            }
+            Err(join_error) if join_error.is_panic() => { /* reported already */ }
+            Err(join_error) => warn!("unknown kind of JoinError: {join_error}"),
         }
     }
 }
