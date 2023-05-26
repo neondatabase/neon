@@ -172,8 +172,10 @@ def test_timeline_create_break_after_uninit_mark(neon_simple_env: NeonEnv):
 
     # Introduce failpoint when creating a new timeline uninit mark, before any other files were created
     pageserver_http.configure_failpoints(("after-timeline-uninit-mark-creation", "return"))
-    with pytest.raises(Exception, match="after-timeline-uninit-mark-creation"):
+    with pytest.raises(Exception, match="create timeline files"):
         _ = env.neon_cli.create_timeline("test_timeline_create_break_after_uninit_mark", tenant_id)
+    env.pageserver.allowed_errors.append(".*InternalServerError.*create timeline files")
+    env.pageserver.allowed_errors.append(".*hitting failpoint after-timeline-uninit-mark-creation")
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     # "New" timeline is not present in the list, allowing pageserver to retry the same request

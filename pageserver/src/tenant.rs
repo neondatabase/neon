@@ -2817,6 +2817,7 @@ impl Tenant {
         crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
 
         fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
+            error!("hitting failpoint after-timeline-uninit-mark-creation");
             anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
         });
 
