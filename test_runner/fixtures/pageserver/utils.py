@@ -4,7 +4,6 @@ from typing import Optional
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import wait_until
 
 
 def assert_tenant_state(
@@ -105,19 +104,6 @@ def wait_until_tenant_active(
         expected_state="Active",
         iterations=iterations,
         period=period,
-    )
-
-
-def assert_all_tenants_to_exit_loading_state(pageserver_http: PageserverHttpClient):
-    states = [t["state"]["slug"] != "Loading" for t in pageserver_http.tenant_list()]
-    assert all(states)
-
-
-def wait_for_all_tenants_to_exit_loading_state(
-    pageserver_http: PageserverHttpClient, iterations: int = 25, interval: float = 0.2
-):
-    wait_until(
-        iterations, interval, lambda: assert_all_tenants_to_exit_loading_state(pageserver_http)
     )
 
 
