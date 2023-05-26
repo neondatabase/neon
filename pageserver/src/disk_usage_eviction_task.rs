@@ -512,7 +512,7 @@ async fn collect_eviction_candidates(
             if !tl.is_active() {
                 continue;
             }
-            let info = tl.get_local_layers_for_disk_usage_eviction();
+            let info = tl.get_local_layers_for_disk_usage_eviction().await;
             debug!(tenant_id=%tl.tenant_id, timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
             tenant_candidates.extend(
                 info.resident_layers
