@@ -301,9 +301,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
 
-    let new_timeline_id = request_data
-        .new_timeline_id
-        .unwrap_or_else(TimelineId::generate);
+    let new_timeline_id = request_data.new_timeline_id;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
 
@@ -330,7 +328,7 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
             Err(err) => Err(ApiError::InternalServerError(err)),
         }
     }
-    .instrument(info_span!("timeline_create", tenant = %tenant_id, new_timeline = ?request_data.new_timeline_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
+    .instrument(info_span!("timeline_create", tenant = %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
     .await
 }
 

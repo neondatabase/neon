@@ -118,9 +118,8 @@ pub enum TimelineState {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_timeline_id: Option<TimelineId>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub new_timeline_id: TimelineId,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,

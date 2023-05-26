@@ -162,7 +162,7 @@ class PageserverHttpClient(requests.Session):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
-                "new_tenant_id": str(new_tenant_id) if new_tenant_id else None,
+                "new_tenant_id": str(new_tenant_id),
                 **(conf or {}),
             },
         )
@@ -293,13 +293,13 @@ class PageserverHttpClient(requests.Session):
         self,
         pg_version: PgVersion,
         tenant_id: TenantId,
-        new_timeline_id: Optional[TimelineId] = None,
+        new_timeline_id: TimelineId,
         ancestor_timeline_id: Optional[TimelineId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
         **kwargs,
     ) -> Dict[Any, Any]:
         body: Dict[str, Any] = {
-            "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
+            "new_timeline_id": str(new_timeline_id),
             "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
             "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
         }

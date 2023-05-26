@@ -499,6 +499,9 @@ impl PageServerNode {
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
     ) -> anyhow::Result<TimelineInfo> {
+        // If timeline ID was not specified, generate one
+        let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
+
         self.http_request(
             Method::POST,
             format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
