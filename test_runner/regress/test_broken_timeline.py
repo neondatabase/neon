@@ -90,8 +90,9 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     # Second timeline has no ancestors, only the metadata file and no layer files locally,
     # and we don't have the remote storage enabled. It is loaded into memory, but getting
     # the basebackup from it will fail.
-    # TODO this needed changing beacuse we no longer fail load if the layer map is empty. The tenant is active now but basebackup fails.
-    with pytest.raises(Exception, match=r".*base backup failed") as err:
+    with pytest.raises(
+        Exception, match=f"Tenant {tenant2} will not become active. Current state: Broken"
+    ) as err:
         pg2.start()
     log.info(f"As expected, compute startup failed for timeline with missing layers: {err}")
 
