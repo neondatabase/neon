@@ -1298,6 +1298,10 @@ impl Timeline {
     }
 }
 
+/// Number of times we will compute partition within a checkpoint distance. Currently, this is set to 10, which
+/// indicates that we will recompute partition 10 times within a checkpoint distance.
+pub const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
+
 // Private functions
 impl Timeline {
     fn get_checkpoint_distance(&self) -> u64 {
@@ -1493,7 +1497,7 @@ impl Timeline {
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
             };
             result.repartition_threshold =
-                result.get_checkpoint_distance() / result.get_compaction_threshold() as u64;
+                result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
             result
                 .metrics
                 .last_record_gauge
