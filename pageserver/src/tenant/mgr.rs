@@ -225,6 +225,7 @@ pub fn schedule_local_tenant_processing(
 /// That could be easily misinterpreted by control plane, the consumer of the
 /// management API. For example, it could attach the tenant on a different pageserver.
 /// We would then be in split-brain once this pageserver restarts.
+#[instrument]
 pub async fn shutdown_all_tenants() {
     // Prevent new tenants from being created.
     let tenants_to_shut_down = {
