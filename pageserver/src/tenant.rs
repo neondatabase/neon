@@ -394,6 +394,11 @@ pub enum DeleteTimelineError {
     Other(#[from] anyhow::Error),
 }
 
+pub enum SetStoppingError {
+    AlreadyStopping,
+    Broken,
+}
+
 struct RemoteStartupData {
     index_part: IndexPart,
     remote_metadata: TimelineMetadata,
@@ -1982,20 +1987,26 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    pub async fn set_stopping(&self) {
+    pub async fn set_stopping(&self) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
-            TenantState::Activating | TenantState::Loading | TenantState::Attaching => false, // TODO log that we're waiting
+            TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
+                info!(
+                    "waiting for {} to turn Active|Broken|Stopping",
+                    <&'static str>::from(state)
+                );
+                false
+            }
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
         })
         .await
         .expect("cannot drop self.state while on a &self method");
 
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
-        let mut stopping = false;
-        self.state.send_modify(|current_state| match current_state {
+        let mut err = None;
+        let stopping = self.state.send_if_modified(|current_state| match current_state {
             TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
                 unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
             }
@@ -2004,29 +2015,42 @@ impl Tenant {
                 // are created after the transition to Stopping. That's harmless, as the Timelines
                 // won't be accessible to anyone afterwards, because the Tenant is in Stopping state.
                 *current_state = TenantState::Stopping;
-                stopping = true;
                 // Continue stopping outside the closure. We need to grab timelines.lock()
                 // and we plan to turn it into a tokio::sync::Mutex in a future patch.
+                true
             }
             TenantState::Broken { reason, .. } => {
                 info!(
                     "Cannot set tenant to Stopping state, it is in Broken state due to: {reason}"
                 );
+                err = Some(SetStoppingError::Broken);
+                false
             }
             TenantState::Stopping => {
                 info!("Tenant is already in Stopping state");
+                err = Some(SetStoppingError::AlreadyStopping);
+                false
             }
         });
-
-        if stopping {
-            let timelines_accessor = self.timelines.lock().unwrap();
-            let not_broken_timelines = timelines_accessor
-                .values()
-                .filter(|timeline| timeline.current_state() != TimelineState::Broken);
-            for timeline in not_broken_timelines {
-                timeline.set_state(TimelineState::Stopping);
-            }
+        match (stopping, err) {
+            (true, None) => {} // continue
+            (false, Some(err)) => return Err(err),
+            (true, Some(_)) => unreachable!(
+                "send_if_modified closure must error out if not transitioning to Stopping"
+            ),
+            (false, None) => unreachable!(
+                "send_if_modified closure must return true if transitioning to Stopping"
+            ),
         }
+
+        let timelines_accessor = self.timelines.lock().unwrap();
+        let not_broken_timelines = timelines_accessor
+            .values()
+            .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+        for timeline in not_broken_timelines {
+            timeline.set_state(TimelineState::Stopping);
+        }
+        Ok(())
     }
 
     /// Method for tenant::mgr to transition us into Broken state in case of a late failure in
@@ -2041,7 +2065,13 @@ impl Tenant {
         // The load & attach routines own the tenant state until it has reached `Active`.
         // So, wait until it's done.
         rx.wait_for(|state| match state {
-            TenantState::Activating | TenantState::Loading | TenantState::Attaching => false, // TODO log that we're waiting
+            TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
+                info!(
+                    "waiting for {} to turn Active|Broken|Stopping",
+                    <&'static str>::from(state)
+                );
+                false
+            }
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
         })
         .await

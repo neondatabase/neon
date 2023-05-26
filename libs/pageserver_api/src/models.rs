@@ -55,19 +55,38 @@ use bytes::{BufMut, Bytes, BytesMut};
 )]
 #[serde(tag = "slug", content = "data")]
 pub enum TenantState {
-    /// This tenant is being loaded from local disk
+    /// This tenant is being loaded from local disk.
+    ///
+    /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
     Loading,
     /// This tenant is being attached to the pageserver.
+    ///
+    /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
     Attaching,
     /// The tenant is transitioning from Loading/Attaching to Active.
+    ///
+    /// While in this state, the individual timelines are being activated.
+    ///
+    /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
     Activating,
     /// The tenant has finished activating and is open for business.
+    ///
+    /// Transitions out of this state are possible through `set_stopping()` and `set_broken()`.
     Active,
-    /// A tenant is recognized by pageserver, but it is being detached or the
+    /// The tenant is recognized by pageserver, but it is being detached or the
     /// system is being shut down.
+    ///
+    /// Transitions out of this state are possible through `set_broken()`.
     Stopping,
-    /// A tenant is recognized by the pageserver, but can no longer be used for
-    /// any operations, because it failed to be activated.
+    /// The tenant is recognized by the pageserver, but can no longer be used for
+    /// any operations.
+    ///
+    /// If the tenant fails to load or attach, it will transition to this state
+    /// and it is guaranteed that no background tasks are running in its name.
+    ///
+    /// The other way to transition into this state is from `Stopping` state
+    /// through `set_broken()` called from `remove_tenant_from_memory()`. That happens
+    /// if the cleanup future executed by `remove_tenant_from_memory()` fails.
     Broken { reason: String, backtrace: String },
 }
 
@@ -144,9 +163,8 @@ pub enum TimelineState {
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_timeline_id: Option<TimelineId>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub new_timeline_id: TimelineId,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
@@ -157,12 +175,11 @@ pub struct TimelineCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_tenant_id: Option<TenantId>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub new_tenant_id: TenantId,
     #[serde(flatten)]
     pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
 }
@@ -210,10 +227,10 @@ pub struct StatusResponse {
 }
 
 impl TenantCreateRequest {
-    pub fn new(new_tenant_id: Option<TenantId>) -> TenantCreateRequest {
+    pub fn new(new_tenant_id: TenantId) -> TenantCreateRequest {
         TenantCreateRequest {
             new_tenant_id,
-            ..Default::default()
+            config: TenantConfig::default(),
         }
     }
 }

@@ -407,9 +407,7 @@ jobs:
         uses: ./.github/actions/allure-report-generate
 
       - uses: actions/github-script@v6
-        if: >
-          !cancelled() &&
-          github.event_name == 'pull_request'
+        if: ${{ !cancelled() }}
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
@@ -419,7 +417,7 @@ jobs:
               reportJsonUrl: "${{ steps.create-allure-report.outputs.report-json-url }}",
             }
 
-            const script = require("./scripts/pr-comment-test-report.js")
+            const script = require("./scripts/comment-test-report.js")
             await script({
               github,
               context,
