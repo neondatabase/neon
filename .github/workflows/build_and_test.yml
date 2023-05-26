@@ -492,11 +492,16 @@ jobs:
         env:
           COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          scripts/coverage \
-            --dir=/tmp/coverage report \
+          scripts/coverage --dir=/tmp/coverage \
+            report \
             --input-objects=/tmp/coverage/binaries.list \
             --commit-url=${COMMIT_URL} \
             --format=github
+
+          scripts/coverage --dir=/tmp/coverage \
+            report \
+            --input-objects=/tmp/coverage/binaries.list \
+            --format=lcov
 
       - name: Upload coverage report
         id: upload-coverage-report
@@ -504,7 +509,7 @@ jobs:
           BUCKET: neon-github-public-dev
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://neon-github-public-dev/code-coverage/${COMMIT_SHA}
+          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://${BUCKET}/code-coverage/${COMMIT_SHA}
 
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
