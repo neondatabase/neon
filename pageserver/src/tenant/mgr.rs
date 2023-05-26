@@ -269,9 +269,16 @@ pub async fn shutdown_all_tenants() {
         join_set.spawn(
             async move {
                 match tenant.set_stopping().await {
-                    Ok(()) => Ok(tenant),
-                    Err(e) => Err((tenant, e)),
+                    Ok(()) => debug!("tenant successfully stopped"),
+                    Err(SetStoppingError::Broken) => {
+                        info!("tenant is broken, so stopping failed, freeze_and_flush is likely going to make noise as well");
+                    },
+                    Err(SetStoppingError::AlreadyStopping) => {
+                        // our task_mgr::shutdown_tasks are going to coalesce on that just fine
+                    }
                 }
+
+                tenant
             }
             .instrument(info_span!("set_stopping", %tenant_id)),
         );
@@ -291,21 +298,7 @@ pub async fn shutdown_all_tenants() {
             Err(join_error) => {
                 warn!("unknown kind of JoinError: {join_error}");
             }
-            Ok(retval) => match retval {
-                Ok(tenant) => {
-                    // success
-                    debug!("tenant successfully stopped: {}", tenant.tenant_id);
-                    tenants_to_freeze_and_flush.push(tenant);
-                }
-                // our task_mgr::shutdown_tasks are going to coalesce on that just fine
-                Err((tenant, SetStoppingError::AlreadyStopping)) => {
-                    tenants_to_freeze_and_flush.push(tenant);
-                }
-                Err((tenant, SetStoppingError::Broken)) => {
-                    info!("tenant is broken, so stopping failed, freeze_and_flush is likely going to make noise as well: {}", tenant.tenant_id);
-                    tenants_to_freeze_and_flush.push(tenant);
-                }
-            },
+            Ok(tenant) => tenants_to_freeze_and_flush.push(tenant),
         }
     }
 
