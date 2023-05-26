@@ -5,6 +5,9 @@ from typing import List, Tuple
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder
+from fixtures.pageserver.utils import (
+    wait_for_all_tenants_to_exit_loading_state,
+)
 from fixtures.types import TenantId, TimelineId
 
 
@@ -12,6 +15,7 @@ from fixtures.types import TenantId, TimelineId
 # running.
 def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
+    client = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.extend(
         [
@@ -71,6 +75,8 @@ def test_broken_timeline(neon_env_builder: NeonEnvBuilder):
     log.info(f"Timeline {tenant3}/{timeline3} got its layer files spoiled")
 
     env.pageserver.start()
+
+    wait_for_all_tenants_to_exit_loading_state(client)
 
     # Tenant 0 should still work
     pg0.start()
