@@ -678,6 +678,8 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+                - new_timeline_id
               properties:
                 new_timeline_id:
                   type: string
@@ -936,6 +938,8 @@ components:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
         - type: object
+          required:
+            - new_tenant_id
           properties:
             new_tenant_id:
               type: string

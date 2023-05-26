@@ -4,19 +4,10 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import psycopg2
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    PortDistributor,
-    VanillaPostgres,
-)
+from fixtures.neon_fixtures import VanillaPostgres
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
-
-
-@pytest.fixture(scope="session")
-def httpserver_listen_address(port_distributor: PortDistributor):
-    port = port_distributor.get_port()
-    return ("localhost", port)
 
 
 def handle_db(dbs, roles, operation):
