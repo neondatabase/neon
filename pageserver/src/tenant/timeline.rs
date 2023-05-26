@@ -2973,15 +2973,14 @@ impl Timeline {
                     // create a new image layer, check if the range is already covered at more recent LSNs.
                     if !layers
                         .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))?
+                        && *forced_image_layers_count < self.get_forced_image_creation_limit()
                     {
-                        if *forced_image_layers_count < self.get_forced_image_creation_limit() {
-                            debug!(
-                                "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
-                                img_range.start, img_range.end, cutoff_lsn, lsn
-                            );
-                            *forced_image_layers_count += 1;
-                            return Ok(true);
-                        }
+                        debug!(
+                            "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
+                            img_range.start, img_range.end, cutoff_lsn, lsn
+                        );
+                        *forced_image_layers_count += 1;
+                        return Ok(true);
                     }
                 }
             }
