@@ -34,8 +34,9 @@ impl Ord for LayerKey {
         //      the persistent data structure must be constructed in that order.
         // NOTE we also care about comparing by (-lsn.end), then key.start, and
         //      then (-key.end) next to make sure that if one layer contains
-        //      another, the larger one is inserted first and the smaller one
-        //      is detected as redundant.
+        //      another, the outer one is inserted first and the inner one
+        //      is detected as redundant. So if we ever find an L1 layer with
+        //      many L0s in it, the L0s are redundant, not the L1.
         self.lsn
             .start
             .cmp(&other.lsn.start)
@@ -85,7 +86,10 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
         }
     }
 
-    /// Add a layer, returning whether the operation was a noop.
+    /// Add a layer, returning whether the insertion had any effect.
+    ///
+    /// Returns false after inserting a layer whose Key-Lsn space is already
+    /// covered by a union of previously inserted layers.
     ///
     /// Panics if new layer has older lsn.start than an existing layer.
     /// See BufferedHistoricLayerCoverage for a more general insertion method.
@@ -105,12 +109,12 @@ impl<Value: Clone> HistoricLayerCoverage<Value> {
             &mut self.head.delta_coverage
         };
 
-        let was_noop = target.insert(layer_key.key, layer_key.lsn.clone(), value);
+        let changed = target.insert(layer_key.key, layer_key.lsn.clone(), value);
 
         // Remember history. Clone is O(1)
         self.historic.insert(layer_key.lsn.start, self.head.clone());
 
-        was_noop
+        changed
     }
 
     /// Query at a particular LSN, inclusive
@@ -402,7 +406,9 @@ pub struct BufferedHistoricLayerCoverage<Value> {
     /// Redundant layers are ones that are completely covered by a union of other layers.
     /// If two layers are identical only one of them will be marked as redundant, such that
     /// it is always safe to remove all redundant layers without seeing any difference in
-    /// results.
+    /// results. If a layer is contained in another, the inner one will be marked as
+    /// redundant. This makes sure that if we have an L1 layer and a set of L0 layers
+    /// that completely cover it, the L0s are marked redundant, not the L1.
     ///
     /// Redundant layers can show up if the pageserver dies during compaction, after
     /// creating some L1 layers but before deleting the L0 layers. In this case we'd rather
@@ -528,12 +534,12 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
                 is_image: false,
             }..,
         ) {
-            let was_noop = self
+            let changed = self
                 .historic_coverage
                 .insert(layer_key.clone(), layer.clone());
             num_inserted += 1;
 
-            if was_noop {
+            if !changed {
                 self.redundant_layers
                     .insert(layer_key.clone(), layer.clone());
             }

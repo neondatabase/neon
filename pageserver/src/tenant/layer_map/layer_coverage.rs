@@ -51,7 +51,10 @@ impl<Value: Clone> LayerCoverage<Value> {
         self.nodes.insert_mut(key, value);
     }
 
-    /// Insert a layer, returning whether the operation was a NOOP.
+    /// Insert a layer, returning whether the insertion had any effect.
+    ///
+    /// Returns false after inserting a layer whose Key-Lsn space is already
+    /// covered by a union of previously inserted layers.
     ///
     /// Complexity: worst case O(N), in practice O(log N). See NOTE in implementation.
     pub fn insert(&mut self, key: Range<i128>, lsn: Range<u64>, value: Value) -> bool {
@@ -96,7 +99,7 @@ impl<Value: Clone> LayerCoverage<Value> {
             self.nodes.remove_mut(k);
         }
 
-        to_update.is_empty()
+        !to_update.is_empty()
     }
 
     /// Get the latest (by lsn.end) layer at a given key
