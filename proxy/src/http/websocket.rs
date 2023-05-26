@@ -191,22 +191,24 @@ impl AsyncRead for MyObject {
 
         let data = &self.get_mut().data;
 
-        // let len: usize = data.len();
+        // let len: usize = recv_data.len();
+        // info!("len: {}", len);
         // let mut i: usize = 0;
         // let mut zcount = 0;
         // while len >= i + 5 {
-        //     let cmd = data[i];
-        //     info!("cmd: {}", cmd);
+        //     let cmd = recv_data[i];
         //     if cmd == 0x5a { zcount += 1; }
-        //     let size = u32::from_be_bytes(data[i..(i + 4)].try_into().unwrap());
-        //     i += usize::try_from(size).unwrap();
+        //     let size = u32::from_be_bytes(recv_data[(i + 1)..(i + 5)].try_into().unwrap());
+        //     info!("cmd: {}  size: {}  buf: {:?}", cmd, size, recv_data);
+        //     i += usize::try_from(size).unwrap() + 1;
         // }
         // if zcount < 2 {
         //     Poll::Pending
+
         // } else {
-        //     let mut reader = &data[..];
+        //     let mut reader = &recv_data[..];
         //     Pin::new(&mut reader).poll_read(cx, buf)
-        //}
+        // }
 
         let mut reader = &data[..];
         Pin::new(&mut reader).poll_read(cx, buf)
@@ -220,21 +222,19 @@ impl AsyncWrite for MyObject {
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
         
-        eprintln!("{:?}", buf);
+        // eprintln!("{:?}", buf);
         let recv_data = &mut self.get_mut().recv_data;
         recv_data.extend(buf);
         Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        
-        
+        // ...
         Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        
-        
+        // ...
         Poll::Ready(Ok(()))
     }
 }
