@@ -292,7 +292,7 @@ pub async fn shutdown_all_tenants() {
                     tenants_to_freeze_and_flush.push(tenant);
                 }
                 Err((tenant, SetStoppingError::Broken)) => {
-                    warn!("tenant is broken, so stopping failed, freeze_and_flush is likely going to make noise as well: {}", tenant.tenant_id);
+                    info!("tenant is broken, so stopping failed, freeze_and_flush is likely going to make noise as well: {}", tenant.tenant_id);
                     tenants_to_freeze_and_flush.push(tenant);
                 }
             },
