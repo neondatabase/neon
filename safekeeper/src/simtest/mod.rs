@@ -17,12 +17,12 @@ use crate::{
 fn run_test() {
     let delay = Delay {
         min: 1,
-        max: 10,
+        max: 60,
         fail_prob: 0.4,
     };
 
     let network = NetworkOptions {
-        timeout: Some(1000),
+        timeout: Some(50),
         connect_delay: delay.clone(),
         send_delay: delay.clone(),
     };
