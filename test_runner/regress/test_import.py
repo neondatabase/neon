@@ -128,29 +128,24 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         )
 
     # Importing empty file fails
+    log.info("importing empty_file")
     empty_file = os.path.join(test_output_dir, "empty_file")
     with open(empty_file, "w") as _:
         with pytest.raises(Exception):
             import_tar(empty_file, empty_file)
 
-    # yet, timeline is created and needs to be removed
-    log.info("deleting timeline")
-    client.timeline_delete(tenant, timeline)
-
-    log.info("importing corrupt_base_tar")
+    assert timeline not in {TimelineId(t["timeline_id"]) for t in client.timeline_list(tenant)}
 
     # Importing corrupt backup fails
+    log.info("importing corrupt_base_tar")
     with pytest.raises(Exception):
         import_tar(corrupt_base_tar, wal_tar)
 
-    # yet, timeline is created and needs to be removed
-    log.info("deleting timeline")
-    client.timeline_delete(tenant, timeline)
-
-    log.info("importing base_plus_garbage_tar")
+    assert timeline not in {TimelineId(t["timeline_id"]) for t in client.timeline_list(tenant)}
 
     # A tar with trailing garbage is currently accepted. It prints a warnings
     # to the pageserver log, however. Check that.
+    log.info("importing base_plus_garbage_tar")
     import_tar(base_plus_garbage_tar, wal_tar)
     assert env.pageserver.log_contains(
         ".*WARN.*ignored .* unexpected bytes after the tar archive.*"

@@ -136,7 +136,7 @@ pub struct Tenant {
     tenant_conf: Arc<RwLock<TenantConfOpt>>,
 
     tenant_id: TenantId,
-    timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
+    pub(super) timelines: Mutex<HashMap<TimelineId, Arc<Timeline>>>,
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration
@@ -158,7 +158,7 @@ pub struct Tenant {
 
 /// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
 #[inline(always)]
-fn compare_arced_timeline(left: &Arc<Timeline>, right: &Arc<Timeline>) -> bool {
+pub(crate) fn compare_arced_timeline(left: &Arc<Timeline>, right: &Arc<Timeline>) -> bool {
     // See: https://github.com/rust-lang/rust/issues/103763
     // See: https://github.com/rust-lang/rust/pull/106450
     let left = Arc::as_ptr(left) as *const ();
@@ -304,6 +304,18 @@ impl<'t> CreatingTimelineGuard<'t> {
                 error!("either placeholder timeline or real timeline should be present in the timelines map");
             }
         }
+    }
+}
+
+/// Newtype to avoid conusing local variables that are both Arc<Timelien>
+struct AncestorArg(Option<Arc<Timeline>>);
+
+impl AncestorArg {
+    pub fn ancestor(ancestor: Arc<Timeline>) -> Self {
+        Self(Some(ancestor))
+    }
+    pub fn no_ancestor() -> Self {
+        Self(None)
     }
 }
 
@@ -455,18 +467,49 @@ impl Tenant {
     /// If the operation fails, the timeline is left in the tenant's hash map in Broken state. On success,
     /// it is marked as Active.
     #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all, fields(?cause))]
     async fn timeline_init_and_sync(
         &self,
         timeline_id: TimelineId,
         remote_client: Option<Arc<RemoteTimelineClient>>,
         remote_startup_data: Option<RemoteStartupData>,
         local_metadata: Option<TimelineMetadata>,
-        ancestor: Option<Arc<Timeline>>,
+        ancestor: AncestorArg,
         cause: TimelineLoadCause,
         first_save: bool, // TODO need to think about this
         _ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let tenant_id = self.tenant_id;
+        let ancestor = ancestor.0;
+
+        match (
+            local_metadata.as_ref().map(|lmd| lmd.ancestor_timeline()),
+            remote_startup_data
+                .as_ref()
+                .map(|rsd| rsd.remote_metadata.ancestor_timeline()),
+        ) {
+            (Some(local_ancestor), Some(remote_ancestor)) => {
+                assert_eq!(
+                    local_ancestor, remote_ancestor,
+                    "local and remote ancestor timelines should match"
+                );
+            }
+            (None, None) => {}
+            (local, remote) => {
+                anyhow::bail!("local and remote metadata do not agree on ancestorship, local={local:?} remote={remote:?}");
+            }
+        }
+        assert_eq!(
+            ancestor.as_ref().map(|a| a.timeline_id),
+            // we could check either local or remote metadata, it doesn't matter,
+            // we checked above that they're either (None, None) or (Some, Some)
+            local_metadata
+                .as_ref()
+                .and_then(|lmd| lmd.ancestor_timeline()),
+            "caller does not provide correct ancestor"
+        );
 
         let (up_to_date_metadata, picked_local) = merge_local_remote_metadata(
             local_metadata.as_ref(),
@@ -474,6 +517,12 @@ impl Tenant {
         )
         .context("merge_local_remote_metadata")?
         .to_owned();
+
+        assert_eq!(
+            up_to_date_metadata.ancestor_timeline(),
+            ancestor.as_ref().map(|a| a.timeline_id),
+            "merge_local_remote_metadata should not change ancestor"
+        );
 
         let timeline = {
             let timeline = self.create_timeline_data(
@@ -492,31 +541,7 @@ impl Tenant {
                     format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
                 })?;
 
-            // avoiding holding it across awaits
-            let mut timelines_accessor = self.timelines.lock().unwrap();
-            match timelines_accessor.entry(timeline_id) {
-                Entry::Occupied(mut e) => {
-                    match cause {
-                        TimelineLoadCause::TenantCreate => unreachable!("tenant creates no timelines, so, we don't reach here"),
-                        TimelineLoadCause::Startup |
-                        TimelineLoadCause::TenantLoad  |
-                        TimelineLoadCause::Attach => unreachable!("when loading a full tenant, the loading entity is responsible for ensuring there are no duplicates, cause={cause:?}"),
-                        TimelineLoadCause::TimelineCreate { placeholder_timeline } => {
-                            // replace placeholder with real one
-                            assert!(compare_arced_timeline(e.get(), &placeholder_timeline), "when creating a timeline, the placeholder timeline should be the one in the map");
-                            e.insert(Arc::clone(&timeline));
-                            timeline
-                        },
-                        #[cfg(test)]
-                        TimelineLoadCause::Test => todo!(),
-                    }
-                }
-                Entry::Vacant(v) => {
-                    v.insert(Arc::clone(&timeline));
-                    timeline.maybe_spawn_flush_loop();
-                    timeline
-                }
-            }
+            timeline
         };
 
         if self.remote_storage.is_some() {
@@ -724,7 +749,27 @@ impl Tenant {
                 .expect("just put it in above");
 
             // TODO again handle early failure
-            self.load_remote_timeline(timeline_id, index_part, remote_metadata, remote_client, ctx)
+            let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
+                let timelines = self.timelines.lock().unwrap();
+                AncestorArg::ancestor(Arc::clone(timelines.get(&ancestor_id).ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                        "cannot find ancestor timeline {ancestor_id} for timeline {timeline_id}"
+                    )
+                    },
+                )?))
+            } else {
+                AncestorArg::no_ancestor()
+            };
+            let timeline = self
+                .load_remote_timeline(
+                    timeline_id,
+                    index_part,
+                    remote_metadata,
+                    ancestor,
+                    remote_client,
+                    ctx,
+                )
                 .await
                 .with_context(|| {
                     format!(
@@ -732,6 +777,16 @@ impl Tenant {
                         timeline_id, self.tenant_id
                     )
                 })?;
+            // TODO: why can't load_remote_timeline return None like load_local_timeline does?
+
+            let mut timelines = self.timelines.lock().unwrap();
+            let overwritten = timelines.insert(timeline_id, Arc::clone(&timeline));
+            if let Some(overwritten) = overwritten {
+                panic!(
+                    "timeline should not be in the map yet, but is: {timeline_id}: {:?}",
+                    overwritten.current_state()
+                );
+            }
         }
 
         std::fs::remove_file(&marker_file)
@@ -768,28 +823,16 @@ impl Tenant {
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
+        ancestor: AncestorArg,
         remote_client: RemoteTimelineClient,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         debug_assert_current_span_has_tenant_id();
 
         info!("downloading index file for timeline {}", timeline_id);
         tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
             .context("Failed to create new timeline directory")?;
-
-        let ancestor = if let Some(ancestor_id) = remote_metadata.ancestor_timeline() {
-            let timelines = self.timelines.lock().unwrap();
-            Some(Arc::clone(timelines.get(&ancestor_id).ok_or_else(
-                || {
-                    anyhow::anyhow!(
-                        "cannot find ancestor timeline {ancestor_id} for timeline {timeline_id}"
-                    )
-                },
-            )?))
-        } else {
-            None
-        };
 
         // Even if there is local metadata it cannot be ahead of the remote one
         // since we're attaching. Even if we resume interrupted attach remote one
@@ -809,8 +852,7 @@ impl Tenant {
             true,
             ctx,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Create a placeholder Tenant object for a broken tenant
@@ -1021,9 +1063,38 @@ impl Tenant {
         //    1. "Timeline has no ancestor and no layer files"
 
         for (timeline_id, local_metadata) in sorted_timelines {
-            self.load_local_timeline(timeline_id, local_metadata, cause.clone(), ctx)
+            let ancestor = if let Some(ancestor_id) = local_metadata.ancestor_timeline() {
+                let timelines = self.timelines.lock().unwrap();
+                AncestorArg::ancestor(Arc::clone(timelines.get(&ancestor_id).ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                        "cannot find ancestor timeline {ancestor_id} for timeline {timeline_id}"
+                    )
+                    },
+                )?))
+            } else {
+                AncestorArg::no_ancestor()
+            };
+            let timeline = self
+                .load_local_timeline(timeline_id, local_metadata, ancestor, cause.clone(), ctx)
                 .await
                 .with_context(|| format!("load local timeline {timeline_id}"))?;
+            match timeline {
+                Some(loaded_timeline) => {
+                    let mut timelines = self.timelines.lock().unwrap();
+                    let overwritten = timelines.insert(timeline_id, Arc::clone(&loaded_timeline));
+                    if let Some(overwritten) = overwritten {
+                        panic!(
+                            "timeline should not be in the map yet, but is: {timeline_id}: {:?}",
+                            overwritten.current_state()
+                        );
+                    }
+                }
+                None => {
+                    info!(%timeline_id, "timeline is marked as deleted on the remote, load_local_timeline finished the deletion locally");
+                    // TODO don't we need to restart the tree sort?
+                }
+            }
         }
 
         info!("Done");
@@ -1039,6 +1110,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
+        ancestor: AncestorArg,
         cause: TimelineLoadCause,
         ctx: &RequestContext,
     ) -> anyhow::Result<Option<Arc<Timeline>>> {
@@ -1092,14 +1164,6 @@ impl Tenant {
                 Err(e) => return Err(anyhow::anyhow!(e)),
             },
             None => None,
-        };
-
-        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
-            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
-            .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
-            Some(ancestor_timeline)
-        } else {
-            None
         };
 
         let inserted_timeline = self
@@ -1241,6 +1305,7 @@ impl Tenant {
             .load_local_timeline(
                 new_timeline_id,
                 metadata,
+                AncestorArg::no_ancestor(),
                 TimelineLoadCause::TimelineCreate {
                     placeholder_timeline: Arc::clone(&guard.placeholder_timeline),
                 },
@@ -1250,16 +1315,20 @@ impl Tenant {
             .context("load newly created on-disk timeline state")?
             .expect("load_local_timeline should have created the timeline");
 
-        let real_timeline = match self.timelines.lock().unwrap().entry(new_timeline_id) {
-            Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
-            Entry::Occupied(entry) => {
-                assert_eq!(guard.placeholder_timeline.current_state(), TimelineState::Creating);
-                assert!(compare_arced_timeline(&real_timeline, entry.get()));
-                assert_eq!(real_timeline.current_state(), TimelineState::Loading);
-                assert!(!compare_arced_timeline(&guard.placeholder_timeline, entry.get()), "load_local_timeline should have replaced the placeholder with the real timeline");
-                Arc::clone(entry.get())
-            }
-        };
+        // don't replace the placeholder timeline, the caller is going to fill
+        // real_timeline with more data and once that's done, we're ready to
+        // replace the placeholder
+
+        // let real_timeline = match self.timelines.lock().unwrap().entry(new_timeline_id) {
+        //     Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
+        //     Entry::Occupied(entry) => {
+        //         assert_eq!(guard.placeholder_timeline.current_state(), TimelineState::Creating);
+        //         assert!(compare_arced_timeline(&real_timeline, entry.get()));
+        //         assert_eq!(real_timeline.current_state(), TimelineState::Loading);
+        //         assert!(!compare_arced_timeline(&guard.placeholder_timeline, entry.get()), "load_local_timeline should have replaced the placeholder with the real timeline");
+        //         Arc::clone(entry.get())
+        //     }
+        // };
 
         // Do not activate, the caller is responsible for that.
         // Also, the caller is still responsible for removing the uninit mark file.
@@ -1422,6 +1491,7 @@ impl Tenant {
                         ctx,
                     )
                     .await?;
+                    Ok(AncestorArg::ancestor(ancestor_timeline))
                 }
                 None => {
                     self.bootstrap_timeline(
@@ -1432,17 +1502,16 @@ impl Tenant {
                         ctx,
                     )
                     .await?;
+                    Ok(AncestorArg::no_ancestor())
                 }
-            };
-
+            }
             // XXX do we need to remove uninit mark before the self.branch_timeline / self.bootstrap_timeline start the uploads?
             // If we die with uninit mark present, we'll leak the uploaded state in S3.
-            Ok(())
         };
-        let placeholder_timeline = match create_ondisk_state.await {
-            Ok(()) => {
+        let (placeholder_timeline, ancestor) = match create_ondisk_state.await {
+            Ok(ancestor) => {
                 match guard.creation_complete_remove_uninit_marker_and_get_placeholder_timeline() {
-                    Ok(placeholder_timeline) => placeholder_timeline,
+                    Ok(placeholder_timeline) => (placeholder_timeline, ancestor),
                     Err(err) => {
                         error!(
                             "failed to remove uninit marker for new_timeline_id={new_timeline_id}: {err:#}"
@@ -1463,25 +1532,34 @@ impl Tenant {
         // From here on, it's just like during pageserver startup.
         let metadata = load_metadata(self.conf, new_timeline_id, self.tenant_id)
             .context("load newly created on-disk timeline metadata")?;
-        self.load_local_timeline(
-            new_timeline_id,
-            metadata,
-            TimelineLoadCause::TimelineCreate {
-                placeholder_timeline: Arc::clone(&placeholder_timeline),
-            },
-            ctx,
-        )
-        .await
-        .context("load newly created on-disk timeline state")?;
 
-        let real_timeline = match self.timelines.lock().unwrap().entry(new_timeline_id) {
-            Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
-            Entry::Occupied(entry) => {
-                assert_eq!(placeholder_timeline.current_state(), TimelineState::Creating);
-                assert!(!compare_arced_timeline(&placeholder_timeline, entry.get()), "load_local_timeline should have replaced the placeholder with the real timeline");
-                Arc::clone(entry.get())
-            }
+        let real_timeline = self
+            .load_local_timeline(
+                new_timeline_id,
+                metadata,
+                ancestor,
+                TimelineLoadCause::TimelineCreate {
+                    placeholder_timeline: Arc::clone(&placeholder_timeline),
+                },
+                ctx,
+            )
+            .await
+            .context("load newly created on-disk timeline state")?;
+
+        let Some(real_timeline) = real_timeline else {
+            anyhow::bail!("we just created this timeline's local files, but load_local_timeline did not load it");
         };
+
+        match self.timelines.lock().unwrap().entry(new_timeline_id) {
+            Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
+            Entry::Occupied(mut o) => {
+                info!("replacing placeholder timeline with the real one");
+                assert_eq!(placeholder_timeline.current_state(), TimelineState::Creating);
+                assert!(compare_arced_timeline(&placeholder_timeline, o.get()));
+                let replaced_placeholder = o.insert(Arc::clone(&real_timeline));
+                assert!(compare_arced_timeline(&replaced_placeholder, &placeholder_timeline));
+            },
+        }
 
         real_timeline.activate(broker_client, ctx);
 
@@ -2658,19 +2736,21 @@ impl Tenant {
         // From here on, it's just like during pageserver startup.
         let metadata = load_metadata(self.conf, dst_id, self.tenant_id)
             .context("load newly created on-disk timeline metadata")?;
-        self.load_local_timeline(dst_id, metadata, TimelineLoadCause::Test, ctx)
+
+        let tline = self
+            .load_local_timeline(
+                dst_id,
+                metadata,
+                AncestorArg::no_ancestor(),
+                TimelineLoadCause::Test,
+                ctx,
+            )
             .instrument(info_span!("load_local_timeline", timeline_id=%dst_id))
             .await
-            .context("load newly created on-disk timeline state")?;
+            .context("load newly created on-disk timeline state")?
+            .unwrap();
 
-        let loaded_timeline = self
-            .timelines
-            .lock()
-            .unwrap()
-            .get(&dst_id)
-            .cloned()
-            .expect("we just loaded it");
-        loaded_timeline.set_state(TimelineState::Active);
+        tline.set_state(TimelineState::Active);
         Ok(loaded_timeline)
     }
 
