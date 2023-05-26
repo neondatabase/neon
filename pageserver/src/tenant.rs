@@ -1581,9 +1581,9 @@ impl Tenant {
 
         let load_cause = TimelineLoadCause::TimelineCreate {
             placeholder_timeline: Arc::clone(&placeholder_timeline),
-            // branched timelines (ancestor.is_some()) just have the metadata file
-            // bootstrapped timelines (!ancestor.is_some()) have layers due to initdb
-            expxect_layer_files: !ancestor.0.is_some(),
+            // branched timelines (ancestor == Some) just have the metadata file
+            // bootstrapped timelines (ancestor == None) have layers due to initdb
+            expxect_layer_files: ancestor.0.is_none(),
         };
         let real_timeline = self
             .load_local_timeline(new_timeline_id, metadata, ancestor, load_cause, ctx)
