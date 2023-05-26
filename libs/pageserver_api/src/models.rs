@@ -181,7 +181,7 @@ pub struct TenantConfig {
     // Otherwise we'd have to move the types for eviction policy into this package.
     // We might do that once the eviction feature has stabilizied.
     // For now, this field is not even documented in the openapi_spec.yml.
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(serde_json::Value))]
     pub eviction_policy: Option<serde_json::Value>,
     #[clap(long)]
     pub min_resident_size_override: Option<u64>,
