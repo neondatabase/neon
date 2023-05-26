@@ -484,30 +484,29 @@ impl Tenant {
         let tenant_id = self.tenant_id;
         let ancestor = ancestor.0;
 
-        match (
-            local_metadata.as_ref().map(|lmd| lmd.ancestor_timeline()),
-            remote_startup_data
-                .as_ref()
-                .map(|rsd| rsd.remote_metadata.ancestor_timeline()),
+        let agreed_ancestor_id = match (
+            &local_metadata,
+            remote_startup_data.as_ref().map(|rsd| &rsd.remote_metadata),
         ) {
-            (Some(local_ancestor), Some(remote_ancestor)) => {
-                assert_eq!(
-                    local_ancestor, remote_ancestor,
-                    "local and remote ancestor timelines should match"
+            (Some(local_metadata), Some(remote_metadata)) => {
+                anyhow::ensure!(
+                    local_metadata.ancestor_timeline() == remote_metadata.ancestor_timeline(),
+                    "local and remote metadata do not agree on ancestorship, local={local:?} remote={remote:?}",
+                    local = local_metadata,
+                    remote = remote_metadata,
                 );
+                local_metadata.ancestor_timeline()
             }
-            (None, None) => {}
-            (local, remote) => {
-                anyhow::bail!("local and remote metadata do not agree on ancestorship, local={local:?} remote={remote:?}");
+            (None, None) => {
+                unreachable!("TODO probably get rid of this possiblity at the same time as we eliminate first_save");
             }
-        }
+            (Some(md), None) | (None, Some(md)) => md.ancestor_timeline(),
+        };
         assert_eq!(
             ancestor.as_ref().map(|a| a.timeline_id),
             // we could check either local or remote metadata, it doesn't matter,
             // we checked above that they're either (None, None) or (Some, Some)
-            local_metadata
-                .as_ref()
-                .and_then(|lmd| lmd.ancestor_timeline()),
+            agreed_ancestor_id,
             "caller does not provide correct ancestor"
         );
 
@@ -1358,20 +1357,32 @@ impl Tenant {
         pg_version: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let (uninit_mark, tl) = self
+        let (guard, real_timeline) = self
             .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
             // make the debug_assert_current_span_has_tenant_id() in create_empty_timeline() happy
             .instrument(tracing::info_span!("create_test_timeline", tenant_id=%self.tenant_id))
             .await
             .context("create empty timeline")?;
         // the tests don't need any content in the timeline, we're done here
-        uninit_mark
-            .remove_uninit_mark()
-            .context("remove_uninit_mark")?;
+        let placeholder_timeline = guard
+            .creation_complete_remove_uninit_marker_and_get_placeholder_timeline()
+            .context("creation_complete_remove_uninit_marker_and_get_placeholder_timeline")?;
+
+        match self.timelines.lock().unwrap().entry(new_timeline_id) {
+            Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
+            Entry::Occupied(mut o) => {
+                info!("replacing placeholder timeline with the real one");
+                assert_eq!(placeholder_timeline.current_state(), TimelineState::Creating);
+                assert!(compare_arced_timeline(&placeholder_timeline, o.get()));
+                let replaced_placeholder = o.insert(Arc::clone(&real_timeline));
+                assert!(compare_arced_timeline(&replaced_placeholder, &placeholder_timeline));
+            },
+        }
+
         // The non-test code would call tl.activate() here.
-        tl.maybe_spawn_flush_loop();
-        tl.set_state(TimelineState::Active);
-        Ok(tl)
+        real_timeline.maybe_spawn_flush_loop();
+        real_timeline.set_state(TimelineState::Active);
+        Ok(real_timeline)
     }
 
     /// Create a new timeline.
@@ -2721,27 +2732,46 @@ impl Tenant {
         start_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
+        //TODO can't we just use create_timeline here?
+
         let guard = self
-            .new_timeline_creating_placeholder(dst_id)
+            .start_creating_timeline(dst_id)
             .context("create creating placeholder timeline")?;
 
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, None, &guard, ctx)
-            .await
-            .context("branch_timeline_impl")?;
-
-        uninit_mark
-            .remove_uninit_mark()
-            .context("remove_uninit_mark")?;
+        let create_ondisk_state = async {
+            self.branch_timeline_impl(src_timeline, dst_id, start_lsn, None, &guard, ctx)
+                .await
+                .context("branch_timeline_impl")?;
+            anyhow::Ok(())
+        };
+        let placeholder_timeline = match create_ondisk_state.await {
+            Ok(()) => {
+                match guard.creation_complete_remove_uninit_marker_and_get_placeholder_timeline() {
+                    Ok(placeholder_timeline) => placeholder_timeline,
+                    Err(err) => {
+                        error!(
+                            "failed to remove uninit marker for new_timeline_id={dst_id}: {err:#}"
+                        );
+                        return Err(err);
+                    }
+                }
+            }
+            Err(err) => {
+                error!("failed to create on-disk state for new_timeline_id={dst_id}: {err:#}");
+                guard.creation_failed();
+                return Err(err);
+            }
+        };
 
         // From here on, it's just like during pageserver startup.
         let metadata = load_metadata(self.conf, dst_id, self.tenant_id)
             .context("load newly created on-disk timeline metadata")?;
 
-        let tline = self
+        let real_timeline = self
             .load_local_timeline(
                 dst_id,
                 metadata,
-                AncestorArg::no_ancestor(),
+                AncestorArg::ancestor(Arc::clone(src_timeline)),
                 TimelineLoadCause::Test,
                 ctx,
             )
@@ -2750,8 +2780,20 @@ impl Tenant {
             .context("load newly created on-disk timeline state")?
             .unwrap();
 
-        tline.set_state(TimelineState::Active);
-        Ok(loaded_timeline)
+        match self.timelines.lock().unwrap().entry(dst_id) {
+            Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
+            Entry::Occupied(mut o) => {
+                info!("replacing placeholder timeline with the real one");
+                assert_eq!(placeholder_timeline.current_state(), TimelineState::Creating);
+                assert!(compare_arced_timeline(&placeholder_timeline, o.get()));
+                let replaced_placeholder = o.insert(Arc::clone(&real_timeline));
+                assert!(compare_arced_timeline(&replaced_placeholder, &placeholder_timeline));
+            },
+        }
+
+        real_timeline.set_state(TimelineState::Active);
+        real_timeline.maybe_spawn_flush_loop();
+        Ok(real_timeline)
     }
 
     /// Branch an existing timeline, creating local and remote files.
@@ -3651,7 +3693,10 @@ mod tests {
             Ok(_) => panic!("duplicate timeline creation should fail"),
             Err(e) => assert_eq!(
                 e.to_string(),
-                format!("timeline {} already exists", TIMELINE_ID)
+                format!(
+                    "timeline {} already exists (\"timeline directory\")",
+                    TIMELINE_ID
+                )
             ),
         }
 
