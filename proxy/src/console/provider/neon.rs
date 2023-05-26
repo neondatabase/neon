@@ -1,5 +1,6 @@
 //! Production console backend.
 
+use std::net::SocketAddr;
 use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
@@ -101,7 +102,7 @@ impl Api {
             // We'll set username and such later using the startup message.
             // TODO: add more type safety (in progress).
             let mut config = compute::ConnCfg::new();
-            config.host(host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
+            config.host(&host).port(port).ssl_mode(SslMode::Disable); // TLS is not configured on compute nodes.
 
             let node = NodeInfo {
                 config,
@@ -178,9 +179,9 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     Err(ApiError::Console { status, text })
 }
 
-fn parse_host_port(input: &str) -> Option<(&str, u16)> {
-    let (host, port) = input.split_once(':')?;
-    Some((host, port.parse().ok()?))
+fn parse_host_port(input: &str) -> Option<(String, u16)> {
+    let parsed: SocketAddr = input.parse().ok()?;
+    Some((parsed.ip().to_string(), parsed.port()))
 }
 
 #[cfg(test)]
