@@ -249,13 +249,14 @@ pub async fn shutdown_all_tenants() {
     };
 
     // Set tenant (and its timlines) to Stoppping state.
+    //
     // Since we can only transition into Stopping state after activation is complete,
-    // run it in a JoinSet so all tenants have a chance to stop before we git SIGKILLed.
+    // run it in a JoinSet so all tenants have a chance to stop before we get SIGKILLed.
     //
     // Transitioning tenants to Stopping state has a couple of non-obvious side effects:
     // 1. Lock out any new requests to the tenants.
     // 2. Signal cancellation to WAL receivers (we wait on it below).
-    // 3. Signal cancellation for othher tenant background loops.
+    // 3. Signal cancellation for other tenant background loops.
     // 4. ???
     //
     // The waiting for the cancellation is not done uniformly.
