@@ -1118,7 +1118,7 @@ impl<'a> DatadirModification<'a> {
 
         let writer = self.tline.writer().await;
 
-        let mut layer_map = self.tline.layers.write().unwrap();
+        let mut layer_map = self.tline.layers.write().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
         let mut result: anyhow::Result<()> = Ok(());
@@ -1152,10 +1152,10 @@ impl<'a> DatadirModification<'a> {
         self.pending_nblocks = 0;
 
         for (key, value) in self.pending_updates.drain() {
-            writer.put(key, lsn, &value)?;
+            writer.put(key, lsn, &value).await?;
         }
         for key_range in self.pending_deletions.drain(..) {
-            writer.delete(key_range, lsn)?;
+            writer.delete(key_range, lsn).await?;
         }
 
         writer.finish_write(lsn);
@@ -1602,7 +1602,9 @@ pub async fn create_test_timeline(
     pg_version: u32,
     ctx: &RequestContext,
 ) -> anyhow::Result<std::sync::Arc<Timeline>> {
-    let tline = tenant.create_test_timeline(timeline_id, Lsn(8), pg_version, ctx)?;
+    let tline = tenant
+        .create_test_timeline(timeline_id, Lsn(8), pg_version, ctx)
+        .await?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit().await?;

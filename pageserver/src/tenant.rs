@@ -505,6 +505,7 @@ impl Tenant {
             //     "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
             timeline
                 .load_layer_map(new_disk_consistent_lsn)
+                .await
                 .with_context(|| {
                     format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
                 })?;
@@ -544,7 +545,7 @@ impl Tenant {
                 || timeline
                     .layers
                     .read()
-                    .unwrap()
+                    .await
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -1166,7 +1167,7 @@ impl Tenant {
     /// This is used to create the initial 'main' timeline during bootstrapping,
     /// or when importing a new base backup. The caller is expected to load an
     /// initial image of the datadir to the new timeline after this.
-    pub fn create_empty_timeline(
+    pub async fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
@@ -1178,9 +1179,10 @@ impl Tenant {
             "Cannot create empty timelines on inactive tenant"
         );
 
-        let timelines = self.timelines.lock().unwrap();
-        let timeline_uninit_mark = self.create_timeline_uninit_mark(new_timeline_id, &timelines)?;
-        drop(timelines);
+        let timeline_uninit_mark = {
+            let timelines = self.timelines.lock().unwrap();
+            self.create_timeline_uninit_mark(new_timeline_id, &timelines)?
+        };
 
         let new_metadata = TimelineMetadata::new(
             Lsn(0),
@@ -1198,6 +1200,7 @@ impl Tenant {
             true,
             None,
         )
+        .await
     }
 
     /// Helper for unit tests to create an emtpy timeline.
@@ -1206,19 +1209,22 @@ impl Tenant {
     // This makes the various functions which anyhow::ensure! for Active state work in tests.
     // Our current tests don't need the background loops.
     #[cfg(test)]
-    pub fn create_test_timeline(
+    pub async fn create_test_timeline(
         &self,
         new_timeline_id: TimelineId,
         initdb_lsn: Lsn,
         pg_version: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let uninit_tl = self.create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)?;
+        let uninit_tl = self
+            .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
+            .await?;
 
         let raw_timeline = uninit_tl.raw_timeline().unwrap();
 
         raw_timeline
             .load_layer_map(raw_timeline.get_disk_consistent_lsn())
+            .await
             .with_context(|| {
                 format!(
                     "Failed to load layermap for timeline {tenant_id}/{timeline_id}",
@@ -2481,16 +2487,19 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
-        let uninit_timeline = self.prepare_timeline(
-            dst_id,
-            &metadata,
-            timeline_uninit_mark,
-            false,
-            Some(Arc::clone(src_timeline)),
-        )?;
+        let uninit_timeline = self
+            .prepare_timeline(
+                dst_id,
+                &metadata,
+                timeline_uninit_mark,
+                false,
+                Some(Arc::clone(src_timeline)),
+            )
+            .await?;
         let raw_timeline = uninit_timeline.raw_timeline()?;
         raw_timeline
             .load_layer_map(raw_timeline.get_disk_consistent_lsn())
+            .await
             .with_context(|| {
                 format!(
                     "Failed to load layermap for timeline {tenant_id}/{timeline_id}",
@@ -2578,8 +2587,9 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let raw_timeline =
-            self.prepare_timeline(timeline_id, &new_metadata, timeline_uninit_mark, true, None)?;
+        let raw_timeline = self
+            .prepare_timeline(timeline_id, &new_metadata, timeline_uninit_mark, true, None)
+            .await?;
 
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
@@ -2632,7 +2642,7 @@ impl Tenant {
 
     /// Creates intermediate timeline structure and its files, without loading it into memory.
     /// It's up to the caller to import the necesary data and import the timeline into memory.
-    fn prepare_timeline(
+    async fn prepare_timeline(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
@@ -2664,7 +2674,7 @@ impl Tenant {
         ) {
             Ok(new_timeline) => {
                 if init_layers {
-                    new_timeline.layers.write().unwrap().next_open_layer_at =
+                    new_timeline.layers.write().await.next_open_layer_at =
                         Some(new_timeline.initdb_lsn);
                 }
                 debug!(
@@ -3324,15 +3334,21 @@ mod tests {
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_basic")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -3357,9 +3373,14 @@ mod tests {
         let (tenant, ctx) = TenantHarness::create("no_duplicate_timelines")?
             .load()
             .await;
-        let _ = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let _ = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
-        match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx) {
+        match tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await
+        {
             Ok(_) => panic!("duplicate timeline creation should fail"),
             Err(e) => assert_eq!(
                 e.to_string(),
@@ -3388,7 +3409,9 @@ mod tests {
         use std::str::from_utf8;
 
         let (tenant, ctx) = TenantHarness::create("test_branch")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let writer = tline.writer().await;
 
         #[allow(non_snake_case)]
@@ -3397,13 +3420,21 @@ mod tests {
         let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
-        writer.put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))?;
-        writer.put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))
+            .await?;
+        writer
+            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))
+            .await?;
         writer.finish_write(Lsn(0x20));
 
-        writer.put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))
+            .await?;
         writer.finish_write(Lsn(0x30));
-        writer.put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))
+            .await?;
         writer.finish_write(Lsn(0x40));
 
         //assert_current_logical_size(&tline, Lsn(0x40));
@@ -3416,7 +3447,9 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
         let new_writer = newtline.writer().await;
-        new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
+        new_writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))
+            .await?;
         new_writer.finish_write(Lsn(0x40));
 
         // Check page contents on both branches
@@ -3444,36 +3477,44 @@ mod tests {
         {
             let writer = tline.writer().await;
             // Create a relation on the timeline
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
         }
         tline.freeze_and_flush().await?;
         {
             let writer = tline.writer().await;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
         }
         tline.freeze_and_flush().await
@@ -3485,7 +3526,9 @@ mod tests {
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
                 .load()
                 .await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
@@ -3522,8 +3565,9 @@ mod tests {
                 .load()
                 .await;
 
-        let tline =
-            tenant.create_test_timeline(TIMELINE_ID, Lsn(0x50), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x50), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
         match tenant
             .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), &ctx)
@@ -3572,7 +3616,9 @@ mod tests {
             TenantHarness::create("test_get_branchpoints_from_an_inactive_timeline")?
                 .load()
                 .await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant
@@ -3620,7 +3666,9 @@ mod tests {
             TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
                 .load()
                 .await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant
@@ -3643,7 +3691,9 @@ mod tests {
             TenantHarness::create("test_parent_keeps_data_forever_after_branching")?
                 .load()
                 .await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant
@@ -3675,8 +3725,9 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
         {
             let (tenant, ctx) = harness.load().await;
-            let tline =
-                tenant.create_test_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION, &ctx)?;
+            let tline = tenant
+                .create_test_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION, &ctx)
+                .await?;
             make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
         }
 
@@ -3695,8 +3746,9 @@ mod tests {
         // create two timelines
         {
             let (tenant, ctx) = harness.load().await;
-            let tline =
-                tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            let tline = tenant
+                .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+                .await?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
@@ -3733,7 +3785,9 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
         let (tenant, ctx) = harness.load().await;
 
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         drop(tline);
         drop(tenant);
 
@@ -3771,10 +3825,14 @@ mod tests {
     #[tokio::test]
     async fn test_images() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_images")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
@@ -3782,7 +3840,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -3790,7 +3850,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))
+            .await?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
@@ -3798,7 +3860,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))
+            .await?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
@@ -3836,7 +3900,9 @@ mod tests {
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
         let mut lsn = Lsn(0x10);
 
@@ -3848,11 +3914,13 @@ mod tests {
             for _ in 0..10000 {
                 test_key.field6 = blknum;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
 
@@ -3878,7 +3946,9 @@ mod tests {
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_random_updates")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -3896,11 +3966,13 @@ mod tests {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
             let writer = tline.writer().await;
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -3914,11 +3986,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -3951,8 +4025,9 @@ mod tests {
         let (tenant, ctx) = TenantHarness::create("test_traverse_branches")?
             .load()
             .await;
-        let mut tline =
-            tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let mut tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -3970,11 +4045,13 @@ mod tests {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
             let writer = tline.writer().await;
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -3996,11 +4073,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
@@ -4034,8 +4113,9 @@ mod tests {
         let (tenant, ctx) = TenantHarness::create("test_traverse_ancestors")?
             .load()
             .await;
-        let mut tline =
-            tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        let mut tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .await?;
 
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;
@@ -4061,11 +4141,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
