@@ -20,6 +20,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
     available_remote_storages,
+    last_flush_lsn_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
@@ -250,8 +251,12 @@ def test_pageserver_metrics_removed_after_detach(
     tenant_1, _ = env.neon_cli.create_tenant()
     tenant_2, _ = env.neon_cli.create_tenant()
 
-    env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_1)
-    env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_2)
+    tenant_1_timeline = env.neon_cli.create_timeline(
+        "test_metrics_removed_after_detach", tenant_id=tenant_1
+    )
+    tenant_2_timeline = env.neon_cli.create_timeline(
+        "test_metrics_removed_after_detach", tenant_id=tenant_2
+    )
 
     endpoint_tenant1 = env.endpoints.create_start(
         "test_metrics_removed_after_detach", tenant_id=tenant_1
@@ -260,13 +265,17 @@ def test_pageserver_metrics_removed_after_detach(
         "test_metrics_removed_after_detach", tenant_id=tenant_2
     )
 
-    for endpoint in [endpoint_tenant1, endpoint_tenant2]:
+    for endpoint, timeline_id in [
+        (endpoint_tenant1, tenant_1_timeline),
+        (endpoint_tenant2, tenant_2_timeline),
+    ]:
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE TABLE t(key int primary key, value text)")
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
                 assert cur.fetchone() == (5000050000,)
+            last_flush_lsn_upload(env, endpoint, endpoint.tenant_id, timeline_id)
 
     def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
         ps_metrics = env.pageserver.http_client().get_metrics()
