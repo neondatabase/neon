@@ -13,5 +13,5 @@
 #     -lpgcommon -lpgport -lz -lreadline -lm \
 #     -o walproposer.so walproposer.o
 
-clang -c -o walproposer.o walproposer.c
+clang -c -o walproposer.o walproposer.c -ferror-limit=1
 ar rcs libwalproposer.a walproposer.o
