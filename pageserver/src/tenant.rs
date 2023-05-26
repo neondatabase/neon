@@ -220,7 +220,7 @@ impl<'t> CreatingTimelineGuard<'t> {
                 .uninit_mark_path
                 .parent()
                 .expect("uninit mark always has parent");
-            crashsafe::fsync(&uninit_mark_path_parent).with_context(|| {
+            crashsafe::fsync(uninit_mark_path_parent).with_context(|| {
                 format!("fsync uninit mark parent dir {uninit_mark_path_parent:?}")
             })?;
             anyhow::Ok(())
@@ -259,7 +259,7 @@ impl<'t> CreatingTimelineGuard<'t> {
                 .timeline_path
                 .parent()
                 .expect("timeline dir always has parent");
-            crashsafe::fsync(&timeline_dir_parent).with_context(|| {
+            crashsafe::fsync(timeline_dir_parent).with_context(|| {
                 format!("fsync timeline dir parent dir {timeline_dir_parent:?}")
             })?;
             std::fs::remove_file(&self.uninit_mark_path).context("remove uninit mark")?;
@@ -267,7 +267,7 @@ impl<'t> CreatingTimelineGuard<'t> {
                 .uninit_mark_path
                 .parent()
                 .expect("uninit mark always has parent");
-            crashsafe::fsync(&uninit_mark_path_parent).with_context(|| {
+            crashsafe::fsync(uninit_mark_path_parent).with_context(|| {
                 format!("fsync uninit mark parent dir {uninit_mark_path_parent:?}")
             })?;
             anyhow::Ok(())
@@ -278,7 +278,6 @@ impl<'t> CreatingTimelineGuard<'t> {
             }
             Err(e) => {
                 error!(timeline_id=%self.timeline_id, error=?e, "failure during cleanup of creating timeline, it will remain in memory and be undeletable, ignore+fix_manually+load the affected tenant");
-                return;
             }
         }
     }
