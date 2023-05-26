@@ -434,6 +434,7 @@ pub enum TimelineLoadCause {
     TenantCreate,
     TimelineCreate {
         placeholder_timeline: Arc<Timeline>,
+        expxect_layer_files: bool,
     },
     TenantLoad,
     #[cfg(test)]
@@ -555,18 +556,47 @@ impl Tenant {
                 .context("failed to reconcile with remote")?
         }
 
-        // Sanity check: a timeline should have some content.
-        // anyhow::ensure!(
-        //     ancestor.is_some()
-        //         || timeline
-        //             .layers
-        //             .read()
-        //             .unwrap()
-        //             .iter_historic_layers()
-        //             .next()
-        //             .is_some(),
-        //     "Timeline has no ancestor and no layer files"
-        // );
+        match cause {
+            TimelineLoadCause::TenantCreate => {
+                unreachable!("tenant create does not create timelines")
+            }
+            TimelineLoadCause::Attach
+            | TimelineLoadCause::TenantLoad
+            | TimelineLoadCause::Startup
+            | TimelineLoadCause::TimelineCreate {
+                expxect_layer_files: true,
+                ..
+            } => {
+                // Sanity check: a timeline should have some content.
+                anyhow::ensure!(
+                    ancestor.is_some()
+                        || timeline
+                            .layers
+                            .read()
+                            .unwrap()
+                            .iter_historic_layers()
+                            .next()
+                            .is_some(),
+                    "Timeline has no ancestor and no layer files"
+                );
+            }
+            TimelineLoadCause::TimelineCreate {
+                expxect_layer_files: false,
+                ..
+            } => {
+                let has_layers = timeline
+                    .layers
+                    .read()
+                    .unwrap()
+                    .iter_historic_layers()
+                    .next()
+                    .is_some();
+                assert!(!has_layers, "timeline is not expected to have layers");
+            }
+            // tests do all sorts of weird stuff
+            #[cfg(test)]
+            TimelineLoadCause::Test => {}
+        }
 
         // Save the metadata file to local disk.
         if !picked_local {
@@ -1306,6 +1336,7 @@ impl Tenant {
                 AncestorArg::no_ancestor(),
                 TimelineLoadCause::TimelineCreate {
                     placeholder_timeline: Arc::clone(&guard.placeholder_timeline),
+                    expxect_layer_files: false,
                 },
                 ctx,
             )
@@ -1543,16 +1574,18 @@ impl Tenant {
         let metadata = load_metadata(self.conf, new_timeline_id, self.tenant_id)
             .context("load newly created on-disk timeline metadata")?;
 
+        let load_cause = TimelineLoadCause::TimelineCreate {
+            placeholder_timeline: Arc::clone(&placeholder_timeline),
+            expxect_layer_files: if ancestor.0.is_some() {
+                // branched timelines just have the metadata file
+                false
+            } else {
+                // bootstrapped timelines have layers
+                true
+            },
+        };
         let real_timeline = self
-            .load_local_timeline(
-                new_timeline_id,
-                metadata,
-                ancestor,
-                TimelineLoadCause::TimelineCreate {
-                    placeholder_timeline: Arc::clone(&placeholder_timeline),
-                },
-                ctx,
-            )
+            .load_local_timeline(new_timeline_id, metadata, ancestor, load_cause, ctx)
             .await
             .context("load newly created on-disk timeline state")?;
 
