@@ -192,7 +192,6 @@ impl UninitializedTimeline<'_> {
         mut self,
         _ctx: &RequestContext,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
-        load_layer_map: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
@@ -201,25 +200,11 @@ impl UninitializedTimeline<'_> {
             format!("No timeline for initalization found for {tenant_id}/{timeline_id}")
         })?;
 
-        let new_disk_consistent_lsn = new_timeline.get_disk_consistent_lsn();
-        // TODO it would be good to ensure that, but apparently a lot of our testing is dependend on that at least
-        // ensure!(new_disk_consistent_lsn.is_valid(),
-        //     "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
-
         match timelines.entry(timeline_id) {
             Entry::Occupied(_) => anyhow::bail!(
                 "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
             ),
             Entry::Vacant(v) => {
-                if load_layer_map {
-                    new_timeline
-                        .load_layer_map(new_disk_consistent_lsn)
-                        .with_context(|| {
-                            format!(
-                                "Failed to load layermap for timeline {tenant_id}/{timeline_id}"
-                            )
-                        })?;
-                }
                 uninit_mark.remove_uninit_mark().with_context(|| {
                     format!(
                         "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
@@ -265,7 +250,7 @@ impl UninitializedTimeline<'_> {
         // Initialize without loading the layer map. We started with an empty layer map, and already
         // updated it for the layers that we created during the import.
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        let tl = self.initialize_with_lock(ctx, &mut timelines, false)?;
+        let tl = self.initialize_with_lock(ctx, &mut timelines)?;
         tl.activate(broker_client, ctx);
         Ok(tl)
     }
@@ -1229,8 +1214,21 @@ impl Tenant {
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let uninit_tl = self.create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)?;
+
+        let raw_timeline = uninit_tl.raw_timeline().unwrap();
+
+        raw_timeline
+            .load_layer_map(raw_timeline.get_disk_consistent_lsn())
+            .with_context(|| {
+                format!(
+                    "Failed to load layermap for timeline {tenant_id}/{timeline_id}",
+                    tenant_id = self.tenant_id,
+                    timeline_id = new_timeline_id
+                )
+            })?;
+
         let mut timelines = self.timelines.lock().unwrap();
-        let tl = uninit_tl.initialize_with_lock(ctx, &mut timelines, true)?;
+        let tl = uninit_tl.initialize_with_lock(ctx, &mut timelines)?;
         // The non-test code would call tl.activate() here.
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -2483,16 +2481,27 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
+        let uninit_timeline = self.prepare_timeline(
+            dst_id,
+            &metadata,
+            timeline_uninit_mark,
+            false,
+            Some(Arc::clone(src_timeline)),
+        )?;
+        let raw_timeline = uninit_timeline.raw_timeline()?;
+        raw_timeline
+            .load_layer_map(raw_timeline.get_disk_consistent_lsn())
+            .with_context(|| {
+                format!(
+                    "Failed to load layermap for timeline {tenant_id}/{timeline_id}",
+                    tenant_id = self.tenant_id,
+                    timeline_id = dst_id
+                )
+            })?;
+
         let new_timeline = {
             let mut timelines = self.timelines.lock().unwrap();
-            self.prepare_timeline(
-                dst_id,
-                &metadata,
-                timeline_uninit_mark,
-                false,
-                Some(Arc::clone(src_timeline)),
-            )?
-            .initialize_with_lock(ctx, &mut timelines, true)?
+            uninit_timeline.initialize_with_lock(ctx, &mut timelines)?
         };
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
@@ -2609,7 +2618,7 @@ impl Tenant {
         // map above, when we imported the datadir.
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
-            raw_timeline.initialize_with_lock(ctx, &mut timelines, false)?
+            raw_timeline.initialize_with_lock(ctx, &mut timelines)?
         };
 
         info!(
