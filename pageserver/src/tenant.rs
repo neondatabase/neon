@@ -1716,7 +1716,13 @@ impl Tenant {
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
-            TenantState::Activating | TenantState::Loading | TenantState::Attaching => false, // TODO log that we're waiting
+            TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
+                info!(
+                    "waiting for {} to turn Active|Broken|Stopping",
+                    <&'static str>::from(state)
+                );
+                false
+            }
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
         })
         .await
@@ -1770,7 +1776,13 @@ impl Tenant {
         // The load & attach routines own the tenant state until it has reached `Active`.
         // So, wait until it's done.
         rx.wait_for(|state| match state {
-            TenantState::Activating | TenantState::Loading | TenantState::Attaching => false, // TODO log that we're waiting
+            TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
+                info!(
+                    "waiting for {} to turn Active|Broken|Stopping",
+                    <&'static str>::from(state)
+                );
+                false
+            }
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
         })
         .await
