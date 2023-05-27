@@ -1436,7 +1436,11 @@ impl Tenant {
         Ok(())
     }
 
-    /// Removes timeline-related in-memory data
+    /// Shuts down a timeline's tasks, removes its in-memory structures, and deletes its
+    /// data from disk.
+    ///
+    /// This doesn't currently delete all data from S3, but sets a flag in its
+    /// index_part.json file to mark it as deleted.
     pub async fn delete_timeline(
         &self,
         timeline_id: TimelineId,
@@ -1446,7 +1450,11 @@ impl Tenant {
 
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
-        let timeline = {
+        //
+        // Also grab the Timeline's delete_lock to prevent another deletion from starting.
+        let timeline;
+        let mut delete_lock_guard;
+        {
             let mut timelines = self.timelines.lock().unwrap();
 
             // Ensure that there are no child timelines **attached to that pageserver**,
@@ -1464,20 +1472,36 @@ impl Tenant {
                 Entry::Vacant(_) => return Err(DeleteTimelineError::NotFound),
             };
 
-            let timeline = Arc::clone(timeline_entry.get());
+            timeline = Arc::clone(timeline_entry.get());
+
+            // Prevent two tasks from trying to delete the timeline at the same time.
+            //
+            // XXX: We should perhaps return an HTTP "202 Accepted" to signal that the caller
+            // needs to poll until the operation has finished. But for now, we return an
+            // error, because the control plane knows to retry errors.
+            delete_lock_guard = timeline.delete_lock.try_lock().map_err(|_| {
+                DeleteTimelineError::Other(anyhow::anyhow!(
+                    "timeline deletion is already in progress"
+                ))
+            })?;
+
+            // If another task finished the deletion just before we acquired the lock,
+            // return success.
+            if *delete_lock_guard {
+                return Ok(());
+            }
+
             timeline.set_state(TimelineState::Stopping);
 
             drop(timelines);
-            timeline
-        };
+        }
 
         // Now that the Timeline is in Stopping state, request all the related tasks to
         // shut down.
         //
-        // NB: If you call delete_timeline multiple times concurrently, they will
-        // all go through the motions here. Make sure the code here is idempotent,
-        // and don't error out if some of the shutdown tasks have already been
-        // completed!
+        // NB: If this fails half-way through, and is retried, the retry will go through
+        // all the same steps again. Make sure the code here is idempotent, and don't
+        // error out if some of the shutdown tasks have already been completed!
 
         // Stop the walreceiver first.
         debug!("waiting for wal receiver to shutdown");
@@ -1518,6 +1542,10 @@ impl Tenant {
                 // If we (now, or already) marked it successfully as deleted, we can proceed
                 Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
                 // Bail out otherwise
+                //
+                // AlreadyInProgress shouldn't happen, because the 'delete_lock' prevents
+                // two tasks from performing the deletion at the same time. The first task
+                // that starts deletion should run it to completion.
                 Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
                 | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
                     return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
@@ -1528,14 +1556,12 @@ impl Tenant {
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.
             //
-            // This lock prevents multiple concurrent delete_timeline calls from
-            // stepping on each other's toes, while deleting the files. It also
-            // prevents GC or compaction from running at the same time.
+            // This lock prevents prevents GC or compaction from running at the same time.
+            // The GC task doesn't register itself with the timeline it's operating on,
+            // so it might still be running even though we called `shutdown_tasks`.
             //
             // Note that there are still other race conditions between
-            // GC, compaction and timeline deletion. GC task doesn't
-            // register itself properly with the timeline it's
-            // operating on. See
+            // GC, compaction and timeline deletion. See
             // https://github.com/neondatabase/neon/issues/2671
             //
             // No timeout here, GC & Compaction should be responsive to the
@@ -1597,37 +1623,27 @@ impl Tenant {
         });
 
         // Remove the timeline from the map.
-        let mut timelines = self.timelines.lock().unwrap();
-        let children_exist = timelines
-            .iter()
-            .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
-        // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
-        // We already deleted the layer files, so it's probably best to panic.
-        // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
-        if children_exist {
-            panic!("Timeline grew children while we removed layer files");
+        {
+            let mut timelines = self.timelines.lock().unwrap();
+
+            let children_exist = timelines
+                .iter()
+                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+            // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
+            // We already deleted the layer files, so it's probably best to panic.
+            // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
+            if children_exist {
+                panic!("Timeline grew children while we removed layer files");
+            }
+
+            timelines.remove(&timeline_id).expect(
+                "timeline that we were deleting was concurrently removed from 'timelines' map",
+            );
         }
-        let removed_timeline = timelines.remove(&timeline_id);
-        if removed_timeline.is_none() {
-            // This can legitimately happen if there's a concurrent call to this function.
-            //   T1                                             T2
-            //   lock
-            //   unlock
-            //                                                  lock
-            //                                                  unlock
-            //                                                  remove files
-            //                                                  lock
-            //                                                  remove from map
-            //                                                  unlock
-            //                                                  return
-            //   remove files
-            //   lock
-            //   remove from map observes empty map
-            //   unlock
-            //   return
-            debug!("concurrent call to this function won the race");
-        }
-        drop(timelines);
+
+        // All done! Mark the deletion as completed and release the delete_lock
+        *delete_lock_guard = true;
+        drop(delete_lock_guard);
 
         Ok(())
     }

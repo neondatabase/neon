@@ -371,7 +371,7 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
 
         # make the second call and assert behavior
         log.info("second call start")
-        error_msg_re = "another task is already setting the deleted_flag, started at"
+        error_msg_re = "timeline deletion is already in progress"
         with pytest.raises(PageserverApiException, match=error_msg_re) as second_call_err:
             ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
         assert second_call_err.value.status_code == 500
