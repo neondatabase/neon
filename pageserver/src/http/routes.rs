@@ -1403,7 +1403,7 @@ pub fn make_router(
         .put("/v1/tenant/:tenant_id/break", |r| {
             testing_api_handler("set tenant state to broken", r, handle_tenant_break)
         })
-        .get("/v1/panic", |r| api_handler(r, always_panic_handler)) // FIXME: testing?
+        .get("/v1/panic", |r| api_handler(r, always_panic_handler))
         .post("/v1/tracing/event", |r| {
             testing_api_handler("emit a tracing event", r, post_tracing_event_handler)
         })
