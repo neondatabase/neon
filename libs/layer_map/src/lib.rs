@@ -32,7 +32,7 @@ pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
 #[derive(Debug, thiserror::Error)]
 pub enum GetReconstructPathError {}
 
-pub trait LayerMap {
+pub trait HistoricStuff {
     type Key;
     type Lsn;
     type HistoricLayer;
@@ -43,40 +43,39 @@ pub trait LayerMap {
         lsn: Self::Lsn,
     ) -> Result<Vec<Self::HistoricLayer>, GetReconstructPathError>;
     /// Produce a new version of `self` that includes the given inmem layer.
-    /// If the layer map is persistent, it is it's job to take care of that.
     fn make_historic(&self, inmem: Self::InMemoryLayer) -> Self;
 }
 
-struct State<K, L, RD, Layer, M, IML>
+struct State<K, L, RD, Layer, H, IML>
 where
     K: Copy,
-    M: LayerMap<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
+    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
     IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
 {
     inmem: Mutex<Option<IML>>,
-    historic: M,
+    historic: H,
 }
 
-pub struct Reader<K, C, L, RD, Layer, M, IML>
+pub struct Reader<K, C, L, RD, Layer, H, IML>
 where
     K: Copy,
     C: seqwait::MonotonicCounter<L> + Copy,
     L: Ord + Copy,
-    M: LayerMap<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
+    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
     IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
 {
-    shared: Wait<C, L, Arc<State<K, L, RD, Layer, M, IML>>>,
+    shared: Wait<C, L, Arc<State<K, L, RD, Layer, H, IML>>>,
 }
 
-pub struct ReadWriter<K, C, L, RD, Layer, M, IML>
+pub struct ReadWriter<K, C, L, RD, Layer, H, IML>
 where
     K: Copy,
     C: seqwait::MonotonicCounter<L> + Copy,
     L: Ord + Copy,
-    M: LayerMap<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
+    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
     IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
 {
-    shared: Advance<C, L, Arc<State<K, L, RD, Layer, M, IML>>>,
+    shared: Advance<C, L, Arc<State<K, L, RD, Layer, H, IML>>>,
 }
 
 pub enum Record<D, I> {
@@ -88,18 +87,18 @@ pub struct Lsn;
 
 pub struct PageImage;
 
-pub fn empty<K, C, L, RD, Layer, M, IML>(
+pub fn empty<K, C, L, RD, Layer, H, IML>(
     lsn: C,
-    historic: M,
+    historic: H,
 ) -> (
-    Reader<K, C, L, RD, Layer, M, IML>,
-    ReadWriter<K, C, L, RD, Layer, M, IML>,
+    Reader<K, C, L, RD, Layer, H, IML>,
+    ReadWriter<K, C, L, RD, Layer, H, IML>,
 )
 where
     K: Copy,
     C: seqwait::MonotonicCounter<L> + Copy,
     L: Ord + Copy,
-    M: LayerMap<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
+    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
     IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
 {
     let state = Arc::new(State {
@@ -127,12 +126,12 @@ pub struct ReconstructWork<K, L, RD, Layer> {
     historic_path: Vec<Layer>,
 }
 
-impl<K, C, L, RD, Layer, M, IML> Reader<K, C, L, RD, Layer, M, IML>
+impl<K, C, L, RD, Layer, H, IML> Reader<K, C, L, RD, Layer, H, IML>
 where
     K: Copy,
     C: seqwait::MonotonicCounter<L> + Copy,
     L: Ord + Copy,
-    M: LayerMap<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
+    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
     IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
 {
     pub async fn get(&self, key: K, lsn: L) -> Result<ReconstructWork<K, L, RD, Layer>, GetError> {
@@ -154,12 +153,12 @@ where
     }
 }
 
-impl<K, C, L, RD, Layer, M, IML> ReadWriter<K, C, L, RD, Layer, M, IML>
+impl<K, C, L, RD, Layer, H, IML> ReadWriter<K, C, L, RD, Layer, H, IML>
 where
     K: Copy,
     C: seqwait::MonotonicCounter<L> + Copy,
     L: Ord + Copy,
-    M: LayerMap<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
+    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
     IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
 {
     pub async fn put(&mut self, key: K, lsn: L, delta: RD) -> tokio::io::Result<()> {
@@ -259,7 +258,7 @@ mod tests {
         }
     }
 
-    impl super::LayerMap for LayerMap {
+    impl super::HistoricStuff for LayerMap {
         type Key = usize;
         type Lsn = usize;
         type HistoricLayer = Arc<HistoricLayer>;
