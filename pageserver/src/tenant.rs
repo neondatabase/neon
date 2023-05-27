@@ -1636,7 +1636,7 @@ impl Tenant {
                 panic!("Timeline grew children while we removed layer files");
             }
 
-            let removed_timeline = timelines.remove(&timeline_id).expect(
+            timelines.remove(&timeline_id).expect(
                 "timeline that we were deleting was concurrently removed from 'timelines' map",
             );
         }
