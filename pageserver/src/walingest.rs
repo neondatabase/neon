@@ -1208,7 +1208,9 @@ mod tests {
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_relsize")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1427,7 +1429,9 @@ mod tests {
     #[tokio::test]
     async fn test_drop_extend() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_drop_extend")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
 
         let mut m = tline.begin_modification(Lsn(0x20));
@@ -1496,7 +1500,9 @@ mod tests {
     #[tokio::test]
     async fn test_truncate_extend() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_truncate_extend")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
 
         // Create a 20 MB relation (the size is arbitrary)
@@ -1636,7 +1642,9 @@ mod tests {
     #[tokio::test]
     async fn test_large_rel() -> Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_large_rel")?.load().await;
-        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)?;
+        let tline = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
+            .await?;
         let mut walingest = init_walingest_test(&tline, &ctx).await?;
 
         let mut lsn = 0x10;
