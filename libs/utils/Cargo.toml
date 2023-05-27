@@ -37,6 +37,7 @@ uuid = { version = "1.2", features = ["v4", "serde"] }
 
 metrics.workspace = true
 workspace_hack.workspace = true
+either.workspace = true
 
 [dev-dependencies]
 byteorder.workspace = true

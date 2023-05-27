@@ -4564,6 +4564,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "criterion",
+ "either",
  "futures",
  "heapless",
  "hex",

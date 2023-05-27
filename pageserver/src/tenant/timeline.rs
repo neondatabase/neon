@@ -145,7 +145,7 @@ pub struct Timeline {
     // 'last_record_lsn.load().prev'. It's used to set the xl_prev pointer of the
     // first WAL record when the node is started up. But here, we just
     // keep track of it.
-    last_record_lsn: SeqWait<RecordLsn, Lsn>,
+    last_record_lsn: SeqWait<RecordLsn, Lsn, ()>,
 
     // All WAL records have been processed and stored durably on files on
     // local disk, up to this LSN. On crash and restart, we need to re-process
@@ -1270,10 +1270,13 @@ impl Timeline {
                 remote_client: remote_client.map(Arc::new),
 
                 // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
-                last_record_lsn: SeqWait::new(RecordLsn {
-                    last: disk_consistent_lsn,
-                    prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
-                }),
+                last_record_lsn: SeqWait::new(
+                    RecordLsn {
+                        last: disk_consistent_lsn,
+                        prev: metadata.prev_record_lsn().unwrap_or(Lsn(0)),
+                    },
+                    (),
+                ),
                 disk_consistent_lsn: AtomicLsn::new(disk_consistent_lsn.0),
 
                 last_freeze_at: AtomicLsn::new(disk_consistent_lsn.0),
@@ -2420,7 +2423,7 @@ impl Timeline {
         assert!(new_lsn.is_aligned());
 
         self.metrics.last_record_gauge.set(new_lsn.0 as i64);
-        self.last_record_lsn.advance(new_lsn);
+        self.last_record_lsn.advance(new_lsn, None);
     }
 
     fn freeze_inmem_layer(&self, write_lock_held: bool) {
