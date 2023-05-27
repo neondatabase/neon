@@ -581,6 +581,11 @@ impl Timeline {
         self.disk_consistent_lsn.load()
     }
 
+    #[cfg(test)]
+    pub(super) fn set_disk_consistent_lsn(&self, lsn: Lsn) {
+        self.disk_consistent_lsn.store(lsn)
+    }
+
     pub fn get_remote_consistent_lsn(&self) -> Option<Lsn> {
         if let Some(remote_client) = &self.remote_client {
             remote_client.last_uploaded_consistent_lsn()
