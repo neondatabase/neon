@@ -1600,7 +1600,7 @@ pub fn create_test_timeline(
     pg_version: u32,
     ctx: &RequestContext,
 ) -> anyhow::Result<std::sync::Arc<Timeline>> {
-    let tline = tenant.create_test_timeline(timeline_id, Lsn(8), pg_version, ctx)?;
+    let tline = tenant.create_test_timeline(timeline_id, Lsn(4), pg_version, ctx)?;
     let mut m = tline.begin_modification(Lsn(8));
     m.init_empty()?;
     m.commit()?;
