@@ -1593,8 +1593,15 @@ impl Timeline {
     }
 
     ///
+    /// Initialize with an empty layer map. Used when creating a new timeline.
+    ///
+    pub(super) fn init_empty_layer_map(&self, start_lsn: Lsn) {
+        let mut layers = self.layers.write().unwrap();
+        layers.next_open_layer_at = Some(Lsn(start_lsn.0));
+    }
+
+    ///
     /// Scan the timeline directory to populate the layer map.
-    /// Returns all timeline-related files that were found and loaded.
     ///
     pub(super) fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
         let mut layers = self.layers.write().unwrap();
@@ -2670,7 +2677,11 @@ impl Timeline {
         let layer;
         if let Some(open_layer) = &layers.open_layer {
             if open_layer.get_lsn_range().start > lsn {
-                bail!("unexpected open layer in the future");
+                bail!(
+                    "unexpected open layer in the future: open layers starts at {}, write lsn {}",
+                    open_layer.get_lsn_range().start,
+                    lsn
+                );
             }
 
             layer = Arc::clone(open_layer);
