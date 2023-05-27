@@ -1237,12 +1237,12 @@ where
     // We arm a drop-guard, so that if Hyper drops the Future, we signal the task
     // with the cancellation token.
     let token = CancellationToken::new();
-    let guard = token.clone().drop_guard();
+    let cancel_guard = token.clone().drop_guard();
     let handle = tokio::spawn(request_span(request, move |r| handler(r, token)));
 
     let result = handle.await;
 
-    guard.disarm();
+    cancel_guard.disarm();
 
     match result {
         Ok(result) => result,
