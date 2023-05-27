@@ -186,18 +186,13 @@ struct TimelineUninitMark {
 }
 
 impl UninitializedTimeline<'_> {
-    /// Ensures timeline data is valid, loads it into pageserver's memory and removes
-    /// uninit mark file on success.
+    /// Finish timeline creation: insert it into the Tenant's timelines map and remove the
+    /// uninit mark file.
     ///
     /// This function launches the flush loop if not already done.
     ///
     /// The caller is responsible for activating the timeline (function `.activate()`).
-    fn initialize_with_lock(
-        mut self,
-        _ctx: &RequestContext,
-        timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
-        load_layer_map: bool,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    fn finish_creation(mut self) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
 
@@ -205,25 +200,19 @@ impl UninitializedTimeline<'_> {
             format!("No timeline for initalization found for {tenant_id}/{timeline_id}")
         })?;
 
-        let new_disk_consistent_lsn = new_timeline.get_disk_consistent_lsn();
-        // TODO it would be good to ensure that, but apparently a lot of our testing is dependend on that at least
-        // ensure!(new_disk_consistent_lsn.is_valid(),
-        //     "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
+        // Check that the caller initialized disk_consistent_lsn
+        //
+        // TODO: many our unit tests violate this.
+        //let new_disk_consistent_lsn = new_timeline.get_disk_consistent_lsn();
+        //anyhow::ensure!(new_disk_consistent_lsn.is_valid(),
+        //     "new timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn");
 
+        let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         match timelines.entry(timeline_id) {
             Entry::Occupied(_) => anyhow::bail!(
                 "Found freshly initialized timeline {tenant_id}/{timeline_id} in the tenant map"
             ),
             Entry::Vacant(v) => {
-                if load_layer_map {
-                    new_timeline
-                        .load_layer_map(new_disk_consistent_lsn)
-                        .with_context(|| {
-                            format!(
-                                "Failed to load layermap for timeline {tenant_id}/{timeline_id}"
-                            )
-                        })?;
-                }
                 uninit_mark.remove_uninit_mark().with_context(|| {
                     format!(
                         "Failed to remove uninit mark file for timeline {tenant_id}/{timeline_id}"
@@ -252,9 +241,10 @@ impl UninitializedTimeline<'_> {
             .await
             .context("Failed to import basebackup")?;
 
+        // Flush the new layer files to disk, before we make the timeline as available to
+        // the outside world.
+        //
         // Flush loop needs to be spawned in order to be able to flush.
-        // We want to run proper checkpoint before we mark timeline as available to outside world
-        // Thus spawning flush loop manually and skipping flush_loop setup in initialize_with_lock
         raw_timeline.maybe_spawn_flush_loop();
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
@@ -266,10 +256,9 @@ impl UninitializedTimeline<'_> {
             .await
             .context("Failed to flush after basebackup import")?;
 
-        // Initialize without loading the layer map. We started with an empty layer map, and already
-        // updated it for the layers that we created during the import.
-        let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        let tl = self.initialize_with_lock(ctx, &mut timelines, false)?;
+        // All the data has been imported. Insert the Timeline into the tenant's timelines
+        // map and remove the uninit mark file.
+        let tl = self.finish_creation()?;
         tl.activate(broker_client, None, ctx);
         Ok(tl)
     }
@@ -516,24 +505,25 @@ impl Tenant {
         .context("merge_local_remote_metadata")?
         .to_owned();
 
-        let timeline = {
-            let timeline = self.create_timeline_data(
-                timeline_id,
-                up_to_date_metadata,
-                ancestor.clone(),
-                remote_client,
-                init_order,
-            )?;
-            let new_disk_consistent_lsn = timeline.get_disk_consistent_lsn();
-            // TODO it would be good to ensure that, but apparently a lot of our testing is dependend on that at least
-            // ensure!(new_disk_consistent_lsn.is_valid(),
-            //     "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
-            timeline
-                .load_layer_map(new_disk_consistent_lsn)
-                .with_context(|| {
-                    format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
-                })?;
+        let timeline = self.create_timeline_struct(
+            timeline_id,
+            up_to_date_metadata,
+            ancestor.clone(),
+            remote_client,
+            init_order,
+        )?;
+        let new_disk_consistent_lsn = timeline.get_disk_consistent_lsn();
+        anyhow::ensure!(
+            new_disk_consistent_lsn.is_valid(),
+            "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn"
+        );
+        timeline
+            .load_layer_map(new_disk_consistent_lsn)
+            .with_context(|| {
+                format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
+            })?;
 
+        {
             // avoiding holding it across awaits
             let mut timelines_accessor = self.timelines.lock().unwrap();
             match timelines_accessor.entry(timeline_id) {
@@ -547,7 +537,6 @@ impl Tenant {
                 Entry::Vacant(v) => {
                     v.insert(Arc::clone(&timeline));
                     timeline.maybe_spawn_flush_loop();
-                    timeline
                 }
             }
         };
@@ -1139,14 +1128,14 @@ impl Tenant {
                                 .init_upload_queue_stopped_to_continue_deletion(&index_part)?;
 
                             let timeline = self
-                                .create_timeline_data(
+                                .create_timeline_struct(
                                     timeline_id,
                                     &local_metadata,
                                     ancestor,
                                     Some(remote_client),
                                     init_order,
                                 )
-                                .context("create_timeline_data")?;
+                                .context("create_timeline_struct")?;
 
                             let guard = Arc::clone(&timeline.delete_lock).lock_owned().await;
 
@@ -1272,6 +1261,8 @@ impl Tenant {
         drop(timelines);
 
         let new_metadata = TimelineMetadata::new(
+            // Initialize disk_consistent LSN to 0, The caller must import some data to
+            // make it valid, before calling finish_creation()
             Lsn(0),
             None,
             None,
@@ -1280,11 +1271,11 @@ impl Tenant {
             initdb_lsn,
             pg_version,
         );
-        self.prepare_timeline(
+        self.prepare_new_timeline(
             new_timeline_id,
             &new_metadata,
             timeline_uninit_mark,
-            true,
+            initdb_lsn,
             None,
         )
     }
@@ -1315,10 +1306,7 @@ impl Tenant {
             .commit()
             .context("commit init_empty_test_timeline modification")?;
 
-        let mut timelines = self.timelines.lock().unwrap();
-        // load_layers=false because create_empty_timeline already did that what's necessary (set next_open_layer)
-        // and modification.init_empty() already created layers.
-        let tl = uninit_tl.initialize_with_lock(ctx, &mut timelines, false)?;
+        let tl = uninit_tl.finish_creation()?;
         // The non-test code would call tl.activate() here.
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -2250,7 +2238,12 @@ impl Tenant {
         }
     }
 
-    fn create_timeline_data(
+    /// Helper function to create a new Timeline struct.
+    ///
+    /// The returned Timeline is in Loading state. The caller is responsible for
+    /// initializing any on-disk state, and for inserting the Timeline to the 'timelines'
+    /// map.
+    fn create_timeline_struct(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
@@ -2670,7 +2663,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let src_id = src_timeline.timeline_id;
 
@@ -2755,17 +2748,15 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
-        let new_timeline = {
-            let mut timelines = self.timelines.lock().unwrap();
-            self.prepare_timeline(
-                dst_id,
-                &metadata,
-                timeline_uninit_mark,
-                false,
-                Some(Arc::clone(src_timeline)),
-            )?
-            .initialize_with_lock(ctx, &mut timelines, true)?
-        };
+        let uninitialized_timeline = self.prepare_new_timeline(
+            dst_id,
+            &metadata,
+            timeline_uninit_mark,
+            start_lsn + 1,
+            Some(Arc::clone(src_timeline)),
+        )?;
+
+        let new_timeline = uninitialized_timeline.finish_creation()?;
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
         // A branch timeline though, when created, can get no writes for some time, hence won't get any layers created.
@@ -2841,8 +2832,13 @@ impl Tenant {
             pgdata_lsn,
             pg_version,
         );
-        let raw_timeline =
-            self.prepare_timeline(timeline_id, &new_metadata, timeline_uninit_mark, true, None)?;
+        let raw_timeline = self.prepare_new_timeline(
+            timeline_id,
+            &new_metadata,
+            timeline_uninit_mark,
+            pgdata_lsn,
+            None,
+        )?;
 
         let tenant_id = raw_timeline.owning_tenant.tenant_id;
         let unfinished_timeline = raw_timeline.raw_timeline()?;
@@ -2858,10 +2854,10 @@ impl Tenant {
             format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
         })?;
 
-        // Flush the new layer files to disk, before we mark the timeline as available to
+        // Flush the new layer files to disk, before we make the timeline as available to
         // the outside world.
         //
-        // Thus spawn flush loop manually and skip flush_loop setup in initialize_with_lock
+        // Flush loop needs to be spawned in order to be able to flush.
         unfinished_timeline.maybe_spawn_flush_loop();
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
@@ -2877,12 +2873,8 @@ impl Tenant {
                 )
             })?;
 
-        // Initialize the timeline without loading the layer map, because we already updated the layer
-        // map above, when we imported the datadir.
-        let timeline = {
-            let mut timelines = self.timelines.lock().unwrap();
-            raw_timeline.initialize_with_lock(ctx, &mut timelines, false)?
-        };
+        // All done!
+        let timeline = raw_timeline.finish_creation()?;
 
         info!(
             "created root timeline {} timeline.lsn {}",
@@ -2893,14 +2885,18 @@ impl Tenant {
         Ok(timeline)
     }
 
-    /// Creates intermediate timeline structure and its files, without loading it into memory.
-    /// It's up to the caller to import the necesary data and import the timeline into memory.
-    fn prepare_timeline(
+    /// Creates intermediate timeline structure and its files.
+    ///
+    /// An empty layer map is initialized, and new data and WAL can be imported starting
+    /// at 'disk_consistent_lsn'. After any initial data has been imported, call
+    /// `finish_creation` to insert the Timeline into the timelines map and to remove the
+    /// uninit mark file.
+    fn prepare_new_timeline(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
         uninit_mark: TimelineUninitMark,
-        init_layers: bool,
+        start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
     ) -> anyhow::Result<UninitializedTimeline> {
         let tenant_id = self.tenant_id;
@@ -2918,33 +2914,27 @@ impl Tenant {
             None
         };
 
-        match self.create_timeline_files(
-            &uninit_mark.timeline_path,
-            new_timeline_id,
-            new_metadata,
-            ancestor,
-            remote_client,
-        ) {
-            Ok(new_timeline) => {
-                if init_layers {
-                    new_timeline.layers.write().unwrap().next_open_layer_at =
-                        Some(new_timeline.initdb_lsn);
-                }
-                debug!(
-                    "Successfully created initial files for timeline {tenant_id}/{new_timeline_id}"
-                );
-                Ok(UninitializedTimeline {
-                    owning_tenant: self,
-                    timeline_id: new_timeline_id,
-                    raw_timeline: Some((new_timeline, uninit_mark)),
-                })
-            }
-            Err(e) => {
-                error!("Failed to create initial files for timeline {tenant_id}/{new_timeline_id}, cleaning up: {e:?}");
-                cleanup_timeline_directory(uninit_mark);
-                Err(e)
-            }
+        let timeline_struct = self
+            .create_timeline_struct(new_timeline_id, new_metadata, ancestor, remote_client, None)
+            .context("Failed to create timeline data structure")?;
+
+        timeline_struct.init_empty_layer_map(start_lsn);
+
+        if let Err(e) =
+            self.create_timeline_files(&uninit_mark.timeline_path, new_timeline_id, new_metadata)
+        {
+            error!("Failed to create initial files for timeline {tenant_id}/{new_timeline_id}, cleaning up: {e:?}");
+            cleanup_timeline_directory(uninit_mark);
+            return Err(e);
         }
+
+        debug!("Successfully created initial files for timeline {tenant_id}/{new_timeline_id}");
+
+        Ok(UninitializedTimeline {
+            owning_tenant: self,
+            timeline_id: new_timeline_id,
+            raw_timeline: Some((timeline_struct, uninit_mark)),
+        })
     }
 
     fn create_timeline_files(
@@ -2952,13 +2942,8 @@ impl Tenant {
         timeline_path: &Path,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
-        ancestor: Option<Arc<Timeline>>,
-        remote_client: Option<RemoteTimelineClient>,
-    ) -> anyhow::Result<Arc<Timeline>> {
-        let timeline_data = self
-            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client, None)
-            .context("Failed to create timeline data structure")?;
-        crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
+    ) -> anyhow::Result<()> {
+        crashsafe::create_dir(timeline_path).context("Failed to create timeline directory")?;
 
         fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
             anyhow::bail!("failpoint after-timeline-uninit-mark-creation");
@@ -2972,8 +2957,7 @@ impl Tenant {
             true,
         )
         .context("Failed to create timeline metadata")?;
-
-        Ok(timeline_data)
+        Ok(())
     }
 
     /// Attempts to create an uninit mark file for the timeline initialization.
