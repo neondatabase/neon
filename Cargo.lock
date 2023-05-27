@@ -1989,6 +1989,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "layer_map"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "utils",
+ "workspace_hack",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
