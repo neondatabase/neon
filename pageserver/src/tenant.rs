@@ -1446,7 +1446,11 @@ impl Tenant {
 
         // Transition the timeline into TimelineState::Stopping.
         // This should prevent new operations from starting.
-        let timeline = {
+        //
+        // Also grab the Timeline's delete_lock to prevent another deletion from starting.
+        let timeline;
+        let mut delete_lock_guard;
+        {
             let mut timelines = self.timelines.lock().unwrap();
 
             // Ensure that there are no child timelines **attached to that pageserver**,
@@ -1464,12 +1468,29 @@ impl Tenant {
                 Entry::Vacant(_) => return Err(DeleteTimelineError::NotFound),
             };
 
-            let timeline = Arc::clone(timeline_entry.get());
+            timeline = Arc::clone(timeline_entry.get());
+
+            // Prevent two tasks from trying to delete the timeline at the same time.
+            //
+            // XXX: We should perhaps return an HTTP "202 Accepted" to signal that the caller
+            // needs to poll until the operation has finished. But for now, we return an
+            // error, because the control plane knows to retry errors.
+            delete_lock_guard = timeline.delete_lock.try_lock().map_err(|_| {
+                DeleteTimelineError::Other(anyhow::anyhow!(
+                    "timeline deletion is already in progress"
+                ))
+            })?;
+
+            // If another task finished the deletion just before we acquired the lock,
+            // return success.
+            if *delete_lock_guard {
+                return Ok(());
+            }
+
             timeline.set_state(TimelineState::Stopping);
 
             drop(timelines);
-            timeline
-        };
+        }
 
         // Now that the Timeline is in Stopping state, request all the related tasks to
         // shut down.
@@ -1518,6 +1539,10 @@ impl Tenant {
                 // If we (now, or already) marked it successfully as deleted, we can proceed
                 Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
                 // Bail out otherwise
+                //
+                // AlreadyInProgress shouldn't happen, because the 'delete_lock' prevents
+                // two tasks from performing the deletion at the same time. The first task
+                // that starts deletion should run it to completion.
                 Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
                 | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
                     return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
@@ -1628,6 +1653,8 @@ impl Tenant {
             debug!("concurrent call to this function won the race");
         }
         drop(timelines);
+
+        *delete_lock_guard = true;
 
         Ok(())
     }

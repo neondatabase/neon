@@ -236,6 +236,10 @@ pub struct Timeline {
 
     state: watch::Sender<TimelineState>,
 
+    /// Prevent two tasks from deleting the timeline at the same time. If held, the
+    /// timeline is being deleted. If 'true', the timeline has already been deleted.
+    pub delete_lock: tokio::sync::Mutex<bool>,
+
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 }
 
@@ -1414,6 +1418,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
+                delete_lock: tokio::sync::Mutex::new(false),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
