@@ -48,7 +48,6 @@ use bytes::{BufMut, Bytes, BytesMut};
     serde::Serialize,
     serde::Deserialize,
     strum_macros::Display,
-    strum_macros::EnumString,
     strum_macros::EnumVariantNames,
     strum_macros::AsRefStr,
     strum_macros::IntoStaticStr,
