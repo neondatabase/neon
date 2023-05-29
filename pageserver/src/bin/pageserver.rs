@@ -342,12 +342,27 @@ fn start_pageserver(
     let init_done_rx = Arc::new(tokio::sync::Mutex::new(init_done_rx));
 
     // Scan the local 'tenants/' directory and start loading the tenants
+    let init_started_at = std::time::Instant::now();
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         broker_client.clone(),
         remote_storage.clone(),
         init_done_tx,
     ))?;
+
+    BACKGROUND_RUNTIME.spawn({
+        let init_done_rx = init_done_rx.clone();
+        async move {
+            let init_done = async move { init_done_rx.lock().await.recv().await };
+
+            let elapsed = init_started_at.elapsed();
+
+            tracing::info!(
+                elapsed_millis = elapsed.as_millis(),
+                "Initial load completed."
+            );
+        }
+    });
 
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
