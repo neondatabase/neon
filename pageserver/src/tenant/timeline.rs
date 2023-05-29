@@ -1915,8 +1915,14 @@ impl Timeline {
                 /// we could lock up all worker threads.
                 static GLOBAL_INITIAL_LOGICAL_SIZES_AT_ONCE: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> = once_cell::sync::Lazy::new(|| {
                     let cores = std::thread::available_parallelism();
+                    // half rationale: we have other blocking work which will start later:
+                    // consumption metrics and per timeline eviction task. we however need to
+                    // be fast to accept page reads, so perhaps this is a suitable middle ground?
                     let max_blocked_threads = cores.map(|count| count.get() / 2);
-                    Arc::new(tokio::sync::Semaphore::new(max_blocked_threads.unwrap_or(1).min(1)))
+                    let max_blocked_threads = max_blocked_threads.unwrap_or(1);
+                    let max_blocked_threads = std::cmp::max(1, max_blocked_threads);
+                    tracing::info!("using max {max_blocked_threads} threads for initial logical size");
+                    Arc::new(tokio::sync::Semaphore::new(max_blocked_threads))
                 });
 
                 let _permit = GLOBAL_INITIAL_LOGICAL_SIZES_AT_ONCE.clone().acquire_owned().await.expect("global semaphore is never closed");
