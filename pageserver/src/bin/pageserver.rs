@@ -414,7 +414,7 @@ fn start_pageserver(
         );
 
         if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-            let init_done_rx = init_done_rx.clone();
+            let init_done_rx = init_done_rx;
             let metrics_ctx = RequestContext::todo_child(
                 TaskKind::MetricsCollection,
                 // This task itself shouldn't download anything.
