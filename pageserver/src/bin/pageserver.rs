@@ -354,6 +354,7 @@ fn start_pageserver(
         let init_done_rx = init_done_rx.clone();
         async move {
             let init_done = async move { init_done_rx.lock().await.recv().await };
+            init_done.await;
 
             let elapsed = init_started_at.elapsed();
 
