@@ -887,6 +887,7 @@ impl Tenant {
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
+        init_done_tx: Option<tokio::sync::mpsc::Sender<()>>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
@@ -920,6 +921,9 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
+                // keep the sender alive as long as we have the initial load ongoing; it will be
+                // None for loads spawned after init_tenant_mgr.
+                let _init_done_tx = init_done_tx;
                 let doit = async {
                     tenant_clone.load(&ctx).await?;
                     tenant_clone.activate(broker_client, &ctx)?;

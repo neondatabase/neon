@@ -82,6 +82,7 @@ pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
     state: Arc<State>,
+    init_done_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<()>>>,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
@@ -98,6 +99,10 @@ pub fn launch_disk_usage_global_eviction_task(
         "disk usage based eviction",
         false,
         async move {
+            // wait until initial load is complete, because we cannot evict if there are no tenants
+            let init_done = async move { init_done_rx.lock().await.recv().await };
+            init_done.await;
+
             disk_usage_eviction_task(
                 &state,
                 task_config,
