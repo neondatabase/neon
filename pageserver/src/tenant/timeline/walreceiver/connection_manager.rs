@@ -718,7 +718,7 @@ impl ConnectionManagerState {
         let currently_at = self.timeline.get_last_record_lsn();
         self.applicable_connection_candidates()
             .filter(|&(sk_id, _, _)| Some(sk_id) != node_to_omit)
-            .filter(|&(sk_id, info, _)| {
+            .filter(|&(_, info, _)| {
                 // avoid connecting until there is something to download, which will come through
                 // broker message
                 Lsn(info.commit_lsn) > currently_at
