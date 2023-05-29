@@ -447,6 +447,11 @@ pub enum DeleteTimelineError {
     Other(#[from] anyhow::Error),
 }
 
+pub enum SetStoppingError {
+    AlreadyStopping,
+    Broken,
+}
+
 struct RemoteStartupData {
     index_part: IndexPart,
     remote_metadata: TimelineMetadata,
@@ -645,16 +650,17 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
-                let doit = async {
-                    tenant_clone.attach(&ctx).await?;
-                    tenant_clone.activate(broker_client, &ctx)?;
-                    anyhow::Ok(())
-                };
-                match doit.await {
-                    Ok(_) => {}
+                match tenant_clone.attach(&ctx).await {
+                    Ok(()) => {
+                        info!("attach finished, activating");
+                        tenant_clone.activate(broker_client, &ctx);
+                    }
                     Err(e) => {
-                        tenant_clone.set_broken(e.to_string());
-                        error!("error attaching tenant: {:?}", e);
+                        error!("attach failed, setting tenant state to Broken: {:?}", e);
+                        tenant_clone.state.send_modify(|state| {
+                            assert_eq!(*state, TenantState::Attaching, "the attach task owns the tenant state until activation is complete");
+                            *state = TenantState::broken_from_reason(e.to_string());
+                        });
                     }
                 }
                 Ok(())
@@ -670,6 +676,8 @@ impl Tenant {
 
     ///
     /// Background task that downloads all data for a tenant and brings it to Active state.
+    ///
+    /// No background tasks are started as part of this routine.
     ///
     async fn attach(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
@@ -924,20 +932,20 @@ impl Tenant {
                 // keep the sender alive as long as we have the initial load ongoing; it will be
                 // None for loads spawned after init_tenant_mgr.
                 let _init_done_tx = init_done_tx;
-                let doit = async {
-                    tenant_clone.load(&ctx).await?;
-                    tenant_clone.activate(broker_client, &ctx)?;
-                    anyhow::Ok(())
-                };
-                match doit.await {
-                    Ok(()) => {}
+                match tenant_clone.load(&ctx).await {
+                    Ok(()) => {
+                        info!("load finished, activating");
+                        tenant_clone.activate(broker_client, &ctx);
+                    }
                     Err(err) => {
-                        tenant_clone.set_broken(err.to_string());
-                        error!("could not load tenant {tenant_id}: {err:?}");
+                        error!("load failed, setting tenant state to Broken: {err:?}");
+                        tenant_clone.state.send_modify(|state| {
+                            assert_eq!(*state, TenantState::Loading, "the loading task owns the tenant state until activation is complete");
+                            *state = TenantState::broken_from_reason(err.to_string());
+                        });
                     }
                 }
-                info!("initial load for tenant {tenant_id} finished!");
-                Ok(())
+               Ok(())
             }
             .instrument({
                 let span = tracing::info_span!(parent: None, "load", tenant_id=%tenant_id);
@@ -955,6 +963,7 @@ impl Tenant {
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
     ///
+    /// No background tasks are started as part of this routine.
     async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
 
@@ -1661,130 +1670,191 @@ impl Tenant {
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
-    fn activate(
-        self: &Arc<Self>,
-        broker_client: BrokerClientChannel,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    fn activate(self: &Arc<Self>, broker_client: BrokerClientChannel, ctx: &RequestContext) {
         debug_assert_current_span_has_tenant_id();
 
-        let mut result = Ok(());
+        let mut activating = false;
         self.state.send_modify(|current_state| {
+            use pageserver_api::models::ActivatingFrom;
             match &*current_state {
-                TenantState::Active => {
-                    // activate() was called on an already Active tenant. Shouldn't happen.
-                    result = Err(anyhow::anyhow!("Tenant is already active"));
+                TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping => {
+                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
                 }
-                TenantState::Broken { reason, .. } => {
-                    // This shouldn't happen either
-                    result = Err(anyhow::anyhow!(
-                        "Could not activate tenant because it is in broken state due to: {reason}",
-                    ));
+                TenantState::Loading => {
+                    *current_state = TenantState::Activating(ActivatingFrom::Loading);
                 }
-                TenantState::Stopping => {
-                    // The tenant was detached, or system shutdown was requested, while we were
-                    // loading or attaching the tenant.
-                    info!("Tenant is already in Stopping state, skipping activation");
-                }
-                TenantState::Loading | TenantState::Attaching => {
-                    *current_state = TenantState::Active;
-
-                    debug!(tenant_id = %self.tenant_id, "Activating tenant");
-
-                    let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
-
-                    // Spawn gc and compaction loops. The loops will shut themselves
-                    // down when they notice that the tenant is inactive.
-                    tasks::start_background_loops(self);
-
-                    let mut activated_timelines = 0;
-
-                    for timeline in not_broken_timelines {
-                        timeline.activate(broker_client.clone(), ctx);
-                        activated_timelines += 1;
-                    }
-
-                    let elapsed = self.loading_started_at.elapsed();
-                    let total_timelines = timelines_accessor.len();
-
-                    // log a lot of stuff, because some tenants sometimes suffer from user-visible
-                    // times to activate. see https://github.com/neondatabase/neon/issues/4025
-                    info!(
-                        since_creation_millis = elapsed.as_millis(),
-                        tenant_id = %self.tenant_id,
-                        activated_timelines,
-                        total_timelines,
-                        post_state = <&'static str>::from(&*current_state),
-                        "activation attempt finished"
-                    );
+                TenantState::Attaching => {
+                    *current_state = TenantState::Activating(ActivatingFrom::Attaching);
                 }
             }
+            debug!(tenant_id = %self.tenant_id, "Activating tenant");
+            activating = true;
+            // Continue outside the closure. We need to grab timelines.lock()
+            // and we plan to turn it into a tokio::sync::Mutex in a future patch.
         });
-        result
+
+        if activating {
+            let timelines_accessor = self.timelines.lock().unwrap();
+            let not_broken_timelines = timelines_accessor
+                .values()
+                .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+
+            // Spawn gc and compaction loops. The loops will shut themselves
+            // down when they notice that the tenant is inactive.
+            tasks::start_background_loops(self);
+
+            let mut activated_timelines = 0;
+
+            for timeline in not_broken_timelines {
+                timeline.activate(broker_client.clone(), ctx);
+                activated_timelines += 1;
+            }
+
+            self.state.send_modify(move |current_state| {
+                assert!(
+                    matches!(current_state, TenantState::Activating(_)),
+                    "set_stopping and set_broken wait for us to leave Activating state",
+                );
+                *current_state = TenantState::Active;
+
+                let elapsed = self.loading_started_at.elapsed();
+                let total_timelines = timelines_accessor.len();
+
+                // log a lot of stuff, because some tenants sometimes suffer from user-visible
+                // times to activate. see https://github.com/neondatabase/neon/issues/4025
+                info!(
+                    since_creation_millis = elapsed.as_millis(),
+                    tenant_id = %self.tenant_id,
+                    activated_timelines,
+                    total_timelines,
+                    post_state = <&'static str>::from(&*current_state),
+                    "activation attempt finished"
+                );
+            });
+        }
     }
 
-    /// Change tenant status to Stopping, to mark that it is being shut down
-    pub fn set_stopping(&self) {
-        self.state.send_modify(|current_state| {
-            match current_state {
-                TenantState::Active | TenantState::Loading | TenantState::Attaching => {
-                    *current_state = TenantState::Stopping;
+    /// Change tenant status to Stopping, to mark that it is being shut down.
+    ///
+    /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
+    ///
+    /// This function is not cancel-safe!
+    pub async fn set_stopping(&self) -> Result<(), SetStoppingError> {
+        let mut rx = self.state.subscribe();
 
-                    // FIXME: If the tenant is still Loading or Attaching, new timelines
-                    // might be created after this. That's harmless, as the Timelines
-                    // won't be accessible to anyone, when the Tenant is in Stopping
-                    // state.
-                    let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
-                    for timeline in not_broken_timelines {
-                        timeline.set_state(TimelineState::Stopping);
-                    }
-                }
-                TenantState::Broken { reason, .. } => {
-                    info!("Cannot set tenant to Stopping state, it is in Broken state due to: {reason}");
-                }
-                TenantState::Stopping => {
-                    // The tenant was detached, or system shutdown was requested, while we were
-                    // loading or attaching the tenant.
-                    info!("Tenant is already in Stopping state");
-                }
+        // cannot stop before we're done activating, so wait out until we're done activating
+        rx.wait_for(|state| match state {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                info!(
+                    "waiting for {} to turn Active|Broken|Stopping",
+                    <&'static str>::from(state)
+                );
+                false
+            }
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
+        })
+        .await
+        .expect("cannot drop self.state while on a &self method");
+
+        // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
+        let mut err = None;
+        let stopping = self.state.send_if_modified(|current_state| match current_state {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+            }
+            TenantState::Active => {
+                // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
+                // are created after the transition to Stopping. That's harmless, as the Timelines
+                // won't be accessible to anyone afterwards, because the Tenant is in Stopping state.
+                *current_state = TenantState::Stopping;
+                // Continue stopping outside the closure. We need to grab timelines.lock()
+                // and we plan to turn it into a tokio::sync::Mutex in a future patch.
+                true
+            }
+            TenantState::Broken { reason, .. } => {
+                info!(
+                    "Cannot set tenant to Stopping state, it is in Broken state due to: {reason}"
+                );
+                err = Some(SetStoppingError::Broken);
+                false
+            }
+            TenantState::Stopping => {
+                info!("Tenant is already in Stopping state");
+                err = Some(SetStoppingError::AlreadyStopping);
+                false
             }
         });
+        match (stopping, err) {
+            (true, None) => {} // continue
+            (false, Some(err)) => return Err(err),
+            (true, Some(_)) => unreachable!(
+                "send_if_modified closure must error out if not transitioning to Stopping"
+            ),
+            (false, None) => unreachable!(
+                "send_if_modified closure must return true if transitioning to Stopping"
+            ),
+        }
+
+        let timelines_accessor = self.timelines.lock().unwrap();
+        let not_broken_timelines = timelines_accessor
+            .values()
+            .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+        for timeline in not_broken_timelines {
+            timeline.set_state(TimelineState::Stopping);
+        }
+        Ok(())
     }
 
-    pub fn set_broken(&self, reason: String) {
+    /// Method for tenant::mgr to transition us into Broken state in case of a late failure in
+    /// `remove_tenant_from_memory`
+    ///
+    /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
+    ///
+    /// In tests, we also use this to set tenants to Broken state on purpose.
+    pub(crate) async fn set_broken(&self, reason: String) {
+        let mut rx = self.state.subscribe();
+
+        // The load & attach routines own the tenant state until it has reached `Active`.
+        // So, wait until it's done.
+        rx.wait_for(|state| match state {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                info!(
+                    "waiting for {} to turn Active|Broken|Stopping",
+                    <&'static str>::from(state)
+                );
+                false
+            }
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
+        })
+        .await
+        .expect("cannot drop self.state while on a &self method");
+
+        // we now know we're done activating, let's see whether this task is the winner to transition into Broken
         self.state.send_modify(|current_state| {
             match *current_state {
+                TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                    unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+                }
                 TenantState::Active => {
-                    // Broken tenants can currently only used for fatal errors that happen
-                    // while loading or attaching a tenant. A tenant that has already been
-                    // activated should never be marked as broken. We cope with it the best
-                    // we can, but it shouldn't happen.
-                    warn!("Changing Active tenant to Broken state, reason: {}", reason);
-                    *current_state = TenantState::broken_from_reason(reason);
+                    if cfg!(feature = "testing") {
+                        warn!("Changing Active tenant to Broken state, reason: {}", reason);
+                        *current_state = TenantState::broken_from_reason(reason);
+                    } else {
+                        unreachable!("not allowed to call set_broken on Active tenants in non-testing builds")
+                    }
                 }
                 TenantState::Broken { .. } => {
-                    // This shouldn't happen either
                     warn!("Tenant is already in Broken state");
                 }
+                // This is the only "expected" path, any other path is a bug.
                 TenantState::Stopping => {
-                    // This shouldn't happen either
                     warn!(
                         "Marking Stopping tenant as Broken state, reason: {}",
                         reason
                     );
                     *current_state = TenantState::broken_from_reason(reason);
                 }
-                TenantState::Loading | TenantState::Attaching => {
-                    info!("Setting tenant as Broken state, reason: {}", reason);
-                    *current_state = TenantState::broken_from_reason(reason);
-                }
-            }
+           }
         });
     }
 
@@ -1797,7 +1867,7 @@ impl Tenant {
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
-                TenantState::Loading | TenantState::Attaching => {
+                TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
                     receiver.changed().await.map_err(
                         |_e: tokio::sync::watch::error::RecvError| {

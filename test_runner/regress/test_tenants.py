@@ -22,6 +22,7 @@ from fixtures.neon_fixtures import (
     available_remote_storages,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
 
@@ -308,9 +309,7 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.allowed_errors.append(
         ".*marking .* as locally complete, while it doesnt exist in remote index.*"
     )
-    env.pageserver.allowed_errors.append(
-        ".*could not load tenant.*Failed to list timelines directory.*"
-    )
+    env.pageserver.allowed_errors.append(".*load failed.*Failed to list timelines directory.*")
 
     client = env.pageserver.http_client()
 
@@ -341,9 +340,15 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.start()
 
     client = env.pageserver.http_client()
-    tenants = client.tenant_list()
 
-    assert len(tenants) == 2
+    def not_loading():
+        tenants = client.tenant_list()
+        assert len(tenants) == 2
+        assert all(t["state"]["slug"] != "Loading" for t in tenants)
+
+    wait_until(10, 0.2, not_loading)
+
+    tenants = client.tenant_list()
 
     [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
     assert (
@@ -355,7 +360,7 @@ def test_pageserver_with_empty_tenants(
         broken_tenant_status["state"]["slug"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
-    assert env.pageserver.log_contains(".*Setting tenant as Broken state, reason:.*")
+    assert env.pageserver.log_contains(".*load failed, setting tenant state to Broken:.*")
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines)]
     assert (
