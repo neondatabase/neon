@@ -1910,6 +1910,17 @@ impl Timeline {
                 // no cancellation here, because nothing really waits for this to complete compared
                 // to spawn_ondemand_logical_size_calculation.
                 let cancel = CancellationToken::new();
+
+                /// Ugly, but necessary until `spawn_blocking` is used for blocking I/O, otherwise
+                /// we could lock up all worker threads.
+                static GLOBAL_INITIAL_LOGICAL_SIZES_AT_ONCE: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> = once_cell::sync::Lazy::new(|| {
+                    let cores = std::thread::available_parallelism();
+                    let max_blocked_threads = cores.map(|count| count.get() / 2);
+                    Arc::new(tokio::sync::Semaphore::new(max_blocked_threads.unwrap_or(1).min(1)))
+                });
+
+                let _permit = GLOBAL_INITIAL_LOGICAL_SIZES_AT_ONCE.clone().acquire_owned().await.expect("global semaphore is never closed");
+
                 let calculated_size = match self_clone
                     .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx, cancel)
                     .await
