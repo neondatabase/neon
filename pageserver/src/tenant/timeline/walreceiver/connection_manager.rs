@@ -715,14 +715,8 @@ impl ConnectionManagerState {
         &self,
         node_to_omit: Option<NodeId>,
     ) -> Option<(NodeId, &SafekeeperTimelineInfo, PgConnectionConfig)> {
-        let currently_at = self.timeline.get_last_record_lsn();
         self.applicable_connection_candidates()
             .filter(|&(sk_id, _, _)| Some(sk_id) != node_to_omit)
-            .filter(|&(_, info, _)| {
-                // avoid connecting until there is something to download, which will come through
-                // broker message
-                Lsn(info.commit_lsn) > currently_at
-            })
             .max_by_key(|(_, info, _)| info.commit_lsn)
     }
 

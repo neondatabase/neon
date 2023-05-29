@@ -7,7 +7,6 @@ from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
-    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
@@ -128,7 +127,7 @@ def expect_updated_msg_lsn(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     prev_msg_lsn: Optional[Lsn],
-) -> Optional[Lsn]:
+) -> Lsn:
     timeline_details = client.timeline_detail(tenant_id, timeline_id=timeline_id)
 
     # a successful `timeline_details` response must contain the below fields
@@ -136,22 +135,17 @@ def expect_updated_msg_lsn(
     assert "last_received_msg_lsn" in timeline_details.keys()
     assert "last_received_msg_ts" in timeline_details.keys()
 
-    log.info("wal_source_connstr: %s" % (timeline_details["wal_source_connstr"],))
-    log.info("last_received_msg_lsn: %s" % (timeline_details["last_received_msg_lsn"],))
-    log.info("last_received_msg_ts: %s" % (timeline_details["last_received_msg_ts"],))
+    assert (
+        timeline_details["last_received_msg_lsn"] is not None
+    ), "the last received message's LSN is empty"
 
-    if prev_msg_lsn is None:
-        assert (
-            timeline_details["last_received_msg_lsn"] is None
-        ), "the last received message's LSN is empty"
-        return None
-    else:
-        last_msg_lsn = Lsn(timeline_details["last_received_msg_lsn"])
-        assert (
-            prev_msg_lsn < last_msg_lsn
-        ), f"the last received message's LSN {last_msg_lsn} hasn't been updated \
-            compared to the previous message's LSN {prev_msg_lsn}"
-        return last_msg_lsn
+    last_msg_lsn = Lsn(timeline_details["last_received_msg_lsn"])
+    assert (
+        prev_msg_lsn is None or prev_msg_lsn < last_msg_lsn
+    ), f"the last received message's LSN {last_msg_lsn} hasn't been updated \
+        compared to the previous message's LSN {prev_msg_lsn}"
+
+    return last_msg_lsn
 
 
 # Test the WAL-receiver related fields in the response to `timeline_details` API call
@@ -168,22 +162,19 @@ def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
         # We need to wait here because it's possible that we don't have access to
         # the latest WAL yet, when the `timeline_detail` API is first called.
         # See: https://github.com/neondatabase/neon/issues/1768.
-        wait_until(
+        lsn = wait_until(
             number_of_iterations=5,
             interval=1,
             func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, None),
         )
-        initdb_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
         # Make a DB modification then expect getting a new WAL receiver's data.
         endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
-        flush_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-        later_lsn = wait_until(
+        wait_until(
             number_of_iterations=5,
             interval=1,
-            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, initdb_lsn),
+            func=lambda: expect_updated_msg_lsn(client, tenant_id, timeline_id, lsn),
         )
-        assert flush_lsn == later_lsn
 
 
 def test_pageserver_http_api_client(neon_simple_env: NeonEnv):
