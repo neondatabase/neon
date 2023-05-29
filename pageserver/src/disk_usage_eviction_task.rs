@@ -99,7 +99,7 @@ pub fn launch_disk_usage_global_eviction_task(
         "disk usage based eviction",
         false,
         async move {
-            // wait until initial load is complete, because we cannot evict if there are no tenants
+            // wait until initial load is complete, because we cannot evict from loading tenants.
             let init_done = async move { init_done_rx.lock().await.recv().await };
             init_done.await;
 

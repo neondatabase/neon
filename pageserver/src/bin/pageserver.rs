@@ -429,7 +429,11 @@ fn start_pageserver(
                 "consumption metrics collection",
                 true,
                 async move {
-                    // first wait for initial load to complete before first iteration
+                    // first wait for initial load to complete before first iteration.
+                    //
+                    // this is because we only process active tenants and timelines, and the
+                    // Timeline::get_current_logical_size will spawn the logical size calculation,
+                    // which will not be rate-limited.
                     let init_done = async move { init_done_rx.lock().await.recv().await };
                     init_done.await;
 
