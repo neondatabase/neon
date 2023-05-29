@@ -1655,18 +1655,22 @@ impl Tenant {
 
         let mut activating = false;
         self.state.send_modify(|current_state| {
+            use pageserver_api::models::ActivatingFrom;
             match &*current_state {
-                TenantState::Activating | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping => {
+                TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping => {
                     panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
                 }
-               TenantState::Loading | TenantState::Attaching => {
-                    *current_state = TenantState::Activating;
-                    debug!(tenant_id = %self.tenant_id, "Activating tenant");
-                    activating = true;
-                    // Continue outside the closure. We need to grab timelines.lock()
-                    // and we plan to turn it into a tokio::sync::Mutex in a future patch.
+                TenantState::Loading => {
+                    *current_state = TenantState::Activating(ActivatingFrom::Loading);
+                }
+                TenantState::Attaching => {
+                    *current_state = TenantState::Activating(ActivatingFrom::Attaching);
                 }
             }
+            debug!(tenant_id = %self.tenant_id, "Activating tenant");
+            activating = true;
+            // Continue outside the closure. We need to grab timelines.lock()
+            // and we plan to turn it into a tokio::sync::Mutex in a future patch.
         });
 
         if activating {
@@ -1687,9 +1691,8 @@ impl Tenant {
             }
 
             self.state.send_modify(move |current_state| {
-                assert_eq!(
-                    *current_state,
-                    TenantState::Activating,
+                assert!(
+                    matches!(current_state, TenantState::Activating(_)),
                     "set_stopping and set_broken wait for us to leave Activating state",
                 );
                 *current_state = TenantState::Active;
@@ -1721,7 +1724,7 @@ impl Tenant {
 
         // cannot stop before we're done activating, so wait out until we're done activating
         rx.wait_for(|state| match state {
-            TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
                     <&'static str>::from(state)
@@ -1736,7 +1739,7 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
         let mut err = None;
         let stopping = self.state.send_if_modified(|current_state| match current_state {
-            TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
                 unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
             }
             TenantState::Active => {
@@ -1794,7 +1797,7 @@ impl Tenant {
         // The load & attach routines own the tenant state until it has reached `Active`.
         // So, wait until it's done.
         rx.wait_for(|state| match state {
-            TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
                     <&'static str>::from(state)
@@ -1809,7 +1812,7 @@ impl Tenant {
         // we now know we're done activating, let's see whether this task is the winner to transition into Broken
         self.state.send_modify(|current_state| {
             match *current_state {
-                TenantState::Activating | TenantState::Loading | TenantState::Attaching => {
+                TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
                     unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
                 }
                 TenantState::Active => {
@@ -1844,7 +1847,7 @@ impl Tenant {
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
-                TenantState::Loading | TenantState::Attaching | TenantState::Activating => {
+                TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
                     receiver.changed().await.map_err(
                         |_e: tokio::sync::watch::error::RecvError| {
