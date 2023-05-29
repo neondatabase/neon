@@ -2,7 +2,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
