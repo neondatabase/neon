@@ -2,13 +2,13 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
-from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
