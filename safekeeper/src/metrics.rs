@@ -125,6 +125,22 @@ pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_backup_errors_total counter")
 });
+pub static BROKER_PUSH_ALL_UPDATES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_broker_push_update_seconds",
+        "Seconds to push all timeline updates to the broker",
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_broker_push_update_seconds histogram vec")
+});
+pub static BROKER_ITERATION_TIMELINES: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_broker_iteration_timelines",
+        "Count of timelines pushed to the broker in a single iteration",
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_broker_iteration_timelines histogram vec")
+});
 
 pub const LABEL_UNKNOWN: &str = "unknown";
 

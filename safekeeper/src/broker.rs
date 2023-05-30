@@ -19,8 +19,10 @@ use tokio::task::JoinHandle;
 use tokio::{runtime, time::sleep};
 use tracing::*;
 
+use crate::metrics::BROKER_ITERATION_TIMELINES;
 use crate::metrics::BROKER_PULLED_UPDATES;
 use crate::metrics::BROKER_PUSHED_UPDATES;
+use crate::metrics::BROKER_PUSH_ALL_UPDATES_SECONDS;
 use crate::GlobalTimelines;
 use crate::SafeKeeperConf;
 
@@ -61,8 +63,10 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
                 BROKER_PUSHED_UPDATES.inc();
             }
             let elapsed = now.elapsed();
-            // Log duration every second. Should be about 10MB of logs per day.
-            info!("pushed {} timeline updates to broker in {:?}", active_tlis.len(), elapsed);
+
+            BROKER_PUSH_ALL_UPDATES_SECONDS.observe(elapsed.as_secs_f64());
+            BROKER_ITERATION_TIMELINES.observe(active_tlis.len() as f64);
+
             sleep(push_interval).await;
         }
     };
