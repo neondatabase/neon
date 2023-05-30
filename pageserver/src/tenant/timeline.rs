@@ -2728,7 +2728,7 @@ impl Timeline {
     }
 
     /// Flush one frozen in-memory layer to disk, as a new delta layer.
-    #[instrument(skip(self, frozen_layer, ctx), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id, layer=%frozen_layer.short_id()))]
     async fn flush_frozen_layer(
         self: &Arc<Self>,
         frozen_layer: Arc<InMemoryLayer>,
@@ -2752,9 +2752,14 @@ impl Timeline {
                 // normal case, write out a L0 delta layer file.
                 let this = self.clone();
                 let frozen_layer = frozen_layer.clone();
-                let (delta_path, metadata) =
-                    tokio::task::spawn_blocking(move || this.create_delta_layer(&frozen_layer))
-                        .await??;
+                let span = tracing::info_span!("blocking");
+                let (delta_path, metadata) = tokio::task::spawn_blocking(move || {
+                    let _g = span.entered();
+                    this.create_delta_layer(&frozen_layer)
+                })
+                .await
+                .context("create_delta_layer spawn_blocking")
+                .and_then(|res| res)?;
                 HashMap::from([(delta_path, metadata)])
             };
 
@@ -3523,14 +3528,18 @@ impl Timeline {
         let this = self.clone();
         let ctx_inner = ctx.clone();
         let layer_removal_cs_inner = layer_removal_cs.clone();
+        let span = tracing::info_span!("blocking");
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
         } = tokio::task::spawn_blocking(move || {
+            let _g = span.entered();
             this.compact_level0_phase1(layer_removal_cs_inner, target_file_size, &ctx_inner)
         })
         .await
-        .unwrap()?;
+        .context("compact_level0_phase1 spawn_blocking")
+        .map_err(CompactionError::Other)
+        .and_then(|res| res)?;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
