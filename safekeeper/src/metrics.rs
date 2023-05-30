@@ -133,11 +133,14 @@ pub static BROKER_PUSH_ALL_UPDATES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_broker_push_update_seconds histogram vec")
 });
+pub const TIMELINES_COUNT_BUCKETS: &[f64] = &[
+    1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0, 50000.0,
+];
 pub static BROKER_ITERATION_TIMELINES: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "safekeeper_broker_iteration_timelines",
         "Count of timelines pushed to the broker in a single iteration",
-        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+        TIMELINES_COUNT_BUCKETS.to_vec()
     )
     .expect("Failed to register safekeeper_broker_iteration_timelines histogram vec")
 });
