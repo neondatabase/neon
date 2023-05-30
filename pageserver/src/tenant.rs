@@ -986,15 +986,11 @@ impl Tenant {
         // collect a list of timelines and their ancestors.
         let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
         let timelines_dir = self.conf.timelines_path(&self.tenant_id);
-        for entry in std::fs::read_dir(&timelines_dir).with_context(|| {
-            format!(
-                "Failed to list timelines directory for tenant {}",
-                self.tenant_id
-            )
-        })? {
-            let entry = entry.with_context(|| {
-                format!("cannot read timeline dir entry for {}", self.tenant_id)
-            })?;
+
+        for entry in
+            std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
+        {
+            let entry = entry.context("read timeline dir entry")?;
             let timeline_dir = entry.path();
 
             if crate::is_temporary(&timeline_dir) {
