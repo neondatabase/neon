@@ -1291,11 +1291,11 @@ impl Timeline {
             .unwrap_or(default_tenant_conf.evictions_low_residence_duration_metric_threshold)
     }
 
-    fn get_forced_image_creation_limit(&self) -> u64 {
+    fn get_gc_feedback(&self) -> bool {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
-            .forced_image_creation_limit
-            .unwrap_or(self.conf.default_tenant_conf.forced_image_creation_limit)
+            .gc_feedback
+            .unwrap_or(self.conf.default_tenant_conf.gc_feedback)
     }
 
     pub(super) fn tenant_conf_updated(&self) {
@@ -2948,12 +2948,7 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    fn time_for_new_image_layer(
-        &self,
-        partition: &KeySpace,
-        lsn: Lsn,
-        forced_image_layers_count: &mut u64,
-    ) -> anyhow::Result<bool> {
+    fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<bool> {
         let threshold = self.get_image_creation_threshold();
 
         let layers = self.layers.read().unwrap();
@@ -2973,13 +2968,11 @@ impl Timeline {
                     // create a new image layer, check if the range is already covered at more recent LSNs.
                     if !layers
                         .image_layer_exists(&img_range, &(Lsn::min(lsn, *cutoff_lsn)..lsn + 1))?
-                        && *forced_image_layers_count < self.get_forced_image_creation_limit()
                     {
                         debug!(
                             "Force generation of layer {}-{} wanted by GC, cutoff={}, lsn={})",
                             img_range.start, img_range.end, cutoff_lsn, lsn
                         );
-                        *forced_image_layers_count += 1;
                         return Ok(true);
                     }
                 }
@@ -3038,7 +3031,6 @@ impl Timeline {
     ) -> Result<HashMap<LayerFileName, LayerFileMetadata>, PageReconstructError> {
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
-        let mut forced_image_layers_count = 0u64;
 
         // We need to avoid holes between generated image layers.
         // Otherwise LayerMap::image_layer_exists will return false if key range of some layer is covered by more than one
@@ -3054,9 +3046,7 @@ impl Timeline {
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
             start = img_range.end;
-            if force
-                || self.time_for_new_image_layer(partition, lsn, &mut forced_image_layers_count)?
-            {
+            if force || self.time_for_new_image_layer(partition, lsn)? {
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
@@ -3142,11 +3132,6 @@ impl Timeline {
         let mut updates = layers.batch_update();
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
 
-        info!(
-            "Generate {} image layers {} of which were requested by GC",
-            image_layers.len(),
-            forced_image_layers_count
-        );
         for l in image_layers {
             let path = l.filename();
             let metadata = timeline_path
@@ -3919,7 +3904,7 @@ impl Timeline {
                 // delta layers. Image layers can form "stairs" preventing old image from been deleted.
                 // But image layers are in any case less sparse than delta layers. Also we need some
                 // protection from replacing recent image layers with new one after each GC iteration.
-                if l.is_incremental() && !LayerMap::is_l0(&*l) {
+                if self.get_gc_feedback() && l.is_incremental() && !LayerMap::is_l0(&*l) {
                     wanted_image_layers.add_range(l.get_key_range());
                 }
                 result.layers_not_updated += 1;

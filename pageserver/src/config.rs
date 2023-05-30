@@ -108,7 +108,7 @@ pub mod defaults {
 
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
-#forced_image_creation_limit = {DEFAULT_FORCED_IMAGE_CREATION_LIMIT}
+#gc_feedback = false
 # [remote_storage]
 
 "###
@@ -828,11 +828,12 @@ impl PageServerConf {
             )?);
         }
 
-        if let Some(forced_image_creation_limit) = item.get("forced_image_creation_limit") {
-            t_conf.forced_image_creation_limit = Some(parse_toml_u64(
-                "forced_image_creation_limit",
-                forced_image_creation_limit,
-            )?);
+        if let Some(gc_feedback) = item.get("gc_feedback") {
+            t_conf.gc_feedback = Some(
+                gc_feedback
+                    .as_bool()
+                    .with_context(|| "configure option gc_feedback is not a bool".to_string())?,
+            );
         }
 
         Ok(t_conf)

@@ -369,10 +369,11 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
-            forced_image_creation_limit: settings
-                .remove("forced_image_creation_limit")
-                .map(|x| x.parse::<u64>())
-                .transpose()?,
+            gc_feedback: settings
+                .remove("gc_feedback")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_feedback' as bool")?,
         };
 
         // If tenant ID was not specified, generate one
@@ -467,11 +468,11 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-                forced_image_creation_limit: settings
-                    .remove("forced_image_creation_limit")
-                    .map(|x| x.parse::<u64>())
+                gc_feedback: settings
+                    .remove("gc_feedback")
+                    .map(|x| x.parse::<bool>())
                     .transpose()
-                    .context("Failed to parse 'forced_image_creation_limit' as an integer")?,
+                    .context("Failed to parse 'gc_feedback' as bool")?,
             }
         };
 

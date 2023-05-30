@@ -223,8 +223,7 @@ pub struct TenantConfig {
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
-    /// Maximal number of image layer which creation is requested by GC
-    pub forced_image_creation_limit: Option<u64>,
+    pub gc_feedback: Option<bool>,
 }
 
 #[serde_as]
@@ -283,7 +282,7 @@ impl TenantConfigRequest {
             eviction_policy: None,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: None,
-            forced_image_creation_limit: None,
+            gc_feedback: None,
         };
         TenantConfigRequest { tenant_id, config }
     }

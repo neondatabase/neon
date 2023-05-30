@@ -42,12 +42,6 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
-    // This parameter limits amount of image layer generated due to GC request.
-    // It should avoid storage space explosion caused by taken in account GC feedback for existed projects.
-    // Total amount of forced image layers is limited by forced_image_creation_limit*compaction_target_size
-    // per GC iteration. As far as GC will be able to remove old layers only after PiTR interval expiration,
-    // maximal storage extension is pitr_interval/gc_period*forced_image_creation_limit*compaction_target_size
-    pub const DEFAULT_FORCED_IMAGE_CREATION_LIMIT: u64 = 10;
 }
 
 /// Per-tenant configuration options
@@ -105,7 +99,7 @@ pub struct TenantConf {
     // See the corresponding metric's help string.
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
-    pub forced_image_creation_limit: u64,
+    pub gc_feedback: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -185,7 +179,7 @@ pub struct TenantConfOpt {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub forced_image_creation_limit: Option<u64>,
+    pub gc_feedback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,9 +247,7 @@ impl TenantConfOpt {
             evictions_low_residence_duration_metric_threshold: self
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
-            forced_image_creation_limit: self
-                .forced_image_creation_limit
-                .unwrap_or(global_conf.forced_image_creation_limit),
+            gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
         }
     }
 }
@@ -292,7 +284,7 @@ impl Default for TenantConf {
                 DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
-            forced_image_creation_limit: DEFAULT_FORCED_IMAGE_CREATION_LIMIT,
+            gc_feedback: false,
         }
     }
 }
@@ -387,7 +379,7 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
                     ))?,
             );
         }
-        tenant_conf.forced_image_creation_limit = request_data.forced_image_creation_limit;
+        tenant_conf.gc_feedback = request_data.gc_feedback;
 
         Ok(tenant_conf)
     }
