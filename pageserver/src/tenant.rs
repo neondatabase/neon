@@ -1047,8 +1047,8 @@ impl Tenant {
                     conf.timeline_uninit_mark_file_path(tenant_id, timeline_id);
                 if timeline_uninit_mark_file.exists() {
                     info!(
-                        "Found an uninit mark file for timeline {}/{}, removing the timeline and its uninit mark",
-                        tenant_id, timeline_id
+                        %timeline_id,
+                        "Found an uninit mark file, removing the timeline and its uninit mark",
                     );
                     if let Err(e) =
                         remove_timeline_and_uninit_mark(&timeline_dir, &timeline_uninit_mark_file)
