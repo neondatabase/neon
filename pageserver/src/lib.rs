@@ -45,8 +45,8 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
 
-#[tracing::instrument]
-pub async fn shutdown_pageserver(exit_code: i32) {
+#[tracing::instrument(skip(guard))]
+pub async fn shutdown_pageserver(exit_code: i32, guard: Option<impl Drop>) {
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
     task_mgr::shutdown_tasks(Some(TaskKind::LibpqEndpointListener), None, None).await;
@@ -72,6 +72,9 @@ pub async fn shutdown_pageserver(exit_code: i32) {
     // There should be nothing left, but let's be sure
     task_mgr::shutdown_tasks(None, None, None).await;
     info!("Shut down successfully completed");
+
+    drop(guard);
+
     std::process::exit(exit_code);
 }
 

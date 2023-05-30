@@ -98,7 +98,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         TracingErrorLayerEnablement::Disabled
     };
-    logging::init(conf.log_format, tracing_error_layer_enablement)?;
+    let _guard = logging::init_with_flame(conf.log_format, tracing_error_layer_enablement)?;
 
     // mind the order required here: 1. logging, 2. panic_hook, 3. sentry.
     // disarming this hook on pageserver, because we never tear down tracing.
@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
     virtual_file::init(conf.max_file_descriptors);
     page_cache::init(conf.page_cache_size);
 
-    start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
+    start_pageserver(launch_ts, conf, _guard).context("Failed to start pageserver")?;
 
     scenario.teardown();
     Ok(())
@@ -225,6 +225,7 @@ fn initialize_config(
 fn start_pageserver(
     launch_ts: &'static LaunchTimestamp,
     conf: &'static PageServerConf,
+    guard: impl Drop,
 ) -> anyhow::Result<()> {
     // Print version and launch timestamp to the log,
     // and expose them as prometheus metrics.
@@ -484,7 +485,8 @@ fn start_pageserver(
     }
 
     // All started up! Now just sit and wait for shutdown signal.
-    ShutdownSignals::handle(|signal| match signal {
+    let mut guard = Some(guard);
+    ShutdownSignals::handle(move |signal| match signal {
         Signal::Quit => {
             info!(
                 "Got {}. Terminating in immediate shutdown mode",
@@ -498,7 +500,7 @@ fn start_pageserver(
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
+            BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0, guard.take()));
             unreachable!()
         }
     })

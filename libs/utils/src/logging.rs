@@ -104,6 +104,47 @@ pub fn init(
     Ok(())
 }
 
+pub fn init_with_flame(
+    log_format: LogFormat,
+    tracing_error_layer_enablement: TracingErrorLayerEnablement,
+) -> anyhow::Result<impl Drop> {
+    // We fall back to printing all spans at info-level or above if
+    // the RUST_LOG environment variable is not set.
+    let rust_log_env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    };
+
+    // NB: the order of the with() calls does not matter.
+    // See https://docs.rs/tracing-subscriber/0.3.16/tracing_subscriber/layer/index.html#per-layer-filtering
+    use tracing_subscriber::prelude::*;
+    let r = tracing_subscriber::registry();
+    let r = r.with({
+        let log_layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(atty::is(atty::Stream::Stdout))
+            .with_writer(std::io::stdout);
+        let log_layer = match log_format {
+            LogFormat::Json => log_layer.json().boxed(),
+            LogFormat::Plain => log_layer.boxed(),
+            LogFormat::Test => log_layer.with_test_writer().boxed(),
+        };
+        log_layer.with_filter(rust_log_env_filter())
+    });
+    let r = r.with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()));
+    let (flame_layer, guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
+    let r = r.with(flame_layer);
+    match tracing_error_layer_enablement {
+        TracingErrorLayerEnablement::EnableWithRustLogFilter => {
+            r.with(tracing_error::ErrorLayer::default().with_filter(rust_log_env_filter()))
+                .init();
+        }
+        TracingErrorLayerEnablement::Disabled => r.init(),
+    }
+
+    Ok(guard)
+}
+
 /// Disable the default rust panic hook by using `set_hook`.
 ///
 /// For neon binaries, the assumption is that tracing is configured before with [`init`], after

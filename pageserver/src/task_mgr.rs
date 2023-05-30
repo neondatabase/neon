@@ -433,7 +433,7 @@ async fn task_finish(
     }
 
     if shutdown_process {
-        shutdown_pageserver(1).await;
+        shutdown_pageserver(1, None::<Box<u32>>).await;
     }
 }
 

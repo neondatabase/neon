@@ -40,6 +40,7 @@ uuid.workspace = true
 pq_proto.workspace = true
 metrics.workspace = true
 workspace_hack.workspace = true
+tracing-flame = "0.2"
 
 [dev-dependencies]
 byteorder.workspace = true
