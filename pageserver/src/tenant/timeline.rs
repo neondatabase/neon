@@ -2757,7 +2757,9 @@ impl Timeline {
                     let _g = span.entered();
                     this.create_delta_layer(&frozen_layer)
                 })
-                .await??;
+                .await
+                .context("create_delta_layer spawn_blocking")
+                .and_then(|res| res)?;
                 HashMap::from([(delta_path, metadata)])
             };
 
