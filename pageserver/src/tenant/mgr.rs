@@ -25,6 +25,7 @@ use crate::tenant::{
 };
 use crate::IGNORED_TENANT_FILE_NAME;
 
+use utils::completion;
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
@@ -66,7 +67,7 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
-    init_done_tx: tokio::sync::mpsc::Sender<()>,
+    init_done_tx: completion::Completion,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
@@ -159,7 +160,7 @@ pub fn schedule_local_tenant_processing(
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
-    init_done_tx: Option<tokio::sync::mpsc::Sender<()>>,
+    init_done_tx: Option<completion::Completion>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(

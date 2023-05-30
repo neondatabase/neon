@@ -20,6 +20,7 @@ use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::*;
+use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 
 use std::cmp::min;
@@ -895,7 +896,7 @@ impl Tenant {
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
-        init_done_tx: Option<tokio::sync::mpsc::Sender<()>>,
+        init_done_tx: Option<completion::Completion>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {

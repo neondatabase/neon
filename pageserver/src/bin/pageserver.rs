@@ -338,8 +338,7 @@ fn start_pageserver(
     // All tenant load operations carry this while they are ongoing; it will be dropped once those
     // operations finish either successfully or in some other manner. However, the initial load
     // will be then done, and we can start the global background tasks.
-    let (init_done_tx, init_done_rx) = tokio::sync::mpsc::channel::<()>(1);
-    let init_done_rx = Arc::new(tokio::sync::Mutex::new(init_done_rx));
+    let (init_done_tx, init_done_rx) = utils::completion::channel();
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let init_started_at = std::time::Instant::now();
@@ -353,8 +352,7 @@ fn start_pageserver(
     BACKGROUND_RUNTIME.spawn({
         let init_done_rx = init_done_rx.clone();
         async move {
-            let init_done = async move { init_done_rx.lock().await.recv().await };
-            init_done.await;
+            init_done_rx.wait().await;
 
             let elapsed = init_started_at.elapsed();
 
@@ -435,8 +433,7 @@ fn start_pageserver(
                     // this is because we only process active tenants and timelines, and the
                     // Timeline::get_current_logical_size will spawn the logical size calculation,
                     // which will not be rate-limited.
-                    let init_done = async move { init_done_rx.lock().await.recv().await };
-                    init_done.await;
+                    init_done_rx.wait().await;
 
                     pageserver::consumption_metrics::collect_metrics(
                         metric_collection_endpoint,
