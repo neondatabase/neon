@@ -225,6 +225,10 @@ fn test_regression() {
         "Layer 2".to_string(),
     );
 
+    // If an insertion operation improperly deletes the endpoint of a previous layer
+    // (which is more likely to happen with layers that collide on key.end), we will
+    // end up with an infinite layer, covering the entire keyspace. Here we assert
+    // that there's no layer at key 100 because we didn't insert any layer there.
     let version = map.get_version(100).unwrap();
     assert_eq!(version.delta_coverage.query(100), None);
 }
