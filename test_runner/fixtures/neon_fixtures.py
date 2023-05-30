@@ -1621,6 +1621,8 @@ class NeonPageserver(PgProtocol):
             ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
             # these can happen anytime we do compactions from background task and shutdown pageserver
             r".*ERROR.*ancestor timeline \S+ is being stopped",
+            # this is expected given our collaborative shutdown approach for the UploadQueue
+            ".*Compaction failed, retrying in .*: queue is in state Stopped.*",
         ]
 
     def start(
