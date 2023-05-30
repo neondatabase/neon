@@ -3528,14 +3528,18 @@ impl Timeline {
         let this = self.clone();
         let ctx_inner = ctx.clone();
         let layer_removal_cs_inner = layer_removal_cs.clone();
+        let span = tracing::info_span!("blocking");
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
         } = tokio::task::spawn_blocking(move || {
+            let _g = span.entered();
             this.compact_level0_phase1(layer_removal_cs_inner, target_file_size, &ctx_inner)
         })
         .await
-        .unwrap()?;
+        .context("compact_level0_phase1 spawn_blocking")
+        .map_err(CompactionError::Other)
+        .and_then(|res| res)?;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
