@@ -984,8 +984,11 @@ impl Tenant {
         //
         // Scan the directory, peek into the metadata file of each timeline, and
         // collect a list of timelines and their ancestors.
+        let tenant_id = self.tenant_id;
+        let conf = self.conf;
+
         let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-        let timelines_dir = self.conf.timelines_path(&self.tenant_id);
+        let timelines_dir = conf.timelines_path(&tenant_id);
 
         for entry in
             std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
@@ -1022,7 +1025,7 @@ impl Tenant {
                             timeline_uninit_mark_file.display()
                         )
                     })?;
-                let timeline_dir = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+                let timeline_dir = conf.timeline_path(&timeline_id, &tenant_id);
                 if let Err(e) =
                     remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
                 {
@@ -1040,13 +1043,12 @@ impl Tenant {
                             timeline_dir.display()
                         )
                     })?;
-                let timeline_uninit_mark_file = self
-                    .conf
-                    .timeline_uninit_mark_file_path(self.tenant_id, timeline_id);
+                let timeline_uninit_mark_file =
+                    conf.timeline_uninit_mark_file_path(tenant_id, timeline_id);
                 if timeline_uninit_mark_file.exists() {
                     info!(
                         "Found an uninit mark file for timeline {}/{}, removing the timeline and its uninit mark",
-                        self.tenant_id, timeline_id
+                        tenant_id, timeline_id
                     );
                     if let Err(e) =
                         remove_timeline_and_uninit_mark(&timeline_dir, &timeline_uninit_mark_file)
@@ -1060,7 +1062,7 @@ impl Tenant {
                 if let Ok(timeline_id) =
                     file_name.to_str().unwrap_or_default().parse::<TimelineId>()
                 {
-                    let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
+                    let metadata = load_metadata(conf, timeline_id, tenant_id)
                         .context("failed to load metadata")?;
                     timelines_to_load.insert(timeline_id, metadata);
                 } else {
