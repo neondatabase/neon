@@ -346,7 +346,7 @@ fn start_pageserver(
         conf,
         broker_client.clone(),
         remote_storage.clone(),
-        init_done_tx,
+        (init_done_tx, init_done_rx.clone()),
     ))?;
 
     BACKGROUND_RUNTIME.spawn({

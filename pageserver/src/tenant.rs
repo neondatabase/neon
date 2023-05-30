@@ -654,7 +654,7 @@ impl Tenant {
                 match tenant_clone.attach(&ctx).await {
                     Ok(()) => {
                         info!("attach finished, activating");
-                        tenant_clone.activate(broker_client, &ctx);
+                        tenant_clone.activate(broker_client, None, &ctx);
                     }
                     Err(e) => {
                         error!("attach failed, setting tenant state to Broken: {:?}", e);
@@ -896,7 +896,7 @@ impl Tenant {
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
-        init_done_tx: Option<completion::Completion>,
+        init_done: Option<(completion::Completion, completion::Barrier)>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
@@ -932,11 +932,15 @@ impl Tenant {
             async move {
                 // keep the sender alive as long as we have the initial load ongoing; it will be
                 // None for loads spawned after init_tenant_mgr.
-                let _init_done_tx = init_done_tx;
+                let (_tx, rx) = if let Some((tx, rx)) = init_done {
+                    (Some(tx), Some(rx))
+                } else {
+                    (None, None)
+                };
                 match tenant_clone.load(&ctx).await {
                     Ok(()) => {
-                        info!("load finished, activating");
-                        tenant_clone.activate(broker_client, &ctx);
+                        debug!("load finished, activating");
+                        tenant_clone.activate(broker_client, rx.as_ref(), &ctx);
                     }
                     Err(err) => {
                         error!("load failed, setting tenant state to Broken: {err:?}");
@@ -1671,7 +1675,12 @@ impl Tenant {
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
-    fn activate(self: &Arc<Self>, broker_client: BrokerClientChannel, ctx: &RequestContext) {
+    fn activate(
+        self: &Arc<Self>,
+        broker_client: BrokerClientChannel,
+        init_done: Option<&completion::Barrier>,
+        ctx: &RequestContext,
+    ) {
         debug_assert_current_span_has_tenant_id();
 
         let mut activating = false;
@@ -1702,7 +1711,7 @@ impl Tenant {
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
-            tasks::start_background_loops(self);
+            tasks::start_background_loops(self, init_done);
 
             let mut activated_timelines = 0;
 
