@@ -6,6 +6,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+import backoff
 import psycopg2
 
 CREATE_TABLE = """
@@ -24,6 +25,7 @@ def err(msg):
     sys.exit(1)
 
 
+@backoff.on_exception(backoff.expo, psycopg2.OperationalError, max_time=15)
 @contextmanager
 def get_connection_cursor():
     connstr = os.getenv("DATABASE_URL")

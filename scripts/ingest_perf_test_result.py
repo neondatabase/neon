@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+import backoff
 import psycopg2
 import psycopg2.extras
 
@@ -30,6 +31,7 @@ def err(msg):
     sys.exit(1)
 
 
+@backoff.on_exception(backoff.expo, psycopg2.OperationalError, max_time=15)
 @contextmanager
 def get_connection_cursor():
     connstr = os.getenv("DATABASE_URL")
