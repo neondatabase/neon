@@ -42,7 +42,12 @@ pub mod defaults {
     pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
-    pub const DEFAULT_FORCED_IMAGE_CREATION_LIMIT: u64 = 1024;
+    // This parameter limits amount of image layer generated due to GC request.
+    // It should avoid storage space explosion caused by taken in account GC feedback for existed projects.
+    // Total amount of forced image layers is limited by forced_image_creation_limit*compaction_target_size
+    // per GC iteration. As far as GC will be able to remove old layers only after PiTR interval expiration,
+    // maximal storage extension is pitr_interval/gc_period*forced_image_creation_limit*compaction_target_size
+    pub const DEFAULT_FORCED_IMAGE_CREATION_LIMIT: u64 = 10;
 }
 
 /// Per-tenant configuration options
