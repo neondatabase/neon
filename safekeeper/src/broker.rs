@@ -67,6 +67,10 @@ async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
             BROKER_PUSH_ALL_UPDATES_SECONDS.observe(elapsed.as_secs_f64());
             BROKER_ITERATION_TIMELINES.observe(active_tlis.len() as f64);
 
+            if elapsed > push_interval / 2 {
+                info!("broker push is too long, pushed {} timeline updates to broker in {:?}", active_tlis.len(), elapsed);
+            }
+
             sleep(push_interval).await;
         }
     };
