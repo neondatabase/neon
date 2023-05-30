@@ -3,4 +3,4 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-void rust_function(void);
+void rust_function(uint32_t a);

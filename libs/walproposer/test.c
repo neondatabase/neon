@@ -4,6 +4,6 @@
 
 int TestFunc(int a, int b) {
     printf("TestFunc: %d + %d = %d\n", a, b, a + b);
-    rust_function();
+    rust_function(0);
     return a + b;
 }

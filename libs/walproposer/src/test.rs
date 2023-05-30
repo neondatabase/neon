@@ -1,4 +1,4 @@
-use crate::TestFunc;
+use crate::{TestFunc, TMP_TEST};
 
 #[test]
 fn run_test() {
