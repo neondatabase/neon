@@ -103,9 +103,23 @@ use crate::shutdown_pageserver;
 // other operations, if the upload tasks e.g. get blocked on locks. It shouldn't
 // happen, but still.
 //
+
+pub static THREADS_PER_RUNTIME: Lazy<std::num::NonZeroUsize> = Lazy::new(|| {
+    let num = std::env::var_os("PAGESERVER_THREADS_PER_RUNTIME")
+        .and_then(|var| var.to_str().map(|v| v.parse::<usize>()))
+        .expect("PAGESERVER_THREADS_PER_RUNTIME is unset")
+        .expect("PAGESERVER_THREADS_PER_RUNTIME is not an usize");
+
+    let num =
+        std::num::NonZeroUsize::new(num).expect("PAGESERVER_THREADS_PER_RUNTIME out of range");
+
+    num
+});
+
 pub static COMPUTE_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("compute request worker")
+        .worker_threads(THREADS_PER_RUNTIME.get())
         .enable_all()
         .build()
         .expect("Failed to create compute request runtime")
@@ -114,6 +128,7 @@ pub static COMPUTE_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("mgmt request worker")
+        .worker_threads(THREADS_PER_RUNTIME.get())
         .enable_all()
         .build()
         .expect("Failed to create mgmt request runtime")
@@ -122,6 +137,7 @@ pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("walreceiver worker")
+        .worker_threads(THREADS_PER_RUNTIME.get())
         .enable_all()
         .build()
         .expect("Failed to create walreceiver runtime")
@@ -130,6 +146,7 @@ pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("background op worker")
+        .worker_threads(THREADS_PER_RUNTIME.get())
         .enable_all()
         .build()
         .expect("Failed to create background op runtime")
