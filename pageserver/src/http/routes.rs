@@ -49,7 +49,6 @@ use utils::{
 };
 
 // Imports only used for testing APIs
-#[cfg(feature = "testing")]
 use super::models::ConfigureFailpointsRequest;
 
 struct State {
@@ -909,7 +908,6 @@ async fn update_tenant_config_handler(
 }
 
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
-#[cfg(feature = "testing")]
 async fn handle_tenant_break(
     r: Request<Body>,
     _cancel: CancellationToken,
@@ -925,7 +923,6 @@ async fn handle_tenant_break(
     json_response(StatusCode::OK, ())
 }
 
-#[cfg(feature = "testing")]
 async fn failpoints_handler(
     mut request: Request<Body>,
     _cancel: CancellationToken,
@@ -984,7 +981,6 @@ async fn timeline_gc_handler(
 }
 
 // Run compaction immediately on given timeline.
-#[cfg(feature = "testing")]
 async fn timeline_compact_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -1009,7 +1005,6 @@ async fn timeline_compact_handler(
 }
 
 // Run checkpoint immediately on given timeline.
-#[cfg(feature = "testing")]
 async fn timeline_checkpoint_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -1184,7 +1179,6 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     )
 }
 
-#[cfg(feature = "testing")]
 async fn post_tracing_event_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
