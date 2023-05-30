@@ -1102,14 +1102,14 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip_all, fields(timeline_id))]
+    #[instrument(skip_all, fields(timeline_id=%timeline_id))]
     async fn load_local_timeline(
         &self,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        debug_assert_current_span_has_tenant_id();
+        debug_assert_current_span_has_tenant_and_timeline_id();
 
         let remote_client = self.remote_storage.as_ref().map(|remote_storage| {
             RemoteTimelineClient::new(
@@ -1394,6 +1394,8 @@ impl Tenant {
         pitr: Duration,
         ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
+        debug_assert_current_span_has_tenant_id();
+
         anyhow::ensure!(
             self.is_active(),
             "Cannot run GC iteration on inactive tenant"
@@ -1408,6 +1410,8 @@ impl Tenant {
     /// Also it can be explicitly requested per timeline through page server
     /// api's 'compact' command.
     pub async fn compaction_iteration(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         anyhow::ensure!(
             self.is_active(),
             "Cannot run compaction iteration on inactive tenant"
@@ -2141,7 +2145,7 @@ impl Tenant {
         let target_config_path = conf.tenant_config_path(tenant_id);
         let target_config_display = target_config_path.display();
 
-        info!("loading tenantconf from {target_config_display}");
+        debug!("loading tenantconf from {target_config_display}");
 
         // FIXME If the config file is not found, assume that we're attaching
         // a detached tenant and config is passed via attach command.

@@ -56,7 +56,7 @@ pub(super) async fn connection_manager_loop_step(
     {
         Ok(()) => {}
         Err(_) => {
-            info!("Timeline dropped state updates sender before becoming active, stopping wal connection manager loop");
+            debug!("Timeline dropped state updates sender before becoming active, stopping wal connection manager loop");
             return ControlFlow::Break(());
         }
     }
@@ -79,7 +79,7 @@ pub(super) async fn connection_manager_loop_step(
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
     let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id).await;
-    info!("Subscribed for broker timeline updates");
+    debug!("Subscribed for broker timeline updates");
 
     loop {
         let time_until_next_retry = connection_manager_state.time_until_next_retry();
@@ -151,7 +151,7 @@ pub(super) async fn connection_manager_loop_step(
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
                                 TimelineState::Broken | TimelineState::Stopping => {
-                                    info!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
+                                    debug!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
                                     return ControlFlow::Break(());
                                 }
                                 TimelineState::Loading => {
@@ -165,11 +165,11 @@ pub(super) async fn connection_manager_loop_step(
                 }
             } => match new_event {
                 ControlFlow::Continue(new_state) => {
-                    info!("observed timeline state change, new state is {new_state:?}");
+                    debug!("observed timeline state change, new state is {new_state:?}");
                     return ControlFlow::Continue(());
                 }
                 ControlFlow::Break(()) => {
-                    info!("Timeline dropped state updates sender, stopping wal connection manager loop");
+                    debug!("Timeline dropped state updates sender, stopping wal connection manager loop");
                     return ControlFlow::Break(());
                 }
             },
@@ -470,7 +470,7 @@ impl ConnectionManagerState {
 
         if let Some(next) = &retry.next_retry_at {
             if next > &now {
-                info!(
+                debug!(
                     "Next connection retry to {:?} is at {}",
                     wal_connection.sk_id, next
                 );
@@ -515,7 +515,7 @@ impl ConnectionManagerState {
         );
 
         if old_entry.is_none() {
-            info!("New SK node was added: {new_safekeeper_id}");
+            debug!("New SK node was added: {new_safekeeper_id}");
             WALRECEIVER_CANDIDATES_ADDED.inc();
         }
     }

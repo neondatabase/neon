@@ -119,6 +119,7 @@ pub(super) async fn handle_walreceiver_connection(
         ctx.download_behavior(),
     );
     let connection_cancellation = cancellation.clone();
+    use tracing::Instrument;
     task_mgr::spawn(
         WALRECEIVER_RUNTIME.handle(),
         TaskKind::WalReceiverConnectionPoller,
@@ -140,7 +141,8 @@ pub(super) async fn handle_walreceiver_connection(
                 _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
             }
             Ok(())
-        },
+        }
+        .instrument(tracing::info_span!("walreceiver")),
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.
@@ -153,7 +155,7 @@ pub(super) async fn handle_walreceiver_connection(
     }
 
     let identify = identify_system(&mut replication_client).await?;
-    info!("{identify:?}");
+    debug!("{identify:?}");
 
     let end_of_wal = Lsn::from(u64::from(identify.xlogpos));
     let mut caught_up = false;

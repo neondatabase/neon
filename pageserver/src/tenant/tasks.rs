@@ -61,7 +61,7 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, init_done: Option<&completio
 ///
 async fn compaction_loop(tenant: Arc<Tenant>) {
     let wait_duration = Duration::from_secs(2);
-    info!("starting");
+    debug!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         let cancel = task_mgr::shutdown_token();
@@ -72,7 +72,7 @@ async fn compaction_loop(tenant: Arc<Tenant>) {
 
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    info!("received cancellation request");
+                    debug!("received cancellation request");
                     return;
                 },
                 tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
@@ -95,7 +95,7 @@ async fn compaction_loop(tenant: Arc<Tenant>) {
             let started_at = Instant::now();
 
             let sleep_duration = if period == Duration::ZERO {
-                info!("automatic compaction is disabled");
+                debug!("automatic compaction is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
                 Duration::from_secs(10)
             } else {
@@ -113,7 +113,7 @@ async fn compaction_loop(tenant: Arc<Tenant>) {
             // Sleep
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    info!("received cancellation request during idling");
+                    debug!("received cancellation request during idling");
                     break;
                 },
                 _ = tokio::time::sleep(sleep_duration) => {},
@@ -131,7 +131,7 @@ async fn compaction_loop(tenant: Arc<Tenant>) {
 ///
 async fn gc_loop(tenant: Arc<Tenant>) {
     let wait_duration = Duration::from_secs(2);
-    info!("starting");
+    debug!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         let cancel = task_mgr::shutdown_token();
@@ -145,7 +145,7 @@ async fn gc_loop(tenant: Arc<Tenant>) {
 
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    info!("received cancellation request");
+                    debug!("received cancellation request");
                     return;
                 },
                 tenant_wait_result = wait_for_active_tenant(&tenant) => match tenant_wait_result {
@@ -167,7 +167,7 @@ async fn gc_loop(tenant: Arc<Tenant>) {
 
             let gc_horizon = tenant.get_gc_horizon();
             let sleep_duration = if period == Duration::ZERO || gc_horizon == 0 {
-                info!("automatic GC is disabled");
+                debug!("automatic GC is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
                 Duration::from_secs(10)
             } else {
@@ -188,7 +188,7 @@ async fn gc_loop(tenant: Arc<Tenant>) {
             // Sleep
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    info!("received cancellation request during idling");
+                    debug!("received cancellation request during idling");
                     break;
                 },
                 _ = tokio::time::sleep(sleep_duration) => {},

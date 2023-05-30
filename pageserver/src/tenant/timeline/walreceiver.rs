@@ -85,7 +85,7 @@ impl WalReceiver {
             &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
             false,
             async move {
-                info!("WAL receiver manager started, connecting to broker");
+                debug!("WAL receiver manager started, connecting to broker");
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
@@ -93,7 +93,7 @@ impl WalReceiver {
                 loop {
                     select! {
                         _ = task_mgr::shutdown_watcher() => {
-                            info!("WAL receiver shutdown requested, shutting down");
+                            trace!("WAL receiver shutdown requested, shutting down");
                             break;
                         },
                         loop_step_result = connection_manager_loop_step(
@@ -104,7 +104,7 @@ impl WalReceiver {
                         ) => match loop_step_result {
                             ControlFlow::Continue(()) => continue,
                             ControlFlow::Break(()) => {
-                                info!("Connection manager loop ended, shutting down");
+                                trace!("Connection manager loop ended, shutting down");
                                 break;
                             }
                         },
@@ -115,7 +115,11 @@ impl WalReceiver {
                 *loop_status.write().unwrap() = None;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
+            .instrument({
+                let span = info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id);
+                span.follows_from(Span::current());
+                span
+            })
         );
 
         Self {
@@ -214,7 +218,7 @@ impl<E: Clone> TaskHandle<E> {
                             // So, tone them down to info-level.
                             //
                             // XXX: rewrite this module to eliminate the race condition.
-                            info!("sender is dropped while join handle is still alive");
+                            debug!("sender is dropped while join handle is still alive");
                         }
 
                         let res = jh

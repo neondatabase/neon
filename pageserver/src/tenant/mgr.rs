@@ -212,7 +212,7 @@ pub fn schedule_local_tenant_processing(
             )
         }
     } else {
-        info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
+        trace!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
         Tenant::spawn_load(
             conf,

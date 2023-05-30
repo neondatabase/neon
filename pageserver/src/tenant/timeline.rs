@@ -674,7 +674,10 @@ impl Timeline {
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
+    #[instrument(skip_all)]
     pub async fn compact(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         const ROUNDS: usize = 2;
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -1434,7 +1437,7 @@ impl Timeline {
         match *flush_loop_state {
             FlushLoopState::NotStarted => (),
             FlushLoopState::Running => {
-                info!(
+                debug!(
                     "skipping attempt to start flush_loop twice {}/{}",
                     self.tenant_id, self.timeline_id
                 );
@@ -1452,7 +1455,7 @@ impl Timeline {
         let layer_flush_start_rx = self.layer_flush_start_tx.subscribe();
         let self_clone = Arc::clone(self);
 
-        info!("spawning flush loop");
+        debug!("spawning flush loop");
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
@@ -1468,7 +1471,11 @@ impl Timeline {
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "layer flush task", tenant = %self.tenant_id, timeline = %self.timeline_id))
+            .instrument({
+                let span = info_span!(parent: None, "layer flush task", tenant_id = %self.tenant_id, timeline_id = %self.timeline_id);
+                span.follows_from(Span::current());
+                span
+            })
         );
 
         *flush_loop_state = FlushLoopState::Running;
@@ -1483,7 +1490,7 @@ impl Timeline {
         ctx: &RequestContext,
         broker_client: BrokerClientChannel,
     ) {
-        info!(
+        debug!(
             "launching WAL receiver for timeline {} of tenant {}",
             self.timeline_id, self.tenant_id
         );
@@ -1604,7 +1611,7 @@ impl Timeline {
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
             } else if remote_timeline_client::is_temp_download_file(&direntry_path) {
-                info!(
+                debug!(
                     "skipping temp download file, reconcile_with_remote will resume / clean up: {}",
                     fname
                 );
@@ -1613,7 +1620,7 @@ impl Timeline {
                 trace!("deleting old ephemeral file in timeline dir: {}", fname);
                 fs::remove_file(&direntry_path)?;
             } else if is_temporary(&direntry_path) {
-                info!("removing temp timeline file at {}", direntry_path.display());
+                debug!("removing temp timeline file at {}", direntry_path.display());
                 fs::remove_file(&direntry_path).with_context(|| {
                     format!(
                         "failed to remove temp download file at {}",
@@ -1710,7 +1717,7 @@ impl Timeline {
                 }
             }
 
-            info!(
+            debug!(
                 "remote layer does not exist locally, creating remote layer: {}",
                 remote_layer_name.file_name()
             );
@@ -1795,7 +1802,7 @@ impl Timeline {
         up_to_date_metadata: &TimelineMetadata,
         index_part: Option<&IndexPart>,
     ) -> anyhow::Result<()> {
-        info!("starting");
+        trace!("starting");
         let remote_client = self
             .remote_client
             .as_ref()
@@ -1815,7 +1822,7 @@ impl Timeline {
         let has_local_layers = !local_layers.is_empty();
         let local_only_layers = match index_part {
             Some(index_part) => {
-                info!(
+                debug!(
                     "initializing upload queue from remote index with {} layer files",
                     index_part.timeline_layers.len()
                 );
@@ -1824,7 +1831,7 @@ impl Timeline {
                     .await?
             }
             None => {
-                info!("initializing upload queue as empty");
+                debug!("initializing upload queue as empty");
                 remote_client.init_upload_queue_for_empty_remote(up_to_date_metadata)?;
                 local_layers
             }
@@ -1842,7 +1849,7 @@ impl Timeline {
                     .metadata()
                     .with_context(|| format!("failed to get file {layer_path:?} metadata"))?
                     .len();
-                info!("scheduling {layer_path:?} for upload");
+                debug!("scheduling {layer_path:?} for upload");
                 remote_client
                     .schedule_layer_file_upload(layer_name, &LayerFileMetadata::new(layer_size))?;
             }
@@ -1865,7 +1872,7 @@ impl Timeline {
             // Local timeline has a metadata file, remote one too, both have no layers to sync.
         }
 
-        info!("Done");
+        trace!("Done");
 
         Ok(())
     }
@@ -1887,7 +1894,7 @@ impl Timeline {
             .get()
             .is_none());
 
-        info!(
+        debug!(
             "spawning logical size computation from context of task kind {:?}",
             ctx.task_kind()
         );
@@ -2081,6 +2088,7 @@ impl Timeline {
     ///
     /// NOTE: counted incrementally, includes ancestors. This can be a slow operation,
     /// especially if we need to download remote layers.
+    #[instrument(skip_all)]
     pub async fn calculate_logical_size(
         &self,
         up_to_lsn: Lsn,
@@ -2088,7 +2096,7 @@ impl Timeline {
         cancel: CancellationToken,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        info!(
+        debug!(
             "Calculating logical size for timeline {} at {}",
             self.timeline_id, up_to_lsn
         );
@@ -2130,8 +2138,8 @@ impl Timeline {
         let logical_size = self
             .get_current_logical_size_non_incremental(up_to_lsn, cancel, ctx)
             .await?;
-        debug!("calculated logical size: {logical_size}");
         timer.stop_and_record();
+        info!("calculated logical size: {logical_size}");
         Ok(logical_size)
     }
 
@@ -2643,11 +2651,11 @@ impl Timeline {
         mut layer_flush_start_rx: tokio::sync::watch::Receiver<u64>,
         ctx: &RequestContext,
     ) {
-        info!("started flush loop");
+        debug!("started flush loop");
         loop {
             tokio::select! {
                 _ = task_mgr::shutdown_watcher() => {
-                    info!("shutting down layer flush task");
+                    debug!("shutting down layer flush task");
                     break;
                 },
                 _ = layer_flush_start_rx.changed() => {}
@@ -2910,6 +2918,7 @@ impl Timeline {
         Ok((new_delta_filename, LayerFileMetadata::new(sz)))
     }
 
+    #[instrument(skip_all)]
     async fn repartition(
         &self,
         lsn: Lsn,
@@ -3015,6 +3024,7 @@ impl Timeline {
         Ok(false)
     }
 
+    #[instrument(skip_all)]
     async fn create_image_layers(
         &self,
         partitioning: &KeyPartitioning,
@@ -3238,7 +3248,7 @@ impl Timeline {
         let remotes = deltas_to_compact
             .iter()
             .filter(|l| l.is_remote_layer())
-            .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
+            .inspect(|l| debug!("compact requires download of {}", l.filename().file_name()))
             .map(|l| {
                 l.clone()
                     .downcast_remote_layer()
@@ -3262,7 +3272,7 @@ impl Timeline {
         );
 
         for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().file_name());
+            debug!("compact includes {}", l.filename().file_name());
         }
 
         // We don't need the original list of layers anymore. Drop it so that
@@ -3790,7 +3800,7 @@ impl Timeline {
             write_guard.store_and_unlock(new_gc_cutoff).wait();
         }
 
-        info!("GC starting");
+        debug!("GC starting");
 
         debug!("retain_lsns: {:?}", retain_lsns);
 

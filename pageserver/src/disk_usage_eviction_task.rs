@@ -111,7 +111,7 @@ pub fn launch_disk_usage_global_eviction_task(
                 task_mgr::shutdown_token(),
             )
             .await;
-            info!("disk usage based eviction task finishing");
+            debug!("disk usage based eviction task finishing");
             Ok(())
         },
     );
@@ -133,7 +133,7 @@ async fn disk_usage_eviction_task(
             .await
             .is_err()
         {
-            info!("shutting down");
+            debug!("shutting down");
             return;
         }
     }
@@ -168,7 +168,7 @@ async fn disk_usage_eviction_task(
         tokio::select! {
             _ = tokio::time::sleep_until(sleep_until) => {},
             _ = cancel.cancelled() => {
-                info!("shutting down");
+                debug!("shutting down");
                 break
             }
         }

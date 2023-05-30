@@ -22,7 +22,7 @@ use std::{
 
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
+use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -58,7 +58,7 @@ impl Timeline {
             false,
             async move {
                 self_clone.eviction_task(task_mgr::shutdown_token()).await;
-                info!("eviction task finishing");
+                debug!("eviction task finishing");
                 Ok(())
             },
         );
@@ -74,7 +74,7 @@ impl Timeline {
                 EvictionPolicy::NoEviction => Duration::from_secs(10),
             };
             if random_init_delay(period, &cancel).await.is_err() {
-                info!("shutting down");
+                trace!("shutting down");
                 return;
             }
         }
@@ -89,7 +89,7 @@ impl Timeline {
                 ControlFlow::Continue(sleep_until) => {
                     tokio::select! {
                         _ = cancel.cancelled() => {
-                            info!("shutting down");
+                            trace!("shutting down");
                             break;
                         }
                         _ = tokio::time::sleep_until(sleep_until) => { }
@@ -348,7 +348,6 @@ impl Timeline {
                 cancel.clone(),
                 ctx,
             )
-            .instrument(info_span!("calculate_logical_size"))
             .await;
 
         match &size {
