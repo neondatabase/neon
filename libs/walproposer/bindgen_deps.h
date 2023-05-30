@@ -5,4 +5,6 @@
  * header here, and whitelist the struct in the build.rs file.
  */
 // #include "c.h"
-#include "walproposer.h"
+// #include "walproposer.h"
+
+int TestFunc(int a, int b);

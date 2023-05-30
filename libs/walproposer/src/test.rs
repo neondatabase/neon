@@ -1,6 +1,7 @@
-use crate::WalProposerRust;
+use crate::TestFunc;
 
 #[test]
 fn run_test() {
-    unsafe { WalProposerRust(); }
+    let res = unsafe { TestFunc(1, 2) };
+    println!("res: {}", res);
 }

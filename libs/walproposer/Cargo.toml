@@ -28,3 +28,4 @@ postgres.workspace = true
 [build-dependencies]
 anyhow.workspace = true
 bindgen.workspace = true
+cbindgen = "0.24.0"

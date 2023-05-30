@@ -6,7 +6,12 @@ pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-pub use bindings::WalProposerRust;
+pub use bindings::TestFunc;
+
+#[no_mangle]
+pub extern "C" fn rust_function() {
+    println!("Hello from Rust!");
+}
 
 #[cfg(test)]
 mod test;

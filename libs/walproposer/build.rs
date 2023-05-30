@@ -6,10 +6,19 @@ use bindgen::{callbacks::ParseCallbacks, CargoCallbacks};
 extern crate bindgen;
 
 fn main() -> anyhow::Result<()> {
+    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    cbindgen::Builder::new()
+        .with_crate(crate_dir)
+        .with_language(cbindgen::Language::C)
+        .generate()
+        .expect("Unable to generate bindings")
+        .write_to_file("rust_bindings.h");
+
     // Tell cargo to invalidate the built crate whenever the wrapper changes
-    println!("cargo:rerun-if-changed=bindgen_deps.h,walproposer.c,walproposer.h");
-    println!("cargo:rustc-link-lib=dylib=walproposer");
-    println!("cargo:rustc-link-search=/Users/arthur/zen/zenith/libs/walproposer");
+    println!("cargo:rerun-if-changed=bindgen_deps.h,walproposer.c,walproposer.h,test.c");
+    println!("cargo:rustc-link-lib=walproposer");
+    println!("cargo:rustc-link-search=/home/admin/simulator/libs/walproposer");
 
     if !std::process::Command::new("./build.sh")
         .output()
@@ -84,7 +93,7 @@ fn main() -> anyhow::Result<()> {
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(CargoCallbacks))
-        .allowlist_function("WalProposerRust")
+        .allowlist_function("TestFunc")
         // .clang_arg(format!("-I{inc_server_path}"))
         // .clang_arg(format!("-I{inc_pgxn_path}"))
         // Finish the builder and generate the bindings.
@@ -97,7 +106,6 @@ fn main() -> anyhow::Result<()> {
     bindings
         .write_to_file(out_path)
         .expect("Couldn't write bindings!");
-
 
     Ok(())
 }
