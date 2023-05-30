@@ -1096,7 +1096,7 @@ impl Tenant {
                 .with_context(|| format!("load local timeline {timeline_id}"))?;
         }
 
-        info!("Done");
+        trace!("Done");
 
         Ok(())
     }
