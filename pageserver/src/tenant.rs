@@ -890,7 +890,7 @@ impl Tenant {
     /// If the loading fails for some reason, the Tenant will go into Broken
     /// state.
     ///
-    #[instrument(skip(conf, remote_storage, ctx), fields(tenant_id=%tenant_id))]
+    #[instrument(skip_all, fields(tenant_id=%tenant_id))]
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
@@ -899,6 +899,8 @@ impl Tenant {
         init_done: Option<(completion::Completion, completion::Barrier)>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
+        debug_assert_current_span_has_tenant_id();
+
         let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
             Ok(conf) => conf,
             Err(e) => {
