@@ -118,11 +118,6 @@ class EvictionEnv:
 
         wait_until(10, 1, statvfs_called)
 
-        # these can sometimes happen during startup before any tenants have been
-        # loaded, so nothing can be evicted, we just wait for next iteration which
-        # is able to evict.
-        self.neon_env.pageserver.allowed_errors.append(".*WARN.* disk usage still high.*")
-
 
 @pytest.fixture
 def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> EvictionEnv:
