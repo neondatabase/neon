@@ -974,7 +974,7 @@ impl Tenant {
     async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
 
-        info!("loading tenant task");
+        debug!("loading tenant task");
 
         utils::failpoint_sleep_millis_async!("before-loading-tenant");
 
