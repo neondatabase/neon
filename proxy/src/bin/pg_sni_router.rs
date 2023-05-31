@@ -141,15 +141,22 @@ async fn task_main(
         tokio::select! {
             accept_result = listener.accept() => {
                 let (socket, peer_addr) = accept_result?;
-                info!("accepted postgres client connection from {peer_addr}");
-
                 let session_id = uuid::Uuid::new_v4();
+
+                info!(
+                    session_id = ?session_id,
+                    "accepted postgres client connection from {peer_addr}",
+                );
+
                 let tls_config = Arc::clone(&tls_config);
                 let dest_suffix = Arc::clone(&dest_suffix);
 
                 connections.spawn(
                     async move {
-                        info!("spawned a task for {peer_addr}");
+                        info!(
+                            session_id = ?session_id,
+                            "spawned a task for {peer_addr}",
+                        );
 
                         socket
                             .set_nodelay(true)
@@ -157,9 +164,12 @@ async fn task_main(
 
                         handle_client(dest_suffix, tls_config, session_id, socket).await
                     }
-                    .unwrap_or_else(|e| {
+                    .unwrap_or_else(move |e| {
                         // Acknowledge that the task has finished with an error.
-                        error!("per-client task finished with an error: {e:#}");
+                        error!(
+                            session_id = ?session_id,
+                            "per-client task finished with an error: {e:#}",
+                        );
                     }),
                 );
             }
@@ -205,7 +215,7 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 
             let (raw, read_buf) = stream.into_inner();
             // TODO: Normally, client doesn't send any data before
-            // server says TLS handshake is ok and read_buf is empy.
+            // server says TLS handshake is ok and read_buf is empty.
             // However, you could imagine pipelining of postgres
             // SSLRequest + TLS ClientHello in one hunk similar to
             // pipelining in our node js driver. We should probably
