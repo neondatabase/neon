@@ -135,7 +135,7 @@ pub fn init_with_flame(
     let (flame_layer, guard) = {
         let (l, guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
         let l = l
-            .with_empty_samples(true)
+            .with_empty_samples(false)
             .with_module_path(false)
             .with_file_and_line(false)
             .with_threads_collapsed(true);
