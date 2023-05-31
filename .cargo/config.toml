@@ -14,3 +14,6 @@ opt-level = 1
 
 [alias]
 build_testing = ["build", "--features", "testing"]
+
+[build]
+rustflags = ["-C", "default-linker-libraries"]

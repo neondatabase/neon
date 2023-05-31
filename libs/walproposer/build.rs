@@ -16,19 +16,51 @@ fn main() -> anyhow::Result<()> {
         .write_to_file("rust_bindings.h");
 
     // Tell cargo to invalidate the built crate whenever the wrapper changes
-    println!("cargo:rerun-if-changed=bindgen_deps.h,walproposer.c,walproposer.h,test.c");
-    println!("cargo:rustc-link-lib=walproposer");
-    println!("cargo:rustc-link-search=/home/admin/simulator/libs/walproposer");
+    println!("cargo:rerun-if-changed=bindgen_deps.h,walproposer.c,walproposer.h,test.c,libpostgres.a,../../pgxn/neon/walproposer.c,build.sh");
+    // println!("cargo:rustc-link-lib=walproposer");
+    // println!("cargo:rustc-link-lib=ext");
+    // println!("cargo:rustc-link-lib=pgport_srv");
+    // println!("cargo:rustc-link-lib=postgres");
+    // println!("cargo:rustc-link-lib=pgcommon_srv");
+    // println!("cargo:rustc-link-lib=pgport_srv");
+    println!("cargo:rustc-link-arg=-Wl,--start-group");
+    println!("cargo:rustc-link-arg=-lwalproposer");
+    println!("cargo:rustc-link-arg=-lext");
+    println!("cargo:rustc-link-arg=-lpgport_srv");
+    println!("cargo:rustc-link-arg=-lpostgres");
+    println!("cargo:rustc-link-arg=-lpgcommon_srv");
+    println!("cargo:rustc-link-arg=-lssl");
+    println!("cargo:rustc-link-arg=-lcrypto");
+    println!("cargo:rustc-link-arg=-lz");
+    println!("cargo:rustc-link-arg=-lpthread");
+    println!("cargo:rustc-link-arg=-lrt");
+    println!("cargo:rustc-link-arg=-ldl");
+    println!("cargo:rustc-link-arg=-lm");
+    println!("cargo:rustc-link-arg=-Wl,--end-group");
+    // println!("cargo:rustc-flags=-C default-linker-libraries=y");
 
-    if !std::process::Command::new("./build.sh")
-        .output()
-        .expect("could not spawn `clang`")
-        .status
-        .success()
-    {
-        // Panic if the command was not successful.
-        panic!("could not compile object file");
-    }
+    // echo -lseccomp -lssl -lcrypto -lz -lpthread -lrt -ldl -lm
+
+    // println!("cargo:rustc-link-lib=ssl");
+    // println!("cargo:rustc-link-lib=crypto");
+    // println!("cargo:rustc-link-lib=walproposer2");
+    // println!("cargo:rustc-link-lib=postgres");
+    // println!("cargo:rustc-link-lib=pq");
+    // println!("cargo:rustc-link-lib=ssl");
+    // println!("cargo:rustc-link-lib=crypto");
+    println!("cargo:rustc-link-search=/home/admin/simulator/libs/walproposer");
+    // disable fPIE
+    println!("cargo:rustc-link-arg=-no-pie");
+
+    // if !std::process::Command::new("./build.sh")
+    //     .output()
+    //     .expect("could not spawn `clang`")
+    //     .status
+    //     .success()
+    // {
+    //     // Panic if the command was not successful.
+    //     panic!("could not compile object file");
+    // }
 
     // println!("cargo:rustc-link-lib=dylib=neon");
     // println!("cargo:rustc-link-search=/Users/arthur/zen/zenith/pg_install/build/neon-v15");
@@ -94,6 +126,7 @@ fn main() -> anyhow::Result<()> {
         // included header files changed.
         .parse_callbacks(Box::new(CargoCallbacks))
         .allowlist_function("TestFunc")
+        // .allowlist_function("WalProposerRust")
         // .clang_arg(format!("-I{inc_server_path}"))
         // .clang_arg(format!("-I{inc_pgxn_path}"))
         // Finish the builder and generate the bindings.

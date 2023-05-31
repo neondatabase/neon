@@ -8,3 +8,9 @@ Entrypoint header file is `bindgen_deps.h`.
 ## C -> Rust
 
 We use `cbindgen` to generate C bindings for the Rust code. They are stored in `rust_bindings.h`.
+
+## How to run the tests
+
+```
+export RUSTFLAGS="-C default-linker-libraries"
+```

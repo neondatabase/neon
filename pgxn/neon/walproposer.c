@@ -316,6 +316,11 @@ nwp_shmem_startup_hook(void)
 	WalproposerShmemInit();
 }
 
+void WalProposerRust()
+{
+	elog(LOG, "WalProposerRust");
+}
+
 /*
  * WAL proposer bgworker entry point.
  */

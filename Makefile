@@ -39,6 +39,8 @@ endif
 # been no changes to the files. Changing the mtime triggers an
 # unnecessary rebuild of 'postgres_ffi'.
 PG_CONFIGURE_OPTS += INSTALL='$(ROOT_PROJECT_DIR)/scripts/ninstall.sh -C'
+PG_CONFIGURE_OPTS += CC=clang
+PG_CONFIGURE_OPTS += CCX=clang++
 
 # Choose whether we should be silent or verbose
 CARGO_BUILD_FLAGS += --$(if $(filter s,$(MAKEFLAGS)),quiet,verbose)
