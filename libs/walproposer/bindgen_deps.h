@@ -14,3 +14,5 @@
 
 int TestFunc(int a, int b);
 void RunClientC(uint32_t serverId);
+
+void WalProposerRust();

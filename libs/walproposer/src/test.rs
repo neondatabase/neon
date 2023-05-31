@@ -1,4 +1,4 @@
-use crate::bindings::{TestFunc, RunClientC};
+use crate::bindings::{TestFunc, RunClientC, WalProposerRust};
 
 #[test]
 fn test_rust_c_calls() {
@@ -8,5 +8,6 @@ fn test_rust_c_calls() {
 
 #[test]
 fn test_sim_bindings() {
-    unsafe { RunClientC(0); }
+    // unsafe { RunClientC(0); }
+    unsafe { WalProposerRust(); }
 }

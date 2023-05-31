@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     // println!("cargo:rustc-link-lib=pgcommon_srv");
     // println!("cargo:rustc-link-lib=pgport_srv");
     println!("cargo:rustc-link-arg=-Wl,--start-group");
-    println!("cargo:rustc-link-arg=-lwalproposer");
+    println!("cargo:rustc-link-arg=-lsim");
     println!("cargo:rustc-link-arg=-lpgport_srv");
     println!("cargo:rustc-link-arg=-lpostgres");
     println!("cargo:rustc-link-arg=-lpgcommon_srv");
@@ -35,6 +35,7 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-link-arg=-lrt");
     println!("cargo:rustc-link-arg=-ldl");
     println!("cargo:rustc-link-arg=-lm");
+    println!("cargo:rustc-link-arg=-lwalproposer");
     println!("cargo:rustc-link-arg=-Wl,--end-group");
     // println!("cargo:rustc-flags=-C default-linker-libraries=y");
 
@@ -126,6 +127,7 @@ fn main() -> anyhow::Result<()> {
         .parse_callbacks(Box::new(CargoCallbacks))
         .allowlist_function("TestFunc")
         .allowlist_function("RunClientC")
+        .allowlist_function("WalProposerRust")
         // .allowlist_function("WalProposerRust")
         // .clang_arg(format!("-I{inc_server_path}"))
         // .clang_arg(format!("-I{inc_pgxn_path}"))

@@ -136,6 +136,12 @@ neon-pg-ext-%: postgres-%
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-test-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_test_utils/Makefile install
 
+.PHONY:
+neon-pg-ext-walproposer:
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v15/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
+		-C $(POSTGRES_INSTALL_DIR)/build/neon-v15 \
+		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile install
+
 .PHONY: neon-pg-ext-clean-%
 neon-pg-ext-clean-%:
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
