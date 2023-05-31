@@ -106,6 +106,17 @@ where
     );
 
     for retries in 0..RETRIES {
+        match spawned_process.try_wait() {
+            Ok(Some(exit)) => {
+                anyhow::bail!("process {process_name} already exited: {exit}")
+            }
+            Ok(None) => { /* not dead yet */ }
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("try_wait failed on process {pid}"))
+                )
+            }
+        }
         match process_started(pid, Some(pid_file_to_check), &process_status_check) {
             Ok(true) => {
                 println!("\n{process_name} started, pid: {pid}");
