@@ -1690,6 +1690,9 @@ class NeonPageserver(PgProtocol):
                 else:
                     errors.append(line)
 
+        for error in errors:
+            log.info(f"not allowed error: {error.strip()}")
+
         assert not errors
 
     def log_contains(self, pattern: str) -> Optional[str]:

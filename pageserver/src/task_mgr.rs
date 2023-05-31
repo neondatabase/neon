@@ -481,12 +481,17 @@ pub async fn shutdown_tasks(
         }
     }
 
+    let log_all = kind.is_none() && tenant_id.is_none() && timeline_id.is_none();
+
     for task in victim_tasks {
         let join_handle = {
             let mut task_mut = task.mutable.lock().unwrap();
             task_mut.join_handle.take()
         };
         if let Some(mut join_handle) = join_handle {
+            if log_all {
+                warn!(name = task.name, "stopping left-over");
+            }
             let completed = tokio::select! {
                 _ = &mut join_handle => { true },
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
