@@ -8,5 +8,5 @@ fn test_rust_c_calls() {
 
 #[test]
 fn test_sim_bindings() {
-    unsafe { RunClientC(); }
+    unsafe { RunClientC(0); }
 }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use safekeeper::simlib::{network::{NetworkOptions, Delay}, world::World};
+use safekeeper::{simlib::{network::{NetworkOptions, Delay}, world::World}, simtest::{Options, start_simulation}};
 
 use crate::{bindings::RunClientC, sim::c_attach_node_os};
 
@@ -8,8 +8,8 @@ use crate::{bindings::RunClientC, sim::c_attach_node_os};
 fn run_rust_c_test() {
     let delay = Delay {
         min: 1,
-        max: 60,
-        fail_prob: 0.4,
+        max: 5,
+        fail_prob: 0.0,
     };
 
     let network = NetworkOptions {
@@ -19,23 +19,16 @@ fn run_rust_c_test() {
     };
     let seed = 1337;
 
-    start_simulation_2(seed, network.clone(), 1_000_000);
-}
+    let u32_data: [u32; 5] = [1, 2, 3, 4, 5];
 
-fn start_simulation_2(seed: u64, network: NetworkOptions, time_limit: u64) {
-    let network = Arc::new(network);
-    let world = Arc::new(World::new(seed, network));
-    world.register_world();
-
-    let client_node = world.new_node();
-    client_node.launch(move |os| {
-        c_attach_node_os(os);
-        unsafe { RunClientC() }
+    start_simulation(Options {
+        seed,
+        network: network.clone(),
+        time_limit: 1_000_000,
+        client_fn: Box::new(move |os, server_id| {
+            c_attach_node_os(os);
+            unsafe { RunClientC(server_id); }
+        }),
+        u32_data,
     });
-
-    world.await_all();
-
-    while world.step() && world.now() < time_limit {
-        println!("made a step");
-    }
 }

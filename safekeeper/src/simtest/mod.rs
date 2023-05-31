@@ -8,7 +8,7 @@ use crate::{
     simlib::{
         network::{Delay, NetworkOptions},
         proto::ReplCell,
-        world::World,
+        world::World, node_os::NodeOs,
     },
     simtest::{client::run_client, disk::SharedStorage, server::run_server},
 };
@@ -28,13 +28,32 @@ fn run_pure_rust_test() {
     };
 
     for seed in 0..2000 {
-        start_simulation(seed, network.clone(), 1_000_000);
+        let u32_data: [u32; 5] = [1, 2, 3, 4, 5];
+        let data = u32_to_cells(&u32_data, 1);
+
+        start_simulation(Options {
+            seed,
+            network: network.clone(),
+            time_limit: 1_000_000,
+            client_fn: Box::new(move |os, server_id| {
+                run_client(os, &data, server_id)
+            }),
+            u32_data,
+        });
     }
 }
 
-fn start_simulation(seed: u64, network: NetworkOptions, time_limit: u64) {
-    let network = Arc::new(network);
-    let world = Arc::new(World::new(seed, network));
+pub struct Options {
+    pub seed: u64,
+    pub network: NetworkOptions,
+    pub time_limit: u64,
+    pub u32_data: [u32; 5],
+    pub client_fn: Box<dyn FnOnce(NodeOs, u32) + Send + 'static>,
+}
+
+pub fn start_simulation(options: Options) {
+    let network = Arc::new(options.network);
+    let world = Arc::new(World::new(options.seed, network));
     world.register_world();
 
     let client_node = world.new_node();
@@ -42,9 +61,10 @@ fn start_simulation(seed: u64, network: NetworkOptions, time_limit: u64) {
     let server_id = server_node.id;
 
     // start the client thread
-    let u32_data = &[1, 2, 3, 4, 5];
-    let data = u32_to_cells(u32_data, 1);
-    client_node.launch(move |os| run_client(os, &data, server_id));
+    client_node.launch(move |os| {
+        let client_fn = options.client_fn;
+        client_fn(os, server_id);
+    });
 
     // start the server thread
     let shared_storage = SharedStorage::new();
@@ -53,10 +73,10 @@ fn start_simulation(seed: u64, network: NetworkOptions, time_limit: u64) {
 
     world.await_all();
 
-    while world.step() && world.now() < time_limit {}
+    while world.step() && world.now() < options.time_limit {}
 
     let disk_data = shared_storage.state.lock().data.clone();
-    assert!(verify_data(&disk_data, &u32_data[..]));
+    assert!(verify_data(&disk_data, &options.u32_data[..]));
 }
 
 fn u32_to_cells(data: &[u32], client_id: u32) -> Vec<ReplCell> {

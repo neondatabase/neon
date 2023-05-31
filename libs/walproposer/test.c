@@ -18,12 +18,35 @@ int TestFunc(int a, int b) {
 }
 
 // This is a quick experiment with rewriting existing Rust code in C.
-void RunClientC() {
+void RunClientC(uint32_t serverId) {
     MemoryContextInit();
+
+    uint32_t clientId = sim_id();
 
     elog(LOG, "started client");
 
-    for (int i = 0; i < 10; i++) {
-        sim_sleep(100);
+    int data_len = 5;
+
+    int delivered = 0;
+    int tcp = sim_open_tcp(serverId);
+    while (delivered < data_len) {
+        ReplCell cell = {
+            .value = delivered+1,
+            .client_id = clientId,
+            .seqno = delivered,
+        };
+        sim_tcp_send(tcp, cell);
+
+        Event event = sim_epoll_rcv();
+        if (event.tag == 2) {
+            // closed
+            elog(LOG, "connection closed");
+            tcp = sim_open_tcp(serverId);
+        } else if (event.tag == 3) {
+            // got message
+            if (event.value == delivered + 1) {
+                delivered += 1;
+            }
+        }
     }
 }

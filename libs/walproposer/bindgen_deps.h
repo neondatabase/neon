@@ -7,5 +7,10 @@
 // #include "c.h"
 // #include "walproposer.h"
 
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+
 int TestFunc(int a, int b);
-void RunClientC();
+void RunClientC(uint32_t serverId);

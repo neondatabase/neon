@@ -66,7 +66,7 @@ type MessageDirection = u8;
 /// Node 0 is the creator of the connection (client),
 /// and node 1 is the acceptor (server).
 pub struct VirtualConnection {
-    /// Connection id, used for logging and debugging.
+    /// Connection id, used for logging and debugging and C API.
     pub connection_id: u64,
     pub world: Arc<World>,
     pub nodes: [Arc<Node>; 2],
@@ -369,5 +369,14 @@ impl TCP {
     /// before the arrival of all messages sent earlier.
     pub fn send(&self, msg: AnyMessage) {
         self.conn.send(self.dir, msg);
+    }
+
+    pub fn id(&self) -> i64 {
+        let positive: i64 = (self.conn.connection_id + 1) as i64;
+        if self.dir == 0 {
+            positive
+        } else {
+            -positive
+        }
     }
 }
