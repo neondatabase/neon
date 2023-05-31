@@ -132,7 +132,15 @@ pub fn init_with_flame(
         log_layer.with_filter(rust_log_env_filter())
     });
     let r = r.with(TracingEventCountLayer(&TRACING_EVENT_COUNT).with_filter(rust_log_env_filter()));
-    let (flame_layer, guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
+    let (flame_layer, guard) = {
+        let (l, guard) = tracing_flame::FlameLayer::with_file("./tracing.folded").unwrap();
+        let l = l
+            .with_empty_samples(true)
+            .with_module_path(false)
+            .with_file_and_line(false)
+            .with_threads_collapsed(true);
+        (l, guard)
+    };
     let r = r.with(flame_layer);
     match tracing_error_layer_enablement {
         TracingErrorLayerEnablement::EnableWithRustLogFilter => {
