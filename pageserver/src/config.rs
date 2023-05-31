@@ -108,7 +108,7 @@ pub mod defaults {
 
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
-
+#gc_feedback = false
 # [remote_storage]
 
 "###
@@ -797,7 +797,8 @@ impl PageServerConf {
             )?);
         }
         if let Some(max_lsn_wal_lag) = item.get("max_lsn_wal_lag") {
-            t_conf.max_lsn_wal_lag = Some(parse_toml_from_str("max_lsn_wal_lag", max_lsn_wal_lag)?);
+            t_conf.max_lsn_wal_lag =
+                Some(deserialize_from_item("max_lsn_wal_lag", max_lsn_wal_lag)?);
         }
         if let Some(trace_read_requests) = item.get("trace_read_requests") {
             t_conf.trace_read_requests =
@@ -825,6 +826,14 @@ impl PageServerConf {
                 "evictions_low_residence_duration_metric_threshold",
                 item,
             )?);
+        }
+
+        if let Some(gc_feedback) = item.get("gc_feedback") {
+            t_conf.gc_feedback = Some(
+                gc_feedback
+                    .as_bool()
+                    .with_context(|| "configure option gc_feedback is not a bool".to_string())?,
+            );
         }
 
         Ok(t_conf)

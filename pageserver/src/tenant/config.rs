@@ -99,6 +99,7 @@ pub struct TenantConf {
     // See the corresponding metric's help string.
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
+    pub gc_feedback: bool,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -175,6 +176,10 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub evictions_low_residence_duration_metric_threshold: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub gc_feedback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +247,7 @@ impl TenantConfOpt {
             evictions_low_residence_duration_metric_threshold: self
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
+            gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
         }
     }
 }
@@ -278,6 +284,7 @@ impl Default for TenantConf {
                 DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
+            gc_feedback: false,
         }
     }
 }
@@ -372,6 +379,7 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
                     ))?,
             );
         }
+        tenant_conf.gc_feedback = request_data.gc_feedback;
 
         Ok(tenant_conf)
     }

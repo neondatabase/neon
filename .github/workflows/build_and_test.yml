@@ -346,10 +346,8 @@ jobs:
           test_selection: regress
           needs_postgres_source: true
           run_with_real_s3: true
-          real_s3_bucket: ci-tests-s3
-          real_s3_region: us-west-2
-          real_s3_access_key_id: "${{ secrets.AWS_ACCESS_KEY_ID_CI_TESTS_S3 }}"
-          real_s3_secret_access_key: "${{ secrets.AWS_SECRET_ACCESS_KEY_CI_TESTS_S3 }}"
+          real_s3_bucket: neon-github-ci-tests
+          real_s3_region: eu-central-1
           rerun_flaky: true
           pg_version: ${{ matrix.pg_version }}
         env:
@@ -409,9 +407,7 @@ jobs:
         uses: ./.github/actions/allure-report-generate
 
       - uses: actions/github-script@v6
-        if: >
-          !cancelled() &&
-          github.event_name == 'pull_request'
+        if: ${{ !cancelled() }}
         with:
           # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
           retries: 5
@@ -421,7 +417,7 @@ jobs:
               reportJsonUrl: "${{ steps.create-allure-report.outputs.report-json-url }}",
             }
 
-            const script = require("./scripts/pr-comment-test-report.js")
+            const script = require("./scripts/comment-test-report.js")
             await script({
               github,
               context,
@@ -496,11 +492,16 @@ jobs:
         env:
           COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          scripts/coverage \
-            --dir=/tmp/coverage report \
+          scripts/coverage --dir=/tmp/coverage \
+            report \
             --input-objects=/tmp/coverage/binaries.list \
             --commit-url=${COMMIT_URL} \
             --format=github
+
+          scripts/coverage --dir=/tmp/coverage \
+            report \
+            --input-objects=/tmp/coverage/binaries.list \
+            --format=lcov
 
       - name: Upload coverage report
         id: upload-coverage-report
@@ -508,7 +509,7 @@ jobs:
           BUCKET: neon-github-public-dev
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://neon-github-public-dev/code-coverage/${COMMIT_SHA}
+          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://${BUCKET}/code-coverage/${COMMIT_SHA}
 
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
@@ -663,6 +664,9 @@ jobs:
           project: nrdv0s4kcs
           push: true
           tags: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:depot-${{needs.tag.outputs.build-tag}}
+          build-args: |
+            GIT_VERSION=${{ github.sha }}
+            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
 
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
@@ -711,7 +715,11 @@ jobs:
 
   compute-node-image:
     runs-on: [ self-hosted, gen3, large ]
-    container: gcr.io/kaniko-project/executor:v1.9.2-debug
+    container:
+      image: gcr.io/kaniko-project/executor:v1.9.2-debug
+      # Workaround for "Resolving download.osgeo.org (download.osgeo.org)... failed: Temporary failure in name resolution.""
+      # Should be prevented by https://github.com/neondatabase/neon/issues/4281
+      options: --add-host=download.osgeo.org:140.211.15.30
     needs: [ tag ]
     strategy:
       fail-fast: false
@@ -773,7 +781,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.4.6
+      VM_BUILDER_VERSION: v0.8.0
 
     steps:
       - name: Checkout
@@ -783,21 +791,18 @@ jobs:
 
       - name: Downloading vm-builder
         run: |
-          curl -L https://github.com/neondatabase/neonvm/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
+          curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
+      # Note: we need a separate pull step here because otherwise vm-builder will try to pull, and
+      # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
           docker pull 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
-      - name: Building VM compute-node rootfs
-        run: |
-          docker build -t temp-vm-compute-node --build-arg SRC_IMAGE=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -f Dockerfile.vm-compute-node .
-
       - name: Build vm image
         run: |
-          # note: as of 2023-01-12, vm-builder requires a trailing ":latest" for local images
-          ./vm-builder -use-inittab -src=temp-vm-compute-node:latest -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          ./vm-builder -enable-file-cache -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Pushing vm-compute-node image
         run: |
@@ -957,7 +962,7 @@ jobs:
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
       options: --init
     needs: [ promote-images, tag, regress-tests ]
     if: github.ref_name == 'release' && github.event_name != 'workflow_dispatch'
@@ -968,11 +973,13 @@ jobs:
           PREFIX: artifacts/latest
         run: |
           # Update compatibility snapshot for the release
-          for build_type in debug release; do
-            OLD_FILENAME=compatibility-snapshot-${build_type}-pg14-${GITHUB_RUN_ID}.tar.zst
-            NEW_FILENAME=compatibility-snapshot-${build_type}-pg14.tar.zst
+          for pg_version in v14 v15; do
+            for build_type in debug release; do
+              OLD_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}-${GITHUB_RUN_ID}.tar.zst
+              NEW_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}.tar.zst
 
-            time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+              time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+            done
           done
 
           # Update Neon artifact for the release (reuse already uploaded artifact)

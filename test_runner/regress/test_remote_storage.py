@@ -140,7 +140,7 @@ def test_remote_storage_backup_and_restore(
     # This is before the failures injected by test_remote_failures, so it's a permanent error.
     pageserver_http.configure_failpoints(("storage-sync-list-remote-timelines", "return"))
     env.pageserver.allowed_errors.append(
-        ".*error attaching tenant: storage-sync-list-remote-timelines",
+        ".*attach failed.*: storage-sync-list-remote-timelines",
     )
     # Attach it. This HTTP request will succeed and launch a
     # background task to load the tenant. In that background task,

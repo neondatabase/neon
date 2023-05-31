@@ -363,11 +363,29 @@ paths:
         * MUST NOT ASSUME that the request has been lost, based on the observation
           that a subsequent tenant status request returns 404. The request may
           still be in flight. It must be retried.
+
+        The client SHOULD supply a `TenantConfig` for the tenant in the request body.
+        Settings specified in the config override the pageserver's defaults.
+        It is guaranteed that the config settings are applied before the pageserver
+        starts operating on the tenant. E.g., if the config specifies a specific
+        PITR interval for a tenant, then that setting will be in effect before the
+        pageserver starts the garbage collection loop. This enables a client to
+        guarantee a specific PITR setting across detach/attach cycles.
+        The pageserver will reject the request if it cannot parse the config, or
+        if there are any unknown fields in it.
+
+        If the client does not supply a config, the pageserver will use its defaults.
+        This behavior is deprecated: https://github.com/neondatabase/neon/issues/4282
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantAttachRequest"
       responses:
         "202":
           description: Tenant attaching scheduled
         "400":
-          description: Error when no tenant id found in path parameters
           content:
             application/json:
               schema:
@@ -660,6 +678,8 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+                - new_timeline_id
               properties:
                 new_timeline_id:
                   type: string
@@ -741,8 +761,11 @@ paths:
                 $ref: "#/components/schemas/Error"
     post:
       description: |
-        Create a tenant. Returns new tenant id on success.\
+        Create a tenant. Returns new tenant id on success.
+
         If no new tenant id is specified in parameters, it would be generated. It's an error to recreate the same tenant.
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
         content:
           application/json:
@@ -790,6 +813,8 @@ paths:
     put:
       description: |
         Update tenant's config.
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
         content:
           application/json:
@@ -913,10 +938,19 @@ components:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
         - type: object
+          required:
+            - new_tenant_id
           properties:
             new_tenant_id:
               type: string
               format: hex
+    TenantAttachRequest:
+      type: object
+      required:
+        - config
+      properties:
+        config:
+          $ref: '#/components/schemas/TenantConfig'
     TenantConfigRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
