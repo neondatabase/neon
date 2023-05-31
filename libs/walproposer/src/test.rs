@@ -1,8 +1,12 @@
-use crate::{TestFunc, TMP_TEST};
+use crate::bindings::{TestFunc, RunClientC};
 
 #[test]
-fn run_test() {
+fn test_rust_c_calls() {
     let res = unsafe { TestFunc(1, 2) };
-    // unsafe { WalProposerRust(); }
     println!("res: {}", res);
+}
+
+#[test]
+fn test_sim_bindings() {
+    unsafe { RunClientC(); }
 }

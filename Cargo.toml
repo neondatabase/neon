@@ -138,6 +138,7 @@ postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }
 remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
+safekeeper = { path = "./safekeeper/" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }

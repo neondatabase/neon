@@ -16,3 +16,14 @@ int TestFunc(int a, int b) {
     printf("After rust_function\n");
     return a + b;
 }
+
+// This is a quick experiment with rewriting existing Rust code in C.
+void RunClientC() {
+    MemoryContextInit();
+
+    elog(LOG, "started client");
+
+    for (int i = 0; i < 10; i++) {
+        sim_sleep(100);
+    }
+}

@@ -8,3 +8,4 @@
 // #include "walproposer.h"
 
 int TestFunc(int a, int b);
+void RunClientC();

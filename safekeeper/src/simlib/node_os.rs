@@ -10,6 +10,7 @@ use super::{
 };
 
 /// Abstraction with all functions (aka syscalls) available to the node.
+#[derive(Clone)]
 pub struct NodeOs {
     world: Arc<World>,
     internal: Arc<Node>,

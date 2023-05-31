@@ -125,6 +125,7 @@ fn main() -> anyhow::Result<()> {
         // included header files changed.
         .parse_callbacks(Box::new(CargoCallbacks))
         .allowlist_function("TestFunc")
+        .allowlist_function("RunClientC")
         // .allowlist_function("WalProposerRust")
         // .clang_arg(format!("-I{inc_server_path}"))
         // .clang_arg(format!("-I{inc_pgxn_path}"))

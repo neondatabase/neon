@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[test]
-fn run_test() {
+fn run_pure_rust_test() {
     let delay = Delay {
         min: 1,
         max: 60,

@@ -4655,6 +4655,7 @@ dependencies = [
  "postgres",
  "rand",
  "regex",
+ "safekeeper",
  "serde",
  "thiserror",
  "utils",
