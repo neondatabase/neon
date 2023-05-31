@@ -1,4 +1,4 @@
-//! A RemoteLayer is an in-memory placeholder for a layer file that exists
+//! A RemoteLayerDesc is an in-memory placeholder for a layer file that exists
 //! in remote storage.
 //!
 use crate::config::PageServerConf;
@@ -25,19 +25,19 @@ use super::{
     LayerResidenceStatus, PersistentLayer,
 };
 
-/// RemoteLayer is a not yet downloaded [`ImageLayer`] or
+/// RemoteLayerDesc is a not yet downloaded [`ImageLayer`] or
 /// [`crate::storage_layer::DeltaLayer`].
 ///
-/// RemoteLayer might be downloaded on-demand during operations which are
+/// RemoteLayerDesc might be downloaded on-demand during operations which are
 /// allowed download remote layers and during which, it gets replaced with a
 /// concrete `DeltaLayer` or `ImageLayer`.
 ///
 /// See: [`crate::context::RequestContext`] for authorization to download
-pub struct RemoteLayer {
-    tenantid: TenantId,
-    timelineid: TimelineId,
-    key_range: Range<Key>,
-    lsn_range: Range<Lsn>,
+pub struct RemoteLayerDesc {
+    pub(crate) tenantid: TenantId,
+    pub(crate) timelineid: TimelineId,
+    pub(crate) key_range: Range<Key>,
+    pub(crate) lsn_range: Range<Lsn>,
 
     pub file_name: LayerFileName,
 
@@ -54,7 +54,7 @@ pub struct RemoteLayer {
     /// Has `LayerMap::replace` failed for this (true) or not (false).
     ///
     /// Used together with [`ongoing_download`] semaphore in `Timeline::download_remote_layer`.
-    /// The field is used to mark a RemoteLayer permanently (until restart or ignore+load)
+    /// The field is used to mark a RemoteLayerDesc permanently (until restart or ignore+load)
     /// unprocessable, because a LayerMap::replace failed.
     ///
     /// It is very unlikely to accumulate these in the Timeline's LayerMap, but having this avoids
@@ -63,9 +63,9 @@ pub struct RemoteLayer {
     pub(crate) download_replacement_failure: std::sync::atomic::AtomicBool,
 }
 
-impl std::fmt::Debug for RemoteLayer {
+impl std::fmt::Debug for RemoteLayerDesc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RemoteLayer")
+        f.debug_struct("RemoteLayerDesc")
             .field("file_name", &self.file_name)
             .field("layer_metadata", &self.layer_metadata)
             .field("is_incremental", &self.is_incremental)
@@ -73,7 +73,7 @@ impl std::fmt::Debug for RemoteLayer {
     }
 }
 
-impl Layer for RemoteLayer {
+impl Layer for RemoteLayerDesc {
     fn get_key_range(&self) -> Range<Key> {
         self.key_range.clone()
     }
@@ -119,7 +119,7 @@ impl Layer for RemoteLayer {
     }
 }
 
-impl PersistentLayer for RemoteLayer {
+impl PersistentLayer for RemoteLayerDesc {
     fn get_tenant_id(&self) -> TenantId {
         self.tenantid
     }
@@ -160,14 +160,6 @@ impl PersistentLayer for RemoteLayer {
         bail!("remote layer has no layer file");
     }
 
-    fn downcast_remote_layer<'a>(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
-        Some(self)
-    }
-
-    fn is_remote_layer(&self) -> bool {
-        true
-    }
-
     fn file_size(&self) -> u64 {
         self.layer_metadata.file_size()
     }
@@ -201,15 +193,15 @@ impl PersistentLayer for RemoteLayer {
     }
 }
 
-impl RemoteLayer {
+impl RemoteLayerDesc {
     pub fn new_img(
         tenantid: TenantId,
         timelineid: TimelineId,
         fname: &ImageFileName,
         layer_metadata: &LayerFileMetadata,
         access_stats: LayerAccessStats,
-    ) -> RemoteLayer {
-        RemoteLayer {
+    ) -> RemoteLayerDesc {
+        RemoteLayerDesc {
             tenantid,
             timelineid,
             key_range: fname.key_range.clone(),
@@ -230,8 +222,8 @@ impl RemoteLayer {
         fname: &DeltaFileName,
         layer_metadata: &LayerFileMetadata,
         access_stats: LayerAccessStats,
-    ) -> RemoteLayer {
-        RemoteLayer {
+    ) -> RemoteLayerDesc {
+        RemoteLayerDesc {
             tenantid,
             timelineid,
             key_range: fname.key_range.clone(),

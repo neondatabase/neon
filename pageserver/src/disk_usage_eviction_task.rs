@@ -60,7 +60,7 @@ use utils::serde_percent::Percent;
 use crate::{
     config::PageServerConf,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    tenant::{self, storage_layer::PersistentLayer, Timeline},
+    tenant::{self, storage_layer::{PersistentLayer, RemoteLayerDesc}, Timeline},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,7 +329,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // If we get far enough in the list that we start to evict layers that are below
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
-    let mut batched: HashMap<_, Vec<Arc<dyn PersistentLayer>>> = HashMap::new();
+    let mut batched: HashMap<_, Vec<Arc<RemoteLayerDesc>>> = HashMap::new();
     let mut warned = None;
     let mut usage_planned = usage_pre;
     for (i, (partition, candidate)) in candidates.into_iter().enumerate() {
@@ -434,7 +434,7 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 #[derive(Clone)]
 struct EvictionCandidate {
     timeline: Arc<Timeline>,
-    layer: Arc<dyn PersistentLayer>,
+    layer: Arc<RemoteLayerDesc>,
     last_activity_ts: SystemTime,
 }
 

@@ -30,6 +30,7 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::{BlobCursor, BlobWriter, WriteBlobWriter};
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{DiskBtreeBuilder, DiskBtreeReader, VisitDirection};
+use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{
     PersistentLayer, ValueReconstructResult, ValueReconstructState,
 };
@@ -57,7 +58,7 @@ use utils::{
 
 use super::{
     DeltaFileName, Layer, LayerAccessStats, LayerAccessStatsReset, LayerFileName, LayerIter,
-    LayerKeyIter, PathOrConf,
+    LayerKeyIter, PathOrConf, RemoteLayerDesc,
 };
 
 ///
@@ -661,6 +662,17 @@ impl DeltaLayer {
             self.timeline_id,
             self.tenant_id,
             &self.layer_name(),
+        )
+    }
+
+    /// Create layer descriptor for this image layer
+    pub fn layer_desc(&self) -> RemoteLayerDesc {
+        RemoteLayerDesc::new_delta(
+            self.tenant_id,
+            self.timeline_id,
+            &self.layer_name(),
+            &LayerFileMetadata::new(self.file_size()),
+            LayerAccessStats::empty_will_record_residence_event_later(),
         )
     }
 }

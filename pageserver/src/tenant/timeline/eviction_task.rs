@@ -29,7 +29,7 @@ use crate::{
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
-        storage_layer::PersistentLayer,
+        storage_layer::{PersistentLayer, RemoteLayerDesc},
         LogicalSizeCalculationCause, Tenant,
     },
 };
@@ -184,11 +184,11 @@ impl Timeline {
         // NB: all the checks can be invalidated as soon as we release the layer map lock.
         // We don't want to hold the layer map lock during eviction.
         // So, we just need to deal with this.
-        let candidates: Vec<Arc<dyn PersistentLayer>> = {
+        let candidates: Vec<Arc<RemoteLayerDesc>> = {
             let layers = self.layers.read().unwrap();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
-                if hist_layer.is_remote_layer() {
+                if !self.layer_cache.contains(&hist_layer.filename()) {
                     continue;
                 }
 

@@ -61,6 +61,7 @@ use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::Replacement;
 
 use super::storage_layer::range_eq;
+use super::storage_layer::PersistentLayer;
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -138,24 +139,19 @@ where
         self.layer_map.remove_historic_noflush(layer)
     }
 
-    /// Replaces existing layer iff it is the `expected`.
+    /// Ensure the downloaded layer matches existing layer.
     ///
-    /// If the expected layer has been removed it will not be inserted by this function.
-    ///
-    /// Returned `Replacement` describes succeeding in replacement or the reason why it could not
+    /// Returned `Replacement` describes succeeding in checking or the reason why it could not
     /// be done.
-    ///
-    /// TODO replacement can be done without buffering and rebuilding layer map updates.
-    ///      One way to do that is to add a layer of indirection for returned values, so
-    ///      that we can replace values only by updating a hashmap.
-    pub fn replace_historic(
-        &mut self,
+    pub fn ensure_consistent(
+        &self,
         expected: &Arc<L>,
-        new: Arc<L>,
+        new: Arc<dyn PersistentLayer>,
     ) -> anyhow::Result<Replacement<Arc<L>>> {
         fail::fail_point!("layermap-replace-notfound", |_| Ok(Replacement::NotFound));
 
-        self.layer_map.replace_historic_noflush(expected, new)
+        self.layer_map
+            .ensure_consistent_noflush(expected, new)
     }
 
     // We will flush on drop anyway, but this method makes it
@@ -309,16 +305,16 @@ where
         }
     }
 
-    pub(self) fn replace_historic_noflush(
-        &mut self,
+    pub(self) fn ensure_consistent_noflush(
+        &self,
         expected: &Arc<L>,
-        new: Arc<L>,
+        new: Arc<dyn PersistentLayer>,
     ) -> anyhow::Result<Replacement<Arc<L>>> {
         let key = historic_layer_coverage::LayerKey::from(&**expected);
         let other = historic_layer_coverage::LayerKey::from(&*new);
 
         let expected_l0 = Self::is_l0(expected);
-        let new_l0 = Self::is_l0(&new);
+        let new_l0 = LayerMap::<dyn PersistentLayer>::is_l0(&*new);
 
         anyhow::ensure!(
             key == other,
@@ -345,17 +341,7 @@ where
             None
         };
 
-        let replaced = self.historic.replace(&key, new.clone(), |existing| {
-            Self::compare_arced_layers(existing, expected)
-        });
-
-        if let Replacement::Replaced { .. } = &replaced {
-            if let Some(index) = l0_index {
-                self.l0_delta_layers[index] = new;
-            }
-        }
-
-        Ok(replaced)
+        Ok(Replacement::Replaced { in_buffered: false })
     }
 
     /// Helper function for BatchedUpdates::drop.

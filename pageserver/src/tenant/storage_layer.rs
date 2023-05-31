@@ -37,7 +37,7 @@ pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
-pub use remote_layer::RemoteLayer;
+pub use remote_layer::RemoteLayerDesc;
 
 use super::layer_map::BatchedUpdates;
 
@@ -431,14 +431,6 @@ pub trait PersistentLayer: Layer {
     /// Permanently remove this layer from disk.
     fn delete_resident_layer_file(&self) -> Result<()>;
 
-    fn downcast_remote_layer(self: Arc<Self>) -> Option<std::sync::Arc<RemoteLayer>> {
-        None
-    }
-
-    fn is_remote_layer(&self) -> bool {
-        false
-    }
-
     /// Returns None if the layer file size is not known.
     ///
     /// Should not change over the lifetime of the layer object because
@@ -448,16 +440,6 @@ pub trait PersistentLayer: Layer {
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
 
     fn access_stats(&self) -> &LayerAccessStats;
-}
-
-pub fn downcast_remote_layer(
-    layer: &Arc<dyn PersistentLayer>,
-) -> Option<std::sync::Arc<RemoteLayer>> {
-    if layer.is_remote_layer() {
-        Arc::clone(layer).downcast_remote_layer()
-    } else {
-        None
-    }
 }
 
 /// Holds metadata about a layer without any content. Used mostly for testing.
