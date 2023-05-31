@@ -25,7 +25,6 @@ fn main() -> anyhow::Result<()> {
     // println!("cargo:rustc-link-lib=pgport_srv");
     println!("cargo:rustc-link-arg=-Wl,--start-group");
     println!("cargo:rustc-link-arg=-lwalproposer");
-    println!("cargo:rustc-link-arg=-lext");
     println!("cargo:rustc-link-arg=-lpgport_srv");
     println!("cargo:rustc-link-arg=-lpostgres");
     println!("cargo:rustc-link-arg=-lpgcommon_srv");
@@ -52,15 +51,15 @@ fn main() -> anyhow::Result<()> {
     // disable fPIE
     println!("cargo:rustc-link-arg=-no-pie");
 
-    // if !std::process::Command::new("./build.sh")
-    //     .output()
-    //     .expect("could not spawn `clang`")
-    //     .status
-    //     .success()
-    // {
-    //     // Panic if the command was not successful.
-    //     panic!("could not compile object file");
-    // }
+    if !std::process::Command::new("./build.sh")
+        .output()
+        .expect("could not spawn `clang`")
+        .status
+        .success()
+    {
+        // Panic if the command was not successful.
+        panic!("could not compile object file");
+    }
 
     // println!("cargo:rustc-link-lib=dylib=neon");
     // println!("cargo:rustc-link-search=/Users/arthur/zen/zenith/pg_install/build/neon-v15");
