@@ -1,5 +1,5 @@
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
@@ -89,6 +89,41 @@ def wait_until_tenant_state(
 
     raise Exception(
         f"Tenant {tenant_id} did not become {expected_state} within {iterations * period} seconds"
+    )
+
+
+def wait_until_timeline_state(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    expected_state: str,
+    iterations: int,
+    period: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Does not use `wait_until` for debugging purposes
+    """
+    for i in range(iterations):
+        try:
+            timeline = pageserver_http.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
+            log.debug(f"Timeline {tenant_id}/{timeline_id} data: {timeline}")
+            if isinstance(timeline["state"], str):
+                if timeline["state"] == expected_state:
+                    return timeline
+            elif isinstance(timeline, Dict):
+                if timeline["state"].get(expected_state):
+                    return timeline
+
+        except Exception as e:
+            log.debug(f"Timeline {tenant_id}/{timeline_id} state retrieval failure: {e}")
+
+        if i == iterations - 1:
+            # do not sleep last time, we already know that we failed
+            break
+        time.sleep(period)
+
+    raise Exception(
+        f"Timeline {tenant_id}/{timeline_id} did not become {expected_state} within {iterations * period} seconds"
     )
 
 

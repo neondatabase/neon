@@ -91,6 +91,13 @@ impl LocalFs {
     }
 }
 
+async fn is_directory_empty(path: impl AsRef<Path>) -> anyhow::Result<bool> {
+    let mut dir = tokio::fs::read_dir(&path)
+        .await
+        .context(format!("read_dir({})", path.as_ref().display()))?;
+    Ok(dir.next_entry().await?.is_none())
+}
+
 #[async_trait::async_trait]
 impl RemoteStorage for LocalFs {
     async fn list_prefixes(
@@ -101,19 +108,35 @@ impl RemoteStorage for LocalFs {
             Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
             None => Cow::Borrowed(&self.storage_root),
         };
-        Ok(get_all_files(path.as_ref(), false)
+        let mut prefixes = vec![];
+
+        let prefixes_to_filter = get_all_files(path.as_ref(), false)
             .await
             .map_err(DownloadError::Other)?
-            .into_iter()
-            .map(|path| {
-                path.strip_prefix(&self.storage_root)
+            .into_iter();
+
+        // filter out empty directories to mirror s3 behavior.
+        for prefix in prefixes_to_filter {
+            if prefix.is_dir()
+                && is_directory_empty(&prefix)
+                    .await
+                    .map_err(DownloadError::Other)?
+            {
+                continue;
+            }
+
+            prefixes.push(
+                prefix
+                    .strip_prefix(&self.storage_root)
                     .context("Failed to strip preifix")
                     .and_then(RemotePath::new)
                     .expect(
                         "We list files for storage root, hence should be able to remote the prefix",
-                    )
-            })
-            .collect())
+                    ),
+            )
+        }
+
+        Ok(prefixes)
     }
 
     async fn upload(
@@ -320,7 +343,7 @@ where
                     let file_type = dir_entry.file_type().await?;
                     let entry_path = dir_entry.path();
                     if file_type.is_symlink() {
-                        debug!("{entry_path:?} us a symlink, skipping")
+                        debug!("{entry_path:?} is a symlink, skipping")
                     } else if file_type.is_dir() {
                         if recursive {
                             paths.extend(get_all_files(&entry_path, true).await?.into_iter())

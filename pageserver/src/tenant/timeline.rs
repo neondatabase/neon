@@ -238,7 +238,7 @@ pub struct Timeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_lock: tokio::sync::Mutex<bool>,
+    pub delete_lock: Arc<tokio::sync::Mutex<bool>>,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 }
@@ -800,8 +800,7 @@ impl Timeline {
         // above. Rewrite it.
         let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
-        let state = *self.state.borrow();
-        if state == TimelineState::Stopping {
+        if self.is_stopping() {
             return Err(anyhow::anyhow!("timeline is Stopping").into());
         }
 
@@ -935,8 +934,8 @@ impl Timeline {
             (st, TimelineState::Loading) => {
                 error!("ignoring transition from {st:?} into Loading state");
             }
-            (TimelineState::Broken, _) => {
-                error!("Ignoring state update {new_state:?} for broken tenant");
+            (TimelineState::Broken { .. }, new_state) => {
+                error!("Ignoring state update {new_state:?} for broken timeline");
             }
             (TimelineState::Stopping, TimelineState::Active) => {
                 error!("Not activating a Stopping timeline");
@@ -947,12 +946,29 @@ impl Timeline {
         }
     }
 
+    pub fn set_broken(&self, reason: String) {
+        let backtrace_str: String = format!("{}", std::backtrace::Backtrace::force_capture());
+        let broken_state = TimelineState::Broken {
+            reason,
+            backtrace: backtrace_str,
+        };
+        self.set_state(broken_state)
+    }
+
     pub fn current_state(&self) -> TimelineState {
-        *self.state.borrow()
+        self.state.borrow().clone()
+    }
+
+    pub fn is_broken(&self) -> bool {
+        matches!(&*self.state.borrow(), TimelineState::Broken { .. })
     }
 
     pub fn is_active(&self) -> bool {
         self.current_state() == TimelineState::Active
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.current_state() == TimelineState::Stopping
     }
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
@@ -965,7 +981,7 @@ impl Timeline {
     ) -> Result<(), TimelineState> {
         let mut receiver = self.state.subscribe();
         loop {
-            let current_state = *receiver.borrow_and_update();
+            let current_state = receiver.borrow().clone();
             match current_state {
                 TimelineState::Loading => {
                     receiver
@@ -1425,7 +1441,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_lock: tokio::sync::Mutex::new(false),
+                delete_lock: Arc::new(tokio::sync::Mutex::new(false)),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
@@ -2043,11 +2059,11 @@ impl Timeline {
             loop {
                 match timeline_state_updates.changed().await {
                     Ok(()) => {
-                        let new_state = *timeline_state_updates.borrow();
+                        let new_state = timeline_state_updates.borrow().clone();
                         match new_state {
                             // we're running this job for active timelines only
                             TimelineState::Active => continue,
-                            TimelineState::Broken
+                            TimelineState::Broken { .. }
                             | TimelineState::Stopping
                             | TimelineState::Loading => {
                                 break format!("aborted because timeline became inactive (new state: {new_state:?})")
@@ -3727,8 +3743,7 @@ impl Timeline {
 
         let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
-        let state = *self.state.borrow();
-        if state == TimelineState::Stopping {
+        if self.is_stopping() {
             anyhow::bail!("timeline is Stopping");
         }
 

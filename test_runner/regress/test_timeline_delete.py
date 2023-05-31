@@ -18,6 +18,7 @@ from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
+    wait_until_timeline_state,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, wait_until
@@ -130,13 +131,25 @@ def test_delete_timeline_post_rm_failure(
     env = neon_env_builder.init_start()
     assert env.initial_timeline
 
+    env.pageserver.allowed_errors.append(".*Error: failpoint: timeline-delete-after-rm")
+    env.pageserver.allowed_errors.append(".*Ignoring state update Stopping for broken timeline")
+
     ps_http = env.pageserver.http_client()
 
     failpoint_name = "timeline-delete-after-rm"
     ps_http.configure_failpoints((failpoint_name, "return"))
 
-    with pytest.raises(PageserverApiException, match=f"failpoint: {failpoint_name}"):
-        ps_http.timeline_delete(env.initial_tenant, env.initial_timeline)
+    ps_http.timeline_delete(env.initial_tenant, env.initial_timeline)
+
+    timeline_info = wait_until_timeline_state(
+        pageserver_http=ps_http,
+        tenant_id=env.initial_tenant,
+        timeline_id=env.initial_timeline,
+        expected_state="Broken",
+        iterations=2,  # effectively try immediately and retry once in one second
+    )
+
+    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
 
     at_failpoint_log_message = f".*{env.initial_timeline}.*at failpoint {failpoint_name}.*"
     env.pageserver.allowed_errors.append(at_failpoint_log_message)
@@ -148,11 +161,14 @@ def test_delete_timeline_post_rm_failure(
     ps_http.configure_failpoints((failpoint_name, "off"))
 
     # this should succeed
+    # this also checks that delete can be retried even when timeline is in Broken state
     ps_http.timeline_delete(env.initial_tenant, env.initial_timeline, timeout=2)
-    # the second call will try to transition the timeline into Stopping state, but it's already in that state
-    env.pageserver.allowed_errors.append(
-        f".*{env.initial_timeline}.*Ignoring new state, equal to the existing one: Stopping"
-    )
+    with pytest.raises(PageserverApiException) as e:
+        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    assert e.value.status_code == 404
+
+    env.pageserver.allowed_errors.append(f".*NotFound: Timeline.*{env.initial_timeline}.*")
     env.pageserver.allowed_errors.append(
         f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*"
     )
@@ -257,7 +273,6 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     When deleting a timeline, if we succeed in setting the deleted flag remotely
     but fail to delete the local state, restarting the pageserver should resume
     the deletion of the local state.
-    (Deletion of the state in S3 is not implemented yet.)
     """
 
     neon_env_builder.enable_remote_storage(
@@ -292,11 +307,17 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
     )
 
-    with pytest.raises(
-        PageserverApiException,
-        match="failpoint: timeline-delete-before-rm",
-    ):
-        ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
+    ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
+
+    timeline_info = wait_until_timeline_state(
+        pageserver_http=ps_http,
+        tenant_id=env.initial_tenant,
+        timeline_id=leaf_timeline_id,
+        expected_state="Broken",
+        iterations=2,  # effectively try immediately and retry once in one second
+    )
+
+    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
 
     assert leaf_timeline_path.exists(), "the failpoint didn't work"
 
@@ -304,7 +325,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     env.pageserver.start()
 
     # Wait for tenant to finish loading.
-    wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=0.5)
+    wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=1)
 
     assert (
         not leaf_timeline_path.exists()

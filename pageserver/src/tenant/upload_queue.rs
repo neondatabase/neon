@@ -84,9 +84,7 @@ pub(super) enum SetDeletedFlagProgress {
 }
 
 pub(super) struct UploadQueueStopped {
-    pub(super) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
-    pub(super) last_uploaded_consistent_lsn: Lsn,
-    pub(super) latest_metadata: TimelineMetadata,
+    pub(super) upload_queue_for_deletion: UploadQueueInitialized,
     pub(super) deleted_at: SetDeletedFlagProgress,
 }
 
@@ -207,7 +205,7 @@ pub(crate) enum UploadOp {
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
 
-    /// Delete a file.
+    /// Delete a layer file
     Delete(RemoteOpFileKind, LayerFileName),
 
     /// Barrier. When the barrier operation is reached,

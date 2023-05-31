@@ -150,7 +150,7 @@ pub(super) async fn connection_manager_loop_step(
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
-                                TimelineState::Broken | TimelineState::Stopping => {
+                                TimelineState::Broken { .. } | TimelineState::Stopping => {
                                     info!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
                                     return ControlFlow::Break(());
                                 }

@@ -471,7 +471,8 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
         .instrument(info_span!("timeline_delete", tenant = %tenant_id, timeline = %timeline_id))
         .await?;
 
-    json_response(StatusCode::OK, ())
+    // FIXME: needs to be an error for console to retry it. Ideally Accepted should be used and retried until 404.
+    json_response(StatusCode::ACCEPTED, ())
 }
 
 async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
