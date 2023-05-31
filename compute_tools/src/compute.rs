@@ -245,14 +245,22 @@ impl ComputeNode {
     /// Do all the preparations like PGDATA directory creation, configuration,
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip(self, compute_state))]
-    pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
+    pub fn prepare_pgdata(
+        &self,
+        compute_state: &ComputeState,
+        extension_server_port: u16,
+    ) -> Result<()> {
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &pspec.spec)?;
+        config::write_postgres_conf(
+            &pgdata_path.join("postgresql.conf"),
+            &pspec.spec,
+            Some(extension_server_port),
+        )?;
 
         // Syncing safekeepers is only safe with primary nodes: if a primary
         // is already connected it will be kicked out, so a secondary (standby)
@@ -395,7 +403,7 @@ impl ComputeNode {
 
         // Write new config
         let pgdata_path = Path::new(&self.pgdata);
-        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec)?;
+        config::write_postgres_conf(&pgdata_path.join("postgresql.conf"), &spec, None)?;
 
         let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
         self.pg_reload_conf(&mut client)?;
@@ -425,7 +433,7 @@ impl ComputeNode {
     }
 
     #[instrument(skip(self))]
-    pub fn start_compute(&self) -> Result<std::process::Child> {
+    pub fn start_compute(&self, extension_server_port: u16) -> Result<std::process::Child> {
         let compute_state = self.state.lock().unwrap().clone();
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
@@ -436,7 +444,7 @@ impl ComputeNode {
             spec.timeline_id,
         );
 
-        self.prepare_pgdata(&compute_state)?;
+        self.prepare_pgdata(&compute_state, extension_server_port)?;
 
         let start_time = Utc::now();
 

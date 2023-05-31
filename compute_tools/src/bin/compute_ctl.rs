@@ -184,6 +184,8 @@ fn main() -> Result<()> {
     let _http_handle =
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
+    let extension_server_port: u16 = http_port;
+
     if !spec_set {
         // No spec provided, hang waiting for it.
         info!("no compute spec provided, waiting");
@@ -224,7 +226,7 @@ fn main() -> Result<()> {
     // Start Postgres
     let mut delay_exit = false;
     let mut exit_code = None;
-    let pg = match compute.start_compute() {
+    let pg = match compute.start_compute(extension_server_port) {
         Ok(pg) => Some(pg),
         Err(err) => {
             error!("could not start the compute node: {:?}", err);

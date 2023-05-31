@@ -139,6 +139,34 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GenericError"
+  /extension_server:
+    post:
+      tags:
+      - Extension
+      summary: Download extension from S3 to local folder.
+      description: ""
+      operationId: downloadExtension
+      responses:
+        200:
+          description: Extension downloaded
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Error text or 'OK' if download succeeded.
+                example: "OK"
+        400:
+        description: Request is invalid.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenericError"
+        500:
+        description: Extension download request failed.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenericError"
 
 components:
   securitySchemes:

@@ -1,7 +1,8 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
-use std::thread;
+use std::{fs, thread};
 
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
@@ -121,13 +122,87 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // download extension files from S3 on demand
+        (&Method::POST, route) if route.starts_with("/extension_server/") => {
+            info!("serving {:?} POST request", route);
+
+            let filename = route.split("/").last().unwrap();
+
+            info!(
+                "serving /extension_server POST request, filename: {:?}",
+                filename
+            );
+
+            match download_file(&filename).await {
+                Ok(_) => Response::new(Body::from("OK")),
+                Err(e) => {
+                    error!("download_file failed: {}", e);
+                    Response::new(Body::from(e.to_string()))
+                }
+            }
+        }
+
         // Return the `404 Not Found` for any other routes.
-        _ => {
+        method => {
+            info!("404 Not Found for {:?}", method);
+
             let mut not_found = Response::new(Body::from("404 Not Found"));
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             not_found
         }
     }
+}
+
+//debug only
+async fn download_file(filename: &str) -> anyhow::Result<()> {
+    info!("requested file {}", filename);
+
+    let from_prefix: &str = "/tmp"; //debug only
+    let to_prefix = "/home/anastasia/work/neon/pg_install/v15/";
+
+    if filename.ends_with(".so") {
+        info!("requested file is a shared object file {}", filename);
+
+        let from_path = Path::new(from_prefix).join("lib").join(filename);
+        let to_path = Path::new(to_prefix).join("lib").join(filename);
+
+        info!(
+            "copying file {} from {} to {}",
+            filename,
+            from_path.display(),
+            to_path.display()
+        );
+
+        fs::copy(from_path, to_path)?;
+    } else {
+        info!("requested all extension files with prefix {}", filename);
+
+        let from_path = Path::new(from_prefix).join("share/extension/");
+        let to_path = Path::new(to_prefix).join("share/postgresql/extension/");
+
+        info!(
+            "copying files from {} to {}",
+            from_path.display(),
+            to_path.display()
+        );
+
+        for file in fs::read_dir(from_path.clone()).unwrap().flatten() {
+            let fname = file.file_name().into_string().unwrap();
+
+            if fname.starts_with(filename) && fname.ends_with(".sql") {
+                info!(
+                    "copying file {} from {} to {}",
+                    fname,
+                    from_path.display(),
+                    to_path.display()
+                );
+
+                fs::copy(file.path(), to_path.join(fname))?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_configure_request(
