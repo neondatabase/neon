@@ -342,16 +342,24 @@ fn start_pageserver(
     let (init_done_tx, init_done_rx) = utils::completion::channel();
 
     // Scan the local 'tenants/' directory and start loading the tenants
+    let span = tracing::info_span!("initial load");
     let init_started_at = std::time::Instant::now();
-    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
-        conf,
-        broker_client.clone(),
-        remote_storage.clone(),
-        (init_done_tx, init_done_rx.clone()),
-    ))?;
+
+    // initial load started by initializing tenant manager but stopped when initialization is
+    // actually complete
+    BACKGROUND_RUNTIME.block_on(
+        mgr::init_tenant_mgr(
+            conf,
+            broker_client.clone(),
+            remote_storage.clone(),
+            (init_done_tx, init_done_rx.clone()),
+        )
+        .instrument(span.clone()),
+    )?;
 
     BACKGROUND_RUNTIME.spawn({
         let init_done_rx = init_done_rx.clone();
+
         async move {
             init_done_rx.wait().await;
 
@@ -362,6 +370,7 @@ fn start_pageserver(
                 "Initial load completed."
             );
         }
+        .instrument(span)
     });
 
     // shared state between the disk-usage backed eviction background task and the http endpoint

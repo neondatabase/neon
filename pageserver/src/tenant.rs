@@ -955,8 +955,7 @@ impl Tenant {
                Ok(())
             }
             .instrument({
-                let span = tracing::info_span!(parent: None, "load", tenant_id=%tenant_id);
-                span.follows_from(Span::current());
+                let span = tracing::info_span!("load", tenant_id=%tenant_id);
                 span
             }),
         );
