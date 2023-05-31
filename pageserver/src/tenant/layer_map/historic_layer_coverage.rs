@@ -204,6 +204,35 @@ fn test_off_by_one() {
     assert_eq!(version.image_coverage.query(5), None);
 }
 
+/// White-box regression test, checking for incorrect removal of node at key.end
+#[test]
+fn test_regression() {
+    let mut map = HistoricLayerCoverage::<String>::new();
+    map.insert(
+        LayerKey {
+            key: 0..5,
+            lsn: 0..5,
+            is_image: false,
+        },
+        "Layer 1".to_string(),
+    );
+    map.insert(
+        LayerKey {
+            key: 0..5,
+            lsn: 1..2,
+            is_image: false,
+        },
+        "Layer 2".to_string(),
+    );
+
+    // If an insertion operation improperly deletes the endpoint of a previous layer
+    // (which is more likely to happen with layers that collide on key.end), we will
+    // end up with an infinite layer, covering the entire keyspace. Here we assert
+    // that there's no layer at key 100 because we didn't insert any layer there.
+    let version = map.get_version(100).unwrap();
+    assert_eq!(version.delta_coverage.query(100), None);
+}
+
 /// Cover edge cases where layers begin or end on the same key
 #[test]
 fn test_key_collision() {
