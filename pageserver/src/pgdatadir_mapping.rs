@@ -43,6 +43,14 @@ pub enum CalculateLogicalSizeError {
     Other(#[from] anyhow::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RelationError {
+    #[error("Relation Already Exists")]
+    AlreadyExists,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 ///
 /// This impl provides all the functionality to store PostgreSQL relations, SLRUs,
 /// and other special kinds of files, in a versioned key-value store. The
@@ -882,7 +890,7 @@ impl<'a> DatadirModification<'a> {
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            anyhow::bail!("rel {rel} already exists");
+            return Err(RelationError::AlreadyExists);
         }
         self.put(
             rel_dir_key,
