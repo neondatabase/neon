@@ -63,8 +63,13 @@ impl Timeline {
             &format!("layer eviction for {}/{}", self.tenant_id, self.timeline_id),
             false,
             async move {
-                completion::Barrier::maybe_wait(background_tasks_can_start).await;
-                self_clone.eviction_task(task_mgr::shutdown_token()).await;
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); }
+                    _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
+                };
+
+                self_clone.eviction_task(cancel).await;
                 info!("eviction task finishing");
                 Ok(())
             },
