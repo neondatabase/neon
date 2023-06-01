@@ -33,6 +33,7 @@ def test_threshold_based_eviction(
         metric_collection_interval="1s"
         synthetic_size_calculation_interval="2s"
         metric_collection_endpoint="http://{host}:{port}/nonexistent"
+        background_task_maximum_delay='1s'
     """
     metrics_refused_log_line = ".*metrics endpoint refused the sent metrics.*/nonexistent.*"
     env = neon_env_builder.init_start()
