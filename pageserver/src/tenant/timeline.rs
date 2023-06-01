@@ -954,9 +954,10 @@ impl Timeline {
             (TimelineState::Stopping, TimelineState::Active) => {
                 error!("Not activating a Stopping timeline");
             }
-            (current_state, new_state) => {
-                if matches!(current_state, TimelineState::Active) {
-                    // drop the token, if any; it will never be completed otherwise
+            (_, new_state) => {
+                if matches!(new_state, TimelineState::Stopping | TimelineState::Broken) {
+                    // drop the copmletion guard, if any; it might be holding off the completion
+                    // forever needlessly
                     self.initial_logical_size_attempt
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
