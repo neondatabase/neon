@@ -20,7 +20,7 @@ pub struct PersistentLayerDesc {
     pub lsn_range: Range<Lsn>,
     /// Whether this is a delta layer.
     pub is_delta: bool,
-    /// Whether this layer only contains part of the keys in the range. In the current implementation, this should
+    /// Whether this layer only contains page images for part of the keys in the range. In the current implementation, this should
     /// always be equal to `is_delta`. If we land the partial image layer PR someday, image layer could also be
     /// incremental.
     pub is_incremental: bool,
