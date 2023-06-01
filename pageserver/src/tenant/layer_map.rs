@@ -762,7 +762,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{LayerMap, Replacement};
-    use crate::tenant::storage_layer::{Layer, LayerDescriptor, LayerFileName};
+    use crate::tenant::storage_layer::mock::LayerDescriptor;
+    use crate::tenant::storage_layer::{Layer, LayerFileName};
     use std::str::FromStr;
     use std::sync::Arc;
 

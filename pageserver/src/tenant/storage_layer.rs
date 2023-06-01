@@ -460,80 +460,86 @@ pub fn downcast_remote_layer(
     }
 }
 
-/// Holds metadata about a layer without any content. Used mostly for testing.
-///
-/// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
-/// LayerDescriptor.
-#[derive(Clone, Debug)]
-pub struct LayerDescriptor {
-    pub key: Range<Key>,
-    pub lsn: Range<Lsn>,
-    pub is_incremental: bool,
-    pub short_id: String,
-}
+// Hiding this code under a compilation flag allows us to lint it differently than prod code
+#[cfg(any(test, feature = "bench"))]
+pub mod mock {
+    use super::*;
 
-impl Layer for LayerDescriptor {
-    fn get_key_range(&self) -> Range<Key> {
-        self.key.clone()
+    /// Holds metadata about a layer without any content. Used mostly for testing.
+    ///
+    /// To use filenames as fixtures, parse them as [`LayerFileName`] then convert from that to a
+    /// LayerDescriptor.
+    #[derive(Clone, Debug)]
+    pub struct LayerDescriptor {
+        pub key: Range<Key>,
+        pub lsn: Range<Lsn>,
+        pub is_incremental: bool,
+        pub short_id: String,
     }
 
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.lsn.clone()
-    }
+    impl Layer for LayerDescriptor {
+        fn get_key_range(&self) -> Range<Key> {
+            self.key.clone()
+        }
 
-    fn is_incremental(&self) -> bool {
-        self.is_incremental
-    }
+        fn get_lsn_range(&self) -> Range<Lsn> {
+            self.lsn.clone()
+        }
 
-    fn get_value_reconstruct_data(
-        &self,
-        _key: Key,
-        _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-        _ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
-        todo!("This method shouldn't be part of the Layer trait")
-    }
+        fn is_incremental(&self) -> bool {
+            self.is_incremental
+        }
 
-    fn short_id(&self) -> String {
-        self.short_id.clone()
-    }
+        fn get_value_reconstruct_data(
+            &self,
+            _key: Key,
+            _lsn_range: Range<Lsn>,
+            _reconstruct_data: &mut ValueReconstructState,
+            _ctx: &RequestContext,
+        ) -> Result<ValueReconstructResult> {
+            todo!("This method shouldn't be part of the Layer trait")
+        }
 
-    fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
-        todo!()
-    }
-}
+        fn short_id(&self) -> String {
+            self.short_id.clone()
+        }
 
-impl From<DeltaFileName> for LayerDescriptor {
-    fn from(value: DeltaFileName) -> Self {
-        let short_id = value.to_string();
-        LayerDescriptor {
-            key: value.key_range,
-            lsn: value.lsn_range,
-            is_incremental: true,
-            short_id,
+        fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
+            todo!()
         }
     }
-}
 
-impl From<ImageFileName> for LayerDescriptor {
-    fn from(value: ImageFileName) -> Self {
-        let short_id = value.to_string();
-        let lsn = value.lsn_as_range();
-        LayerDescriptor {
-            key: value.key_range,
-            lsn,
-            is_incremental: false,
-            short_id,
+    impl From<DeltaFileName> for LayerDescriptor {
+        fn from(value: DeltaFileName) -> Self {
+            let short_id = value.to_string();
+            LayerDescriptor {
+                key: value.key_range,
+                lsn: value.lsn_range,
+                is_incremental: true,
+                short_id,
+            }
         }
     }
-}
 
-impl From<LayerFileName> for LayerDescriptor {
-    fn from(value: LayerFileName) -> Self {
-        match value {
-            LayerFileName::Delta(d) => Self::from(d),
-            LayerFileName::Image(i) => Self::from(i),
+    impl From<ImageFileName> for LayerDescriptor {
+        fn from(value: ImageFileName) -> Self {
+            let short_id = value.to_string();
+            let lsn = value.lsn_as_range();
+            LayerDescriptor {
+                key: value.key_range,
+                lsn,
+                is_incremental: false,
+                short_id,
+            }
+        }
+    }
+
+    impl From<LayerFileName> for LayerDescriptor {
+        fn from(value: LayerFileName) -> Self {
+            match value {
+                LayerFileName::Delta(d) => Self::from(d),
+                LayerFileName::Image(i) => Self::from(i),
+            }
         }
     }
 }

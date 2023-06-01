@@ -9,6 +9,9 @@ default = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
 testing = ["fail/failpoints"]
+# Just a marker that compiles mock structs that are used in both tests and benchmarks. We
+# hide them behind a feature flag so that we can apply stronger lints to prod-only code.
+bench = []
 
 [dependencies]
 anyhow.workspace = true
