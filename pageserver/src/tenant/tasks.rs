@@ -34,8 +34,12 @@ pub fn start_background_loops(
             let tenant = Arc::clone(tenant);
             let background_jobs_can_start = background_jobs_can_start.cloned();
             async move {
-                completion::Barrier::maybe_wait(background_jobs_can_start).await;
-                compaction_loop(tenant)
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()) },
+                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                };
+                compaction_loop(tenant, cancel)
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
                     .await;
                 Ok(())
@@ -53,8 +57,12 @@ pub fn start_background_loops(
             let tenant = Arc::clone(tenant);
             let background_jobs_can_start = background_jobs_can_start.cloned();
             async move {
-                completion::Barrier::maybe_wait(background_jobs_can_start).await;
-                gc_loop(tenant)
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()) },
+                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                };
+                gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_id))
                     .await;
                 Ok(())
@@ -66,12 +74,11 @@ pub fn start_background_loops(
 ///
 /// Compaction task's main loop
 ///
-async fn compaction_loop(tenant: Arc<Tenant>) {
+async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let wait_duration = Duration::from_secs(2);
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
-        let cancel = task_mgr::shutdown_token();
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         let mut first = true;
         loop {
@@ -136,12 +143,11 @@ async fn compaction_loop(tenant: Arc<Tenant>) {
 ///
 /// GC task's main loop
 ///
-async fn gc_loop(tenant: Arc<Tenant>) {
+async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let wait_duration = Duration::from_secs(2);
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
-        let cancel = task_mgr::shutdown_token();
         // GC might require downloading, to find the cutoff LSN that corresponds to the
         // cutoff specified as time.
         let ctx =
