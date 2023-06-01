@@ -383,8 +383,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     0.001000, // 1000 usec
     0.030,    // 30 ms
     1.000,    // 1000 ms
-    5.000,    // 5000 ms
-    10.000,   // 10000 ms
+    30.000,   // 30000 ms
 ];
 
 const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
