@@ -367,7 +367,7 @@ fn start_pageserver(
     ))?;
 
     BACKGROUND_RUNTIME.spawn({
-        let init_done_rx = init_done_rx.clone();
+        let init_done_rx = init_done_rx;
         let shutdown_pageserver = shutdown_pageserver.clone();
         let wait_and_report = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
