@@ -235,13 +235,17 @@ pub struct TenantConfig {
     // Otherwise we'd have to move the types for eviction policy into this package.
     // We might do that once the eviction feature has stabilizied.
     // For now, this field is not even documented in the openapi_spec.yml.
-    #[clap(long, value_parser = clap::value_parser!(serde_json::Value))]
+    #[clap(long, value_parser = parse_json)]
     pub eviction_policy: Option<serde_json::Value>,
     #[clap(long)]
     pub min_resident_size_override: Option<u64>,
     #[clap(long)]
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
     pub gc_feedback: Option<bool>,
+}
+
+fn parse_json(s: &str) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::from_str(s)
 }
 
 impl TenantConfig {
@@ -926,6 +930,15 @@ mod tests {
             "expect error to contain both 'invalid digit found in string' and the field 'checkpoint_distance', got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_parse_json_field() {
+        let config = vec![(
+            "eviction_policy",
+            "eviction_policy:{\"kind\": \"NoEviction\"}",
+        )];
+        TenantConfig::deserialize_from_settings(config.into_iter().collect()).unwrap();
     }
 
     #[test]
