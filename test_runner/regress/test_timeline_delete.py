@@ -450,7 +450,9 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    notfound_message = f"Timeline {env.initial_tenant}/{child_timeline_id} was not found";
+    notfound_message = f"Timeline {env.initial_tenant}/{child_timeline_id} was not found"
     env.pageserver.allowed_errors.append(".*" + notfound_message)
     with pytest.raises(PageserverApiException, match=notfound_message) as exc:
         ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
+
+    assert exc.value.status_code == 404
