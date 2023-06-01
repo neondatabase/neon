@@ -1932,14 +1932,16 @@ impl Timeline {
             false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
-                // no cancellation here, because nothing really waits for this to complete compared
-                // to spawn_ondemand_logical_size_calculation.
-                let cancel = CancellationToken::new();
+
+                let cancel = task_mgr::shutdown_token();
 
                 // in case we were created during pageserver initialization, wait for
                 // initialization to complete before proceeding. startup time init runs on the same
                 // runtime.
-                completion::Barrier::maybe_wait(self_clone.initial_logical_size_can_start.clone()).await;
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); },
+                    _ = completion::Barrier::maybe_wait(self_clone.initial_logical_size_can_start.clone()) => {}
+                };
 
                 // hold off background tasks from starting until all timelines get to try at least
                 // once initial logical size calculation; though retry will rarely be useful.
@@ -1949,6 +1951,10 @@ impl Timeline {
                 // dropping this at every outcome is probably better than trying to cling on to it,
                 // delay will be terminated by a timeout regardless.
                 let _completion = { self_clone.initial_logical_size_attempt.lock().expect("unexpected initial_logical_size_attempt poisoned").take() };
+
+                // no extra cancellation here, because nothing really waits for this to complete compared
+                // to spawn_ondemand_logical_size_calculation.
+                let cancel = CancellationToken::new();
 
                 let calculated_size = match self_clone
                     .logical_size_calculation_task(lsn, LogicalSizeCalculationCause::Initial, &background_ctx, cancel)
