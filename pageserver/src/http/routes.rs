@@ -1232,36 +1232,38 @@ where
     // with the cancellation token.
     let token = CancellationToken::new();
     let cancel_guard = token.clone().drop_guard();
-    let result = request_span(request,
-        move |r| async {
-            let handle = tokio::spawn(async {
+    let result = request_span(request, move |r| async {
+        let handle = tokio::spawn(
+            async {
                 let token_cloned = token.clone();
                 let result = handler(r, token).await;
                 if token_cloned.is_cancelled() {
                     info!("Cancelled request finished");
                 }
                 result
-            }.in_current_span());
+            }
+            .in_current_span(),
+        );
 
-            match handle.await {
-                Ok(result) => result,
-                Err(e) => {
-                    // The handler task panicked. We have a global panic handler that logs the
-                    // panic with its backtrace, so no need to log that here. Only log a brief
-                    // message to make it clear that we returned the error to the client.
-                    error!("HTTP request handler task panicked: {e:#}");
+        match handle.await {
+            Ok(result) => result,
+            Err(e) => {
+                // The handler task panicked. We have a global panic handler that logs the
+                // panic with its backtrace, so no need to log that here. Only log a brief
+                // message to make it clear that we returned the error to the client.
+                error!("HTTP request handler task panicked: {e:#}");
 
-                    // Don't return an Error here, because then fallback error handler that was
-                    // installed in make_router() will print the error. Instead, construct the
-                    // HTTP error response and return that.
-                    Ok(
-                        ApiError::InternalServerError(anyhow!("HTTP request handler task panicked"))
-                            .into_response(),
-                    )
-                }
+                // Don't return an Error here, because then fallback error handler that was
+                // installed in make_router() will print the error. Instead, construct the
+                // HTTP error response and return that.
+                Ok(
+                    ApiError::InternalServerError(anyhow!("HTTP request handler task panicked"))
+                        .into_response(),
+                )
             }
         }
-    ).await;
+    })
+    .await;
 
     cancel_guard.disarm();
 
