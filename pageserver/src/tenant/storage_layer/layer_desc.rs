@@ -9,7 +9,7 @@ use crate::repository::Key;
 use super::{DeltaFileName, ImageFileName, LayerFileName};
 
 /// A unique identifier of a persistent layer. This is different from `LayerDescriptor`, which is only used in the
-/// benchmarks. This struct contains all necessary information to reconstruct the image / delta layer. It also provides
+/// benchmarks. This struct contains all necessary information to find the image / delta layer. It also provides
 /// a unified way to generate layer information like file name.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PersistentLayerDesc {
@@ -18,7 +18,11 @@ pub struct PersistentLayerDesc {
     pub key_range: Range<Key>,
     /// For image layer, this is `[lsn, lsn+1)`.
     pub lsn_range: Range<Lsn>,
+    /// Whether this is a delta layer.
     pub is_delta: bool,
+    /// Whether this layer only contains part of the keys in the range. In the current implementation, this should
+    /// always be equal to `is_delta`. If we land the partial image layer PR someday, image layer could also be
+    /// incremental.
     pub is_incremental: bool,
 }
 
