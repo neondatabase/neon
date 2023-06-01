@@ -110,6 +110,9 @@ class EvictionEnv:
             overrides=(
                 "--pageserver-config-override=disk_usage_based_eviction="
                 + enc.dump_inline_table(disk_usage_config).replace("\n", " "),
+                # safekeepers are not stopped, but might take a long time to publish new broker messages,
+                # so the initial logical sizes may not complete
+                "--pageserver-config-override=background_task_maximum_delay='0s'"
             ),
         )
 
@@ -133,9 +136,6 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
     log.info(f"setting up eviction_env for test {request.node.name}")
 
     neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS, f"{request.node.name}")
-
-    # in this test env we want the background jobs to start as soon as possible
-    neon_env_builder.pageserver_config_override = "background_task_maximum_delay='0s'"
 
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
