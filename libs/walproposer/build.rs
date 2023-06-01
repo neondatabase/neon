@@ -1,7 +1,5 @@
-use std::{path::PathBuf, env, process::Command};
-
-use anyhow::{anyhow, Context};
-use bindgen::{callbacks::ParseCallbacks, CargoCallbacks};
+use std::{env, path::PathBuf};
+use bindgen::CargoCallbacks;
 
 extern crate bindgen;
 
@@ -16,13 +14,7 @@ fn main() -> anyhow::Result<()> {
         .write_to_file("rust_bindings.h");
 
     // Tell cargo to invalidate the built crate whenever the wrapper changes
-    println!("cargo:rerun-if-changed=bindgen_deps.h,walproposer.c,walproposer.h,test.c,libpostgres.a,../../pgxn/neon/walproposer.c,build.sh");
-    // println!("cargo:rustc-link-lib=walproposer");
-    // println!("cargo:rustc-link-lib=ext");
-    // println!("cargo:rustc-link-lib=pgport_srv");
-    // println!("cargo:rustc-link-lib=postgres");
-    // println!("cargo:rustc-link-lib=pgcommon_srv");
-    // println!("cargo:rustc-link-lib=pgport_srv");
+    println!("cargo:rerun-if-changed=bindgen_deps.h,test.c,../../pgxn/neon/walproposer.c,build.sh");
     println!("cargo:rustc-link-arg=-Wl,--start-group");
     println!("cargo:rustc-link-arg=-lsim");
     println!("cargo:rustc-link-arg=-lpgport_srv");
@@ -37,17 +29,6 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-link-arg=-lm");
     println!("cargo:rustc-link-arg=-lwalproposer");
     println!("cargo:rustc-link-arg=-Wl,--end-group");
-    // println!("cargo:rustc-flags=-C default-linker-libraries=y");
-
-    // echo -lseccomp -lssl -lcrypto -lz -lpthread -lrt -ldl -lm
-
-    // println!("cargo:rustc-link-lib=ssl");
-    // println!("cargo:rustc-link-lib=crypto");
-    // println!("cargo:rustc-link-lib=walproposer2");
-    // println!("cargo:rustc-link-lib=postgres");
-    // println!("cargo:rustc-link-lib=pq");
-    // println!("cargo:rustc-link-lib=ssl");
-    // println!("cargo:rustc-link-lib=crypto");
     println!("cargo:rustc-link-search=/home/admin/simulator/libs/walproposer");
     // disable fPIE
     println!("cargo:rustc-link-arg=-no-pie");
@@ -61,10 +42,6 @@ fn main() -> anyhow::Result<()> {
         // Panic if the command was not successful.
         panic!("could not compile object file");
     }
-
-    // println!("cargo:rustc-link-lib=dylib=neon");
-    // println!("cargo:rustc-link-search=/Users/arthur/zen/zenith/pg_install/build/neon-v15");
-    // println!("cargo:rustc-link-arg=-Wl,-rpath,/Users/arthur/zen/zenith/pg_install/build/neon-v15");
 
     // // Finding the location of C headers for the Postgres server:
     // // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/pg_install`
@@ -113,8 +90,6 @@ fn main() -> anyhow::Result<()> {
 
     // let inc_pgxn_path = "/Users/arthur/zen/zenith/pgxn/neon";
 
-    // TODO: build a libwalproposer.a
-
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
@@ -128,7 +103,6 @@ fn main() -> anyhow::Result<()> {
         .allowlist_function("TestFunc")
         .allowlist_function("RunClientC")
         .allowlist_function("WalProposerRust")
-        // .allowlist_function("WalProposerRust")
         // .clang_arg(format!("-I{inc_server_path}"))
         // .clang_arg(format!("-I{inc_pgxn_path}"))
         // Finish the builder and generate the bindings.

@@ -30,23 +30,28 @@ void RunClientC(uint32_t serverId) {
     int delivered = 0;
     int tcp = sim_open_tcp(serverId);
     while (delivered < data_len) {
-        ReplCell cell = {
-            .value = delivered+1,
-            .client_id = clientId,
-            .seqno = delivered,
-        };
-        sim_tcp_send(tcp, cell);
+        sim_msg_set_repl_cell(delivered+1, clientId, delivered);
+        sim_tcp_send(tcp);
 
         Event event = sim_epoll_rcv();
-        if (event.tag == 2) {
-            // closed
+        switch (event.tag)
+        {
+        case Closed:
             elog(LOG, "connection closed");
             tcp = sim_open_tcp(serverId);
-        } else if (event.tag == 3) {
-            // got message
-            if (event.value == delivered + 1) {
+            break;
+
+        case Message:
+            Assert(event.any_message == Just32);
+            uint32_t val;
+            sim_msg_get_just_u32(&val);
+            if (val == delivered + 1) {
                 delivered += 1;
             }
+            break;
+
+        default:
+            Assert(false);
         }
     }
 }

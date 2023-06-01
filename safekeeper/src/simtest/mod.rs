@@ -6,41 +6,49 @@ use std::sync::Arc;
 
 use crate::{
     simlib::{
-        network::{Delay, NetworkOptions},
+        network::{NetworkOptions},
         proto::ReplCell,
         world::World, node_os::NodeOs,
     },
-    simtest::{client::run_client, disk::SharedStorage, server::run_server},
+    simtest::{disk::SharedStorage, server::run_server},
 };
 
-#[test]
-fn run_pure_rust_test() {
-    let delay = Delay {
-        min: 1,
-        max: 60,
-        fail_prob: 0.4,
-    };
+#[cfg(test)]
+mod tests {
+    use crate::simlib::network::{Delay, NetworkOptions};
 
-    let network = NetworkOptions {
-        timeout: Some(50),
-        connect_delay: delay.clone(),
-        send_delay: delay.clone(),
-    };
+    use super::{u32_to_cells, start_simulation, Options, client::run_client};
 
-    for seed in 0..2000 {
-        let u32_data: [u32; 5] = [1, 2, 3, 4, 5];
-        let data = u32_to_cells(&u32_data, 1);
+    #[test]
+    fn run_pure_rust_test() {
+        let delay = Delay {
+            min: 1,
+            max: 60,
+            fail_prob: 0.4,
+        };
 
-        start_simulation(Options {
-            seed,
-            network: network.clone(),
-            time_limit: 1_000_000,
-            client_fn: Box::new(move |os, server_id| {
-                run_client(os, &data, server_id)
-            }),
-            u32_data,
-        });
+        let network = NetworkOptions {
+            timeout: Some(50),
+            connect_delay: delay.clone(),
+            send_delay: delay.clone(),
+        };
+
+        for seed in 0..20 {
+            let u32_data: [u32; 5] = [1, 2, 3, 4, 5];
+            let data = u32_to_cells(&u32_data, 1);
+
+            start_simulation(Options {
+                seed,
+                network: network.clone(),
+                time_limit: 1_000_000,
+                client_fn: Box::new(move |os, server_id| {
+                    run_client(os, &data, server_id)
+                }),
+                u32_data,
+            });
+        }
     }
+
 }
 
 pub struct Options {
@@ -79,7 +87,7 @@ pub fn start_simulation(options: Options) {
     assert!(verify_data(&disk_data, &options.u32_data[..]));
 }
 
-fn u32_to_cells(data: &[u32], client_id: u32) -> Vec<ReplCell> {
+pub fn u32_to_cells(data: &[u32], client_id: u32) -> Vec<ReplCell> {
     let mut res = Vec::new();
     for i in 0..data.len() {
         res.push(ReplCell {

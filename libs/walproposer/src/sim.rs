@@ -1,6 +1,8 @@
 use std::{cell::RefCell, collections::HashMap};
 
-use safekeeper::simlib::{node_os::NodeOs, network::TCP, proto::AnyMessage, world::NodeEvent, self};
+use safekeeper::simlib::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
+
+use crate::sim_proto::{AnyMessageTag, Event, EventTag, MESSAGE_BUF};
 
 thread_local! {
     static CURRENT_NODE_OS: RefCell<Option<NodeOs>> = RefCell::new(None);
@@ -9,9 +11,7 @@ thread_local! {
 
 /// Get the current node os.
 fn os() -> NodeOs {
-    CURRENT_NODE_OS.with(|cell| {
-        cell.borrow().clone().expect("no node os set")
-    })
+    CURRENT_NODE_OS.with(|cell| cell.borrow().clone().expect("no node os set"))
 }
 
 fn tcp_save(tcp: TCP) -> i64 {
@@ -63,13 +63,9 @@ pub extern "C" fn sim_open_tcp(dst: u32) -> i64 {
 }
 
 #[no_mangle]
-// TODO: custom types!!
-pub extern "C" fn sim_tcp_send(tcp: i64, value: ReplCell) {
-    tcp_load(tcp).send(AnyMessage::ReplCell(simlib::proto::ReplCell {
-        value: value.value,
-        client_id: value.client_id,
-        seqno: value.seqno,
-    }));
+/// Send MESSAGE_BUF content to the given tcp.
+pub extern "C" fn sim_tcp_send(tcp: i64) {
+    tcp_load(tcp).send(MESSAGE_BUF.with(|cell| cell.borrow().clone()));
 }
 
 #[no_mangle]
@@ -77,38 +73,31 @@ pub extern "C" fn sim_epoll_rcv() -> Event {
     let event = os().epoll().recv();
     match event {
         NodeEvent::Accept(tcp) => Event {
+            tag: EventTag::Accept,
             tcp: tcp_save(tcp),
-            value: 0,
-            tag: 1,
+            any_message: AnyMessageTag::None,
         },
         NodeEvent::Closed(tcp) => Event {
+            tag: EventTag::Closed,
             tcp: tcp_save(tcp),
-            value: 0,
-            tag: 2,
+            any_message: AnyMessageTag::None,
         },
-        NodeEvent::Message((message, tcp)) => Event {
-            tcp: tcp_save(tcp),
-            value: match message {
-                AnyMessage::Just32(value) => value.into(),
-                AnyMessage::ReplCell(cell) => cell.value,
-                _ => 0,
-            },
-            tag: 3,
-        },
+        NodeEvent::Message((message, tcp)) => {
+            // store message in thread local storage, C code should use
+            // sim_msg_* functions to access it.
+            MESSAGE_BUF.with(|cell| {
+                *cell.borrow_mut() = message.clone();
+            });
+            Event {
+                tag: EventTag::Message,
+                tcp: tcp_save(tcp),
+                any_message: match message {
+                    AnyMessage::None => AnyMessageTag::None,
+                    AnyMessage::InternalConnect => AnyMessageTag::InternalConnect,
+                    AnyMessage::Just32(_) => AnyMessageTag::Just32,
+                    AnyMessage::ReplCell(_) => AnyMessageTag::ReplCell,
+                },
+            }
+        }
     }
-}
-
-#[repr(C)]
-pub struct Event {
-    pub tcp: i64,
-    // TODO: !!!
-    pub value: u32,
-    pub tag: u32,
-}
-
-#[repr(C)]
-pub struct ReplCell {
-    pub value: u32,
-    pub client_id: u32,
-    pub seqno: u32,
 }

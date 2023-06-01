@@ -13,6 +13,7 @@ pub extern "C" fn rust_function(a: u32) {
 }
 
 pub mod sim;
+pub mod sim_proto;
 
 #[cfg(test)]
 mod test;

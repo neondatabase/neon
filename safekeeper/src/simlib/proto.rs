@@ -1,8 +1,9 @@
 /// All possible flavours of messages.
 /// Grouped by the receiver node.
 #[derive(Clone, Debug)]
-#[repr(C)]
 pub enum AnyMessage {
+    /// Not used, empty placeholder.
+    None,
     /// Used internally for notifying node about new incoming connection.
     InternalConnect,
     Just32(u32),
@@ -10,7 +11,6 @@ pub enum AnyMessage {
 }
 
 #[derive(Clone, Debug)]
-#[repr(C)]
 pub struct ReplCell {
     pub value: u32,
     pub client_id: u32,

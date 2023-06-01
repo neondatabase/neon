@@ -1,6 +1,7 @@
-use std::sync::Arc;
-
-use safekeeper::{simlib::{network::{NetworkOptions, Delay}, world::World}, simtest::{Options, start_simulation}};
+use safekeeper::{
+    simlib::network::{Delay, NetworkOptions},
+    simtest::{start_simulation, Options},
+};
 
 use crate::{bindings::RunClientC, sim::c_attach_node_os};
 
@@ -27,7 +28,9 @@ fn run_rust_c_test() {
         time_limit: 1_000_000,
         client_fn: Box::new(move |os, server_id| {
             c_attach_node_os(os);
-            unsafe { RunClientC(server_id); }
+            unsafe {
+                RunClientC(server_id);
+            }
         }),
         u32_data,
     });
