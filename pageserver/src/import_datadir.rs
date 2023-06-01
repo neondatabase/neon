@@ -150,7 +150,7 @@ async fn import_rel(
     //
     // FIXME: Keep track of which relations we've already created
     // https://github.com/neondatabase/neon/issues/3309
-    if let Err(e) = modification
+    if let Err(err) = modification
         .put_rel_creation(rel, nblocks as u32, ctx)
         .await
     {
@@ -159,7 +159,7 @@ async fn import_rel(
                 debug!("relation {} already exists. we must be extending it", rel);
             }
             _ => {
-                return Err(e);
+                return Err(err);
             }
         }
     }
