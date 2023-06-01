@@ -291,8 +291,8 @@ impl ComputeNode {
         update_pg_hba(pgdata_path)?;
 
         match spec.mode {
-            ComputeMode::Primary | ComputeMode::Static(..) => {}
-            ComputeMode::Replica => {
+            ComputeMode::Primary => {}
+            ComputeMode::Replica | ComputeMode::Static(..) => {
                 add_standby_signal(pgdata_path)?;
             }
         }
