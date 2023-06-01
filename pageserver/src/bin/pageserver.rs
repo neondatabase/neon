@@ -349,7 +349,8 @@ fn start_pageserver(
     let (background_jobs_can_start, background_jobs_barrier) = utils::completion::channel();
 
     let order = pageserver::InitializationOrder {
-        initial_tenant_load: init_done_tx,
+        initial_tenant_load: Some(init_done_tx),
+        initial_logical_size_can_start: init_done_rx.clone(),
         initial_logical_size_attempt: init_logical_size_done_tx,
         background_jobs_can_start: background_jobs_barrier,
     };
@@ -383,6 +384,9 @@ fn start_pageserver(
                 elapsed_millis = elapsed.as_millis(),
                 "Initial load completed."
             );
+
+            // no need to do anything here for initial_logical_size_can_start, because it was
+            // waiting on the same barrier as above.
 
             let mut init_sizes_done = std::pin::pin!(init_logical_size_done_rx.wait());
 

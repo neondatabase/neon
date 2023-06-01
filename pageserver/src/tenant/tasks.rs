@@ -18,7 +18,10 @@ use utils::completion;
 ///
 /// `init_done` is an optional channel used during initial load to delay background task
 /// start. It is not used later.
-pub fn start_background_loops(tenant: &Arc<Tenant>, init_done: Option<&completion::Barrier>) {
+pub fn start_background_loops(
+    tenant: &Arc<Tenant>,
+    background_jobs_can_start: Option<&completion::Barrier>,
+) {
     let tenant_id = tenant.tenant_id;
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
@@ -29,9 +32,9 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, init_done: Option<&completio
         false,
         {
             let tenant = Arc::clone(tenant);
-            let init_done = init_done.cloned();
+            let background_jobs_can_start = background_jobs_can_start.cloned();
             async move {
-                completion::Barrier::maybe_wait(init_done).await;
+                completion::Barrier::maybe_wait(background_jobs_can_start).await;
                 compaction_loop(tenant)
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
                     .await;
@@ -48,9 +51,9 @@ pub fn start_background_loops(tenant: &Arc<Tenant>, init_done: Option<&completio
         false,
         {
             let tenant = Arc::clone(tenant);
-            let init_done = init_done.cloned();
+            let background_jobs_can_start = background_jobs_can_start.cloned();
             async move {
-                completion::Barrier::maybe_wait(init_done).await;
+                completion::Barrier::maybe_wait(background_jobs_can_start).await;
                 gc_loop(tenant)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_id))
                     .await;

@@ -244,7 +244,7 @@ pub struct Timeline {
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
     /// Barrier to wait before doing initial logical size calculation. Used only during startup.
-    background_jobs_can_start: Option<completion::Barrier>,
+    initial_logical_size_can_start: Option<completion::Barrier>,
 
     /// Completion shared between all timelines created during startup; used to delay heavier
     /// background tasks until some logical sizes have been calculated.
@@ -932,12 +932,12 @@ impl Timeline {
     pub fn activate(
         self: &Arc<Self>,
         broker_client: BrokerClientChannel,
-        init_done: Option<&completion::Barrier>,
+        background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
-        self.launch_eviction_task(init_done);
+        self.launch_eviction_task(background_jobs_can_start);
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -1345,7 +1345,7 @@ impl Timeline {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         remote_client: Option<RemoteTimelineClient>,
         pg_version: u32,
-        background_jobs_can_start: Option<completion::Barrier>,
+        initial_logical_size_can_start: Option<completion::Barrier>,
         initial_logical_size_attempt: Option<completion::Completion>,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -1442,7 +1442,7 @@ impl Timeline {
                 ),
                 delete_lock: tokio::sync::Mutex::new(false),
 
-                background_jobs_can_start,
+                initial_logical_size_can_start,
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
@@ -1939,7 +1939,7 @@ impl Timeline {
                 // in case we were created during pageserver initialization, wait for
                 // initialization to complete before proceeding. startup time init runs on the same
                 // runtime.
-                completion::Barrier::maybe_wait(self_clone.background_jobs_can_start.clone()).await;
+                completion::Barrier::maybe_wait(self_clone.initial_logical_size_can_start.clone()).await;
 
                 // hold off background tasks from starting until all timelines get to try at least
                 // once initial logical size calculation; though retry will rarely be useful.
