@@ -954,7 +954,14 @@ impl Timeline {
             (TimelineState::Stopping, TimelineState::Active) => {
                 error!("Not activating a Stopping timeline");
             }
-            (_, new_state) => {
+            (current_state, new_state) => {
+                if matches!(current_state, TimelineState::Active) {
+                    // drop the token, if any; it will never be completed otherwise
+                    self.initial_logical_size_attempt
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take();
+                }
                 self.state.send_replace(new_state);
             }
         }
