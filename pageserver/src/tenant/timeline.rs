@@ -525,7 +525,12 @@ impl Timeline {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
+                    Ordering::Equal => {
+                        self.metrics
+                            .materialized_page_cache_hit_upon_request_counter
+                            .inc();
+                        return Ok(cached_img); // exact LSN match, return the image
+                    }
                     Ordering::Greater => {
                         unreachable!("the returned lsn should never be after the requested lsn")
                     }
@@ -540,8 +545,10 @@ impl Timeline {
             img: cached_page_img,
         };
 
+        let timer = self.metrics.get_reconstruct_data_time_histo.start_timer();
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
+        timer.stop_and_record();
 
         self.metrics
             .reconstruct_time_histo
@@ -2261,6 +2268,9 @@ impl Timeline {
         let mut timeline_owned;
         let mut timeline = self;
 
+        let mut read_count =
+            scopeguard::guard(0, |cnt| self.metrics.read_num_fs_layers.observe(cnt as f64));
+
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
         let mut traversal_path = Vec::<TraversalPathItem>::new();
@@ -2395,6 +2405,7 @@ impl Timeline {
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
+                            // metrics: open_layer does not count as fs access, so we are not updating `read_count`
                             traversal_path.push((
                                 result,
                                 cont_lsn,
@@ -2421,6 +2432,7 @@ impl Timeline {
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
+                            // metrics: open_layer does not count as fs access, so we are not updating `read_count`
                             traversal_path.push((
                                 result,
                                 cont_lsn,
@@ -2455,6 +2467,7 @@ impl Timeline {
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
+                            *read_count += 1;
                             traversal_path.push((
                                 result,
                                 cont_lsn,
