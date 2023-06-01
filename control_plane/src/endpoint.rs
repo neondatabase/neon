@@ -334,21 +334,6 @@ impl Endpoint {
             }
         }
 
-        if !self.env.safekeepers.is_empty() {
-            // Configure Postgres to connect to the safekeepers
-            conf.append("synchronous_standby_names", "walproposer");
-        } else {
-            // We only use setup without safekeepers for tests,
-            // and don't care about data durability on pageserver,
-            // so set more relaxed synchronous_commit.
-            conf.append("synchronous_commit", "remote_write");
-
-            // Configure the node to stream WAL directly to the pageserver
-            // This isn't really a supported configuration, but can be useful for
-            // testing.
-            conf.append("synchronous_standby_names", "pageserver");
-        }
-
         Ok(conf)
     }
 
@@ -451,14 +436,16 @@ impl Endpoint {
             format!("postgresql://no_user@{host}:{port}")
         };
         let mut safekeeper_connstrings = Vec::new();
-        for sk_id in safekeepers {
-            let sk = self
-                .env
-                .safekeepers
-                .iter()
-                .find(|node| node.id == sk_id)
-                .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
-            safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.pg_port));
+        if self.mode == ComputeMode::Primary && safekeepers.is_empty() {
+            for sk_id in safekeepers {
+                let sk = self
+                    .env
+                    .safekeepers
+                    .iter()
+                    .find(|node| node.id == sk_id)
+                    .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
+                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.pg_port));
+            }
         }
 
         // Create spec file
