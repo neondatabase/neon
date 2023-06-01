@@ -12,8 +12,9 @@ use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::completion;
 
-pub fn start_background_loops(tenant: &Arc<Tenant>) {
+pub fn start_background_loops(tenant: &Arc<Tenant>, init_done: Option<&completion::Barrier>) {
     let tenant_id = tenant.tenant_id;
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
@@ -24,7 +25,9 @@ pub fn start_background_loops(tenant: &Arc<Tenant>) {
         false,
         {
             let tenant = Arc::clone(tenant);
+            let init_done = init_done.cloned();
             async move {
+                completion::Barrier::maybe_wait(init_done).await;
                 compaction_loop(tenant)
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
                     .await;
@@ -41,7 +44,9 @@ pub fn start_background_loops(tenant: &Arc<Tenant>) {
         false,
         {
             let tenant = Arc::clone(tenant);
+            let init_done = init_done.cloned();
             async move {
+                completion::Barrier::maybe_wait(init_done).await;
                 gc_loop(tenant)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_id))
                     .await;

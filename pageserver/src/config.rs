@@ -108,7 +108,7 @@ pub mod defaults {
 
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
-
+#gc_feedback = false
 # [remote_storage]
 
 "###
@@ -826,6 +826,14 @@ impl PageServerConf {
                 "evictions_low_residence_duration_metric_threshold",
                 item,
             )?);
+        }
+
+        if let Some(gc_feedback) = item.get("gc_feedback") {
+            t_conf.gc_feedback = Some(
+                gc_feedback
+                    .as_bool()
+                    .with_context(|| "configure option gc_feedback is not a bool".to_string())?,
+            );
         }
 
         Ok(t_conf)

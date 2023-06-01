@@ -11,7 +11,7 @@ use storage_broker::BrokerClientChannel;
 use tenant_size_model::{SizeResult, StorageModel};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-use utils::http::endpoint::RequestSpan;
+use utils::http::endpoint::request_span;
 use utils::http::json::json_request_or_empty_body;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
@@ -859,7 +859,7 @@ async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiErro
         .await
         .map_err(|_| ApiError::Conflict(String::from("no active tenant found")))?;
 
-    tenant.set_broken("broken from test".to_owned());
+    tenant.set_broken("broken from test".to_owned()).await;
 
     json_response(StatusCode::OK, ())
 }
@@ -1179,7 +1179,7 @@ pub fn make_router(
             #[cfg(not(feature = "testing"))]
             let handler = cfg_disabled;
 
-            move |r| RequestSpan(handler).handle(r)
+            move |r| request_span(r, handler)
         }};
     }
 
@@ -1194,54 +1194,50 @@ pub fn make_router(
             )
             .context("Failed to initialize router state")?,
         ))
-        .get("/v1/status", |r| RequestSpan(status_handler).handle(r))
+        .get("/v1/status", |r| request_span(r, status_handler))
         .put(
             "/v1/failpoints",
             testing_api!("manage failpoints", failpoints_handler),
         )
-        .get("/v1/tenant", |r| RequestSpan(tenant_list_handler).handle(r))
-        .post("/v1/tenant", |r| {
-            RequestSpan(tenant_create_handler).handle(r)
-        })
-        .get("/v1/tenant/:tenant_id", |r| {
-            RequestSpan(tenant_status).handle(r)
-        })
+        .get("/v1/tenant", |r| request_span(r, tenant_list_handler))
+        .post("/v1/tenant", |r| request_span(r, tenant_create_handler))
+        .get("/v1/tenant/:tenant_id", |r| request_span(r, tenant_status))
         .get("/v1/tenant/:tenant_id/synthetic_size", |r| {
-            RequestSpan(tenant_size_handler).handle(r)
+            request_span(r, tenant_size_handler)
         })
         .put("/v1/tenant/config", |r| {
-            RequestSpan(update_tenant_config_handler).handle(r)
+            request_span(r, update_tenant_config_handler)
         })
         .get("/v1/tenant/:tenant_id/config", |r| {
-            RequestSpan(get_tenant_config_handler).handle(r)
+            request_span(r, get_tenant_config_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline", |r| {
-            RequestSpan(timeline_list_handler).handle(r)
+            request_span(r, timeline_list_handler)
         })
         .post("/v1/tenant/:tenant_id/timeline", |r| {
-            RequestSpan(timeline_create_handler).handle(r)
+            request_span(r, timeline_create_handler)
         })
         .post("/v1/tenant/:tenant_id/attach", |r| {
-            RequestSpan(tenant_attach_handler).handle(r)
+            request_span(r, tenant_attach_handler)
         })
         .post("/v1/tenant/:tenant_id/detach", |r| {
-            RequestSpan(tenant_detach_handler).handle(r)
+            request_span(r, tenant_detach_handler)
         })
         .post("/v1/tenant/:tenant_id/load", |r| {
-            RequestSpan(tenant_load_handler).handle(r)
+            request_span(r, tenant_load_handler)
         })
         .post("/v1/tenant/:tenant_id/ignore", |r| {
-            RequestSpan(tenant_ignore_handler).handle(r)
+            request_span(r, tenant_ignore_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
-            RequestSpan(timeline_detail_handler).handle(r)
+            request_span(r, timeline_detail_handler)
         })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/get_lsn_by_timestamp",
-            |r| RequestSpan(get_lsn_by_timestamp_handler).handle(r),
+            |r| request_span(r, get_lsn_by_timestamp_handler),
         )
         .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
-            RequestSpan(timeline_gc_handler).handle(r)
+            request_span(r, timeline_gc_handler)
         })
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/compact",
@@ -1253,34 +1249,34 @@ pub fn make_router(
         )
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
-            |r| RequestSpan(timeline_download_remote_layers_handler_post).handle(r),
+            |r| request_span(r, timeline_download_remote_layers_handler_post),
         )
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
-            |r| RequestSpan(timeline_download_remote_layers_handler_get).handle(r),
+            |r| request_span(r, timeline_download_remote_layers_handler_get),
         )
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
-            RequestSpan(timeline_delete_handler).handle(r)
+            request_span(r, timeline_delete_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id/layer", |r| {
-            RequestSpan(layer_map_info_handler).handle(r)
+            request_span(r, layer_map_info_handler)
         })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
-            |r| RequestSpan(layer_download_handler).handle(r),
+            |r| request_span(r, layer_download_handler),
         )
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
-            |r| RequestSpan(evict_timeline_layer_handler).handle(r),
+            |r| request_span(r, evict_timeline_layer_handler),
         )
         .put("/v1/disk_usage_eviction/run", |r| {
-            RequestSpan(disk_usage_eviction_run).handle(r)
+            request_span(r, disk_usage_eviction_run)
         })
         .put(
             "/v1/tenant/:tenant_id/break",
             testing_api!("set tenant state to broken", handle_tenant_break),
         )
-        .get("/v1/panic", |r| RequestSpan(always_panic_handler).handle(r))
+        .get("/v1/panic", |r| request_span(r, always_panic_handler))
         .post(
             "/v1/tracing/event",
             testing_api!("emit a tracing event", post_tracing_event_handler),

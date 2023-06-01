@@ -10,6 +10,7 @@ use tokio::fs;
 use anyhow::Context;
 use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
@@ -19,9 +20,12 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
+use crate::tenant::{
+    create_tenant_files, CreateTenantFilesMode, SetStoppingError, Tenant, TenantState,
+};
 use crate::IGNORED_TENANT_FILE_NAME;
 
+use utils::completion;
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
@@ -63,6 +67,7 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    init_done: (completion::Completion, completion::Barrier),
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
@@ -119,6 +124,7 @@ pub async fn init_tenant_mgr(
                         &tenant_dir_path,
                         broker_client.clone(),
                         remote_storage.clone(),
+                        Some(init_done.clone()),
                         &ctx,
                     ) {
                         Ok(tenant) => {
@@ -154,6 +160,7 @@ pub fn schedule_local_tenant_processing(
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    init_done: Option<(completion::Completion, completion::Barrier)>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -207,7 +214,14 @@ pub fn schedule_local_tenant_processing(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, broker_client, remote_storage, ctx)
+        Tenant::spawn_load(
+            conf,
+            tenant_id,
+            broker_client,
+            remote_storage,
+            init_done,
+            ctx,
+        )
     };
     Ok(tenant)
 }
@@ -222,6 +236,7 @@ pub fn schedule_local_tenant_processing(
 /// That could be easily misinterpreted by control plane, the consumer of the
 /// management API. For example, it could attach the tenant on a different pageserver.
 /// We would then be in split-brain once this pageserver restarts.
+#[instrument]
 pub async fn shutdown_all_tenants() {
     // Prevent new tenants from being created.
     let tenants_to_shut_down = {
@@ -244,13 +259,63 @@ pub async fn shutdown_all_tenants() {
         }
     };
 
+    // Set tenant (and its timlines) to Stoppping state.
+    //
+    // Since we can only transition into Stopping state after activation is complete,
+    // run it in a JoinSet so all tenants have a chance to stop before we get SIGKILLed.
+    //
+    // Transitioning tenants to Stopping state has a couple of non-obvious side effects:
+    // 1. Lock out any new requests to the tenants.
+    // 2. Signal cancellation to WAL receivers (we wait on it below).
+    // 3. Signal cancellation for other tenant background loops.
+    // 4. ???
+    //
+    // The waiting for the cancellation is not done uniformly.
+    // We certainly wait for WAL receivers to shut down.
+    // That is necessary so that no new data comes in before the freeze_and_flush.
+    // But the tenant background loops are joined-on in our caller.
+    // It's mesed up.
+    let mut join_set = JoinSet::new();
     let mut tenants_to_freeze_and_flush = Vec::with_capacity(tenants_to_shut_down.len());
-    for (_, tenant) in tenants_to_shut_down {
-        if tenant.is_active() {
-            // updates tenant state, forbidding new GC and compaction iterations from starting
-            tenant.set_stopping();
-            tenants_to_freeze_and_flush.push(tenant);
+    for (tenant_id, tenant) in tenants_to_shut_down {
+        join_set.spawn(
+            async move {
+                match tenant.set_stopping().await {
+                    Ok(()) => debug!("tenant successfully stopped"),
+                    Err(SetStoppingError::Broken) => {
+                        info!("tenant is broken, so stopping failed, freeze_and_flush is likely going to make noise as well");
+                    },
+                    Err(SetStoppingError::AlreadyStopping) => {
+                        // our task_mgr::shutdown_tasks are going to coalesce on that just fine
+                    }
+                }
+
+                tenant
+            }
+            .instrument(info_span!("set_stopping", %tenant_id)),
+        );
+    }
+
+    let mut panicked = 0;
+
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Err(join_error) if join_error.is_cancelled() => {
+                unreachable!("we are not cancelling any of the futures");
+            }
+            Err(join_error) if join_error.is_panic() => {
+                // cannot really do anything, as this panic is likely a bug
+                panicked += 1;
+            }
+            Err(join_error) => {
+                warn!("unknown kind of JoinError: {join_error}");
+            }
+            Ok(tenant) => tenants_to_freeze_and_flush.push(tenant),
         }
+    }
+
+    if panicked > 0 {
+        warn!(panicked, "observed panicks while stopping tenants");
     }
 
     // Shut down all existing walreceiver connections and stop accepting the new ones.
@@ -264,12 +329,30 @@ pub async fn shutdown_all_tenants() {
     // should be no more activity in any of the repositories.
     //
     // On error, log it but continue with the shutdown for other tenants.
+
+    let mut join_set = tokio::task::JoinSet::new();
+
     for tenant in tenants_to_freeze_and_flush {
         let tenant_id = tenant.tenant_id();
-        debug!("shutdown tenant {tenant_id}");
 
-        if let Err(err) = tenant.freeze_and_flush().await {
-            error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
+        join_set.spawn(
+            async move {
+                if let Err(err) = tenant.freeze_and_flush().await {
+                    warn!("Could not checkpoint tenant during shutdown: {err:?}");
+                }
+            }
+            .instrument(info_span!("freeze_and_flush", %tenant_id)),
+        );
+    }
+
+    while let Some(next) = join_set.join_next().await {
+        match next {
+            Ok(()) => {}
+            Err(join_error) if join_error.is_cancelled() => {
+                unreachable!("no cancelling")
+            }
+            Err(join_error) if join_error.is_panic() => { /* reported already */ }
+            Err(join_error) => warn!("unknown kind of JoinError: {join_error}"),
         }
     }
 }
@@ -291,7 +374,7 @@ pub async fn create_tenant(
         //       See https://github.com/neondatabase/neon/issues/4233
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, None, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -437,7 +520,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, None, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -510,7 +593,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), None, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -589,13 +672,23 @@ where
     {
         let tenants_accessor = TENANTS.write().await;
         match tenants_accessor.get(&tenant_id) {
-            Some(tenant) => match tenant.current_state() {
-                TenantState::Attaching
-                | TenantState::Loading
-                | TenantState::Broken { .. }
-                | TenantState::Active => tenant.set_stopping(),
-                TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
-            },
+            Some(tenant) => {
+                let tenant = Arc::clone(tenant);
+                // don't hold TENANTS lock while set_stopping waits for activation to finish
+                drop(tenants_accessor);
+                match tenant.set_stopping().await {
+                    Ok(()) => {
+                        // we won, continue stopping procedure
+                    }
+                    Err(SetStoppingError::Broken) => {
+                        // continue the procedure, let's hope the closure can deal with broken tenants
+                    }
+                    Err(SetStoppingError::AlreadyStopping) => {
+                        // the tenant is already stopping or broken, don't do anything
+                        return Err(TenantStateError::IsStopping(tenant_id));
+                    }
+                }
+            }
             None => return Err(TenantStateError::NotFound(tenant_id)),
         }
     }
@@ -620,7 +713,7 @@ where
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
                 Some(tenant) => {
-                    tenant.set_broken(e.to_string());
+                    tenant.set_broken(e.to_string()).await;
                 }
                 None => {
                     warn!("Tenant {tenant_id} got removed from memory");

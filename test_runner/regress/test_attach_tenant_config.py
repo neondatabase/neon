@@ -158,6 +158,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "threshold": "23h",
         },
         "evictions_low_residence_duration_metric_threshold": "2days",
+        "gc_feedback": True,
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
         "image_creation_threshold": 7,

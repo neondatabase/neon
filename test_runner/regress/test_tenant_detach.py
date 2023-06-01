@@ -647,7 +647,9 @@ def test_ignored_tenant_stays_broken_without_metadata(
             metadata_removed = True
     assert metadata_removed, f"Failed to find metadata file in {tenant_timeline_dir}"
 
-    env.pageserver.allowed_errors.append(".*could not load tenant .*?: failed to load metadata.*")
+    env.pageserver.allowed_errors.append(
+        f".*{tenant_id}.*: load failed.*: failed to load metadata.*"
+    )
 
     # now, load it from the local files and expect it to be broken due to inability to load tenant files into memory
     pageserver_http.tenant_load(tenant_id=tenant_id)
