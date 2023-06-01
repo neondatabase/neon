@@ -25,7 +25,6 @@ use crate::tenant::{
 };
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 
-
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
