@@ -235,11 +235,6 @@ impl Endpoint {
         conf.append("wal_log_hints", "off");
         conf.append("max_replication_slots", "10");
         conf.append("hot_standby", "on");
-        // prefetching of blocks referenced in WAL doesn't make sense for us
-        // Neon hot standby ignores pages that are not in the shared_buffers
-        if self.pg_version >= 15 {
-            conf.append("recovery_prefetch", "off");
-        }
         conf.append("shared_buffers", "1MB");
         conf.append("fsync", "off");
         conf.append("max_connections", "100");
@@ -255,24 +250,89 @@ impl Endpoint {
 
         // Load the 'neon' extension
         conf.append("shared_preload_libraries", "neon");
-        conf.append_line("");
 
-        // Configure backpressure
-        // - Replication write lag depends on how fast the walreceiver can process incoming WAL.
-        //   This lag determines latency of get_page_at_lsn. Speed of applying WAL is about 10MB/sec,
-        //   so to avoid expiration of 1 minute timeout, this lag should not be larger than 600MB.
-        //   Actually latency should be much smaller (better if < 1sec). But we assume that recently
-        //   updates pages are not requested from pageserver.
-        // - Replication flush lag depends on speed of persisting data by checkpointer (creation of
-        //   delta/image layers) and advancing disk_consistent_lsn. Safekeepers are able to
-        //   remove/archive WAL only beyond disk_consistent_lsn. Too large a lag can cause long
-        //   recovery time (in case of pageserver crash) and disk space overflow at safekeepers.
-        // - Replication apply lag depends on speed of uploading changes to S3 by uploader thread.
-        //   To be able to restore database in case of pageserver node crash, safekeeper should not
-        //   remove WAL beyond this point. Too large lag can cause space exhaustion in safekeepers
-        //   (if they are not able to upload WAL to S3).
-        conf.append("max_replication_write_lag", "15MB");
-        conf.append("max_replication_flush_lag", "10GB");
+        conf.append_line("");
+        // Replication-related configurations, such as WAL sending
+        match &self.mode {
+            ComputeMode::Primary => {
+                // Configure backpressure
+                // - Replication write lag depends on how fast the walreceiver can process incoming WAL.
+                //   This lag determines latency of get_page_at_lsn. Speed of applying WAL is about 10MB/sec,
+                //   so to avoid expiration of 1 minute timeout, this lag should not be larger than 600MB.
+                //   Actually latency should be much smaller (better if < 1sec). But we assume that recently
+                //   updates pages are not requested from pageserver.
+                // - Replication flush lag depends on speed of persisting data by checkpointer (creation of
+                //   delta/image layers) and advancing disk_consistent_lsn. Safekeepers are able to
+                //   remove/archive WAL only beyond disk_consistent_lsn. Too large a lag can cause long
+                //   recovery time (in case of pageserver crash) and disk space overflow at safekeepers.
+                // - Replication apply lag depends on speed of uploading changes to S3 by uploader thread.
+                //   To be able to restore database in case of pageserver node crash, safekeeper should not
+                //   remove WAL beyond this point. Too large lag can cause space exhaustion in safekeepers
+                //   (if they are not able to upload WAL to S3).
+                conf.append("max_replication_write_lag", "15MB");
+                conf.append("max_replication_flush_lag", "10GB");
+
+                if !self.env.safekeepers.is_empty() {
+                    // Configure Postgres to connect to the safekeepers
+                    conf.append("synchronous_standby_names", "walproposer");
+
+                    let safekeepers = self
+                        .env
+                        .safekeepers
+                        .iter()
+                        .map(|sk| format!("localhost:{}", sk.pg_port))
+                        .collect::<Vec<String>>()
+                        .join(",");
+                    conf.append("neon.safekeepers", &safekeepers);
+                } else {
+                    // We only use setup without safekeepers for tests,
+                    // and don't care about data durability on pageserver,
+                    // so set more relaxed synchronous_commit.
+                    conf.append("synchronous_commit", "remote_write");
+
+                    // Configure the node to stream WAL directly to the pageserver
+                    // This isn't really a supported configuration, but can be useful for
+                    // testing.
+                    conf.append("synchronous_standby_names", "pageserver");
+                }
+            }
+            ComputeMode::Static(lsn) => {
+                conf.append("recovery_target_lsn", &lsn.to_string());
+            }
+            ComputeMode::Replica => {
+                assert!(!self.env.safekeepers.is_empty());
+
+                // TODO: use future host field from safekeeper spec
+                // Pass the list of safekeepers to the replica so that it can connect to any of them,
+                // whichever is availiable.
+                let sk_ports = self
+                    .env
+                    .safekeepers
+                    .iter()
+                    .map(|x| x.pg_port.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sk_hosts = vec!["localhost"; self.env.safekeepers.len()].join(",");
+
+                let connstr = format!(
+                    "host={} port={} options='-c timeline_id={} tenant_id={}' application_name=replica replication=true",
+                    sk_hosts,
+                    sk_ports,
+                    &self.timeline_id.to_string(),
+                    &self.tenant_id.to_string(),
+                );
+
+                let slot_name = format!("repl_{}_", self.timeline_id);
+                conf.append("primary_conninfo", connstr.as_str());
+                conf.append("primary_slot_name", slot_name.as_str());
+                conf.append("hot_standby", "on");
+                // prefetching of blocks referenced in WAL doesn't make sense for us
+                // Neon hot standby ignores pages that are not in the shared_buffers
+                if self.pg_version >= 15 {
+                    conf.append("recovery_prefetch", "off");
+                }
+            }
+        }
 
         if !self.env.safekeepers.is_empty() {
             // Configure Postgres to connect to the safekeepers
