@@ -344,13 +344,23 @@ fn start_pageserver(
     // init_done_rx is a barrier which stops waiting once all init_done_tx clones are dropped.
     let (init_done_tx, init_done_rx) = utils::completion::channel();
 
+    let (init_logical_size_done_tx, init_logical_size_done_rx) = utils::completion::channel();
+
+    let (background_jobs_can_start, background_jobs_barrier) = utils::completion::channel();
+
+    let order = pageserver::InitializationOrder {
+        initial_tenant_load: init_done_tx,
+        initial_logical_size_attempt: init_logical_size_done_tx,
+        background_jobs_can_start: background_jobs_barrier,
+    };
+
     // Scan the local 'tenants/' directory and start loading the tenants
     let init_started_at = std::time::Instant::now();
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         broker_client.clone(),
         remote_storage.clone(),
-        (init_done_tx, init_done_rx.clone()),
+        order,
     ))?;
 
     BACKGROUND_RUNTIME.spawn({
@@ -358,12 +368,56 @@ fn start_pageserver(
         async move {
             init_done_rx.wait().await;
 
-            let elapsed = init_started_at.elapsed();
+            let init_done = std::time::Instant::now();
+            let elapsed = init_done - init_started_at;
 
             tracing::info!(
                 elapsed_millis = elapsed.as_millis(),
                 "Initial load completed."
             );
+
+            let mut init_sizes_done = std::pin::pin!(init_logical_size_done_rx.wait());
+
+            // it is difficult to define this timeout. our largest initialization completions are
+            // in the range of 100-200s, so perhaps this works. smaller nodes will have background
+            // tasks "not running" for this long unless every timeline has it's initial logical
+            // size calculated. not running background tasks for 30s is not terrible.
+            let timeout = std::time::Duration::from_secs(30);
+
+            let completed = tokio::select! {
+                _ = &mut init_sizes_done => {
+                    let now = std::time::Instant::now();
+                    tracing::info!(
+                        from_init_done_millis = (init_done - now).as_millis(),
+                        from_init_millis = (init_started_at - now).as_millis(),
+                        "Initial logical sizes completed."
+                    );
+                    true
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    tracing::info!(
+                        timeout_millis = timeout.as_millis(),
+                        "Initial logical size timeout elapsed; starting background jobs"
+                    );
+                    false
+                }
+            };
+
+            // allow background jobs to start
+            drop(background_jobs_can_start);
+
+            if !completed {
+                // ending up here is not a bug; at the latest logical sizes will be queried by
+                // consumption metrics.
+                init_sizes_done.await;
+
+                let now = std::time::Instant::now();
+                tracing::info!(
+                    from_init_done_millis = (init_done - now).as_millis(),
+                    from_init_millis = (init_started_at - now).as_millis(),
+                    "Initial logical sizes completed after timeout (background jobs already started)."
+                );
+            }
         }
     });
 

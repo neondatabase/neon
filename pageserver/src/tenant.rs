@@ -65,6 +65,7 @@ use crate::tenant::remote_timeline_client::PersistIndexPartWithDeletedFlagError;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
+use crate::InitializationOrder;
 
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
@@ -506,6 +507,8 @@ impl Tenant {
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
+        background_jobs_can_start: Option<&completion::Barrier>,
+        initial_logical_size_attempt: Option<&completion::Completion>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
@@ -531,6 +534,8 @@ impl Tenant {
                 up_to_date_metadata,
                 ancestor.clone(),
                 remote_client,
+                background_jobs_can_start,
+                initial_logical_size_attempt,
             )?;
 
             let timeline = UninitializedTimeline {
@@ -555,6 +560,8 @@ impl Tenant {
                             timeline_id,
                             up_to_date_metadata,
                             ancestor.clone(),
+                            None,
+                            None,
                             None,
                         )
                         .with_context(|| {
@@ -854,6 +861,8 @@ impl Tenant {
             local_metadata,
             ancestor,
             true,
+            None,
+            None,
             ctx,
         )
         .await
@@ -897,7 +906,7 @@ impl Tenant {
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
-        init_done: Option<(completion::Completion, completion::Barrier)>,
+        init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         debug_assert_current_span_has_tenant_id();
@@ -933,17 +942,15 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
-                // keep the sender alive as long as we have the initial load ongoing; it will be
-                // None for loads spawned after init_tenant_mgr.
-                let (_tx, rx) = if let Some((tx, rx)) = init_done {
-                    (Some(tx), Some(rx))
-                } else {
-                    (None, None)
-                };
-                match tenant_clone.load(&ctx).await {
+                let init_order = init_order;
+
+                let background_jobs_can_start = init_order.as_ref().map(|x| &x.background_jobs_can_start);
+                let initial_logical_size_attempt = init_order.as_ref().map(|x| &x.initial_logical_size_attempt);
+
+                match tenant_clone.load(background_jobs_can_start, initial_logical_size_attempt, &ctx).await {
                     Ok(()) => {
                         debug!("load finished, activating");
-                        tenant_clone.activate(broker_client, rx.as_ref(), &ctx);
+                        tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
                     }
                     Err(err) => {
                         error!("load failed, setting tenant state to Broken: {err:?}");
@@ -970,7 +977,12 @@ impl Tenant {
     /// files on disk. Used at pageserver startup.
     ///
     /// No background tasks are started as part of this routine.
-    async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn load(
+        self: &Arc<Tenant>,
+        background_jobs_can_start: Option<&completion::Barrier>,
+        initial_logical_size_attempt: Option<&completion::Completion>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
 
         debug!("loading tenant task");
@@ -1090,9 +1102,15 @@ impl Tenant {
         //    1. "Timeline has no ancestor and no layer files"
 
         for (timeline_id, local_metadata) in sorted_timelines {
-            self.load_local_timeline(timeline_id, local_metadata, ctx)
-                .await
-                .with_context(|| format!("load local timeline {timeline_id}"))?;
+            self.load_local_timeline(
+                timeline_id,
+                local_metadata,
+                background_jobs_can_start,
+                initial_logical_size_attempt,
+                ctx,
+            )
+            .await
+            .with_context(|| format!("load local timeline {timeline_id}"))?;
         }
 
         trace!("Done");
@@ -1108,6 +1126,8 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
+        background_jobs_can_start: Option<&completion::Barrier>,
+        initial_logical_size_attempt: Option<&completion::Completion>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
@@ -1177,6 +1197,8 @@ impl Tenant {
             Some(local_metadata),
             ancestor,
             false,
+            background_jobs_can_start,
+            initial_logical_size_attempt,
             ctx,
         )
         .await
@@ -2060,6 +2082,8 @@ impl Tenant {
         new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
+        background_jobs_can_start: Option<&completion::Barrier>,
+        initial_logical_size_attempt: Option<&completion::Completion>,
     ) -> anyhow::Result<Arc<Timeline>> {
         if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
             anyhow::ensure!(
@@ -2079,6 +2103,8 @@ impl Tenant {
             Arc::clone(&self.walredo_mgr),
             remote_client,
             pg_version,
+            background_jobs_can_start.cloned(),
+            initial_logical_size_attempt.cloned(),
         ))
     }
 
@@ -2754,7 +2780,14 @@ impl Tenant {
         remote_client: Option<RemoteTimelineClient>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_data = self
-            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client)
+            .create_timeline_data(
+                new_timeline_id,
+                new_metadata,
+                ancestor,
+                remote_client,
+                None,
+                None,
+            )
             .context("Failed to create timeline data structure")?;
         crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
 
@@ -3322,7 +3355,7 @@ pub mod harness {
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
             tenant
-                .load(ctx)
+                .load(None, None, ctx)
                 .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
                 .await?;
             tenant.state.send_replace(TenantState::Active);
