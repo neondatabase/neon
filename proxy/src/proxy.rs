@@ -455,6 +455,9 @@ impl<'a, S> Client<'a, S> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
+    // Instrumentation logs endpoint name everywhere. Doesn't work for link
+    // auth; strictly speaking we don't know endpoint name in its case.
+    #[tracing::instrument(name = "", fields(ep = self.creds.get_endpoint().unwrap_or("".to_owned())), skip_all)]
     async fn connect_to_db(
         self,
         session: cancellation::Session<'_>,

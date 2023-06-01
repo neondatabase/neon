@@ -29,16 +29,14 @@ use crate::tenant::timeline::walreceiver::connection_manager::{
     connection_manager_loop_step, ConnectionManagerState,
 };
 
-use anyhow::Context;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::ops::ControlFlow;
-use std::sync::atomic::{self, AtomicBool};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::BrokerClientChannel;
 use tokio::select;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 
@@ -62,46 +60,23 @@ pub struct WalReceiverConf {
 
 pub struct WalReceiver {
     timeline: TenantTimelineId,
-    timeline_ref: Weak<Timeline>,
-    conf: WalReceiverConf,
-    started: AtomicBool,
-    manager_status: Arc<RwLock<Option<ConnectionManagerStatus>>>,
+    manager_status: Arc<std::sync::RwLock<Option<ConnectionManagerStatus>>>,
 }
 
 impl WalReceiver {
-    pub fn new(
-        timeline: TenantTimelineId,
-        timeline_ref: Weak<Timeline>,
-        conf: WalReceiverConf,
-    ) -> Self {
-        Self {
-            timeline,
-            timeline_ref,
-            conf,
-            started: AtomicBool::new(false),
-            manager_status: Arc::new(RwLock::new(None)),
-        }
-    }
-
     pub fn start(
-        &self,
-        ctx: &RequestContext,
+        timeline: Arc<Timeline>,
+        conf: WalReceiverConf,
         mut broker_client: BrokerClientChannel,
-    ) -> anyhow::Result<()> {
-        if self.started.load(atomic::Ordering::Acquire) {
-            anyhow::bail!("Wal receiver is already started");
-        }
-
-        let timeline = self.timeline_ref.upgrade().with_context(|| {
-            format!("walreceiver start on a dropped timeline {}", self.timeline)
-        })?;
-
+        ctx: &RequestContext,
+    ) -> Self {
         let tenant_id = timeline.tenant_id;
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-        let wal_receiver_conf = self.conf.clone();
-        let loop_status = Arc::clone(&self.manager_status);
+
+        let loop_status = Arc::new(std::sync::RwLock::new(None));
+        let manager_status = Arc::clone(&loop_status);
         task_mgr::spawn(
             WALRECEIVER_RUNTIME.handle(),
             TaskKind::WalReceiverManager,
@@ -113,7 +88,7 @@ impl WalReceiver {
                 info!("WAL receiver manager started, connecting to broker");
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
-                    wal_receiver_conf,
+                    conf,
                 );
                 loop {
                     select! {
@@ -137,29 +112,29 @@ impl WalReceiver {
                 }
 
                 connection_manager_state.shutdown().await;
-                *loop_status.write().await = None;
+                *loop_status.write().unwrap() = None;
                 Ok(())
             }
             .instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
         );
 
-        self.started.store(true, atomic::Ordering::Release);
-
-        Ok(())
+        Self {
+            timeline: TenantTimelineId::new(tenant_id, timeline_id),
+            manager_status,
+        }
     }
 
-    pub async fn stop(&self) {
+    pub async fn stop(self) {
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
             Some(self.timeline.tenant_id),
             Some(self.timeline.timeline_id),
         )
         .await;
-        self.started.store(false, atomic::Ordering::Release);
     }
 
-    pub(super) async fn status(&self) -> Option<ConnectionManagerStatus> {
-        self.manager_status.read().await.clone()
+    pub(super) fn status(&self) -> Option<ConnectionManagerStatus> {
+        self.manager_status.read().unwrap().clone()
     }
 }
 

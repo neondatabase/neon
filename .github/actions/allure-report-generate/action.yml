@@ -57,14 +57,14 @@ runs:
         if ! which allure; then
           ALLURE_ZIP=allure-${ALLURE_VERSION}.zip
           wget -q https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/${ALLURE_ZIP}
-          echo "${ALLURE_ZIP_MD5}  ${ALLURE_ZIP}" | md5sum -c
+          echo "${ALLURE_ZIP_SHA256} ${ALLURE_ZIP}" | sha256sum --check
           unzip -q ${ALLURE_ZIP}
           echo "$(pwd)/allure-${ALLURE_VERSION}/bin" >> $GITHUB_PATH
           rm -f ${ALLURE_ZIP}
         fi
       env:
-        ALLURE_VERSION: 2.22.0
-        ALLURE_ZIP_MD5: d5c9f0989b896482536956340a7d5ec9
+        ALLURE_VERSION: 2.22.1
+        ALLURE_ZIP_SHA256: fdc7a62d94b14c5e0bf25198ae1feded6b005fdbed864b4d3cb4e5e901720b0b
 
     # Potentially we could have several running build for the same key (for example, for the main branch), so we use improvised lock for this
     - name: Acquire lock

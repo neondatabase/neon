@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
+use utils::completion;
 use utils::serde_percent::Percent;
 
 use crate::{
@@ -82,6 +83,7 @@ pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
     state: Arc<State>,
+    init_done: completion::Barrier,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
@@ -98,6 +100,9 @@ pub fn launch_disk_usage_global_eviction_task(
         "disk usage based eviction",
         false,
         async move {
+            // wait until initial load is complete, because we cannot evict from loading tenants.
+            init_done.wait().await;
+
             disk_usage_eviction_task(
                 &state,
                 task_config,

@@ -47,8 +47,7 @@ RUN set -e \
     && mold -run cargo build  \
       --bin pg_sni_router  \
       --bin pageserver  \
-      --bin pageserver_binutils  \
-      --bin draw_timeline_dir \
+      --bin pagectl  \
       --bin safekeeper  \
       --bin storage_broker  \
       --bin proxy  \
@@ -73,8 +72,7 @@ RUN set -e \
 
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pg_sni_router       /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver_binutils /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/release/draw_timeline_dir   /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl             /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker         /usr/local/bin
 COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin

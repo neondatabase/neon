@@ -632,6 +632,7 @@ RUN apt update &&  \
         libxml2 \
         libxslt1.1 \
         libzstd1 \
+        libcurl4-openssl-dev \
         procps && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8

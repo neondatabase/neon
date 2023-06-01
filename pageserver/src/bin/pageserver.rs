@@ -9,6 +9,7 @@ use clap::{Arg, ArgAction, Command};
 use fail::FailScenario;
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
+use pageserver::task_mgr::WALRECEIVER_RUNTIME;
 use remote_storage::GenericRemoteStorage;
 use tracing::*;
 
@@ -18,9 +19,7 @@ use pageserver::{
     context::{DownloadBehavior, RequestContext},
     http, page_cache, page_service, task_mgr,
     task_mgr::TaskKind,
-    task_mgr::{
-        BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME, WALRECEIVER_RUNTIME,
-    },
+    task_mgr::{BACKGROUND_RUNTIME, COMPUTE_REQUEST_RUNTIME, MGMT_REQUEST_RUNTIME},
     tenant::mgr,
     virtual_file,
 };
@@ -276,7 +275,18 @@ fn start_pageserver(
     let pageserver_listener = tcp_listener::bind(pg_addr)?;
 
     // Launch broker client
-    WALRECEIVER_RUNTIME.block_on(pageserver::broker_client::init_broker_client(conf))?;
+    // The storage_broker::connect call needs to happen inside a tokio runtime thread.
+    let broker_client = WALRECEIVER_RUNTIME
+        .block_on(async {
+            // Note: we do not attempt connecting here (but validate endpoints sanity).
+            storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)
+        })
+        .with_context(|| {
+            format!(
+                "create broker client for uri={:?} keepalive_interval={:?}",
+                &conf.broker_endpoint, conf.broker_keepalive_interval,
+            )
+        })?;
 
     // Initialize authentication for incoming connections
     let http_auth;
@@ -325,8 +335,33 @@ fn start_pageserver(
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
 
+    // All tenant load operations carry this while they are ongoing; it will be dropped once those
+    // operations finish either successfully or in some other manner. However, the initial load
+    // will be then done, and we can start the global background tasks.
+    let (init_done_tx, init_done_rx) = utils::completion::channel();
+
     // Scan the local 'tenants/' directory and start loading the tenants
-    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(conf, remote_storage.clone()))?;
+    let init_started_at = std::time::Instant::now();
+    BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
+        conf,
+        broker_client.clone(),
+        remote_storage.clone(),
+        (init_done_tx, init_done_rx.clone()),
+    ))?;
+
+    BACKGROUND_RUNTIME.spawn({
+        let init_done_rx = init_done_rx.clone();
+        async move {
+            init_done_rx.wait().await;
+
+            let elapsed = init_started_at.elapsed();
+
+            tracing::info!(
+                elapsed_millis = elapsed.as_millis(),
+                "Initial load completed."
+            );
+        }
+    });
 
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
@@ -339,6 +374,7 @@ fn start_pageserver(
             conf,
             remote_storage.clone(),
             disk_usage_eviction_state.clone(),
+            init_done_rx.clone(),
         )?;
     }
 
@@ -351,6 +387,7 @@ fn start_pageserver(
             conf,
             launch_ts,
             http_auth,
+            broker_client.clone(),
             remote_storage,
             disk_usage_eviction_state,
         )?
@@ -375,6 +412,7 @@ fn start_pageserver(
         );
 
         if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
+            let init_done_rx = init_done_rx;
             let metrics_ctx = RequestContext::todo_child(
                 TaskKind::MetricsCollection,
                 // This task itself shouldn't download anything.
@@ -390,6 +428,13 @@ fn start_pageserver(
                 "consumption metrics collection",
                 true,
                 async move {
+                    // first wait for initial load to complete before first iteration.
+                    //
+                    // this is because we only process active tenants and timelines, and the
+                    // Timeline::get_current_logical_size will spawn the logical size calculation,
+                    // which will not be rate-limited.
+                    init_done_rx.wait().await;
+
                     pageserver::consumption_metrics::collect_metrics(
                         metric_collection_endpoint,
                         conf.metric_collection_interval,
@@ -427,6 +472,7 @@ fn start_pageserver(
             async move {
                 page_service::libpq_listener_main(
                     conf,
+                    broker_client,
                     pg_auth,
                     pageserver_listener,
                     conf.pg_auth_type,
