@@ -381,8 +381,8 @@ fn start_pageserver(
             // it is difficult to define this timeout. our largest initialization completions are
             // in the range of 100-200s, so perhaps this works. smaller nodes will have background
             // tasks "not running" for this long unless every timeline has it's initial logical
-            // size calculated. not running background tasks for 30s is not terrible.
-            let timeout = std::time::Duration::from_secs(30);
+            // size calculated. not running background tasks for some seconds is not terrible.
+            let timeout = conf.background_task_maximum_delay;
 
             let completed = tokio::select! {
                 _ = &mut init_sizes_done => {

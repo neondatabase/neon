@@ -134,6 +134,9 @@ def eviction_env(request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin) -> Ev
 
     neon_env_builder.enable_remote_storage(RemoteStorageKind.LOCAL_FS, f"{request.node.name}")
 
+    # in this test env we want the background jobs to start as soon as possible
+    neon_env_builder.pageserver_config_override = "background_task_maximum_delay='0s'"
+
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
 
