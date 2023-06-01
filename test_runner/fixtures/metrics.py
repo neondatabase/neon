@@ -74,7 +74,7 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_io_operations_seconds_sum",
     "pageserver_last_record_lsn",
     "pageserver_materialized_cache_hits_total",
-    "pageserver_materialized_cache_hits_upon_request_total",
+    "pageserver_materialized_cache_hits_direct_total",
     "pageserver_read_num_fs_layers_bucket",
     "pageserver_read_num_fs_layers_count",
     "pageserver_read_num_fs_layers_sum",
