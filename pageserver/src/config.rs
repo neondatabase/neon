@@ -1116,7 +1116,9 @@ background_task_maximum_delay = '334 s'
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
-                background_task_maximum_delay: Duration::ZERO,
+                background_task_maximum_delay: humantime::parse_duration(
+                    defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
+                )?,
             },
             "Correct defaults should be used when no config values are provided"
         );
