@@ -356,6 +356,8 @@ fn start_pageserver(
 
     // Scan the local 'tenants/' directory and start loading the tenants
     let init_started_at = std::time::Instant::now();
+    let shutdown_pageserver = tokio_util::sync::CancellationToken::new();
+
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         broker_client.clone(),
@@ -365,8 +367,14 @@ fn start_pageserver(
 
     BACKGROUND_RUNTIME.spawn({
         let init_done_rx = init_done_rx.clone();
-        async move {
+        let shutdown_pageserver = shutdown_pageserver.clone();
+        let wait_and_report = async move {
+            // NOTE: unlike many futures in pageserver, this one is cancellation-safe
+            let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial load completed"));
+
             init_done_rx.wait().await;
+
+            scopeguard::ScopeGuard::into_inner(guard);
 
             let init_done = std::time::Instant::now();
             let elapsed = init_done - init_started_at;
@@ -383,6 +391,8 @@ fn start_pageserver(
             // tasks "not running" for this long unless every timeline has it's initial logical
             // size calculated. not running background tasks for some seconds is not terrible.
             let timeout = conf.background_task_maximum_delay;
+
+            let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial logical sizes completed"));
 
             let completed = tokio::select! {
                 _ = &mut init_sizes_done => {
@@ -403,10 +413,13 @@ fn start_pageserver(
                 }
             };
 
+            scopeguard::ScopeGuard::into_inner(guard);
+
             // allow background jobs to start
             drop(background_jobs_can_start);
 
             if !completed {
+                let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial logical sizes completed"));
                 // ending up here is not a bug; at the latest logical sizes will be queried by
                 // consumption metrics.
                 init_sizes_done.await;
@@ -417,6 +430,17 @@ fn start_pageserver(
                     from_init_millis = (init_started_at - now).as_millis(),
                     "Initial logical sizes completed after timeout (background jobs already started)."
                 );
+
+                scopeguard::ScopeGuard::into_inner(guard);
+            }
+        };
+
+        async move {
+            let mut wait_and_report = std::pin::pin!(wait_and_report);
+            // just race these tasks
+            tokio::select! {
+                _ = shutdown_pageserver.cancelled() => {},
+                _ = &mut wait_and_report => {},
             }
         }
     });
@@ -541,6 +565,8 @@ fn start_pageserver(
         );
     }
 
+    let mut shutdown = Some(shutdown_pageserver.drop_guard());
+
     // All started up! Now just sit and wait for shutdown signal.
     ShutdownSignals::handle(|signal| match signal {
         Signal::Quit => {
@@ -556,6 +582,7 @@ fn start_pageserver(
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
+            shutdown.take();
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
             unreachable!()
         }
