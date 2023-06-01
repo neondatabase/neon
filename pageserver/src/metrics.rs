@@ -87,7 +87,7 @@ pub static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
 static READ_NUM_FS_LAYERS: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_read_num_fs_layers",
-        "Number of persistent layers accessed for processing a read request",
+        "Number of persistent layers accessed for processing a read request, including those in the cache",
         &["tenant_id", "timeline_id"],
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0],
     )
@@ -105,9 +105,9 @@ static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static MATERIALIZED_PAGE_CACHE_HIT_UPON_REQUEST: Lazy<IntCounterVec> = Lazy::new(|| {
+static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "pageserver_materialized_cache_hits_upon_request_total",
+        "pageserver_materialized_cache_hits_direct_total",
         "Number of cache hits from materialized page cache without redo",
         &["tenant_id", "timeline_id"]
     )
@@ -653,7 +653,7 @@ pub static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
 pub static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the WAL redo process sent to Postgres",
+        "Time spent waiting for access to the Postgres WAL redo process",
         redo_histogram_time_buckets!(),
     )
     .expect("failed to define a metric")
@@ -662,7 +662,7 @@ pub static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
 pub static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_records_histogram",
-        "Histogram of number of records replayed per redo sent to Postgres",
+        "Histogram of number of records replayed per redo in the Postgres WAL redo process",
         redo_histogram_count_buckets!(),
     )
     .expect("failed to define a metric")
@@ -834,10 +834,9 @@ impl TimelineMetrics {
         let read_num_fs_layers = READ_NUM_FS_LAYERS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let materialized_page_cache_hit_upon_request_counter =
-            MATERIALIZED_PAGE_CACHE_HIT_UPON_REQUEST
-                .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-                .unwrap();
+        let materialized_page_cache_hit_upon_request_counter = MATERIALIZED_PAGE_CACHE_HIT_DIRECT
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
@@ -877,8 +876,7 @@ impl Drop for TimelineMetrics {
         let _ = RECONSTRUCT_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = GET_RECONSTRUCT_DATA_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = MATERIALIZED_PAGE_CACHE_HIT.remove_label_values(&[tenant_id, timeline_id]);
-        let _ =
-            MATERIALIZED_PAGE_CACHE_HIT_UPON_REQUEST.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = MATERIALIZED_PAGE_CACHE_HIT_DIRECT.remove_label_values(&[tenant_id, timeline_id]);
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
