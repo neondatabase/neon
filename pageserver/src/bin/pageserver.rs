@@ -382,7 +382,7 @@ fn start_pageserver(
 
             tracing::info!(
                 elapsed_millis = elapsed.as_millis(),
-                "Initial load completed."
+                "Initial load completed"
             );
 
             // no need to do anything here for initial_logical_size_can_start, because it was
@@ -402,9 +402,9 @@ fn start_pageserver(
                 _ = &mut init_sizes_done => {
                     let now = std::time::Instant::now();
                     tracing::info!(
-                        from_init_done_millis = (init_done - now).as_millis(),
-                        from_init_millis = (init_started_at - now).as_millis(),
-                        "Initial logical sizes completed."
+                        from_init_done_millis = (now - init_done).as_millis(),
+                        from_init_millis = (now - init_started_at).as_millis(),
+                        "Initial logical sizes completed"
                     );
                     true
                 }
@@ -430,8 +430,8 @@ fn start_pageserver(
 
                 let now = std::time::Instant::now();
                 tracing::info!(
-                    from_init_done_millis = (init_done - now).as_millis(),
-                    from_init_millis = (init_started_at - now).as_millis(),
+                    from_init_done_millis = (now - init_done).as_millis(),
+                    from_init_millis = (now - init_started_at).as_millis(),
                     "Initial logical sizes completed after timeout (background jobs already started)."
                 );
 
