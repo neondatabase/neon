@@ -257,7 +257,7 @@ pub enum TaskKind {
     // task that handles attaching a tenant
     Attach,
 
-    // Used mostly for backdround deletion from s3
+    // Used mostly for background deletion from s3
     TimelineDeletionWorker,
 
     // task that handhes metrics collection
