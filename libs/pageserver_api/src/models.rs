@@ -934,10 +934,7 @@ mod tests {
 
     #[test]
     fn test_parse_json_field() {
-        let config = vec![(
-            "eviction_policy",
-            "eviction_policy:{\"kind\": \"NoEviction\"}",
-        )];
+        let config = vec![("eviction_policy", "{\"kind\": \"NoEviction\"}")];
         TenantConfig::deserialize_from_settings(config.into_iter().collect()).unwrap();
     }
 
