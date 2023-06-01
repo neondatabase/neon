@@ -1,19 +1,3 @@
-//
-// XXX: This starts to be scarry similar to the `PostgresNode` from `control_plane`,
-// but there are several things that makes `PostgresNode` usage inconvenient in the
-// cloud:
-// - it inherits from `LocalEnv`, which contains **all-all** the information about
-//   a complete service running
-// - it uses `PageServerNode` with information about http endpoint, which we do not
-//   need in the cloud again
-// - many tiny pieces like, for example, we do not use `pg_ctl` in the cloud
-//
-// Thus, to use `PostgresNode` in the cloud, we need to 'mock' a bunch of required
-// attributes (not required for the cloud). Yet, it is still tempting to unify these
-// `PostgresNode` and `ComputeNode` and use one in both places.
-//
-// TODO: stabilize `ComputeNode` and think about using it in the `control_plane`.
-//
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
