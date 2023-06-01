@@ -352,7 +352,7 @@ fn start_pageserver(
         initial_tenant_load: Some(init_done_tx),
         initial_logical_size_can_start: init_done_rx.clone(),
         initial_logical_size_attempt: init_logical_size_done_tx,
-        background_jobs_can_start: background_jobs_barrier,
+        background_jobs_can_start: background_jobs_barrier.clone(),
     };
 
     // Scan the local 'tenants/' directory and start loading the tenants
@@ -460,7 +460,7 @@ fn start_pageserver(
             conf,
             remote_storage.clone(),
             disk_usage_eviction_state.clone(),
-            init_done_rx.clone(),
+            background_jobs_barrier.clone(),
         )?;
     }
 
@@ -498,7 +498,7 @@ fn start_pageserver(
         );
 
         if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-            let init_done_rx = init_done_rx;
+            let background_jobs_barrier = background_jobs_barrier;
             let metrics_ctx = RequestContext::todo_child(
                 TaskKind::MetricsCollection,
                 // This task itself shouldn't download anything.
@@ -514,12 +514,17 @@ fn start_pageserver(
                 "consumption metrics collection",
                 true,
                 async move {
-                    // first wait for initial load to complete before first iteration.
+                    // first wait until background jobs are cleared to launch.
                     //
                     // this is because we only process active tenants and timelines, and the
                     // Timeline::get_current_logical_size will spawn the logical size calculation,
                     // which will not be rate-limited.
-                    init_done_rx.wait().await;
+                    let cancel = task_mgr::shutdown_token();
+
+                    tokio::select! {
+                        _ = cancel.cancelled() => { return Ok(()); },
+                        _ = background_jobs_barrier.wait() => {}
+                    };
 
                     pageserver::consumption_metrics::collect_metrics(
                         metric_collection_endpoint,
