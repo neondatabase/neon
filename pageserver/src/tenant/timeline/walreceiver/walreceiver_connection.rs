@@ -433,20 +433,25 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
 /// If this function returns an `Err()`, the caller can bubble it up using `?`.
 /// The connection manager will log the error at ERROR level.
 fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres::Error> {
-    if pg_error.is_closed()
+    if is_expected_error(&pg_error) {
+        Ok(pg_error)
+    } else {
+        Err(pg_error).context("connection error")
+    }
+}
+
+pub fn is_expected_error(pg_error: &postgres::Error) -> bool {
+    pg_error.is_closed()
         || pg_error
             .source()
             .and_then(|source| source.downcast_ref::<std::io::Error>())
             .map(is_expected_io_error)
             .unwrap_or(false)
-    {
-        return Ok(pg_error);
-    } else if let Some(db_error) = pg_error.as_db_error() {
-        if db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
-            && db_error.message().contains("ending streaming")
-        {
-            return Ok(pg_error);
-        }
-    }
-    Err(pg_error).context("connection error")
+        || pg_error
+            .as_db_error()
+            .filter(|db_error| {
+                db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
+                    && db_error.message().contains("ending streaming")
+            })
+            .is_some()
 }
