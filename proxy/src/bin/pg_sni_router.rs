@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 use utils::{project_git_version, sentry_init::init_sentry};
 
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 project_git_version!(GIT_VERSION);
 
@@ -155,12 +155,13 @@ async fn task_main(
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
-                        handle_client(dest_suffix, tls_config, session_id, socket).await
+                        handle_client(dest_suffix, tls_config, socket).await
                     }
                     .unwrap_or_else(|e| {
                         // Acknowledge that the task has finished with an error.
                         error!("per-client task finished with an error: {e:#}");
-                    }),
+                    })
+                    .instrument(tracing::info_span!("handle_client", ?session_id))
                 );
             }
             _ = cancellation_token.cancelled() => {
@@ -219,11 +220,9 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-#[tracing::instrument(fields(session_id = ?session_id), skip_all)]
 async fn handle_client(
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
-    session_id: uuid::Uuid,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
     let tls_stream = ssl_handshake(stream, tls_config).await?;
