@@ -620,34 +620,14 @@ where
 
     let freeze_and_flush = false;
 
+    // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
+    // that we can continue safely to cleanup.
     match tenant.shutdown(freeze_and_flush).await {
         Ok(()) => {}
         Err(super::ShutdownError::AlreadyStopping) => {
             return Err(TenantStateError::IsStopping(tenant_id))
         }
     }
-
-    /*
-    match tenant.set_stopping().await {
-        Ok(()) => {
-            // we won, continue stopping procedure
-        }
-        Err(SetStoppingError::Broken) => {
-            // continue the procedure, let's hope the closure can deal with broken tenants
-        }
-        Err(SetStoppingError::AlreadyStopping) => {
-            // the tenant is already stopping or broken, don't do anything
-            return Err(TenantStateError::IsStopping(tenant_id));
-        }
-    }
-    */
-
-    /*
-    // shutdown all tenant and timeline tasks: gc, compaction, page service)
-    // No new tasks will be started for this tenant because it's in `Stopping` state.
-    // Hence, once we're done here, the `tenant_cleanup` callback can mutate tenant on-disk state freely.
-    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
-    */
 
     match tenant_cleanup
         .await

@@ -1802,6 +1802,10 @@ impl Tenant {
             }
         }
 
+        // shutdown all tenant and timeline tasks: gc, compaction, page service)
+        // No new tasks will be started for this tenant because it's in `Stopping` state.
+        //
+        // this will additionally shutdown and await all timeline tasks.
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
 
         Ok(())
