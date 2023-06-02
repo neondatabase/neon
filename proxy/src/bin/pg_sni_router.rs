@@ -141,7 +141,6 @@ async fn task_main(
         tokio::select! {
             accept_result = listener.accept() => {
                 let (socket, peer_addr) = accept_result?;
-                info!("accepted postgres client connection from {peer_addr}");
 
                 let session_id = uuid::Uuid::new_v4();
                 let tls_config = Arc::clone(&tls_config);
@@ -149,12 +148,11 @@ async fn task_main(
 
                 connections.spawn(
                     async move {
-                        info!("spawned a task for {peer_addr}");
-
                         socket
                             .set_nodelay(true)
                             .context("failed to set socket option")?;
 
+                        info!(%peer_addr, "serving");
                         handle_client(dest_suffix, tls_config, socket).await
                     }
                     .unwrap_or_else(|e| {
