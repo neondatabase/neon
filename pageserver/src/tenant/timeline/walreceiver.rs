@@ -219,10 +219,19 @@ impl<E: Clone> TaskHandle<E> {
                             trace!("sender is dropped while join handle is still alive");
                         }
 
-                        let res = jh
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to join task: {e}"))
-                            .and_then(|x| x);
+                        let res = match jh.await {
+                            Ok(res) => res,
+                            Err(je) if je.is_cancelled() => {
+                                unreachable!("we don't cancel via tokio")
+                            }
+                            Err(je) if je.is_panic() => {
+                                // panic has already been reported; do not double report
+                                Ok(())
+                            }
+                            Err(je) => {
+                                Err(anyhow::Error::new(je).context("join task walreceiver task"))
+                            }
+                        };
 
                         // For cancellation-safety, drop join_handle only after successful .await.
                         self.join_handle = None;
