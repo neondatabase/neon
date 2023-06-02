@@ -200,22 +200,7 @@ impl<E: Clone> TaskHandle<E> {
                 TaskEvent::End(match self.join_handle.as_mut() {
                     Some(jh) => {
                         if !jh.is_finished() {
-                            // Barring any implementation errors in this module, we can
-                            // only arrive here while the task that executes the future
-                            // passed to `Self::spawn()` is still execution. Cf the comment
-                            // in Self::spawn().
-                            //
-                            // This was logging at warning level in earlier versions, presumably
-                            // to leave some breadcrumbs in case we had an implementation
-                            // error that would would make us get stuck in `jh.await`.
-                            //
-                            // There hasn't been such a bug so far.
-                            // But in a busy system, e.g., during pageserver restart,
-                            // we arrive here often enough that the warning-level logs
-                            // became a distraction.
-                            // So, tone them down to info-level.
-                            //
-                            // XXX: rewrite this module to eliminate the race condition.
+                            // See: https://github.com/neondatabase/neon/issues/2885
                             trace!("sender is dropped while join handle is still alive");
                         }
 
