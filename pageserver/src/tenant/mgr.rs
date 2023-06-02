@@ -66,9 +66,9 @@ impl LazyTenantsMap {
             .map
             .get(tenant_id)
             .ok_or(GetTenantError::NotFound(*tenant_id))?;
-        Ok(tenant
+        tenant
             .get_or_try_init(|| self.try_load_tenant(tenant_id))
-            .await?)
+            .await
     }
 }
 
