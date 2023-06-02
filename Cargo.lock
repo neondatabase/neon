@@ -2530,6 +2530,7 @@ dependencies = [
  "bytes",
  "clap 4.3.0",
  "git-version",
+ "itertools",
  "pageserver",
  "postgres_ffi",
  "svg_fmt",

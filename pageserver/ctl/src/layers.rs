@@ -41,9 +41,18 @@ pub(crate) enum LayerCmd {
         /// The id from list-layer command
         id: usize,
     },
+    /// Output layer statistics
+    GetStats {
+        path: PathBuf,
+        tenant: String,
+        timeline: String,
+        /// The id from list-layer command
+        id: usize,
+    }
 }
 
-fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
+// Return (key, value.len) for all keys, sorted by key.
+fn read_delta_file(path: impl AsRef<Path>) -> Result<Vec<(Key, usize)>> {
     use pageserver::tenant::blob_io::BlobCursor;
     use pageserver::tenant::block_io::BlockReader;
 
@@ -70,11 +79,47 @@ fn read_delta_file(path: impl AsRef<Path>) -> Result<()> {
         },
     )?;
     let mut cursor = BlockCursor::new(&file);
+
+    let mut result = vec![];
     for (k, v) in all {
         let value = cursor.read_blob(v.pos())?;
-        println!("key:{} value_len:{}", k, value.len());
+        result.push((k, value.len()));
     }
     // TODO(chi): special handling for last key?
+    Ok(result)
+}
+
+// We divide the entire i128 keyspace into pre-assigned fixed segments,
+// 8MB each. Group keys by segment, and report segment size for each.
+//
+// 8MB is chosen as the segment size because we're unlikely to make
+// s3 partial downloads smaller than 8KB (due to cost). So summarizing
+// layer metadata in 8KB segments could be enough to generate good test
+// data for write amplification tests.
+fn read_delta_segments(path: impl AsRef<Path>) -> Result<Vec<(i128, usize)>> {
+    fn key_to_segment(key: &Key) -> i128 {
+        key.to_i128() >> 26
+    }
+
+    use itertools::Itertools;
+    let delta_metadata = read_delta_file(path)?;
+    let group_iter = delta_metadata.iter().group_by(|(k, _)| key_to_segment(k));
+    let group_sizes = group_iter
+        .into_iter()
+        .map(|(segment, lengths_group)| {
+            let lengths: Vec<_> = lengths_group.collect();
+            let sum: usize = lengths.iter().map(|(_k, len)| len).sum();
+            (segment, sum)
+        });
+    Ok(group_sizes.collect())
+}
+
+fn summarize_delta_file(path: impl AsRef<Path>) -> Result<()> {
+    // TODO write in some compressed binary format
+    for (segment, size) in read_delta_segments(path)? {
+        println!("segment:{} size:{}", segment, size);
+    }
+
     Ok(())
 }
 
@@ -153,7 +198,9 @@ pub(crate) fn main(cmd: &LayerCmd) -> Result<()> {
                         );
 
                         if layer_file.is_delta {
-                            read_delta_file(layer.path())?;
+                            for (k, len) in read_delta_file(layer.path())? {
+                                println!("key:{} value_len:{}", k, len);
+                            }
                         } else {
                             anyhow::bail!("not supported yet :(");
                         }
@@ -163,7 +210,36 @@ pub(crate) fn main(cmd: &LayerCmd) -> Result<()> {
                     idx += 1;
                 }
             }
-        }
+        },
+        LayerCmd::GetStats {
+            path,
+            tenant,
+            timeline,
+            id,
+        } => {
+            let timeline_path = path
+                .join("tenants")
+                .join(tenant)
+                .join("timelines")
+                .join(timeline);
+            let mut idx = 0;
+            for layer in fs::read_dir(timeline_path)? {
+                let layer = layer?;
+                if let Some(layer_file) = parse_filename(&layer.file_name().into_string().unwrap())
+                {
+                    if *id == idx {
+                        if layer_file.is_delta {
+                            summarize_delta_file(layer.path())?;
+                        } else {
+                            anyhow::bail!("not supported yet :(");
+                        }
+
+                        break;
+                    }
+                    idx += 1;
+                }
+            }
+        },
     }
     Ok(())
 }

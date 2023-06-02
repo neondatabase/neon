@@ -16,3 +16,4 @@ postgres_ffi.workspace = true
 utils.workspace = true
 svg_fmt.workspace = true
 workspace_hack.workspace = true
+itertools.workspace = true
