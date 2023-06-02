@@ -402,7 +402,8 @@ impl ConnectionManagerState {
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
-                super::walreceiver_connection::handle_walreceiver_connection(
+
+                let res = super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
                     new_sk.wal_source_connconf,
                     events_sender,
@@ -411,8 +412,35 @@ impl ConnectionManagerState {
                     ctx,
                     node_id,
                 )
-                .await
-                .context("walreceiver connection handling failure")
+                .await;
+
+                match res {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        // FIXME: right now handle_walreceiver_connection has some `?` usage and
+                        // some filtering usage, so this is all a bit confusing.
+                        let ok_error = if let Some(pg_error) = e.downcast_ref::<postgres::Error>() {
+                            super::walreceiver_connection::is_expected_error(pg_error)
+                        } else {
+                            // rust error types support arbitrary depth lists of errors chained by
+                            // std::error::Error::cause; determine if any of these is ok error
+                            e.chain().any(|maybe_pgerr| {
+                                maybe_pgerr
+                                    .downcast_ref::<postgres::Error>()
+                                    .filter(|e| super::walreceiver_connection::is_expected_error(e))
+                                    .is_some()
+                            })
+                        };
+
+                        if ok_error {
+                            info!("walreceiver connection handling ended: {e:#}");
+                            Ok(())
+                        } else {
+                            // give out an error to have task_mgr give it a really verbose logging
+                            Err(e).context("walreceiver connection handling failure")
+                        }
+                    }
+                }
             }
             .instrument(span)
         });
