@@ -77,8 +77,7 @@ impl SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    #[cfg(test)]
-    fn dummy() -> Self {
+    pub fn dummy() -> Self {
         SafeKeeperConf {
             workdir: PathBuf::from("./"),
             no_sync: false,

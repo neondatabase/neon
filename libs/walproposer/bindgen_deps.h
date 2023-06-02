@@ -16,3 +16,6 @@ int TestFunc(int a, int b);
 void RunClientC(uint32_t serverId);
 
 void WalProposerRust();
+
+// Initialize global variables before calling any Postgres C code.
+void MyContextInit();

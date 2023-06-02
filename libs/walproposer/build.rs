@@ -103,6 +103,7 @@ fn main() -> anyhow::Result<()> {
         .allowlist_function("TestFunc")
         .allowlist_function("RunClientC")
         .allowlist_function("WalProposerRust")
+        .allowlist_function("MyContextInit")
         // .clang_arg(format!("-I{inc_server_path}"))
         // .clang_arg(format!("-I{inc_pgxn_path}"))
         // Finish the builder and generate the bindings.

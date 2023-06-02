@@ -51,4 +51,5 @@ pub enum AnyMessageTag {
     InternalConnect,
     Just32,
     ReplCell,
+    Bytes,
 }

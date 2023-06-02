@@ -318,7 +318,6 @@ nwp_shmem_startup_hook(void)
 
 void WalProposerRust()
 {
-	MemoryContextInit();
 	elog(LOG, "WalProposerRust");
 }
 

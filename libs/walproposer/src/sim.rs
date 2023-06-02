@@ -31,7 +31,7 @@ fn tcp_load(id: i64) -> TCP {
 }
 
 /// Should be called before calling any of the C functions.
-pub fn c_attach_node_os(os: NodeOs) {
+pub(crate) fn c_attach_node_os(os: NodeOs) {
     CURRENT_NODE_OS.with(|cell| {
         *cell.borrow_mut() = Some(os);
     });
@@ -96,6 +96,7 @@ pub extern "C" fn sim_epoll_rcv() -> Event {
                     AnyMessage::InternalConnect => AnyMessageTag::InternalConnect,
                     AnyMessage::Just32(_) => AnyMessageTag::Just32,
                     AnyMessage::ReplCell(_) => AnyMessageTag::ReplCell,
+                    AnyMessage::Bytes(_) => AnyMessageTag::Bytes,
                 },
             }
         }

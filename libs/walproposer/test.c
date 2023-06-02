@@ -1,6 +1,7 @@
 #include "bindgen_deps.h"
 #include "rust_bindings.h"
 #include <stdio.h>
+#include <pthread.h>
 #include "postgres.h"
 #include "utils/memutils.h"
 
@@ -8,8 +9,6 @@
 const char *progname = "fakepostgres";
 
 int TestFunc(int a, int b) {
-    MemoryContextInit();
-
     printf("TestFunc: %d + %d = %d\n", a, b, a + b);
     rust_function(0);
     elog(LOG, "postgres elog test");
@@ -19,8 +18,6 @@ int TestFunc(int a, int b) {
 
 // This is a quick experiment with rewriting existing Rust code in C.
 void RunClientC(uint32_t serverId) {
-    MemoryContextInit();
-
     uint32_t clientId = sim_id();
 
     elog(LOG, "started client");
@@ -54,4 +51,18 @@ void RunClientC(uint32_t serverId) {
             Assert(false);
         }
     }
+}
+
+bool initializedMemoryContext = false;
+// pthread_mutex_init(&lock, NULL)?
+pthread_mutex_t lock;
+
+void MyContextInit() {
+    // initializes global variables, TODO how to make them thread-local?
+    pthread_mutex_lock(&lock);
+    if (!initializedMemoryContext) {
+        initializedMemoryContext = true;
+        MemoryContextInit();
+    }
+    pthread_mutex_unlock(&lock);
 }

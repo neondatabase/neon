@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 /// All possible flavours of messages.
 /// Grouped by the receiver node.
 #[derive(Clone, Debug)]
@@ -8,6 +10,7 @@ pub enum AnyMessage {
     InternalConnect,
     Just32(u32),
     ReplCell(ReplCell),
+    Bytes(Bytes),
 }
 
 #[derive(Clone, Debug)]

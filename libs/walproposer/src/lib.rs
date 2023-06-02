@@ -2,6 +2,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+use safekeeper::simlib::node_os::NodeOs;
+
 pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
@@ -20,3 +22,10 @@ mod test;
 
 #[cfg(test)]
 pub mod simtest;
+
+pub fn c_context() -> Option<Box<dyn Fn(NodeOs) + Send + Sync>> {
+    Some(Box::new(|os: NodeOs| {
+        sim::c_attach_node_os(os);
+        unsafe { bindings::MyContextInit(); }
+    }))
+}

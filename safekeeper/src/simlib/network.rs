@@ -379,4 +379,12 @@ impl TCP {
             -positive
         }
     }
+
+    pub fn connection_id(&self) -> u64 {
+        self.conn.connection_id
+    }
+
+    pub fn close(&self) {
+        self.conn.close(self.dir as usize);
+    }
 }

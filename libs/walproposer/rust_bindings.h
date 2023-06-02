@@ -11,6 +11,7 @@ enum AnyMessageTag {
   InternalConnect,
   Just32,
   ReplCell,
+  Bytes,
 };
 typedef uint8_t AnyMessageTag;
 

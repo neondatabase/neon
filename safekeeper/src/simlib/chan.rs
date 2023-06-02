@@ -44,4 +44,10 @@ impl<T: Clone> Chan<T> {
             self.shared.condvar.wait(&mut queue);
         }
     }
+
+    /// Get a message from the front of the queue, or return `None` if the queue is empty.
+    pub fn try_recv(&self) -> Option<T> {
+        let mut queue = self.shared.queue.lock();
+        queue.pop_front()
+    }
 }

@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use crate::{
     simlib::{
-        network::{NetworkOptions},
         proto::ReplCell,
         world::World, node_os::NodeOs,
     },
@@ -15,8 +14,8 @@ use crate::{
 
 #[cfg(test)]
 mod tests {
-    use crate::simlib::network::{Delay, NetworkOptions};
-
+    use std::sync::Arc;
+    use crate::simlib::{network::{Delay, NetworkOptions}, world::World};
     use super::{u32_to_cells, start_simulation, Options, client::run_client};
 
     #[test]
@@ -36,10 +35,10 @@ mod tests {
         for seed in 0..20 {
             let u32_data: [u32; 5] = [1, 2, 3, 4, 5];
             let data = u32_to_cells(&u32_data, 1);
+            let world = Arc::new(World::new(seed, Arc::new(network.clone()), None));
 
             start_simulation(Options {
-                seed,
-                network: network.clone(),
+                world,
                 time_limit: 1_000_000,
                 client_fn: Box::new(move |os, server_id| {
                     run_client(os, &data, server_id)
@@ -52,16 +51,14 @@ mod tests {
 }
 
 pub struct Options {
-    pub seed: u64,
-    pub network: NetworkOptions,
+    pub world: Arc<World>,
     pub time_limit: u64,
     pub u32_data: [u32; 5],
     pub client_fn: Box<dyn FnOnce(NodeOs, u32) + Send + 'static>,
 }
 
 pub fn start_simulation(options: Options) {
-    let network = Arc::new(options.network);
-    let world = Arc::new(World::new(options.seed, network));
+    let world = options.world;
     world.register_world();
 
     let client_node = world.new_node();

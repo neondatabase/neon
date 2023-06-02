@@ -39,10 +39,13 @@ pub struct World {
 
     /// Network options.
     network_options: Arc<NetworkOptions>,
+
+    /// Optional function to initialize nodes right after thread creation.
+    nodes_init: Option<Box<dyn Fn(NodeOs) + Send + Sync>>,
 }
 
 impl World {
-    pub fn new(seed: u64, network_options: Arc<NetworkOptions>) -> World {
+    pub fn new(seed: u64, network_options: Arc<NetworkOptions>, nodes_init: Option<Box<dyn Fn(NodeOs) + Send + Sync>>) -> World {
         World {
             nodes: Mutex::new(Vec::new()),
             unconditional_parking: Mutex::new(Vec::new()),
@@ -51,6 +54,7 @@ impl World {
             timing: Mutex::new(Timing::new()),
             connection_counter: AtomicU64::new(0),
             network_options,
+            nodes_init,
         }
     }
 
@@ -276,6 +280,11 @@ impl Node {
 
             // park the current thread, [`launch`] will wait until it's parked
             Park::yield_thread();
+
+            if let Some(nodes_init) = world.nodes_init.as_ref() {
+                nodes_init(NodeOs::new(world.clone(), node.clone()));
+            }
+
             // TODO: recover from panic (update state, log the error)
             f(NodeOs::new(world, node.clone()));
 

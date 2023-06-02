@@ -4653,6 +4653,7 @@ dependencies = [
  "memoffset 0.8.0",
  "once_cell",
  "postgres",
+ "postgres_ffi",
  "rand",
  "regex",
  "safekeeper",
