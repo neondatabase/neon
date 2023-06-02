@@ -201,7 +201,7 @@ pub(super) async fn handle_walreceiver_connection(
     while let Some(replication_message) = {
         select! {
             _ = cancellation.cancelled() => {
-                info!("walreceiver interrupted");
+                debug!("walreceiver interrupted");
                 None
             }
             replication_message = physical_stream.next() => replication_message,
