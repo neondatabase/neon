@@ -617,7 +617,14 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
         TenantsMap::Open(m) => Ok(m
             .map
             .iter()
-            .filter_map(|(k, v)| v.get().map(|tenant| (*k, tenant.current_state())))
+            .map(|(id, tenant)| {
+                (
+                    *id,
+                    tenant
+                        .get()
+                        .map_or(TenantState::NotLoaded, |tenant| tenant.current_state()),
+                )
+            })
             .collect()),
         TenantsMap::ShuttingDown(m) => Ok(m
             .iter()
@@ -699,7 +706,7 @@ where
                 tenant_id,
                 e.get()
                     .get()
-                    .map_or(TenantState::Loading, |tenant| tenant.current_state()),
+                    .map_or(TenantState::NotLoaded, |tenant| tenant.current_state()),
             )),
             hash_map::Entry::Vacant(v) => match insert_fn() {
                 Ok(tenant) => {
