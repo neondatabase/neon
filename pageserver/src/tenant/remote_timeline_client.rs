@@ -228,6 +228,7 @@ use crate::metrics::{
     REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
 };
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
+use crate::tenant::upload_queue::Delete;
 use crate::{
     config::PageServerConf,
     task_mgr,
@@ -655,7 +656,11 @@ impl RemoteTimelineClient {
 
             // schedule the actual deletions
             for name in names {
-                let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone());
+                let op = UploadOp::Delete(Delete {
+                    file_kind: RemoteOpFileKind::Layer,
+                    layer_file_name: name.clone(),
+                    scheduled_from_timeline_delete: false,
+                });
                 self.calls_unfinished_metric_begin(&op);
                 upload_queue.queued_operations.push_back(op);
                 info!("scheduled layer file deletion {}", name.file_name());
@@ -842,7 +847,11 @@ impl RemoteTimelineClient {
 
             // schedule the actual deletions
             for name in stopped.upload_queue_for_deletion.latest_files.keys() {
-                let op = UploadOp::Delete(RemoteOpFileKind::Layer, name.clone());
+                let op = UploadOp::Delete(Delete {
+                    file_kind: RemoteOpFileKind::Layer,
+                    layer_file_name: name.clone(),
+                    scheduled_from_timeline_delete: true,
+                });
                 self.calls_unfinished_metric_begin(&op);
                 stopped
                     .upload_queue_for_deletion
@@ -911,7 +920,7 @@ impl RemoteTimelineClient {
                     // have finished.
                     upload_queue.inprogress_tasks.is_empty()
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_) => {
                     // Wait for preceding uploads to finish. Concurrent deletions are OK, though.
                     upload_queue.num_inprogress_deletions == upload_queue.inprogress_tasks.len()
                 }
@@ -942,7 +951,7 @@ impl RemoteTimelineClient {
                 UploadOp::UploadMetadata(_, _) => {
                     upload_queue.num_inprogress_metadata_uploads += 1;
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_) => {
                     upload_queue.num_inprogress_deletions += 1;
                 }
                 UploadOp::Barrier(sender) => {
@@ -1061,16 +1070,16 @@ impl RemoteTimelineClient {
                     }
                     res
                 }
-                UploadOp::Delete(metric_file_kind, ref layer_file_name) => {
+                UploadOp::Delete(delete) => {
                     let path = &self
                         .conf
                         .timeline_path(&self.timeline_id, &self.tenant_id)
-                        .join(layer_file_name.file_name());
+                        .join(delete.layer_file_name.file_name());
                     delete::delete_layer(self.conf, &self.storage_impl, path)
                         .measure_remote_op(
                             self.tenant_id,
                             self.timeline_id,
-                            *metric_file_kind,
+                            delete.file_kind,
                             RemoteOpKind::Delete,
                             Arc::clone(&self.metrics),
                         )
@@ -1137,9 +1146,23 @@ impl RemoteTimelineClient {
             let upload_queue = match upload_queue_guard.deref_mut() {
                 UploadQueue::Uninitialized => panic!("callers are responsible for ensuring this is only called on an initialized queue"),
                 UploadQueue::Stopped(stopped) => {
-                    &mut stopped.upload_queue_for_deletion
-                }, // nothing to do
-                UploadQueue::Initialized(qi) => { qi }
+                    // Special care is needed for deletions, if it was an earlier deletion (not scheduled from deletion)
+                    // then stop() took care of it so we just return.
+                    // For deletions that come from delete_all we still want to maintain metrics, launch following tasks, etc.
+                    match &task.op {
+                        UploadOp::Delete(delete) if delete.scheduled_from_timeline_delete => Some(&mut stopped.upload_queue_for_deletion),
+                        _ => None
+                    }
+                },
+                UploadQueue::Initialized(qi) => { Some(qi) }
+            };
+
+            let upload_queue = match upload_queue {
+                Some(upload_queue) => upload_queue,
+                None => {
+                    info!("another concurrent task already stopped the queue");
+                    return;
+                }
             };
 
             upload_queue.inprogress_tasks.remove(&task.task_id);
@@ -1152,7 +1175,7 @@ impl RemoteTimelineClient {
                     upload_queue.num_inprogress_metadata_uploads -= 1;
                     upload_queue.last_uploaded_consistent_lsn = lsn; // XXX monotonicity check?
                 }
-                UploadOp::Delete(_, _) => {
+                UploadOp::Delete(_) => {
                     upload_queue.num_inprogress_deletions -= 1;
                 }
                 UploadOp::Barrier(_) => unreachable!(),
@@ -1186,8 +1209,8 @@ impl RemoteTimelineClient {
                     reason: "metadata uploads are tiny",
                 },
             ),
-            UploadOp::Delete(file_kind, _) => (
-                *file_kind,
+            UploadOp::Delete(delete) => (
+                delete.file_kind,
                 RemoteOpKind::Delete,
                 DontTrackSize {
                     reason: "should we track deletes? positive or negative sign?",
