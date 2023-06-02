@@ -79,7 +79,7 @@ pub(super) async fn connection_manager_loop_step(
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
     let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id).await;
-    info!("Subscribed for broker timeline updates");
+    debug!("Subscribed for broker timeline updates");
 
     loop {
         let time_until_next_retry = connection_manager_state.time_until_next_retry();
@@ -156,7 +156,7 @@ pub(super) async fn connection_manager_loop_step(
                                 }
                                 TimelineState::Loading => {
                                     warn!("timeline transitioned back to Loading state, that should not happen");
-                                    return ControlFlow::Continue(new_state);
+                                    return ControlFlow::Continue(());
                                 }
                             }
                         }
@@ -164,12 +164,11 @@ pub(super) async fn connection_manager_loop_step(
                     }
                 }
             } => match new_event {
-                ControlFlow::Continue(new_state) => {
-                    info!("observed timeline state change, new state is {new_state:?}");
+                ControlFlow::Continue(()) => {
                     return ControlFlow::Continue(());
                 }
                 ControlFlow::Break(()) => {
-                    info!("Timeline dropped state updates sender, stopping wal connection manager loop");
+                    debug!("Timeline is no longer active, stopping wal connection manager loop");
                     return ControlFlow::Break(());
                 }
             },
