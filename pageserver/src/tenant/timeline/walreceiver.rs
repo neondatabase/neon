@@ -25,6 +25,7 @@ mod walreceiver_connection;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::timeline::walreceiver::connection_manager::{
     connection_manager_loop_step, ConnectionManagerState,
 };
@@ -85,6 +86,7 @@ impl WalReceiver {
             &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
             false,
             async move {
+                debug_assert_current_span_has_tenant_and_timeline_id();
                 info!("WAL receiver manager started, connecting to broker");
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
@@ -115,7 +117,7 @@ impl WalReceiver {
                 *loop_status.write().unwrap() = None;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
+            .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_id, timeline_id = %timeline_id))
         );
 
         Self {

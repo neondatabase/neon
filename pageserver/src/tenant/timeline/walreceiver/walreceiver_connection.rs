@@ -21,16 +21,16 @@ use postgres_types::PgLsn;
 use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn, Instrument};
 
 use super::TaskStateUpdate;
-use crate::metrics::LIVE_CONNECTIONS_COUNT;
-use crate::{context::RequestContext, metrics::WALRECEIVER_STARTED_CONNECTIONS};
 use crate::{
+    context::RequestContext,
+    metrics::{LIVE_CONNECTIONS_COUNT, WALRECEIVER_STARTED_CONNECTIONS},
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
-    tenant::{Timeline, WalReceiverInfo},
+    tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
@@ -127,6 +127,8 @@ pub(super) async fn handle_walreceiver_connection(
         "walreceiver connection",
         false,
         async move {
+            debug_assert_current_span_has_tenant_and_timeline_id();
+
             select! {
                 connection_result = connection => match connection_result {
                     Ok(()) => info!("Walreceiver db connection closed"),
@@ -140,7 +142,8 @@ pub(super) async fn handle_walreceiver_connection(
                 _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
             }
             Ok(())
-        },
+        }
+        .instrument(tracing::info_span!("poller")),
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.

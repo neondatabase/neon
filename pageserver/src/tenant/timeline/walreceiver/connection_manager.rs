@@ -18,7 +18,7 @@ use crate::metrics::{
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::Timeline;
+use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
@@ -390,7 +390,6 @@ impl ConnectionManagerState {
 
         self.drop_old_connection(true).await;
 
-        let id = self.id;
         let node_id = new_sk.safekeeper_id;
         let connect_timeout = self.conf.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
@@ -398,8 +397,11 @@ impl ConnectionManagerState {
             TaskKind::WalReceiverConnectionHandler,
             DownloadBehavior::Download,
         );
+
+        let span = info_span!("connection", %node_id);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
+                debug_assert_current_span_has_tenant_and_timeline_id();
                 super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
                     new_sk.wal_source_connconf,
@@ -412,9 +414,7 @@ impl ConnectionManagerState {
                 .await
                 .context("walreceiver connection handling failure")
             }
-            .instrument(
-                info_span!("walreceiver_connection", tenant_id = %id.tenant_id, timeline_id = %id.timeline_id, %node_id),
-            )
+            .instrument(span)
         });
 
         let now = Utc::now().naive_utc();
