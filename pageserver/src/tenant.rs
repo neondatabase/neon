@@ -1812,7 +1812,7 @@ impl Tenant {
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    pub async fn set_stopping(&self) -> Result<(), SetStoppingError> {
+    async fn set_stopping(&self) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
