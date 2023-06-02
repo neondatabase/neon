@@ -87,7 +87,7 @@ impl WalReceiver {
             false,
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
-                info!("WAL receiver manager started, connecting to broker");
+                debug!("WAL receiver manager started, connecting to broker");
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
@@ -95,7 +95,7 @@ impl WalReceiver {
                 loop {
                     select! {
                         _ = task_mgr::shutdown_watcher() => {
-                            info!("WAL receiver shutdown requested, shutting down");
+                            trace!("WAL receiver shutdown requested, shutting down");
                             break;
                         },
                         loop_step_result = connection_manager_loop_step(
@@ -106,7 +106,7 @@ impl WalReceiver {
                         ) => match loop_step_result {
                             ControlFlow::Continue(()) => continue,
                             ControlFlow::Break(()) => {
-                                info!("Connection manager loop ended, shutting down");
+                                trace!("Connection manager loop ended, shutting down");
                                 break;
                             }
                         },
@@ -216,7 +216,7 @@ impl<E: Clone> TaskHandle<E> {
                             // So, tone them down to info-level.
                             //
                             // XXX: rewrite this module to eliminate the race condition.
-                            info!("sender is dropped while join handle is still alive");
+                            trace!("sender is dropped while join handle is still alive");
                         }
 
                         let res = jh

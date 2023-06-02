@@ -97,7 +97,7 @@ pub(super) async fn handle_walreceiver_connection(
         }
     };
 
-    info!("connected!");
+    debug!("connected!");
     let mut connection_status = WalConnectionStatus {
         is_connected: true,
         has_processed_wal: false,
@@ -131,7 +131,7 @@ pub(super) async fn handle_walreceiver_connection(
 
             select! {
                 connection_result = connection => match connection_result {
-                    Ok(()) => info!("Walreceiver db connection closed"),
+                    Ok(()) => debug!("Walreceiver db connection closed"),
                     Err(connection_error) => {
                         if let Err(e) = ignore_expected_errors(connection_error) {
                             warn!("Connection aborted: {e:#}")
@@ -139,7 +139,7 @@ pub(super) async fn handle_walreceiver_connection(
                     }
                 },
                 // Future: replace connection_cancellation with connection_ctx cancellation
-                _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
+                _ = connection_cancellation.cancelled() => debug!("Connection cancelled"),
             }
             Ok(())
         }
