@@ -29,6 +29,7 @@ pub struct PersistentLayerDesc {
     pub file_size: u64,
 }
 
+/// A unique identifier of a persistent layer within the context of one timeline.
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct PersistentLayerKey {
     pub key_range: Range<Key>,

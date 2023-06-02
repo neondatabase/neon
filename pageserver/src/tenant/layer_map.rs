@@ -322,8 +322,6 @@ where
     pub fn remove_historic_noflush(&mut self, layer_desc: PersistentLayerDesc, layer: Arc<L>) {
         self.historic
             .remove(historic_layer_coverage::LayerKey::from(&*layer));
-        self.mapping.remove(&layer_desc.key());
-
         if Self::is_l0(&layer) {
             let len_before = self.l0_delta_layers.len();
             let mut l0_delta_layers = std::mem::take(&mut self.l0_delta_layers);
@@ -340,6 +338,7 @@ where
                 "failed to locate removed historic layer from l0_delta_layers"
             );
         }
+        self.mapping.remove(&layer_desc.key());
     }
 
     pub(self) fn replace_historic_noflush(
