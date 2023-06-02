@@ -486,6 +486,10 @@ impl std::fmt::Display for WaitToBecomeActiveError {
     }
 }
 
+pub(crate) enum ShutdownError {
+    AlreadyStopping,
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -1749,6 +1753,58 @@ impl Tenant {
                 );
             });
         }
+    }
+
+    /// Shutdown the tenant and join all of the spawned tasks.
+    ///
+    /// The method caters for all use-cases:
+    /// - pageserver shutdown (freeze_and_flush == true)
+    /// - detach + ignore (freeze_and_flush == false)
+    ///
+    /// This will attempt to shutdown even if tenant is broken.
+    pub(crate) async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
+        // Set tenant (and its timlines) to Stoppping state.
+        //
+        // Since we can only transition into Stopping state after activation is complete,
+        // run it in a JoinSet so all tenants have a chance to stop before we get SIGKILLed.
+        //
+        // Transitioning tenants to Stopping state has a couple of non-obvious side effects:
+        // 1. Lock out any new requests to the tenants.
+        // 2. Signal cancellation to WAL receivers (we wait on it below).
+        // 3. Signal cancellation for other tenant background loops.
+        // 4. ???
+        //
+        // The waiting for the cancellation is not done uniformly.
+        // We certainly wait for WAL receivers to shut down.
+        // That is necessary so that no new data comes in before the freeze_and_flush.
+        // But the tenant background loops are joined-on in our caller.
+        // It's mesed up.
+        // we just ignore the failure to stop
+        match self.set_stopping().await {
+            Ok(()) => {}
+            Err(SetStoppingError::Broken) => {
+                // assume that this is acceptable
+            }
+            Err(SetStoppingError::AlreadyStopping) => return Err(ShutdownError::AlreadyStopping),
+        };
+
+        if freeze_and_flush {
+            // Shut down all existing walreceiver connections and stop making the new ones.
+            task_mgr::shutdown_tasks(
+                Some(TaskKind::WalReceiverManager),
+                Some(self.tenant_id),
+                None,
+            )
+            .await;
+
+            if let Err(e) = self.freeze_and_flush().await {
+                warn!("Could not checkpoint tenant during shutdown: {e:?}");
+            }
+        }
+
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
+
+        Ok(())
     }
 
     /// Change tenant status to Stopping, to mark that it is being shut down.
