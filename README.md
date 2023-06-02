@@ -28,7 +28,8 @@ See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more informati
 * On Ubuntu or Debian, this set of packages should be sufficient to build the code:
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
-libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler
+libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler \
+libcurl4-openssl-dev
 ```
 * On Fedora, these packages are needed:
 ```bash
