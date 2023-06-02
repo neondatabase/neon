@@ -159,7 +159,7 @@ async fn import_rel(
                 debug!("relation {} already exists. we must be extending it", rel);
             }
             _ => {
-                return Err(err);
+                return Err(Error::from(err));
             }
         }
     }
