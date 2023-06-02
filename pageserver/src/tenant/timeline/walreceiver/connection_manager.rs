@@ -417,13 +417,9 @@ impl ConnectionManagerState {
                 match res {
                     Ok(()) => Ok(()),
                     Err(e) => {
-                        // FIXME: right now handle_walreceiver_connection has some `?` usage and
-                        // some filtering usage, so this is all a bit confusing.
                         let ok_error = if let Some(pg_error) = e.downcast_ref::<postgres::Error>() {
                             super::walreceiver_connection::is_expected_error(pg_error)
                         } else {
-                            // rust error types support arbitrary depth lists of errors chained by
-                            // std::error::Error::cause; determine if any of these is ok error
                             e.chain().any(|maybe_pgerr| {
                                 maybe_pgerr
                                     .downcast_ref::<postgres::Error>()

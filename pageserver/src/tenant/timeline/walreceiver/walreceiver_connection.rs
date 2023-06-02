@@ -81,13 +81,8 @@ pub(super) async fn handle_walreceiver_connection(
         config.application_name("pageserver");
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
         match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
-            Ok(Ok(client_and_conn)) => client_and_conn,
-            Ok(Err(conn_err)) => {
-                let expected_error = ignore_expected_errors(conn_err)?;
-                info!("DB connection stream finished: {expected_error}");
-                return Ok(());
-            }
-            Err(_) => {
+            Ok(client_and_conn) => client_and_conn?,
+            Err(_elapsed) => {
                 // Timing out to connect to a safekeeper node could happen long time, due to
                 // many reasons that pageserver cannot control.
                 // Do not produce an error, but make it visible, that timeouts happen by logging the `event.
@@ -212,14 +207,7 @@ pub(super) async fn handle_walreceiver_connection(
             replication_message = physical_stream.next() => replication_message,
         }
     } {
-        let replication_message = match replication_message {
-            Ok(message) => message,
-            Err(replication_error) => {
-                let expected_error = ignore_expected_errors(replication_error)?;
-                info!("Replication stream finished: {expected_error}");
-                return Ok(());
-            }
-        };
+        let replication_message = replication_message?;
 
         let now = Utc::now().naive_utc();
         let last_rec_lsn_before_msg = last_rec_lsn;
