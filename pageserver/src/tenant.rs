@@ -1441,28 +1441,56 @@ impl Tenant {
         Ok(())
     }
 
-    /// Flush all in-memory data to disk.
+    /// Flush all in-memory data to disk and remote storage, if any.
     ///
     /// Used at graceful shutdown.
-    ///
-    pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
-        // Scan through the hashmap and collect a list of all the timelines,
-        // while holding the lock. Then drop the lock and actually perform the
-        // flushing. We don't want to block everything else while the
-        // flushing is performed.
-        let timelines_to_flush = {
+    async fn freeze_and_flush_on_shutdown(&self) {
+        let mut js = tokio::task::JoinSet::new();
+
+        // execute on each timeline on the JoinSet, join after.
+        let per_timeline = |timeline_id: TimelineId, timeline: Arc<Timeline>| {
+            async move {
+                debug_assert_current_span_has_tenant_and_timeline_id();
+
+                match timeline.freeze_and_flush().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!("failed to freeze and flush: {e:#}");
+                        return;
+                    }
+                }
+
+                let res = if let Some(client) = timeline.remote_client.as_ref() {
+                    client.wait_completion().await
+                } else {
+                    Ok(())
+                };
+
+                if let Err(e) = res {
+                    warn!("failed to await for frozen and flushed uploads: {e:#}");
+                }
+            }
+            .instrument(tracing::info_span!("freeze_and_flush_on_shutdown", %timeline_id))
+        };
+
+        {
             let timelines = self.timelines.lock().unwrap();
             timelines
                 .iter()
-                .map(|(_id, timeline)| Arc::clone(timeline))
-                .collect::<Vec<_>>()
+                .map(|(id, tl)| (*id, Arc::clone(tl)))
+                .for_each(|(timeline_id, timeline)| {
+                    js.spawn(per_timeline(timeline_id, timeline));
+                })
         };
 
-        for timeline in &timelines_to_flush {
-            timeline.freeze_and_flush().await?;
+        while let Some(res) = js.join_next().await {
+            match res {
+                Ok(()) => {}
+                Err(je) if je.is_cancelled() => unreachable!("no cancelling used"),
+                Err(je) if je.is_panic() => { /* logged already */ }
+                Err(je) => warn!("unexpected JoinError: {je:?}"),
+            }
         }
-
-        Ok(())
     }
 
     /// Shuts down a timeline's tasks, removes its in-memory structures, and deletes its
@@ -1763,6 +1791,7 @@ impl Tenant {
     ///
     /// This will attempt to shutdown even if tenant is broken.
     pub(crate) async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
+        debug_assert_current_span_has_tenant_id();
         // Set tenant (and its timlines) to Stoppping state.
         //
         // Since we can only transition into Stopping state after activation is complete,
@@ -1797,9 +1826,7 @@ impl Tenant {
             )
             .await;
 
-            if let Err(e) = self.freeze_and_flush().await {
-                warn!("Could not checkpoint tenant during shutdown: {e:?}");
-            }
+            self.freeze_and_flush_on_shutdown().await;
         }
 
         // shutdown all tenant and timeline tasks: gc, compaction, page service)
