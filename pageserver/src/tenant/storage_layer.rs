@@ -490,8 +490,8 @@ impl LayerDescriptor {
     /// and the tenant / timeline id does not matter.
     pub fn get_persistent_layer_desc(&self) -> PersistentLayerDesc {
         PersistentLayerDesc::new_delta(
-            TenantId::generate(),
-            TimelineId::generate(),
+            TenantId::from_array([0; 16]),
+            TimelineId::from_array([0; 16]),
             self.key.clone(),
             self.lsn.clone(),
             233,
