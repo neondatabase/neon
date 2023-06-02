@@ -47,6 +47,8 @@ pub enum CalculateLogicalSizeError {
 pub enum RelationError {
     #[error("Relation Already Exists")]
     AlreadyExists,
+    #[error("invalid relnode")]
+    InvalidRelnode,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -869,8 +871,10 @@ impl<'a> DatadirModification<'a> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+    ) -> Result<(), RelationError> {
+        if rel.relnode == 0 {
+            Err (RelationError::InvalidRelnode)
+        }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
