@@ -154,12 +154,12 @@ async fn import_rel(
         .put_rel_creation(rel, nblocks as u32, ctx)
         .await
     {
-        match err {
-            RelationError::AlreadyExists => {
+        match err.downcast_ref::<RelationError>() {
+            Some(RelationError::AlreadyExists) => {
                 debug!("relation {} already exists. we must be extending it", rel);
             }
             _ => {
-                return Err(Error::from(err));
+                return Err(err);
             }
         }
     }
