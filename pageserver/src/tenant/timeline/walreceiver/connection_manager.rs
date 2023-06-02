@@ -55,8 +55,11 @@ pub(super) async fn connection_manager_loop_step(
         .await
     {
         Ok(()) => {}
-        Err(_) => {
-            info!("Timeline dropped state updates sender before becoming active, stopping wal connection manager loop");
+        Err(new_state) => {
+            debug!(
+                ?new_state,
+                "state changed, stopping wal connection manager loop"
+            );
             return ControlFlow::Break(());
         }
     }
