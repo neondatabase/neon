@@ -437,12 +437,22 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     wait_until(50, 0.1, got_hangup_log_message)
 
-    # ok, retry without failpoint, it should succeed
+    # check that the timeline is still present
+    ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
+
+    # ok, disable the failpoint to let the deletion finish
     ps_http.configure_failpoints((failpoint_name, "off"))
 
-    # this should succeed
-    ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
-    # the second call will try to transition the timeline into Stopping state, but it's already in that state
-    env.pageserver.allowed_errors.append(
-        f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
-    )
+    def first_request_finished():
+        message = f".*DELETE.*{child_timeline_id}.*Cancelled request finished"
+        assert env.pageserver.log_contains(message)
+
+    wait_until(50, 0.1, first_request_finished)
+
+    # check that the timeline is gone
+    notfound_message = f"Timeline {env.initial_tenant}/{child_timeline_id} was not found"
+    env.pageserver.allowed_errors.append(".*" + notfound_message)
+    with pytest.raises(PageserverApiException, match=notfound_message) as exc:
+        ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
+
+    assert exc.value.status_code == 404

@@ -40,6 +40,12 @@ struct RequestId(String);
 ///
 /// This also handles errors, logging them and converting them to an HTTP error response.
 ///
+/// NB: If the client disconnects, Hyper will drop the Future, without polling it to
+/// completion. In other words, the handler must be async cancellation safe! request_span
+/// prints a warning to the log when that happens, so that you have some trace of it in
+/// the log.
+///
+///
 /// There could be other ways to implement similar functionality:
 ///
 /// * procmacros placed on top of all handler methods
