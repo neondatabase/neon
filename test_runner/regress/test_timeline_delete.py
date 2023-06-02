@@ -3,6 +3,7 @@ import queue
 import shutil
 import threading
 from pathlib import Path
+from typing import Optional
 
 import pytest
 import requests
@@ -11,9 +12,10 @@ from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     RemoteStorageKind,
+    S3Storage,
     available_remote_storages,
 )
-from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
@@ -174,6 +176,23 @@ def test_delete_timeline_post_rm_failure(
     )
 
 
+def assert_detail_404(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+):
+    try:
+        data = pageserver_http.timeline_detail(tenant_id, timeline_id)
+        log.error(f"detail {data}")
+    except PageserverApiException as e:
+        log.error(e)
+        if e.status_code == 404:
+            return
+        else:
+            raise
+    raise Exception("detail succeeded (it should return 404)")
+
+
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
 @pytest.mark.parametrize("fill_branch", [True, False])
 def test_timeline_resurrection_on_attach(
@@ -246,6 +265,8 @@ def test_timeline_resurrection_on_attach(
     # delete new timeline
     ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=branch_timeline_id)
 
+    wait_until(2, 0.5, lambda: assert_detail_404(ps_http, tenant_id, branch_timeline_id))
+
     ##### Stop the pageserver instance, erase all its data
     env.endpoints.stop_all()
     env.pageserver.stop()
@@ -266,6 +287,26 @@ def test_timeline_resurrection_on_attach(
         main_timeline_id
     }, "the deleted timeline should not have been resurrected"
     assert all([tl["state"] == "Active" for tl in timelines])
+
+
+def assert_prefix_empty(neon_env_builder: NeonEnvBuilder, prefix: Optional[str] = None):
+    # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
+    assert neon_env_builder.remote_storage_kind in (
+        RemoteStorageKind.MOCK_S3,
+        RemoteStorageKind.REAL_S3,
+    )
+    # For mypy
+    assert isinstance(neon_env_builder.remote_storage, S3Storage)
+
+    # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
+    response = neon_env_builder.remote_storage_client.list_objects_v2(
+        Bucket=neon_env_builder.remote_storage.bucket_name,
+        Prefix=prefix or "",
+    )
+    objects = response.get("Contents")
+    assert (
+        response["KeyCount"] == 0
+    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
 
 
 def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuilder):
@@ -327,6 +368,11 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     # Wait for tenant to finish loading.
     wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=1)
 
+    env.pageserver.allowed_errors.append(
+        f".*Timeline {env.initial_tenant}/{leaf_timeline_id} was not found.*"
+    )
+    wait_until(2, 0.5, lambda: assert_detail_404(ps_http, env.initial_tenant, leaf_timeline_id))
+
     assert (
         not leaf_timeline_path.exists()
     ), "timeline load procedure should have resumed the deletion interrupted by the failpoint"
@@ -336,6 +382,48 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         env.initial_timeline,
     }, "other timelines should not have been affected"
     assert all([tl["state"] == "Active" for tl in timelines])
+
+    assert_prefix_empty(
+        neon_env_builder,
+        prefix="/".join(
+            (
+                "tenants",
+                str(env.initial_tenant),
+                "timelines",
+                str(leaf_timeline_id),
+            )
+        ),
+    )
+
+    assert env.initial_timeline is not None
+
+    for timeline_id in (intermediate_timeline_id, env.initial_timeline):
+        ps_http.timeline_delete(env.initial_tenant, timeline_id)
+
+        env.pageserver.allowed_errors.append(
+            f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
+        )
+        wait_until(2, 0.5, lambda: assert_detail_404(ps_http, env.initial_tenant, timeline_id))
+
+        assert_prefix_empty(
+            neon_env_builder,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(env.initial_tenant),
+                    "timelines",
+                    str(timeline_id),
+                )
+            ),
+        )
+
+    # for some reason the check above doesnt immediately take effect for the below.
+    # Assume it is mock server incosistency and check twice.
+    wait_until(
+        2,
+        0.5,
+        lambda: assert_prefix_empty(neon_env_builder),
+    )
 
 
 def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
@@ -466,4 +554,89 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     # the second call will try to transition the timeline into Stopping state, but it's already in that state
     env.pageserver.allowed_errors.append(
         f".*{child_timeline_id}.*Ignoring new state, equal to the existing one: Stopping"
+    )
+
+
+@pytest.mark.parametrize(
+    "remote_storage_kind",
+    list(
+        filter(
+            lambda s: s in (RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3),
+            available_remote_storages(),
+        )
+    ),
+)
+def test_timeline_delete_works_for_remote_smoke(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    neon_env_builder.enable_remote_storage(
+        remote_storage_kind=remote_storage_kind,
+        test_name="test_timeline_resurrection_on_attach",
+    )
+
+    env = neon_env_builder.init_start()
+
+    ps_http = env.pageserver.http_client()
+    pg = env.endpoints.create_start("main")
+
+    tenant_id = TenantId(pg.safe_psql("show neon.tenant_id")[0][0])
+    main_timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+
+    assert tenant_id == env.initial_tenant
+    assert main_timeline_id == env.initial_timeline
+
+    timeline_ids = [env.initial_timeline]
+    for i in range(2):
+        branch_timeline_id = env.neon_cli.create_branch(f"new{i}", "main")
+        pg = env.endpoints.create_start(f"new{i}")
+
+        with pg.cursor() as cur:
+            cur.execute("CREATE TABLE f (i integer);")
+            cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
+            current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
+
+            # wait until pageserver receives that data
+            wait_for_last_record_lsn(ps_http, tenant_id, branch_timeline_id, current_lsn)
+
+            # run checkpoint manually to be sure that data landed in remote storage
+            ps_http.timeline_checkpoint(tenant_id, branch_timeline_id)
+
+            # wait until pageserver successfully uploaded a checkpoint to remote storage
+            log.info("waiting for checkpoint upload")
+            wait_for_upload(ps_http, tenant_id, branch_timeline_id, current_lsn)
+            log.info("upload of checkpoint is done")
+            timeline_id = TimelineId(pg.safe_psql("show neon.timeline_id")[0][0])
+
+        timeline_ids.append(timeline_id)
+
+    # schedule all deletes first
+    for timeline_id in reversed(timeline_ids):
+        ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
+
+    # then wait for them to finish
+    for timeline_id in reversed(timeline_ids):
+        env.pageserver.allowed_errors.append(
+            f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
+        )
+        wait_until(2, 0.5, lambda: assert_detail_404(ps_http, tenant_id, timeline_id))
+
+        assert_prefix_empty(
+            neon_env_builder,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(env.initial_tenant),
+                    "timelines",
+                    str(timeline_id),
+                )
+            ),
+        )
+
+    # for some reason the check above doesnt immediately take effect for the below.
+    # Assume it is mock server incosistency and check twice.
+    wait_until(
+        2,
+        0.5,
+        lambda: assert_prefix_empty(neon_env_builder),
     )
