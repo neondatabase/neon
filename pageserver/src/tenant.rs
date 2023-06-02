@@ -444,7 +444,7 @@ pub enum DeleteTimelineError {
     #[error("NotFound")]
     NotFound,
     #[error("HasChildren")]
-    HasChildren,
+    HasChildren(Vec<TimelineId>),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -1620,12 +1620,19 @@ impl Tenant {
 
             // Ensure that there are no child timelines **attached to that pageserver**,
             // because detach removes files, which will break child branches
-            let children_exist = timelines
+            let children: Vec<TimelineId> = timelines
                 .iter()
-                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+                .filter_map(|(id, entry)| {
+                    if entry.get_ancestor_timeline_id() == Some(timeline_id) {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-            if children_exist {
-                return Err(DeleteTimelineError::HasChildren);
+            if !children.is_empty() {
+                return Err(DeleteTimelineError::HasChildren(children));
             }
 
             let timeline_entry = match timelines.entry(timeline_id) {
