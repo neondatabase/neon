@@ -206,16 +206,12 @@ impl<E: Clone> TaskHandle<E> {
 
                         let res = match jh.await {
                             Ok(res) => res,
-                            Err(je) if je.is_cancelled() => {
-                                unreachable!("we don't cancel via tokio")
-                            }
+                            Err(je) if je.is_cancelled() => unreachable!("not used"),
                             Err(je) if je.is_panic() => {
-                                // panic has already been reported; do not double report
+                                // already logged
                                 Ok(())
                             }
-                            Err(je) => {
-                                Err(anyhow::Error::new(je).context("join task walreceiver task"))
-                            }
+                            Err(je) => Err(anyhow::Error::new(je).context("join walreceiver task")),
                         };
 
                         // For cancellation-safety, drop join_handle only after successful .await.
@@ -239,12 +235,12 @@ impl<E: Clone> TaskHandle<E> {
             match jh.await {
                 Ok(Ok(())) => debug!("Shutdown success"),
                 Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
-                Err(join_error) => {
-                    if join_error.is_cancelled() {
-                        error!("Shutdown task was cancelled");
-                    } else {
-                        error!("Shutdown task join error: {join_error}")
-                    }
+                Err(je) if je.is_cancelled() => unreachable!("not used"),
+                Err(je) if je.is_panic() => {
+                    // already logged
+                }
+                Err(je) => {
+                    error!("Shutdown task join error: {je}")
                 }
             }
         }
