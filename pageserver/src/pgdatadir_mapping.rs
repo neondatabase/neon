@@ -873,7 +873,7 @@ impl<'a> DatadirModification<'a> {
         ctx: &RequestContext,
     ) -> Result<(), RelationError> {
         if rel.relnode == 0 {
-            Err (RelationError::InvalidRelnode)
+            return Err (RelationError::InvalidRelnode);
         }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
