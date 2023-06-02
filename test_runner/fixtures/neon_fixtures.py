@@ -1589,7 +1589,7 @@ class NeonPageserver(PgProtocol):
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
             ".*Connection aborted: connection error: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*Replication stream finished: db error:.*ending streaming to Some*",
+            ".*: db error:.*ending streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
