@@ -1,6 +1,5 @@
 import socket
 import subprocess
-import os
 from pathlib import Path
 from types import TracebackType
 from typing import Optional, Type
@@ -66,7 +65,7 @@ class PgSniRouter(PgProtocol):
         router_log_path = self.test_output_dir / "pg_sni_router.log"
         router_log = open(router_log_path, "w")
 
-        self._popen = subprocess.Popen(args, stderr = router_log)
+        self._popen = subprocess.Popen(args, stderr=router_log)
         self._wait_until_ready()
         log.info(f"pg_sni_router started, log file: {router_log_path}")
         return self
