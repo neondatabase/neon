@@ -191,7 +191,6 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     let mut stream = PqStream::new(Stream::from_raw(raw_stream));
 
     let msg = stream.read_startup_packet().await?;
-    info!("received {msg:?}");
     use pq_proto::FeStartupPacket::*;
 
     match msg {
@@ -214,7 +213,13 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             }
             Ok(raw.upgrade(tls_config).await?)
         }
-        _ => stream.throw_error_str(ERR_INSECURE_CONNECTION).await?,
+        unexpected => {
+            info!(
+                ?unexpected,
+                "unexpected startup packet, rejecting connection"
+            );
+            stream.throw_error_str(ERR_INSECURE_CONNECTION).await?
+        }
     }
 }
 
