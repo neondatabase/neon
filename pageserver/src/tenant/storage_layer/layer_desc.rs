@@ -1,10 +1,11 @@
+use anyhow::Result;
 use std::ops::Range;
 use utils::{
     id::{TenantId, TimelineId},
     lsn::Lsn,
 };
 
-use crate::repository::Key;
+use crate::{context::RequestContext, repository::Key};
 
 use super::{DeltaFileName, ImageFileName, LayerFileName};
 
@@ -24,9 +25,26 @@ pub struct PersistentLayerDesc {
     /// always be equal to `is_delta`. If we land the partial image layer PR someday, image layer could also be
     /// incremental.
     pub is_incremental: bool,
+    /// File size
+    pub file_size: u64,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub struct PersistentLayerKey {
+    pub key_range: Range<Key>,
+    pub lsn_range: Range<Lsn>,
+    pub is_delta: bool,
 }
 
 impl PersistentLayerDesc {
+    pub fn key(&self) -> PersistentLayerKey {
+        PersistentLayerKey {
+            key_range: self.key_range.clone(),
+            lsn_range: self.lsn_range.clone(),
+            is_delta: self.is_delta,
+        }
+    }
+
     pub fn short_id(&self) -> String {
         self.filename().file_name()
     }
@@ -37,6 +55,7 @@ impl PersistentLayerDesc {
         key_range: Range<Key>,
         lsn: Lsn,
         is_incremental: bool,
+        file_size: u64,
     ) -> Self {
         Self {
             tenant_id,
@@ -45,6 +64,7 @@ impl PersistentLayerDesc {
             lsn_range: Self::image_layer_lsn_range(lsn),
             is_delta: false,
             is_incremental,
+            file_size,
         }
     }
 
@@ -53,6 +73,7 @@ impl PersistentLayerDesc {
         timeline_id: TimelineId,
         key_range: Range<Key>,
         lsn_range: Range<Lsn>,
+        file_size: u64,
     ) -> Self {
         Self {
             tenant_id,
@@ -61,6 +82,7 @@ impl PersistentLayerDesc {
             lsn_range,
             is_delta: true,
             is_incremental: true,
+            file_size,
         }
     }
 
@@ -105,5 +127,47 @@ impl PersistentLayerDesc {
         } else {
             self.image_file_name().into()
         }
+    }
+
+    pub fn get_lsn_range(&self) -> Range<Lsn> {
+        self.lsn_range.clone()
+    }
+
+    pub fn get_key_range(&self) -> Range<Key> {
+        self.key_range.clone()
+    }
+
+    pub fn get_timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+
+    pub fn get_tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    pub fn is_incremental(&self) -> bool {
+        self.is_incremental
+    }
+
+    pub fn is_delta(&self) -> bool {
+        self.is_delta
+    }
+
+    pub fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
+        println!(
+            "----- layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
+            self.tenant_id,
+            self.timeline_id,
+            self.key_range.start,
+            self.key_range.end,
+            self.lsn_range.start,
+            self.lsn_range.end
+        );
+
+        Ok(())
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.file_size
     }
 }
