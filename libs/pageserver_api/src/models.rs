@@ -910,7 +910,7 @@ mod tests {
     fn tenantstatus_activating_strum() {
         // tests added, because we use these for metrics
         let examples = [
-            (line!(), TenantState::NotLoaded, "Not Loaded"),
+            (line!(), TenantState::NotLoaded, "NotLoaded"),
             (line!(), TenantState::Loading, "Loading"),
             (line!(), TenantState::Attaching, "Attaching"),
             (
