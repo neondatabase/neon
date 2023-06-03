@@ -615,18 +615,20 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
     let tenants = TENANTS.read().await;
     match &*tenants {
         TenantsMap::Initializing => Err(TenantMapListError::Initializing),
-        TenantsMap::Open(m) => Ok(futures::future::join_all(m.map.iter().map(|(id, tenant)| async {
-            (
-                *id,
-                tenant
-                    .get_or_try_init(|| m.try_load_tenant(id))
-                    .await
-                    .map_or(
-                        TenantState::broken_from_reason("Failed to load tenant".to_string()),
-                        |t| t.current_state(),
-                    ),
-            )
-        }))
+        TenantsMap::Open(m) => Ok(futures::future::join_all(m.map.iter().map(
+            |(id, tenant)| async {
+                (
+                    *id,
+                    tenant
+                        .get_or_try_init(|| m.try_load_tenant(id))
+                        .await
+                        .map_or(
+                            TenantState::broken_from_reason("Failed to load tenant".to_string()),
+                            |t| t.current_state(),
+                        ),
+                )
+            },
+        ))
         .await),
         TenantsMap::ShuttingDown(m) => Ok(m
             .iter()
