@@ -1,7 +1,6 @@
 //! This module acts as a switchboard to access different repositories managed by this
 //! page server.
 
-use futures::future::join_all;
 use std::collections::{hash_map, HashMap};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -616,7 +615,7 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
     let tenants = TENANTS.read().await;
     match &*tenants {
         TenantsMap::Initializing => Err(TenantMapListError::Initializing),
-        TenantsMap::Open(m) => Ok(join_all(m.map.iter().map(|(id, tenant)| async {
+        TenantsMap::Open(m) => Ok(futures::future::join_all(m.map.iter().map(|(id, tenant)| async {
             (
                 *id,
                 tenant
