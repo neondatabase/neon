@@ -4649,6 +4649,7 @@ dependencies = [
  "crc32c",
  "env_logger",
  "hex",
+ "hyper",
  "log",
  "memoffset 0.8.0",
  "once_cell",

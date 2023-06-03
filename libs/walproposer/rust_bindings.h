@@ -19,6 +19,7 @@ typedef uint8_t AnyMessageTag;
  * List of all possible NodeEvent.
  */
 enum EventTag {
+  Timeout,
   Accept,
   Closed,
   Message,
@@ -52,7 +53,14 @@ int64_t sim_open_tcp(uint32_t dst);
  */
 void sim_tcp_send(int64_t tcp);
 
-struct Event sim_epoll_rcv(void);
+struct Event sim_epoll_rcv(int64_t timeout);
+
+int64_t sim_now(void);
+
+/**
+ * Get tag of the current message.
+ */
+AnyMessageTag sim_msg_tag(void);
 
 /**
  * Read AnyMessage::Just32 message.
@@ -63,3 +71,13 @@ void sim_msg_get_just_u32(uint32_t *val);
  * Write AnyMessage::ReplCell message.
  */
 void sim_msg_set_repl_cell(uint32_t value, uint32_t client_id, uint32_t seqno);
+
+/**
+ * Write AnyMessage::Bytes message.
+ */
+void sim_msg_set_bytes(const uint8_t *bytes, uintptr_t len);
+
+/**
+ * Read AnyMessage::Bytes message.
+ */
+const uint8_t *sim_msg_get_bytes(uintptr_t *len);

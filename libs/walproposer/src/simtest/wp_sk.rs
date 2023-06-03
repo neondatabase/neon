@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::{sync::Arc, ffi::CString};
 
 use safekeeper::simlib::{network::{Delay, NetworkOptions}, world::World};
+use utils::{id::TenantTimelineId, logging};
 
-use crate::{simtest::safekeeper::run_server, c_context};
+use crate::{simtest::safekeeper::run_server, c_context, bindings::{WalProposerRust, wal_acceptors_list, wal_acceptor_reconnect_timeout, wal_acceptor_connection_timeout, neon_tenant_walproposer, neon_timeline_walproposer}};
 
 #[test]
 fn run_walproposer_safekeeper_test() {
+    logging::init(logging::LogFormat::Plain).unwrap();
+
     let delay = Delay {
         min: 1,
         max: 5,
@@ -26,10 +29,24 @@ fn run_walproposer_safekeeper_test() {
     let client_node = world.new_node();
 
     let servers = [world.new_node(), world.new_node(), world.new_node()];
-    // let server_ids = [servers[0].id, servers[1].id, servers[2].id];
+    let server_ids = [servers[0].id, servers[1].id, servers[2].id];
+    let safekeepers_guc = server_ids.map(|id| format!("node:{}", id)).join(",");
+
+    println!("server ids: {:?}", safekeepers_guc);
+    let ttid = TenantTimelineId::generate();
 
     // start the client thread
     client_node.launch(move |_| {
+        let list = CString::new(safekeepers_guc).unwrap();
+
+        unsafe {
+            wal_acceptors_list = list.into_raw();
+            wal_acceptor_reconnect_timeout = 1000;
+            wal_acceptor_connection_timeout = 5000;
+            neon_tenant_walproposer = CString::new(ttid.tenant_id.to_string()).unwrap().into_raw();
+            neon_timeline_walproposer = CString::new(ttid.timeline_id.to_string()).unwrap().into_raw();
+            WalProposerRust();
+        }
         // TODO: run sync-safekeepers
     });
 
@@ -44,7 +61,7 @@ fn run_walproposer_safekeeper_test() {
     }
 
     world.await_all();
-    let time_limit = 1_000_000;
+    let time_limit = 1_000_0;
 
     while world.step() && world.now() < time_limit {}
 

@@ -20,6 +20,7 @@ serde.workspace = true
 utils.workspace = true
 safekeeper.workspace = true
 postgres_ffi.workspace = true
+hyper.workspace = true
 
 workspace_hack.workspace = true
 

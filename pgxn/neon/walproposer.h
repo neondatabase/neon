@@ -10,6 +10,8 @@
 #include "utils/uuid.h"
 #include "replication/walreceiver.h"
 
+#define SIMLIB
+
 #define SK_MAGIC 0xCafeCeefu
 #define SK_PROTOCOL_VERSION 2
 
@@ -374,8 +376,11 @@ typedef struct Safekeeper
 	XLogRecPtr	streamingAt;	/* current streaming position */
 	AppendRequestHeader appendRequest;	/* request for sending to safekeeper */
 
+#ifndef SIMLIB
 	int			eventPos;		/* position in wait event set. Equal to -1 if*
 								 * no event */
+#endif
+
 	SafekeeperState state;		/* safekeeper state machine state */
 	TimestampTz latestMsgReceivedAt;        /* when latest msg is received */
 	AcceptorGreeting greetResponse; /* acceptor greeting */

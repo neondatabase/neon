@@ -2,12 +2,13 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use bytes::BytesMut;
+use hyper::Uri;
 use log::info;
 use safekeeper::{simlib::{node_os::NodeOs, network::TCP, world::NodeEvent, proto::AnyMessage}, safekeeper::{ProposerAcceptorMessage, ServerInfo, SafeKeeperState, UNKNOWN_SERVER_VERSION, SafeKeeper}, timeline::{TimelineError}, SafeKeeperConf};
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::{id::{TenantTimelineId, NodeId}, lsn::Lsn};
 use anyhow::{Result, bail};
 
 use crate::simtest::storage::{InMemoryState, DummyWalStore};
@@ -28,6 +29,21 @@ struct SharedState {
 
 pub fn run_server(os: NodeOs) -> Result<()> {
     println!("started server {}", os.id());
+    let conf = SafeKeeperConf {
+        workdir: PathBuf::from("."),
+        my_id: NodeId(os.id() as u64),
+        listen_pg_addr: String::new(),
+        listen_http_addr: String::new(),
+        no_sync: false,
+        broker_endpoint: "/".parse::<Uri>().unwrap(),
+        broker_keepalive_interval: Duration::from_secs(0),
+        heartbeat_timeout: Duration::from_secs(0),
+        remote_storage: None,
+        max_offloader_lag_bytes: 0,
+        backup_runtime_threads: None,
+        wal_backup_enabled: false,
+        auth: None,
+    };
 
     let mut conns: HashMap<i64, ConnState> = HashMap::new();
 
@@ -46,7 +62,7 @@ pub fn run_server(os: NodeOs) -> Result<()> {
                 NodeEvent::Accept(tcp) => {
                     conns.insert(tcp.id(), ConnState {
                         tcp,
-                        conf: SafeKeeperConf::dummy(),
+                        conf: conf.clone(),
                         greeting: false,
                         ttid: TenantTimelineId::empty(),
                         tli: None,
@@ -66,6 +82,7 @@ pub fn run_server(os: NodeOs) -> Result<()> {
                     }
                 }
                 NodeEvent::Closed(_) => {}
+                NodeEvent::WakeTimeout(_) => {}
             }
 
             // TODO: make simulator support multiple events per tick
@@ -86,6 +103,7 @@ impl ConnState {
     fn process_any(&mut self, any: AnyMessage) -> Result<()> {
         if let AnyMessage::Bytes(copy_data) = any {
             let msg = ProposerAcceptorMessage::parse(copy_data)?;
+            println!("got msg: {:?}", msg);
             return self.process(msg);
         } else {
             bail!("unexpected message, expected AnyMessage::Bytes");
@@ -157,8 +175,6 @@ impl ConnState {
                     );
                 }
             }
-
-            return Ok(());
         }
 
         match msg {

@@ -2,8 +2,10 @@
 #include "rust_bindings.h"
 #include <stdio.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include "postgres.h"
 #include "utils/memutils.h"
+#include "utils/guc.h"
 
 // From src/backend/main/main.c
 const char *progname = "fakepostgres";
@@ -30,7 +32,7 @@ void RunClientC(uint32_t serverId) {
         sim_msg_set_repl_cell(delivered+1, clientId, delivered);
         sim_tcp_send(tcp);
 
-        Event event = sim_epoll_rcv();
+        Event event = sim_epoll_rcv(-1);
         switch (event.tag)
         {
         case Closed:
@@ -63,6 +65,19 @@ void MyContextInit() {
     if (!initializedMemoryContext) {
         initializedMemoryContext = true;
         MemoryContextInit();
+
+        setenv("PGDATA", "/home/admin/simulator/libs/walproposer/pgdata", 1);
+
+        /*
+         * Set default values for command-line options.
+         */
+        InitializeGUCOptions();
+
+        /* Acquire configuration parameters */
+        if (!SelectConfigFiles(NULL, progname))
+            exit(1);
+
+        log_min_messages = DEBUG5;
     }
     pthread_mutex_unlock(&lock);
 }

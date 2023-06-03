@@ -83,6 +83,12 @@ char	   *neon_tenant_walproposer = NULL;
 char	   *neon_safekeeper_token_walproposer = NULL;
 
 #define WAL_PROPOSER_SLOT_NAME "wal_proposer_slot"
+#define SIMLIB
+
+#ifdef SIMLIB
+#include "rust_bindings.h"
+#define GetCurrentTimestamp() ((TimestampTz) sim_now())
+#endif
 
 static int	n_safekeepers = 0;
 static int	quorum = 0;
@@ -319,6 +325,7 @@ nwp_shmem_startup_hook(void)
 void WalProposerRust()
 {
 	elog(LOG, "WalProposerRust");
+	WalProposerSync(0, NULL);
 }
 
 /*
@@ -382,6 +389,36 @@ WalProposerBroadcast(XLogRecPtr startpos, XLogRecPtr endpos)
 	BroadcastAppendRequest();
 }
 
+#ifdef SIMLIB
+int
+SimWaitEventSetWait(Safekeeper **sk, long timeout, WaitEvent *occurred_events)
+{
+	Event event = sim_epoll_rcv(timeout);
+	if (event.tag == Closed) {
+		// TODO: shutdown connection?
+		// elog(LOG, "connection closed");
+		// ShutdownConnection(sk);
+		return 0;
+	} else if (event.tag == Message) {
+		Assert(event.any_message == Bytes);
+		for (int i = 0; i < n_safekeepers; i++) {
+			if (safekeeper[i].conn && ((int64_t) walprop_socket(safekeeper[i].conn)) == event.tcp) {
+				*occurred_events = (WaitEvent) {
+					.events = WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE,
+				};
+				*sk = &safekeeper[i];
+				return 1;
+			}
+		}
+		elog(FATAL, "unknown tcp connection");
+	} else if (event.tag == Timeout) {
+		return 0;
+	} else {
+		Assert(false);
+	}
+}
+#endif
+
 /*
  * Advance the WAL proposer state machine, waiting each time for events to occur.
  * Will exit only when latch is set, i.e. new WAL should be pushed from walsender
@@ -397,16 +434,25 @@ WalProposerPoll(void)
 		WaitEvent	event;
 		TimestampTz now = GetCurrentTimestamp();
 
+#ifndef SIMLIB
 		rc = WaitEventSetWait(waitEvents, TimeToReconnect(now),
 							  &event, 1, WAIT_EVENT_WAL_SENDER_MAIN);
 		sk = (Safekeeper *) event.user_data;
+#else
+		rc = SimWaitEventSetWait(&sk, TimeToReconnect(now), &event);
+#endif
 
 		/*
 		 * If the event contains something that one of our safekeeper states
 		 * was waiting for, we'll advance its state.
 		 */
 		if (rc != 0 && (event.events & (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE)))
+		{
 			AdvancePollState(sk, event.events);
+		#ifdef SIMLIB
+			// TODO: assert that code consumed incoming message
+		#endif
+		}
 
 		/*
 		 * If the timeout expired, attempt to reconnect to any safekeepers
@@ -421,7 +467,9 @@ WalProposerPoll(void)
 		 */
 		if (rc != 0 && (event.events & WL_LATCH_SET))
 		{
+		#ifndef SIMLIB
 			ResetLatch(MyLatch);
+		#endif
 			break;
 		}
 
@@ -491,9 +539,11 @@ WalProposerInit(XLogRecPtr flushRecPtr, uint64 systemId)
 	char	   *sep;
 	char	   *port;
 
+#ifndef SIMLIB
 	load_file("libpqwalreceiver", false);
 	if (WalReceiverFunctions == NULL)
 		elog(ERROR, "libpqwalreceiver didn't initialize correctly");
+#endif
 
 	for (host = wal_acceptors_list; host != NULL && *host != '\0'; host = sep)
 	{
@@ -597,6 +647,8 @@ WalProposerLoop(void)
 		WalProposerPoll();
 }
 
+#ifndef SIMLIB
+
 /* Initializes the internal event set, provided that it is currently null */
 static void
 InitEventSet(void)
@@ -667,6 +719,26 @@ HackyRemoveWalProposerEvent(Safekeeper *to_remove)
 		}
 	}
 }
+
+#else
+static void
+InitEventSet(void)
+{
+	elog(DEBUG5, "InitEventSet");
+}
+
+static void
+UpdateEventSet(Safekeeper *sk, uint32 events)
+{
+	elog(DEBUG5, "UpdateEventSet");
+}
+
+static void
+HackyRemoveWalProposerEvent(Safekeeper *to_remove)
+{
+	elog(DEBUG5, "HackyRemoveWalProposerEvent");
+}
+#endif
 
 /* Shuts down and cleans up the connection for a safekeeper. Sets its state to SS_OFFLINE */
 static void
@@ -760,8 +832,13 @@ ResetConnection(Safekeeper *sk)
 	sk->state = SS_CONNECTING_WRITE;
 	sk->latestMsgReceivedAt = GetCurrentTimestamp();
 
+#ifndef SIMLIB
 	sock = walprop_socket(sk->conn);
 	sk->eventPos = AddWaitEventToSet(waitEvents, WL_SOCKET_WRITEABLE, sock, NULL, sk);
+#else
+	HandleConnectionEvent(sk);
+	RecvStartWALPushResult(sk);
+#endif
 	return;
 }
 
@@ -950,12 +1027,14 @@ HandleConnectionEvent(Safekeeper *sk)
 			return;
 	}
 
+#ifndef SIMLIB
 	/*
 	 * Because PQconnectPoll can change the socket, we have to un-register the
 	 * old event and re-register an event on the new socket.
 	 */
 	HackyRemoveWalProposerEvent(sk);
 	sk->eventPos = AddWaitEventToSet(waitEvents, new_events, walprop_socket(sk->conn), NULL, sk);
+#endif
 
 	/* If we successfully connected, send START_WAL_PUSH query */
 	if (result == WP_CONN_POLLING_OK)

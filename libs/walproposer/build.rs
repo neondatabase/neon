@@ -1,4 +1,5 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, process::Command};
+use anyhow::{anyhow, Context};
 use bindgen::CargoCallbacks;
 
 extern crate bindgen;
@@ -33,12 +34,15 @@ fn main() -> anyhow::Result<()> {
     // disable fPIE
     println!("cargo:rustc-link-arg=-no-pie");
 
-    if !std::process::Command::new("./build.sh")
+    // print output of build.sh
+    let output = std::process::Command::new("./build.sh")
         .output()
-        .expect("could not spawn `clang`")
-        .status
-        .success()
-    {
+        .expect("could not spawn `clang`");
+    
+    println!("stdout: {}", String::from_utf8(output.stdout).unwrap());
+    println!("stderr: {}", String::from_utf8(output.stderr).unwrap());
+
+    if !output.status.success() {
         // Panic if the command was not successful.
         panic!("could not compile object file");
     }
@@ -46,49 +50,49 @@ fn main() -> anyhow::Result<()> {
     // // Finding the location of C headers for the Postgres server:
     // // - if POSTGRES_INSTALL_DIR is set look into it, otherwise look into `<project_root>/pg_install`
     // // - if there's a `bin/pg_config` file use it for getting include server, otherwise use `<project_root>/pg_install/{PG_MAJORVERSION}/include/postgresql/server`
-    // let pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
-    //     postgres_install_dir.into()
-    // } else {
-    //     PathBuf::from("pg_install")
-    // };
+    let pg_install_dir = if let Some(postgres_install_dir) = env::var_os("POSTGRES_INSTALL_DIR") {
+        postgres_install_dir.into()
+    } else {
+        PathBuf::from("pg_install")
+    };
 
-    // let pg_version = "v15";
-    // let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
-    // if pg_install_dir_versioned.is_relative() {
-    //     let cwd = env::current_dir().context("Failed to get current_dir")?;
-    //     pg_install_dir_versioned = cwd.join("..").join("..").join(pg_install_dir_versioned);
-    // }
+    let pg_version = "v15";
+    let mut pg_install_dir_versioned = pg_install_dir.join(pg_version);
+    if pg_install_dir_versioned.is_relative() {
+        let cwd = env::current_dir().context("Failed to get current_dir")?;
+        pg_install_dir_versioned = cwd.join("..").join("..").join(pg_install_dir_versioned);
+    }
 
-    // let pg_config_bin = pg_install_dir_versioned
-    //     .join(pg_version)
-    //     .join("bin")
-    //     .join("pg_config");
-    // let inc_server_path: String = if pg_config_bin.exists() {
-    //     let output = Command::new(pg_config_bin)
-    //         .arg("--includedir-server")
-    //         .output()
-    //         .context("failed to execute `pg_config --includedir-server`")?;
+    let pg_config_bin = pg_install_dir_versioned
+        .join(pg_version)
+        .join("bin")
+        .join("pg_config");
+    let inc_server_path: String = if pg_config_bin.exists() {
+        let output = Command::new(pg_config_bin)
+            .arg("--includedir-server")
+            .output()
+            .context("failed to execute `pg_config --includedir-server`")?;
 
-    //     if !output.status.success() {
-    //         panic!("`pg_config --includedir-server` failed")
-    //     }
+        if !output.status.success() {
+            panic!("`pg_config --includedir-server` failed")
+        }
 
-    //     String::from_utf8(output.stdout)
-    //         .context("pg_config output is not UTF-8")?
-    //         .trim_end()
-    //         .into()
-    // } else {
-    //     let server_path = pg_install_dir_versioned
-    //         .join("include")
-    //         .join("postgresql")
-    //         .join("server")
-    //         .into_os_string();
-    //     server_path
-    //         .into_string()
-    //         .map_err(|s| anyhow!("Bad postgres server path {s:?}"))?
-    // };
+        String::from_utf8(output.stdout)
+            .context("pg_config output is not UTF-8")?
+            .trim_end()
+            .into()
+    } else {
+        let server_path = pg_install_dir_versioned
+            .join("include")
+            .join("postgresql")
+            .join("server")
+            .into_os_string();
+        server_path
+            .into_string()
+            .map_err(|s| anyhow!("Bad postgres server path {s:?}"))?
+    };
 
-    // let inc_pgxn_path = "/Users/arthur/zen/zenith/pgxn/neon";
+    let inc_pgxn_path = "/home/admin/simulator/pgxn/neon";
 
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
@@ -104,8 +108,14 @@ fn main() -> anyhow::Result<()> {
         .allowlist_function("RunClientC")
         .allowlist_function("WalProposerRust")
         .allowlist_function("MyContextInit")
-        // .clang_arg(format!("-I{inc_server_path}"))
-        // .clang_arg(format!("-I{inc_pgxn_path}"))
+        .allowlist_var("wal_acceptors_list")
+        .allowlist_var("wal_acceptor_reconnect_timeout")
+        .allowlist_var("wal_acceptor_connection_timeout")
+        .allowlist_var("am_wal_proposer")
+        .allowlist_var("neon_timeline_walproposer")
+        .allowlist_var("neon_tenant_walproposer")
+        .clang_arg(format!("-I{inc_server_path}"))
+        .clang_arg(format!("-I{inc_pgxn_path}"))
         // Finish the builder and generate the bindings.
         .generate()
         // Unwrap the Result and panic on failure.

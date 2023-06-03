@@ -1,8 +1,8 @@
 use std::{cell::RefCell, collections::HashMap};
 
-use safekeeper::simlib::{network::TCP, node_os::NodeOs, proto::AnyMessage, world::NodeEvent};
+use safekeeper::simlib::{network::TCP, node_os::NodeOs, world::NodeEvent};
 
-use crate::sim_proto::{AnyMessageTag, Event, EventTag, MESSAGE_BUF};
+use crate::sim_proto::{AnyMessageTag, Event, EventTag, MESSAGE_BUF, anymessage_tag};
 
 thread_local! {
     static CURRENT_NODE_OS: RefCell<Option<NodeOs>> = RefCell::new(None);
@@ -69,8 +69,18 @@ pub extern "C" fn sim_tcp_send(tcp: i64) {
 }
 
 #[no_mangle]
-pub extern "C" fn sim_epoll_rcv() -> Event {
-    let event = os().epoll().recv();
+pub extern "C" fn sim_epoll_rcv(timeout: i64) -> Event {
+    let event = os().epoll_recv(timeout);
+    let event = if let Some(event) = event {
+        event
+    } else {
+        return Event {
+            tag: EventTag::Timeout,
+            tcp: 0,
+            any_message: AnyMessageTag::None,
+        };
+    };
+
     match event {
         NodeEvent::Accept(tcp) => Event {
             tag: EventTag::Accept,
@@ -91,14 +101,17 @@ pub extern "C" fn sim_epoll_rcv() -> Event {
             Event {
                 tag: EventTag::Message,
                 tcp: tcp_save(tcp),
-                any_message: match message {
-                    AnyMessage::None => AnyMessageTag::None,
-                    AnyMessage::InternalConnect => AnyMessageTag::InternalConnect,
-                    AnyMessage::Just32(_) => AnyMessageTag::Just32,
-                    AnyMessage::ReplCell(_) => AnyMessageTag::ReplCell,
-                    AnyMessage::Bytes(_) => AnyMessageTag::Bytes,
-                },
+                any_message: anymessage_tag(&message),
             }
         }
+        NodeEvent::WakeTimeout(_) => {
+            // can't happen
+            unreachable!()
+        }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn sim_now() -> i64 {
+    os().now() as i64
 }

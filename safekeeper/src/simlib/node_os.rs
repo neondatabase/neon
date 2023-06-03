@@ -26,6 +26,10 @@ impl NodeOs {
         self.internal.id
     }
 
+    pub fn now(&self) -> u64 {
+        self.world.now()
+    }
+
     /// Returns a writable pipe. All incoming messages should be polled
     /// with [`network_epoll`]. Always successful.
     pub fn open_tcp(&self, dst: NodeId) -> TCP {
@@ -35,6 +39,59 @@ impl NodeOs {
     /// Returns a channel to receive timers and events from the network.
     pub fn epoll(&self) -> Chan<NodeEvent> {
         self.internal.network_chan()
+    }
+
+    /// Returns next event from the epoll channel with timeout.
+    /// Returns `None` if timeout is reached.
+    /// -1 – wait forever.
+    /// 0 - poll, return immediately.
+    /// >0 - wait for timeout milliseconds.
+    pub fn epoll_recv(&self, timeout: i64) -> Option<NodeEvent> {
+        let epoll = self.epoll();
+
+        let ready_event = loop {
+            let event = epoll.try_recv();
+            if let Some(NodeEvent::WakeTimeout(_)) = event {
+                continue;
+            }
+            break event;
+        };
+    
+        if let Some(event) = ready_event {
+            // return event if it's ready
+            return Some(event);
+        }
+
+        if timeout == 0 {
+            // poll, return immediately
+            return None;
+        }
+
+        // or wait for timeout
+        
+        let rand_nonce = self.random(u64::MAX);
+        if timeout > 0 {
+            self.world
+                .schedule(
+                    timeout as u64,
+                    SendMessageEvent::new(
+                        epoll.clone(),
+                        NodeEvent::WakeTimeout(rand_nonce),
+                    ),
+                );
+        }
+
+        loop {
+            match epoll.recv() {
+                NodeEvent::WakeTimeout(nonce) if nonce == rand_nonce => {
+                    return None;
+                }
+                NodeEvent::WakeTimeout(_) => {}
+                event => {
+                    return Some(event);
+                }
+            }
+        }
     }
 
     /// Sleep for a given number of milliseconds.

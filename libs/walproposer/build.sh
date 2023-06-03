@@ -1,9 +1,11 @@
 #!/bin/bash
 set -e
 
+cd /home/admin/simulator/libs/walproposer
+
 # TODO: rewrite to Makefile
 
-make -C ../../ neon-pg-ext-walproposer -s
+make -C ../.. neon-pg-ext-walproposer
 # make -C ../../pg_install/build/v15/src/backend postgres-lib -s
 cp ../../pg_install/build/v15/src/backend/libpostgres.a .
 cp ../../pg_install/build/v15/src/common/libpgcommon_srv.a .
