@@ -459,7 +459,7 @@ struct RemoteStartupData {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum WaitToBecomeActiveError {
+pub enum WaitToBecomeActiveError {
     WillNotBecomeActive {
         tenant_id: TenantId,
         state: TenantState,

@@ -162,6 +162,9 @@ impl From<GetTenantError> for ApiError {
             e @ GetTenantError::NotLoaded(_, _) => {
                 ApiError::InternalServerError(anyhow::Error::new(e))
             }
+            e @ GetTenantError::NotActivated(_, _) => {
+                ApiError::InternalServerError(anyhow::Error::new(e))
+            }
         }
     }
 }

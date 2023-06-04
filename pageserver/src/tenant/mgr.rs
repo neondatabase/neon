@@ -22,6 +22,7 @@ use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
     create_tenant_files, CreateTenantFilesMode, SetStoppingError, Tenant, TenantState,
+    WaitToBecomeActiveError,
 };
 use crate::IGNORED_TENANT_FILE_NAME;
 
@@ -68,7 +69,7 @@ impl LazyTenantsMap {
             tenant
                 .wait_to_become_active()
                 .await
-                .map_err(|_| GetTenantError::NotActive(*tenant_id))?;
+                .map_err(|e| GetTenantError::NotActivated(*tenant_id, e))?;
         }
         Ok(tenant)
     }
@@ -493,8 +494,10 @@ pub enum GetTenantError {
     NotFound(TenantId),
     #[error("Tenant {0} is not active")]
     NotActive(TenantId),
-    #[error("Tenant {0} can not be loaded")]
+    #[error("Tenant {0} can not be loaded: {1}")]
     NotLoaded(TenantId, anyhow::Error),
+    #[error("Tenant {0} can not be activated: {1}")]
+    NotActivated(TenantId, WaitToBecomeActiveError),
 }
 
 /// Gets the tenant from the in-memory data, erroring if it's absent or is not fitting to the query.

@@ -1180,6 +1180,9 @@ async fn get_active_tenant_with_timeout(
         Ok(tenant) => tenant,
         Err(e @ GetTenantError::NotFound(_)) => return Err(GetActiveTenantError::NotFound(e)),
         Err(e @ GetTenantError::NotLoaded(_, _)) => return Err(GetActiveTenantError::NotFound(e)),
+        Err(e @ GetTenantError::NotActivated(_, _)) => {
+            return Err(GetActiveTenantError::NotFound(e))
+        }
         Err(GetTenantError::NotActive(_)) => {
             unreachable!("we're calling get_tenant with active=false")
         }
