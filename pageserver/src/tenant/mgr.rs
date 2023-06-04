@@ -634,6 +634,11 @@ pub enum TenantMapListError {
 /// Get list of tenants, for the mgmt API
 ///
 #[cfg(feature = "testing")]
+// Many tests are using list_tenants to check if tenant is in active state
+// With lazy loading tenants are initially in NotLoaded state.
+// To make all this tests pass, lets force loading of tenants if testing feature is specified.
+// Alternatively it is possible to pass extra parameter to list_tenants to choose between
+// eager and lazy loading of tenants.
 pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapListError> {
     let tenants = TENANTS.read().await;
     match &*tenants {
