@@ -34,6 +34,8 @@ use crate::{
     },
 };
 
+use utils::completion;
+
 use super::Timeline;
 
 #[derive(Default)]
@@ -47,8 +49,9 @@ pub struct EvictionTaskTenantState {
 }
 
 impl Timeline {
-    pub(super) fn launch_eviction_task(self: &Arc<Self>) {
+    pub(super) fn launch_eviction_task(self: &Arc<Self>, init_done: Option<&completion::Barrier>) {
         let self_clone = Arc::clone(self);
+        let init_done = init_done.cloned();
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
@@ -57,6 +60,7 @@ impl Timeline {
             &format!("layer eviction for {}/{}", self.tenant_id, self.timeline_id),
             false,
             async move {
+                completion::Barrier::maybe_wait(init_done).await;
                 self_clone.eviction_task(task_mgr::shutdown_token()).await;
                 info!("eviction task finishing");
                 Ok(())

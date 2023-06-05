@@ -14,6 +14,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
 
+/// Start per tenant background loops: compaction and gc.
+///
+/// `init_done` is an optional channel used during initial load to delay background task
+/// start. It is not used later.
 pub fn start_background_loops(tenant: &Arc<Tenant>, init_done: Option<&completion::Barrier>) {
     let tenant_id = tenant.tenant_id;
     task_mgr::spawn(
