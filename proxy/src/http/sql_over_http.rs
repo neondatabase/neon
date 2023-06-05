@@ -1,6 +1,8 @@
 use futures::pin_mut;
 use futures::StreamExt;
 use hyper::body::HttpBody;
+use hyper::http::HeaderName;
+use hyper::http::HeaderValue;
 use hyper::{Body, HeaderMap, Request};
 use pq_proto::StartupMessageParams;
 use serde_json::json;
@@ -22,6 +24,10 @@ struct QueryData {
 const APP_NAME: &str = "sql_over_http";
 const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1 MB
 const MAX_REQUEST_SIZE: u64 = 1024 * 1024; // 1 MB
+
+static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
+static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
+static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
@@ -158,6 +164,11 @@ pub async fn handle(
         ("application_name", APP_NAME),
     ]);
 
+    // Determine the output options. Default behaviour is 'false'. Anything that is not
+    // strictly 'true' assumed to be false.
+    let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
+    let array_mode = headers.get(&ARRAY_MODE) == Some(&HEADER_VALUE_TRUE);
+
     //
     // Wake up the destination if needed. Code here is a bit involved because
     // we reuse the code from the usual proxy and we need to prepare few structures
@@ -272,7 +283,7 @@ pub async fn handle(
     // convert rows to JSON
     let rows = rows
         .iter()
-        .map(pg_text_row_to_json)
+        .map(|row| pg_text_row_to_json(row, raw_output, array_mode))
         .collect::<Result<Vec<_>, _>>()?;
 
     // resulting JSON format is based on the format of node-postgres result
@@ -281,26 +292,42 @@ pub async fn handle(
         "rowCount": command_tag_count,
         "rows": rows,
         "fields": fields,
+        "rowAsArray": array_mode,
     }))
 }
 
 //
 // Convert postgres row with text-encoded values to JSON object
 //
-pub fn pg_text_row_to_json(row: &Row) -> Result<Value, anyhow::Error> {
-    let res = row
-        .columns()
-        .iter()
-        .enumerate()
-        .map(|(i, column)| {
-            let name = column.name();
-            let pg_value = row.as_text(i)?;
-            let json_value = pg_text_to_json(pg_value, column.type_())?;
-            Ok((name.to_string(), json_value))
-        })
-        .collect::<Result<Map<String, Value>, anyhow::Error>>()?;
+pub fn pg_text_row_to_json(
+    row: &Row,
+    raw_output: bool,
+    array_mode: bool,
+) -> Result<Value, anyhow::Error> {
+    let iter = row.columns().iter().enumerate().map(|(i, column)| {
+        let name = column.name();
+        let pg_value = row.as_text(i)?;
+        let json_value = if raw_output {
+            match pg_value {
+                Some(v) => Value::String(v.to_string()),
+                None => Value::Null,
+            }
+        } else {
+            pg_text_to_json(pg_value, column.type_())?
+        };
+        Ok((name.to_string(), json_value))
+    });
 
-    Ok(Value::Object(res))
+    if array_mode {
+        // drop keys and aggregate into array
+        let arr = iter
+            .map(|r| r.map(|(_key, val)| val))
+            .collect::<Result<Vec<Value>, anyhow::Error>>()?;
+        Ok(Value::Array(arr))
+    } else {
+        let obj = iter.collect::<Result<Map<String, Value>, anyhow::Error>>()?;
+        Ok(Value::Object(obj))
+    }
 }
 
 //
