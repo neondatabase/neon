@@ -7,12 +7,15 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
+use once_cell::sync::OnceCell;
 use remote_storage::{
     GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
 use test_context::{test_context, AsyncTestContext};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info};
+
+static LOGGING_DONE: OnceCell<()> = OnceCell::new();
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
 
@@ -104,6 +107,16 @@ async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result
     Ok(())
 }
 
+fn ensure_logging_ready() {
+    LOGGING_DONE.get_or_init(|| {
+        utils::logging::init(
+            utils::logging::LogFormat::Test,
+            utils::logging::TracingErrorLayerEnablement::Disabled,
+        )
+        .expect("logging init failed");
+    });
+}
+
 struct EnabledS3 {
     client: Arc<GenericRemoteStorage>,
     base_prefix: &'static str,
@@ -130,11 +143,8 @@ enum MaybeEnabledS3 {
 #[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledS3 {
     async fn setup() -> Self {
-        utils::logging::init(
-            utils::logging::LogFormat::Test,
-            utils::logging::TracingErrorLayerEnablement::Disabled,
-        )
-        .expect("logging init failed");
+        ensure_logging_ready();
+
         if env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_err() {
             info!(
                 "`{}` env variable is not set, skipping the test",
@@ -162,11 +172,7 @@ struct S3WithTestBlobs {
 #[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledS3WithTestBlobs {
     async fn setup() -> Self {
-        utils::logging::init(
-            utils::logging::LogFormat::Test,
-            utils::logging::TracingErrorLayerEnablement::Disabled,
-        )
-        .expect("logging init failed");
+        ensure_logging_ready();
         if env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_err() {
             info!(
                 "`{}` env variable is not set, skipping the test",
