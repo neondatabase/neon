@@ -4,9 +4,9 @@
 //!
 //! This crate implements the core data flows inside pageserver:
 //!
-//! 1. WAL records from `walreceiver`, via in-memory layers, into on-disk L0 layers.
-//! 2. Data re-shuffeling through compaciton.
-//! 3. Page image creation & garbage collection through GC.
+//! 1. WAL records from `walreceiver`, via in-memory layers, into persistent L0 layers.
+//! 2. Data re-shuffeling through compaction (TODO).
+//! 3. Page image creation & garbage collection through GC (TODO).
 //! 4. `GetPage@LSN`: retrieval of WAL records and page images for feeding into WAL redo.
 //!
 //! The implementation assumes the following concepts,
@@ -32,19 +32,21 @@
 //!
 //! # API
 //!
-//! The common idea for both flavors is that there is a Read-end and a ReadWrite-end.
+//! The core idea is that of a specialized single-producer multi-consumer structure,
+//! embodied by a Read-end and a Write-end.
 //!
-//! The ReadWrite-end is used to push new `DeltaRecord @ LSN`s into the system.
+//! The Write-end is used to push new `DeltaRecord @ LSN`s into the system.
 //! In Pageserver, this is used by the `WalReceiver`.
 //!
 //! The Read-end provides the `GetPage@LSN` API.
-//! In the current iteration, we actually return something called `ReconstructWork`,
-//! i.e., we leave the work of reading the values from the layers, and the WAL redo invocation
-//! to the caller. This is to keep the scope limited, and to prepare for clustered pageservers (aka "sharding").
+//! In the current iteration, we actually return something called `ReconstructWork`.
+//! I.e., we leave the work of reading the values from the layers, and the WAL redo invocation to the caller.
+//! Find rationale for this design in the *Scope* section.
 //!
 //! ## Immutability
 //!
 //! The traits defined by this crate assume immutable data structures that are multi-versioned.
+//!
 //! As an example for what "immutable" means, take the case where we add a new Historic Layer to HistoricStuff.
 //! Traditionally, one would use shared mutable state, i.e. `Arc<RwLock<...>>`.
 //! To insert the new Historic Layer, we would acquire the RwLock in write mode, and modifying a lookup data structure to accomodate the new layer.
@@ -52,11 +54,12 @@
 //!
 //! Conversely, with  *immutable data structures*, writers create new version (aka *snapshot*) of the lookup data structure.
 //! New reads on the Read-ends will use the new snapshot, but old ongoing reads would use the old version(s).
-//! A common implementation would likely share the Historic Layer objects, e.g., using `Arc`.
+//! An efficient implementation would likely share the Historic Layer objects, e.g., using `Arc`.
 //! And maybe there's internally mutable state inside the layer objects, e.g., to track residence (i.e., *on-demand downloaded* vs *evicted*).
-//! But the important point is that there's no synchronization / lock-holding except when grabbing a reference to the snapshot (Read-end), or when publishing a new snapshot (ReadWrite-end).
+//! But the important point is that there's no synchronization / lock-holding at any higher level, except when grabbing a reference to the snapshot (Read-end), or when publishing a new snapshot (Write-end).
 //!
 //! ## Scope
+//!
 //! The following concerns are considered implementation details from the perspective of this crate:
 //!
 //! - **Layer File Persistence**: `HistoricStuff::make_historic` is responsible for this.
@@ -66,8 +69,13 @@
 //! - **Layer Eviction & On-Demand Download**: this is just an aspect of the above.
 //!   The crate consumer can choose to implement eviction & on-demand download however they wish.
 //!   The only requirement is that the Historic Layer object give the same answers at all time.
-//!   - For example, a `layer cache` module or service can take care of layer uploads, eviction, and on-demand downloads.
-//!     Initially, the `layer cache` can be local-only, but, over time, it can be multi-machine / clustered pagesevers / aka "sharding".
+//!   - For example, a `LayerCache` modoule or service could take care of layer uploads, eviction, and on-demand downloads.
+//!     Initially, the `layer cache` can be local-only.
+//!     But over time, it can be multi-machine / clustered pagesevers / aka "sharding".
+//!
+//! # Example
+//!
+//! See the test cases.
 
 use std::{marker::PhantomData, time::Duration};
 
@@ -76,6 +84,21 @@ use utils::seqwait::{self, Advance, SeqWait, Wait};
 #[cfg(test)]
 mod tests;
 
+/// Collection of types / type bounds used by Read-end and Write-end.
+///
+/// See the [`crate`]-level docs's *Concepts* section to learn about
+/// the meaning of each associated `type`.
+///
+/// # Usage
+///
+/// Define a zero-sized-type and impl this Trait for it.
+/// Then use that zero-sized-type as the single generic argument to [`new`]
+/// and almost all types declared in this crate.
+///
+/// It might feel a bit weird, but, the alternative is to have umpteen generic
+/// types per `impl` with repetitive trait bounds.
+///
+/// Search the test cases for an example of how this can be used to improve testability.
 pub trait Types {
     type Key: Copy;
     type Lsn: Ord + Copy;
@@ -86,12 +109,14 @@ pub trait Types {
     type HistoricStuff: HistoricStuff<Types = Self> + Clone;
 }
 
+/// Error returned by [`InMemoryLayer::put`].
 #[derive(thiserror::Error)]
 pub struct InMemoryLayerPutError<DeltaRecord> {
     delta: DeltaRecord,
     kind: InMemoryLayerPutErrorKind,
 }
 
+/// Part of [`InMemoryLayerPutError`].
 #[derive(Debug)]
 pub enum InMemoryLayerPutErrorKind {
     LayerFull,
@@ -108,6 +133,7 @@ impl<DeltaRecord> std::fmt::Debug for InMemoryLayerPutError<DeltaRecord> {
     }
 }
 
+/// An in-memory layer. See [`crate`] docs for details on this concept.
 pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
     type Types: Types;
     fn put(
@@ -126,6 +152,7 @@ pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
 #[derive(Debug, thiserror::Error)]
 pub enum GetReconstructPathError {}
 
+/// The manager of [`Types::HistoricLayer`]s.
 pub trait HistoricStuff {
     type Types: Types;
     fn get_reconstruct_path(
@@ -137,6 +164,7 @@ pub trait HistoricStuff {
     fn make_historic(&self, inmem: <Self::Types as Types>::InMemoryLayer) -> Self;
 }
 
+/// A snapshot of the data. See [`crate`]-level docs section on *immutability* for details.
 struct Snapshot<T: Types> {
     _types: PhantomData<T>,
     inmem: Option<T::InMemoryLayer>,
@@ -153,18 +181,20 @@ impl<T: Types> Clone for Snapshot<T> {
     }
 }
 
+/// The Read-end. See [`crate`]-level docs for details.
 pub struct Reader<T: Types> {
     wait: Wait<T::LsnCounter, T::Lsn, Snapshot<T>>,
 }
 
-pub struct ReadWriter<T: Types> {
+/// The Write-end. See [`crate`]-level docs for details.
+pub struct Writer<T: Types> {
     advance: Advance<T::LsnCounter, T::Lsn, Snapshot<T>>,
 }
 
-pub fn empty<T: Types>(
-    lsn: T::LsnCounter,
-    historic: T::HistoricStuff,
-) -> (Reader<T>, ReadWriter<T>) {
+/// Setup a pair of Read-end and Write-End. This is the entrypoint to this crate.
+///
+/// The idea is that the caller loads the arguments from persistent state that `HistoricStuff` wrote at an earlier point in time.
+pub fn new<T: Types>(lsn: T::LsnCounter, historic: T::HistoricStuff) -> (Reader<T>, Writer<T>) {
     let state = Snapshot {
         _types: PhantomData::<T>::default(),
         inmem: None,
@@ -172,10 +202,11 @@ pub fn empty<T: Types>(
     };
     let (wait, advance) = SeqWait::new(lsn, state).split_spmc();
     let reader = Reader { wait };
-    let read_writer = ReadWriter { advance };
+    let read_writer = Writer { advance };
     (reader, read_writer)
 }
 
+/// Error returned by the get-page operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GetError {
     #[error(transparent)]
@@ -184,6 +215,14 @@ pub enum GetError {
     GetReconstructPath(#[from] GetReconstructPathError),
 }
 
+/// Self-contained set of objects required to reconstruct a page image for the given `key` @ `lsn`.
+///
+/// This is returned by the `get` methods of [`Reader`] and [`Writer`].
+///
+/// To reconstruct the page image, stack up (top to bottom) `inmem_records` plus all records found for `key` and `lsn` along the `historic_path` until an initial page image is found.
+/// Then feed that stack to WAL-redo to get the page image.
+///
+/// See [`crate`]-level docs on *scope* for why we don't return page images from these functions.
 pub struct ReconstructWork<T: Types> {
     pub key: T::Key,
     pub lsn: T::Lsn,
@@ -192,8 +231,11 @@ pub struct ReconstructWork<T: Types> {
 }
 
 impl<T: Types> Reader<T> {
+    /// This is the `GetPage@LSN` operation.
+    ///
+    /// See the [`crate`]-level docs for why we return [`ReconstructWork`] instead of a Page Image here.
     pub async fn get(&self, key: T::Key, lsn: T::Lsn) -> Result<ReconstructWork<T>, GetError> {
-        // XXX dedup with ReadWriter::get_nowait
+        // XXX dedup with Writer::get_nowait
         let state = self.wait.wait_for(lsn).await?;
         let inmem_records = state
             .inmem
@@ -210,11 +252,16 @@ impl<T: Types> Reader<T> {
     }
 }
 
+/// Error returned by the `put` operation.
 #[derive(thiserror::Error)]
 pub struct PutError<T: Types> {
+    /// The `delta` record which we failed to `put`.
     pub delta: T::DeltaRecord,
+    /// Description of what went wrong.
     pub kind: PutErrorKind,
 }
+
+/// Part of [`PutError`].
 #[derive(Debug)]
 pub enum PutErrorKind {
     AlreadyHaveInMemoryRecordForKeyAndLsn,
@@ -230,7 +277,8 @@ impl<T: Types> std::fmt::Debug for PutError<T> {
     }
 }
 
-impl<T: Types> ReadWriter<T> {
+impl<T: Types> Writer<T> {
+    /// Insert data into the system.
     pub async fn put(
         &mut self,
         key: T::Key,
@@ -281,6 +329,10 @@ impl<T: Types> ReadWriter<T> {
         Ok(())
     }
 
+    /// Force flushing of the current in-memory layer.
+    ///
+    /// Usually, flushing happens only if the in-memory layer is full.
+    /// Use this API to make it happen in other circumstances (shutdown, periodic ticker, etc.).
     pub async fn force_flush(&mut self) -> tokio::io::Result<()> {
         let (snapshot_lsn, snapshot) = self.advance.get_current_data();
         let Snapshot {
@@ -303,6 +355,11 @@ impl<T: Types> ReadWriter<T> {
         Ok(())
     }
 
+    /// `get` at the given LSN, without blocking.
+    ///
+    /// Fails with a timeout error if the `lsn` isn't there yet.
+    /// That makes sense because the only way we'd stop waiting is by a `self.put()`.
+    /// But concurrent `put()` is forbidden.
     pub async fn get_nowait(
         &self,
         key: T::Key,
