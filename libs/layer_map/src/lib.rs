@@ -6,6 +6,7 @@ use std::{
     ops::Deref,
     pin::Pin,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use utils::seqwait::{self, Advance, SeqWait, Wait};
@@ -102,6 +103,7 @@ pub struct ReconstructWork<T: Types> {
 
 impl<T: Types> Reader<T> {
     pub async fn get(&self, key: T::Key, lsn: T::Lsn) -> Result<ReconstructWork<T>, GetError> {
+        // XXX dedup with ReadWriter::get_nowait
         let state = self.shared.wait_for(lsn).await?;
         let inmem_records = state
             .inmem
@@ -189,7 +191,26 @@ impl<T: Types> ReadWriter<T> {
         key: T::Key,
         lsn: T::Lsn,
     ) -> Result<ReconstructWork<T>, GetError> {
-        todo!()
+        // XXX dedup with Reader::get
+        let state = self
+            .shared
+            .wait_for_timeout(lsn, Duration::from_secs(0))
+            // The await is never going to block because we pass from_secs(0).
+            .await?;
+        let inmem_records = state
+            .inmem
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|iml| iml.get(key, lsn))
+            .unwrap_or_default();
+        let historic_path = state.historic.get_reconstruct_path(key, lsn)?;
+        Ok(ReconstructWork {
+            key,
+            lsn,
+            inmem_records,
+            historic_path,
+        })
     }
 }
 
