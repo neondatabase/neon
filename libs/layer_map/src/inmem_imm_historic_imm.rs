@@ -1,8 +1,4 @@
-use std::{
-    marker::PhantomData,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{marker::PhantomData, time::Duration};
 
 use utils::seqwait::{self, Advance, SeqWait, Wait};
 
@@ -12,8 +8,8 @@ pub trait Types {
     type LsnCounter: seqwait::MonotonicCounter<Self::Lsn> + Copy;
     type DeltaRecord;
     type HistoricLayer;
-    type InMemoryLayer: InMemoryLayer<Types = Self>;
-    type HistoricStuff: HistoricStuff<Types = Self>;
+    type InMemoryLayer: InMemoryLayer<Types = Self> + Clone;
+    type HistoricStuff: HistoricStuff<Types = Self> + Clone;
 }
 
 #[derive(thiserror::Error)]
@@ -24,12 +20,11 @@ pub struct InMemoryLayerPutError<DeltaRecord> {
 
 #[derive(Debug)]
 pub enum InMemoryLayerPutErrorKind {
-    Frozen,
     LayerFull,
     AlreadyHaveRecordForKeyAndLsn,
 }
 
-impl<T: Types> std::fmt::Debug for InMemoryLayerPutError<T> {
+impl<DeltaRecord> std::fmt::Debug for InMemoryLayerPutError<DeltaRecord> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InMemoryLayerPutError")
             // would require DeltaRecord to impl Debug
@@ -46,13 +41,12 @@ pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
         key: <Self::Types as Types>::Key,
         lsn: <Self::Types as Types>::Lsn,
         delta: <Self::Types as Types>::DeltaRecord,
-    ) -> Result<(), InMemoryLayerPutError<<Self::Types as Types>::DeltaRecord>>;
+    ) -> Result<Self, InMemoryLayerPutError<<Self::Types as Types>::DeltaRecord>>;
     fn get(
         &self,
         key: <Self::Types as Types>::Key,
         lsn: <Self::Types as Types>::Lsn,
     ) -> Vec<<Self::Types as Types>::DeltaRecord>;
-    fn freeze(&mut self);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,32 +63,42 @@ pub trait HistoricStuff {
     fn make_historic(&self, inmem: <Self::Types as Types>::InMemoryLayer) -> Self;
 }
 
-struct State<T: Types> {
+struct Snapshot<T: Types> {
     _types: PhantomData<T>,
-    inmem: Mutex<Option<T::InMemoryLayer>>,
+    inmem: Option<T::InMemoryLayer>,
     historic: T::HistoricStuff,
 }
 
+impl<T: Types> Clone for Snapshot<T> {
+    fn clone(&self) -> Self {
+        Self {
+            _types: self._types.clone(),
+            inmem: self.inmem.clone(),
+            historic: self.historic.clone(),
+        }
+    }
+}
+
 pub struct Reader<T: Types> {
-    shared: Wait<T::LsnCounter, T::Lsn, Arc<State<T>>>,
+    wait: Wait<T::LsnCounter, T::Lsn, Snapshot<T>>,
 }
 
 pub struct ReadWriter<T: Types> {
-    shared: Advance<T::LsnCounter, T::Lsn, Arc<State<T>>>,
+    advance: Advance<T::LsnCounter, T::Lsn, Snapshot<T>>,
 }
 
 pub fn empty<T: Types>(
     lsn: T::LsnCounter,
     historic: T::HistoricStuff,
 ) -> (Reader<T>, ReadWriter<T>) {
-    let state = Arc::new(State {
+    let state = Snapshot {
         _types: PhantomData::<T>::default(),
-        inmem: Mutex::new(None),
+        inmem: None,
         historic: historic,
-    });
-    let (wait_only, advance) = SeqWait::new(lsn, state).split_spmc();
-    let reader = Reader { shared: wait_only };
-    let read_writer = ReadWriter { shared: advance };
+    };
+    let (wait, advance) = SeqWait::new(lsn, state).split_spmc();
+    let reader = Reader { wait };
+    let read_writer = ReadWriter { advance };
     (reader, read_writer)
 }
 
@@ -116,11 +120,9 @@ pub struct ReconstructWork<T: Types> {
 impl<T: Types> Reader<T> {
     pub async fn get(&self, key: T::Key, lsn: T::Lsn) -> Result<ReconstructWork<T>, GetError> {
         // XXX dedup with ReadWriter::get_nowait
-        let state = self.shared.wait_for(lsn).await?;
+        let state = self.wait.wait_for(lsn).await?;
         let inmem_records = state
             .inmem
-            .lock()
-            .unwrap()
             .as_ref()
             .map(|iml| iml.get(key, lsn))
             .unwrap_or_default();
@@ -136,8 +138,8 @@ impl<T: Types> Reader<T> {
 
 #[derive(thiserror::Error)]
 pub struct PutError<T: Types> {
-    delta: T::DeltaRecord,
-    kind: PutErrorKind,
+    pub delta: T::DeltaRecord,
+    pub kind: PutErrorKind,
 }
 #[derive(Debug)]
 pub enum PutErrorKind {
@@ -161,22 +163,20 @@ impl<T: Types> ReadWriter<T> {
         lsn: T::Lsn,
         delta: T::DeltaRecord,
     ) -> Result<(), PutError<T>> {
-        let (_, shared) = self.shared.get_current_data();
-        let mut inmem_guard = shared
+        let (snapshot_lsn, snapshot) = self.advance.get_current_data();
+        // TODO ensure snapshot_lsn <= lsn?
+        let mut inmem = snapshot
             .inmem
-            .try_lock()
-            // XXX: use the Advance as witness and only allow witness to access inmem in write mode
-            .expect("we are the only ones with the Advance at hand");
-        let inmem = inmem_guard.get_or_insert_with(|| T::InMemoryLayer::default());
+            .unwrap_or_else(|| T::InMemoryLayer::default());
+        // XXX: use the Advance as witness and only allow witness to access inmem in write mode
         match inmem.put(key, lsn, delta) {
-            Ok(()) => {
-                self.shared.advance(lsn, None);
-            }
-            Err(InMemoryLayerPutError {
-                delta: _,
-                kind: InMemoryLayerPutErrorKind::Frozen,
-            }) => {
-                unreachable!("this method is &mut self, so, Rust guarantees that we are the only ones who can put() into the inmem layer, and if we freeze it as part of put, we make sure we don't try to put() again")
+            Ok(new_inmem) => {
+                let new_snapshot = Snapshot {
+                    _types: PhantomData,
+                    inmem: Some(new_inmem),
+                    historic: snapshot.historic,
+                };
+                self.advance.advance(lsn, Some(new_snapshot));
             }
             Err(InMemoryLayerPutError {
                 delta,
@@ -188,47 +188,44 @@ impl<T: Types> ReadWriter<T> {
                 });
             }
             Err(InMemoryLayerPutError {
-                delta: _delta,
+                delta,
                 kind: InMemoryLayerPutErrorKind::LayerFull,
             }) => {
-                inmem.freeze();
-                let inmem_clone = inmem.clone();
-                drop(inmem);
-                drop(inmem_guard);
-                let new_historic = shared.historic.make_historic(inmem_clone);
-                let new_state = Arc::new(State {
+                let new_historic = snapshot.historic.make_historic(inmem);
+                let mut new_inmem = T::InMemoryLayer::default();
+                let new_inmem = new_inmem
+                    .put(key, lsn, delta)
+                    .expect("put into default inmem layer must not fail");
+                let new_state = Snapshot {
                     _types: PhantomData::<T>::default(),
-                    inmem: Mutex::new(None),
+                    inmem: Some(new_inmem),
                     historic: new_historic,
-                });
-                self.shared.advance(lsn, Some(new_state));
+                };
+                self.advance.advance(lsn, Some(new_state));
             }
         }
         Ok(())
     }
 
     pub async fn force_flush(&mut self) -> tokio::io::Result<()> {
-        let (_, shared) = self.shared.get_current_data();
-        let mut inmem_guard = shared
-            .inmem
-            .try_lock()
-            // XXX: use the Advance as witness and only allow witness to access inmem in write mode
-            .expect("we are the only ones with the Advance at hand");
-        let Some(inmem) = &mut *inmem_guard else {
+        let (snapshot_lsn, snapshot) = self.advance.get_current_data();
+        let Snapshot {
+            _types,
+            inmem,
+            historic,
+        } = snapshot;
+        // XXX: use the Advance as witness and only allow witness to access inmem in "write" mode
+        let Some(inmem) = inmem else {
             // nothing to do
             return Ok(());
         };
-        inmem.freeze();
-        let inmem_clone = inmem.clone();
-        // XXX don't hold the lock while writing the layer to disk ==> needs State::frozen
-        let new_historic = shared.historic.make_historic(inmem_clone);
-        let new_state = Arc::new(State {
+        let new_historic = historic.make_historic(inmem);
+        let new_snapshot = Snapshot {
             _types: PhantomData::<T>::default(),
-            inmem: Mutex::new(None),
+            inmem: None,
             historic: new_historic,
-        });
-        todo!("do something with new_state");
-        drop(inmem_guard);
+        };
+        self.advance.advance(snapshot_lsn, Some(new_snapshot)); // TODO: should fail if we're past snapshot_lsn
         Ok(())
     }
 
@@ -239,14 +236,12 @@ impl<T: Types> ReadWriter<T> {
     ) -> Result<ReconstructWork<T>, GetError> {
         // XXX dedup with Reader::get
         let state = self
-            .shared
+            .advance
             .wait_for_timeout(lsn, Duration::from_secs(0))
             // The await is never going to block because we pass from_secs(0).
             .await?;
         let inmem_records = state
             .inmem
-            .lock()
-            .unwrap()
             .as_ref()
             .map(|iml| iml.get(key, lsn))
             .unwrap_or_default();
@@ -266,8 +261,6 @@ mod tests {
     use std::sync::Arc;
 
     use crate::tests_common::UsizeCounter;
-
-    use super::InMemoryLayerPutError;
 
     /// The ZST for which we impl the `super::Types` type collection trait.
     struct TestTypes;
@@ -291,7 +284,6 @@ mod tests {
     /// For testing, our in-memory layer is a simple hashmap.
     #[derive(Clone, Default, Debug)]
     struct TestInMemoryLayer {
-        frozen: bool,
         by_key: BTreeMap<usize, BTreeMap<usize, &'static str>>,
     }
 
@@ -299,7 +291,7 @@ mod tests {
     struct TestHistoricLayer(TestInMemoryLayer);
 
     /// This is the data structure that impls the `HistoricStuff` trait.
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct TestHistoricStuff {
         by_key: BTreeMap<usize, BTreeMap<usize, Arc<TestHistoricLayer>>>,
     }
@@ -345,24 +337,20 @@ mod tests {
             key: usize,
             lsn: usize,
             delta: &'static str,
-        ) -> Result<(), super::InMemoryLayerPutError<&'static str>> {
-            if self.frozen {
-                return Err(InMemoryLayerPutError {
-                    delta,
-                    kind: super::InMemoryLayerPutErrorKind::Frozen,
-                });
-            }
-            let by_key = self.by_key.entry(key).or_default();
+        ) -> Result<Self, super::InMemoryLayerPutError<&'static str>> {
+            let mut clone = self.clone();
+            drop(self);
+            let by_key = clone.by_key.entry(key).or_default();
             match by_key.entry(lsn) {
                 Entry::Occupied(_record) => {
-                    return Err(InMemoryLayerPutError {
+                    return Err(super::InMemoryLayerPutError {
                         delta,
                         kind: super::InMemoryLayerPutErrorKind::AlreadyHaveRecordForKeyAndLsn,
                     });
                 }
                 Entry::Vacant(vacant) => vacant.insert(delta),
             };
-            Ok(())
+            Ok(clone)
         }
 
         fn get(&self, key: usize, lsn: usize) -> Vec<&'static str> {
@@ -376,10 +364,6 @@ mod tests {
                 .rev()
                 .cloned()
                 .collect()
-        }
-
-        fn freeze(&mut self) {
-            todo!()
         }
     }
 
