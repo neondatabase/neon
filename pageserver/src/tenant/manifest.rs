@@ -63,35 +63,38 @@ impl Manifest {
         Ok(manifest)
     }
 
-    pub fn load(mut file: VirtualFile) -> Result<(Self, Vec<Operation>)> {
+    /// Load a manifest. Returns the manifest and a list of operations. If the manifest is corrupted,
+    /// the bool flag will be set to true and the user is responsible to reconstruct a new manifest and
+    /// backup the current one.
+    pub fn load(mut file: VirtualFile) -> Result<(Self, Vec<Operation>, bool)> {
         let mut buf = vec![];
         file.read_to_end(&mut buf)?;
         let mut buf = Bytes::from(buf);
         let mut operations = Vec::new();
-        loop {
+        let corrupted = loop {
             if buf.remaining() == 0 {
-                break;
+                break false;
             }
             if buf.remaining() < HEADER_LEN {
                 warn!("incomplete header when decoding manifest, could be corrupted");
-                break;
+                break true;
             }
             let Header { size, checksum } = Header::decode(&buf[..HEADER_LEN]);
             let size = size as usize;
             buf.advance(HEADER_LEN);
             if buf.remaining() < size {
                 warn!("incomplete data when decoding manifest, could be corrupted");
-                break;
+                break true;
             }
             let data = &buf[..size];
             if crc32c(data) != checksum {
                 warn!("checksum mismatch when decoding manifest, could be corrupted");
-                break;
+                break true;
             }
             operations.push(serde_json::from_slice(data)?);
             buf.advance(size);
-        }
-        Ok((Self { file }, operations))
+        };
+        Ok((Self { file }, operations, corrupted))
     }
 
     fn append_data(&mut self, data: &[u8]) -> Result<()> {
@@ -150,7 +153,8 @@ mod tests {
                 .truncate(false),
         )
         .unwrap();
-        let (mut manifest, operations) = Manifest::load(file).unwrap();
+        let (mut manifest, operations, corrupted) = Manifest::load(file).unwrap();
+        assert!(!corrupted);
         assert_eq!(operations.len(), 2);
         assert_eq!(&operations[0], &Operation::Snapshot(snapshot.clone()));
         assert_eq!(
@@ -174,7 +178,8 @@ mod tests {
                 .truncate(false),
         )
         .unwrap();
-        let (_manifest, operations) = Manifest::load(file).unwrap();
+        let (_manifest, operations, corrupted) = Manifest::load(file).unwrap();
+        assert!(!corrupted);
         assert_eq!(operations.len(), 3);
         assert_eq!(&operations[0], &Operation::Snapshot(snapshot.clone()));
         assert_eq!(
