@@ -97,7 +97,7 @@ async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result
         "{}/for_sure_there_is_nothing_there_really",
         ctx.base_prefix,
     )))
-    .with_context(|| format!("RemotePath conversion"))?;
+    .with_context(|| "RemotePath conversion")?;
 
     ctx.client.delete(&path).await.expect("should succeed");
 
@@ -180,7 +180,7 @@ impl AsyncTestContext for MaybeEnabledS3WithTestBlobs {
 
         let enabled = EnabledS3::setup(Some(max_keys_in_list_response)).await;
 
-        match upload_s3_data(&enabled.client, &enabled.base_prefix, upload_tasks_count).await {
+        match upload_s3_data(&enabled.client, enabled.base_prefix, upload_tasks_count).await {
             ControlFlow::Continue(uploads) => {
                 info!("Remote objects created successfully");
 
@@ -231,7 +231,7 @@ fn create_s3_client(
             prefix_in_bucket: Some(format!("pagination_should_work_test_{random_prefix_part}/")),
             endpoint: None,
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
-            max_keys_per_list_response: max_keys_per_list_response,
+            max_keys_per_list_response,
         }),
     };
     Ok(Arc::new(
