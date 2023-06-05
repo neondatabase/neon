@@ -364,6 +364,8 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Initialuize the queue in stopped state. Used in startup path
+    /// to continue deletion operation interrupted by pageserver crash or restart.
     pub fn init_upload_queue_stopped_to_continue_deletion(
         &self,
         index_part: &IndexPart,
@@ -383,12 +385,10 @@ impl RemoteTimelineClient {
             "bug: it is responsibility of the caller to provide index part from MaybeDeletedIndexPart::Deleted"
         ))?;
 
-        match &mut *upload_queue {
-            UploadQueue::Stopped(stopped) => {
-                stopped.deleted_at = SetDeletedFlagProgress::Successful(deleted_at)
-            }
-            _ => unreachable!("stopped above"),
-        }
+        upload_queue
+            .stopped_mut()
+            .expect("stopped above")
+            .deleted_at = SetDeletedFlagProgress::Successful(deleted_at);
 
         Ok(())
     }
@@ -722,15 +722,7 @@ impl RemoteTimelineClient {
             // We must be in stopped state because otherwise
             // we can have inprogress index part upload that can overwrite the file
             // with missing is_deleted flag that we going to set below
-            let stopped = match &mut *locked {
-                UploadQueue::Uninitialized => {
-                    return Err(anyhow::anyhow!("is not Stopped but Uninitialized").into())
-                }
-                UploadQueue::Initialized(_) => {
-                    return Err(anyhow::anyhow!("is not Stopped but Initialized").into())
-                }
-                UploadQueue::Stopped(stopped) => stopped,
-            };
+            let stopped = locked.stopped_mut()?;
 
             match stopped.deleted_at {
                 SetDeletedFlagProgress::NotRunning => (), // proceed
@@ -744,30 +736,17 @@ impl RemoteTimelineClient {
             let deleted_at = Utc::now().naive_utc();
             stopped.deleted_at = SetDeletedFlagProgress::InProgress(deleted_at);
 
-            let mut index_part = IndexPart::new(
-                stopped.upload_queue_for_deletion.latest_files.clone(),
-                stopped
-                    .upload_queue_for_deletion
-                    .last_uploaded_consistent_lsn,
-                stopped
-                    .upload_queue_for_deletion
-                    .latest_metadata
-                    .to_bytes()
-                    .context("serialize metadata")?,
-            );
+            let mut index_part = IndexPart::try_from(&stopped.upload_queue_for_deletion)
+                .context("IndexPart serialize")?;
             index_part.deleted_at = Some(deleted_at);
             index_part
         };
 
         let undo_deleted_at = scopeguard::guard(Arc::clone(self), |self_clone| {
             let mut locked = self_clone.upload_queue.lock().unwrap();
-            let stopped = match &mut *locked {
-                UploadQueue::Uninitialized | UploadQueue::Initialized(_) => unreachable!(
-                    "there's no way out of Stopping, and we checked it's Stopping above: {:?}",
-                    locked.as_str(),
-                ),
-                UploadQueue::Stopped(stopped) => stopped,
-            };
+            let stopped = locked
+                .stopped_mut()
+                .expect("there's no way out of Stopping, and we checked it's Stopping above");
             stopped.deleted_at = SetDeletedFlagProgress::NotRunning;
         });
 
@@ -802,13 +781,10 @@ impl RemoteTimelineClient {
         ScopeGuard::into_inner(undo_deleted_at);
         {
             let mut locked = self.upload_queue.lock().unwrap();
-            let stopped = match &mut *locked {
-                UploadQueue::Uninitialized | UploadQueue::Initialized(_) => unreachable!(
-                    "there's no way out of Stopping, and we checked it's Stopping above: {:?}",
-                    locked.as_str(),
-                ),
-                UploadQueue::Stopped(stopped) => stopped,
-            };
+
+            let stopped = locked
+                .stopped_mut()
+                .expect("there's no way out of Stopping, and we checked it's Stopping above");
             stopped.deleted_at = SetDeletedFlagProgress::Successful(
                 index_part_with_deleted_at
                     .deleted_at
@@ -820,30 +796,22 @@ impl RemoteTimelineClient {
     }
 
     pub(crate) async fn delete_all(self: &Arc<Self>) -> anyhow::Result<()> {
-        let mut receiver = {
+        let (mut receiver, deletions_queued) = {
+            let mut deletions_queued = 0;
+
             let mut locked = self.upload_queue.lock().unwrap();
-            let stopped = match &mut *locked {
-                UploadQueue::Uninitialized => {
-                    anyhow::bail!("upload queue is not stopped but initialized")
-                }
-                UploadQueue::Initialized(_) => {
-                    anyhow::bail!("upload queue is not stopped but initialized")
-                }
-                UploadQueue::Stopped(stopped) => stopped,
-            };
+            let stopped = locked.stopped_mut()?;
 
             if !matches!(stopped.deleted_at, SetDeletedFlagProgress::Successful(_)) {
                 anyhow::bail!("deleted_at is not set")
             }
 
-            debug_assert!(stopped
-                .upload_queue_for_deletion
-                .inprogress_tasks
-                .is_empty());
-            debug_assert!(stopped
+            debug_assert!(stopped.upload_queue_for_deletion.no_pending_work());
+
+            stopped
                 .upload_queue_for_deletion
                 .queued_operations
-                .is_empty());
+                .reserve(stopped.upload_queue_for_deletion.latest_files.len());
 
             // schedule the actual deletions
             for name in stopped.upload_queue_for_deletion.latest_files.keys() {
@@ -857,12 +825,17 @@ impl RemoteTimelineClient {
                     .upload_queue_for_deletion
                     .queued_operations
                     .push_back(op);
+
                 info!("scheduled layer file deletion {}", name.file_name());
+                deletions_queued += 1;
             }
 
             self.launch_queued_tasks(&mut stopped.upload_queue_for_deletion);
 
-            self.schedule_barrier(&mut stopped.upload_queue_for_deletion)
+            (
+                self.schedule_barrier(&mut stopped.upload_queue_for_deletion),
+                deletions_queued,
+            )
         };
 
         receiver.changed().await?;
@@ -897,7 +870,7 @@ impl RemoteTimelineClient {
         info!("deleting index part");
         self.storage_impl.delete(&index_file_path).await?;
 
-        info!("Done");
+        info!(deletions_queued, "done deleting, including index_part.json");
 
         Ok(())
     }

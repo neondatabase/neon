@@ -76,6 +76,12 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) queued_operations: VecDeque<UploadOp>,
 }
 
+impl UploadQueueInitialized {
+    pub(super) fn no_pending_work(&self) -> bool {
+        self.inprogress_tasks.is_empty() && self.queued_operations.is_empty()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum SetDeletedFlagProgress {
     NotRunning,
@@ -183,6 +189,15 @@ impl UploadQueue {
                 anyhow::bail!("queue is in state {}", self.as_str())
             }
             UploadQueue::Initialized(x) => Ok(x),
+        }
+    }
+
+    pub(crate) fn stopped_mut(&mut self) -> anyhow::Result<&mut UploadQueueStopped> {
+        match self {
+            UploadQueue::Initialized(_) | UploadQueue::Uninitialized => {
+                anyhow::bail!("queue is in state {}", self.as_str())
+            }
+            UploadQueue::Stopped(stopped) => Ok(stopped),
         }
     }
 }

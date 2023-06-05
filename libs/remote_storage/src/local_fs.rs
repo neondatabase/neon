@@ -17,7 +17,7 @@ use tokio::{
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 use tracing::*;
-use utils::crashsafe::path_with_suffix_extension;
+use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
 use crate::{Download, DownloadError, RemotePath};
 
@@ -91,13 +91,6 @@ impl LocalFs {
     }
 }
 
-async fn is_directory_empty(path: impl AsRef<Path>) -> anyhow::Result<bool> {
-    let mut dir = tokio::fs::read_dir(&path)
-        .await
-        .context(format!("read_dir({})", path.as_ref().display()))?;
-    Ok(dir.next_entry().await?.is_none())
-}
-
 #[async_trait::async_trait]
 impl RemoteStorage for LocalFs {
     async fn list_prefixes(
@@ -108,12 +101,12 @@ impl RemoteStorage for LocalFs {
             Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
             None => Cow::Borrowed(&self.storage_root),
         };
-        let mut prefixes = vec![];
 
         let prefixes_to_filter = get_all_files(path.as_ref(), false)
             .await
-            .map_err(DownloadError::Other)?
-            .into_iter();
+            .map_err(DownloadError::Other)?;
+
+        let mut prefixes = Vec::with_capacity(prefixes_to_filter.len());
 
         // filter out empty directories to mirror s3 behavior.
         for prefix in prefixes_to_filter {
