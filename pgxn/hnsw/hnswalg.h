@@ -32,11 +32,11 @@ struct HierarchicalNSW
 	size_t size_links_level0;
 	size_t efConstruction;
 
-	char   data_level0_memory[0]; // varying size
-
 #ifdef __x86_64__
 	bool	use_avx2;
 #endif
+
+	char   data_level0_memory[0]; // varying size
 
   public:
 	HierarchicalNSW(size_t dim, size_t maxelements, size_t M, size_t maxM, size_t efConstruction);
