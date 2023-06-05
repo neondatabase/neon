@@ -16,10 +16,27 @@ pub trait Types {
     type HistoricStuff: HistoricStuff<Types = Self>;
 }
 
-pub enum InMemoryLayerPutError {
+#[derive(thiserror::Error)]
+pub struct InMemoryLayerPutError<DeltaRecord> {
+    delta: DeltaRecord,
+    kind: InMemoryLayerPutErrorKind,
+}
+
+#[derive(Debug)]
+pub enum InMemoryLayerPutErrorKind {
     Frozen,
     LayerFull,
     AlreadyHaveRecordForKeyAndLsn,
+}
+
+impl<T: Types> std::fmt::Debug for InMemoryLayerPutError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryLayerPutError")
+            // would require DeltaRecord to impl Debug
+            //         .field("delta", &self.delta)
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
@@ -29,7 +46,7 @@ pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
         key: <Self::Types as Types>::Key,
         lsn: <Self::Types as Types>::Lsn,
         delta: <Self::Types as Types>::DeltaRecord,
-    ) -> Result<(), (<Self::Types as Types>::DeltaRecord, InMemoryLayerPutError)>;
+    ) -> Result<(), InMemoryLayerPutError<<Self::Types as Types>::DeltaRecord>>;
     fn get(
         &self,
         key: <Self::Types as Types>::Key,
@@ -155,16 +172,25 @@ impl<T: Types> ReadWriter<T> {
             Ok(()) => {
                 self.shared.advance(lsn, None);
             }
-            Err((_delta, InMemoryLayerPutError::Frozen)) => {
+            Err(InMemoryLayerPutError {
+                delta: _,
+                kind: InMemoryLayerPutErrorKind::Frozen,
+            }) => {
                 unreachable!("this method is &mut self, so, Rust guarantees that we are the only ones who can put() into the inmem layer, and if we freeze it as part of put, we make sure we don't try to put() again")
             }
-            Err((delta, InMemoryLayerPutError::AlreadyHaveRecordForKeyAndLsn)) => {
+            Err(InMemoryLayerPutError {
+                delta,
+                kind: InMemoryLayerPutErrorKind::AlreadyHaveRecordForKeyAndLsn,
+            }) => {
                 return Err(PutError {
                     delta,
                     kind: PutErrorKind::AlreadyHaveInMemoryRecordForKeyAndLsn,
                 });
             }
-            Err((_delta, InMemoryLayerPutError::LayerFull)) => {
+            Err(InMemoryLayerPutError {
+                delta: _delta,
+                kind: InMemoryLayerPutErrorKind::LayerFull,
+            }) => {
                 inmem.freeze();
                 let inmem_clone = inmem.clone();
                 drop(inmem);
@@ -240,6 +266,8 @@ mod tests {
     use std::sync::Arc;
 
     use crate::tests_common::UsizeCounter;
+
+    use super::InMemoryLayerPutError;
 
     /// The ZST for which we impl the `super::Types` type collection trait.
     struct TestTypes;
@@ -317,17 +345,20 @@ mod tests {
             key: usize,
             lsn: usize,
             delta: &'static str,
-        ) -> Result<(), (&'static str, super::InMemoryLayerPutError)> {
+        ) -> Result<(), super::InMemoryLayerPutError<&'static str>> {
             if self.frozen {
-                return Err((delta, super::InMemoryLayerPutError::Frozen));
+                return Err(InMemoryLayerPutError {
+                    delta,
+                    kind: super::InMemoryLayerPutErrorKind::Frozen,
+                });
             }
             let by_key = self.by_key.entry(key).or_default();
             match by_key.entry(lsn) {
                 Entry::Occupied(_record) => {
-                    return Err((
+                    return Err(InMemoryLayerPutError {
                         delta,
-                        super::InMemoryLayerPutError::AlreadyHaveRecordForKeyAndLsn,
-                    ));
+                        kind: super::InMemoryLayerPutErrorKind::AlreadyHaveRecordForKeyAndLsn,
+                    });
                 }
                 Entry::Vacant(vacant) => vacant.insert(delta),
             };
