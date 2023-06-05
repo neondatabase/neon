@@ -3749,6 +3749,7 @@ impl Timeline {
         // Is the timeline being deleted?
         let state = *self.state.borrow();
         if state == TimelineState::Stopping {
+            // there's a global allowed_error for this
             anyhow::bail!("timeline is Stopping");
         }
 
