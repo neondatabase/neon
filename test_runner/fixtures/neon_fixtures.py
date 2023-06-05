@@ -1585,13 +1585,10 @@ class NeonPageserver(PgProtocol):
             ".*serving compute connection task.*exited with error: Postgres connection error.*",
             ".*serving compute connection task.*exited with error: Connection reset by peer.*",
             ".*serving compute connection task.*exited with error: Postgres query error.*",
-            ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",
-            ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
-            ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
-            ".*Connection aborted: connection error: unexpected message from server*",
+            ".*Connection aborted: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*Replication stream finished: db error:.*ending streaming to Some*",
+            ".*: db error:.*ending streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
@@ -1608,8 +1605,6 @@ class NeonPageserver(PgProtocol):
             ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
             ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
             ".*Removing intermediate uninit mark file.*",
-            # FIXME: known race condition in TaskHandle: https://github.com/neondatabase/neon/issues/2885
-            ".*sender is dropped while join handle is still alive.*",
             # Tenant::delete_timeline() can cause any of the four following errors.
             # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
             ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
