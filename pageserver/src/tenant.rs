@@ -267,7 +267,7 @@ impl UninitializedTimeline<'_> {
         // updated it for the layers that we created during the import.
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
         let tl = self.initialize_with_lock(ctx, &mut timelines, false)?;
-        tl.activate(broker_client, ctx);
+        tl.activate(broker_client, None, ctx);
         Ok(tl)
     }
 
@@ -879,7 +879,6 @@ impl Tenant {
         ))
     }
 
-    ///
     /// Load a tenant that's available on local disk
     ///
     /// This is used at pageserver startup, to rebuild the in-memory
@@ -890,6 +889,8 @@ impl Tenant {
     /// If the loading fails for some reason, the Tenant will go into Broken
     /// state.
     ///
+    /// `init_done` is an optional channel used during initial load to delay background task
+    /// start. It is not used later.
     #[instrument(skip_all, fields(tenant_id=%tenant_id))]
     pub fn spawn_load(
         conf: &'static PageServerConf,
@@ -1358,7 +1359,7 @@ impl Tenant {
             }
         };
 
-        loaded_timeline.activate(broker_client, ctx);
+        loaded_timeline.activate(broker_client, None, ctx);
 
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
             // Wait for the upload of the 'index_part.json` file to finish, so that when we return
@@ -1394,6 +1395,7 @@ impl Tenant {
         pitr: Duration,
         ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
+        // there is a global allowed_error for this
         anyhow::ensure!(
             self.is_active(),
             "Cannot run GC iteration on inactive tenant"
@@ -1682,6 +1684,9 @@ impl Tenant {
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
+    ///
+    /// `init_done` is an optional channel used during initial load to delay background task
+    /// start. It is not used later.
     fn activate(
         self: &Arc<Self>,
         broker_client: BrokerClientChannel,
@@ -1723,7 +1728,7 @@ impl Tenant {
             let mut activated_timelines = 0;
 
             for timeline in not_broken_timelines {
-                timeline.activate(broker_client.clone(), ctx);
+                timeline.activate(broker_client.clone(), init_done, ctx);
                 activated_timelines += 1;
             }
 
