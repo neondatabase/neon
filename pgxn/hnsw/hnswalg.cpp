@@ -1,6 +1,12 @@
 #include "hnswalg.h"
 
+#if defined(__GNUC__)
+#define PORTABLE_ALIGN32 __attribute__((aligned(32)))
 #define PREFETCH(addr,hint) __builtin_prefetch(addr, 0, hint)
+#else
+#define PORTABLE_ALIGN32 __declspec(align(32))
+#define PREFETCH(addr,hint)
+#endif
 
 HierarchicalNSW::HierarchicalNSW(size_t dim_, size_t maxelements_, size_t M_, size_t maxM_, size_t efConstruction_)
 {
@@ -232,7 +238,8 @@ dist_t fstdistfunc_scalar(const coord_t *x, const coord_t *y, size_t n)
 __attribute__((target("avx2")))
 dist_t fstdistfunc_avx2(const coord_t *x, const coord_t *y, size_t n)
 {
-    float PORTABLE_ALIGN32 TmpRes[8];
+    const size_t TmpResSz = sizeof(__m256) / sizeof(float);
+    float PORTABLE_ALIGN32 TmpRes[TmpResSz];
     size_t qty16 = n / 16;
     const float *pEnd1 = x + (qty16 * 16);
     __m256 diff, v1, v2;
@@ -260,6 +267,11 @@ dist_t fstdistfunc_avx2(const coord_t *x, const coord_t *y, size_t n)
 
 dist_t fstdistfunc_sse(const coord_t *x, const coord_t *y, size_t n)
 {
+    const size_t TmpResSz = sizeof(__m128) / sizeof(float);
+    float PORTABLE_ALIGN32 TmpRes[TmpResSz];
+    size_t qty16 = n / 16;
+    const float *pEnd1 = x + (qty16 * 16);
+
     __m128 diff, v1, v2;
     __m128 sum = _mm_set1_ps(0);
 
