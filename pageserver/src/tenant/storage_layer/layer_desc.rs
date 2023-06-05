@@ -8,10 +8,12 @@ use crate::repository::Key;
 
 use super::{DeltaFileName, ImageFileName, LayerFileName};
 
+use serde::{Deserialize, Serialize};
+
 /// A unique identifier of a persistent layer. This is different from `LayerDescriptor`, which is only used in the
 /// benchmarks. This struct contains all necessary information to find the image / delta layer. It also provides
 /// a unified way to generate layer information like file name.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct PersistentLayerDesc {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
@@ -29,6 +31,18 @@ pub struct PersistentLayerDesc {
 impl PersistentLayerDesc {
     pub fn short_id(&self) -> String {
         self.filename().file_name()
+    }
+
+    #[cfg(test)]
+    pub fn new_test(key_range: Range<Key>) -> Self {
+        Self {
+            tenant_id: TenantId::generate(),
+            timeline_id: TimelineId::generate(),
+            key_range,
+            lsn_range: Lsn(0)..Lsn(1),
+            is_delta: false,
+            is_incremental: false,
+        }
     }
 
     pub fn new_img(
