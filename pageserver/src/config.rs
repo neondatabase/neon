@@ -63,7 +63,7 @@ pub mod defaults {
     pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "1 hour";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "30s";
+    pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
 
     ///
     /// Default built-in configuration file.
@@ -91,7 +91,6 @@ pub mod defaults {
 #metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
 #cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
 #synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
-
 
 #disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
 
