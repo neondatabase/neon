@@ -188,10 +188,7 @@ mod tests {
         );
         assert_eq!(
             &operations[2],
-            &Operation::Operation(vec![
-                Record::RemoveLayer(layer3),
-                Record::AddLayer(layer4)
-            ])
+            &Operation::Operation(vec![Record::RemoveLayer(layer3), Record::AddLayer(layer4)])
         );
     }
 }
