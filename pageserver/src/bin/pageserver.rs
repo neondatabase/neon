@@ -335,9 +335,13 @@ fn start_pageserver(
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
 
-    // All tenant load operations carry this while they are ongoing; it will be dropped once those
-    // operations finish either successfully or in some other manner. However, the initial load
-    // will be then done, and we can start the global background tasks.
+    // Startup staging or optimizing:
+    //
+    // (init_done_tx, init_done_rx) are used to control when do background loops start. This is to
+    // avoid starving out the BACKGROUND_RUNTIME async worker threads doing heavy work, like
+    // initial repartitioning while we still have Loading tenants.
+    //
+    // init_done_rx is a barrier which stops waiting once all init_done_tx clones are dropped.
     let (init_done_tx, init_done_rx) = utils::completion::channel();
 
     // Scan the local 'tenants/' directory and start loading the tenants
