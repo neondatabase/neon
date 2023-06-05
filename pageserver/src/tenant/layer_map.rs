@@ -134,6 +134,7 @@ where
     ///
     /// Insert an on-disk layer.
     ///
+    // TODO remove the `layer` argument when `mapping` is refactored out of `LayerMap`
     pub fn insert_historic(&mut self, layer_desc: PersistentLayerDesc, layer: Arc<L>) {
         self.layer_map.insert_historic_noflush(layer_desc, layer)
     }
