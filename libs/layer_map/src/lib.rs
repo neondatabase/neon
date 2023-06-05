@@ -2,12 +2,23 @@ use std::{
     cell::{RefCell, RefMut},
     future::Future,
     io::Read,
+    marker::PhantomData,
     ops::Deref,
     pin::Pin,
     sync::{Arc, Mutex, RwLock},
 };
 
 use utils::seqwait::{self, Advance, SeqWait, Wait};
+
+pub trait Types {
+    type Key: Copy;
+    type Lsn: Ord + Copy;
+    type LsnCounter: seqwait::MonotonicCounter<Self::Lsn> + Copy;
+    type DeltaRecord;
+    type HistoricLayer;
+    type InMemoryLayer: InMemoryLayer<Types = Self>;
+    type HistoricStuff: HistoricStuff<Types = Self>;
+}
 
 pub enum InMemoryLayerPutError {
     Frozen,
@@ -16,16 +27,18 @@ pub enum InMemoryLayerPutError {
 }
 
 pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
-    type Key;
-    type Lsn;
-    type DeltaRecord;
+    type Types: Types;
     fn put(
         &mut self,
-        key: Self::Key,
-        lsn: Self::Lsn,
-        delta: Self::DeltaRecord,
-    ) -> Result<(), (Self::DeltaRecord, InMemoryLayerPutError)>;
-    fn get(&self, key: Self::Key, lsn: Self::Lsn) -> Vec<Self::DeltaRecord>;
+        key: <Self::Types as Types>::Key,
+        lsn: <Self::Types as Types>::Lsn,
+        delta: <Self::Types as Types>::DeltaRecord,
+    ) -> Result<(), (<Self::Types as Types>::DeltaRecord, InMemoryLayerPutError)>;
+    fn get(
+        &self,
+        key: <Self::Types as Types>::Key,
+        lsn: <Self::Types as Types>::Lsn,
+    ) -> Vec<<Self::Types as Types>::DeltaRecord>;
     fn freeze(&mut self);
 }
 
@@ -33,75 +46,36 @@ pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
 pub enum GetReconstructPathError {}
 
 pub trait HistoricStuff {
-    type Key;
-    type Lsn;
-    type HistoricLayer;
-    type InMemoryLayer;
+    type Types: Types;
     fn get_reconstruct_path(
         &self,
-        key: Self::Key,
-        lsn: Self::Lsn,
-    ) -> Result<Vec<Self::HistoricLayer>, GetReconstructPathError>;
+        key: <Self::Types as Types>::Key,
+        lsn: <Self::Types as Types>::Lsn,
+    ) -> Result<Vec<<Self::Types as Types>::HistoricLayer>, GetReconstructPathError>;
     /// Produce a new version of `self` that includes the given inmem layer.
-    fn make_historic(&self, inmem: Self::InMemoryLayer) -> Self;
+    fn make_historic(&self, inmem: <Self::Types as Types>::InMemoryLayer) -> Self;
 }
 
-struct State<K, L, RD, Layer, H, IML>
-where
-    K: Copy,
-    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
-    IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
-{
-    inmem: Mutex<Option<IML>>,
-    historic: H,
+struct State<T: Types> {
+    _types: PhantomData<T>,
+    inmem: Mutex<Option<T::InMemoryLayer>>,
+    historic: T::HistoricStuff,
 }
 
-pub struct Reader<K, C, L, RD, Layer, H, IML>
-where
-    K: Copy,
-    C: seqwait::MonotonicCounter<L> + Copy,
-    L: Ord + Copy,
-    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
-    IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
-{
-    shared: Wait<C, L, Arc<State<K, L, RD, Layer, H, IML>>>,
+pub struct Reader<T: Types> {
+    shared: Wait<T::LsnCounter, T::Lsn, Arc<State<T>>>,
 }
 
-pub struct ReadWriter<K, C, L, RD, Layer, H, IML>
-where
-    K: Copy,
-    C: seqwait::MonotonicCounter<L> + Copy,
-    L: Ord + Copy,
-    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
-    IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
-{
-    shared: Advance<C, L, Arc<State<K, L, RD, Layer, H, IML>>>,
+pub struct ReadWriter<T: Types> {
+    shared: Advance<T::LsnCounter, T::Lsn, Arc<State<T>>>,
 }
 
-pub enum Record<D, I> {
-    Delta(D),
-    Image(I),
-}
-
-pub struct Lsn;
-
-pub struct PageImage;
-
-pub fn empty<K, C, L, RD, Layer, H, IML>(
-    lsn: C,
-    historic: H,
-) -> (
-    Reader<K, C, L, RD, Layer, H, IML>,
-    ReadWriter<K, C, L, RD, Layer, H, IML>,
-)
-where
-    K: Copy,
-    C: seqwait::MonotonicCounter<L> + Copy,
-    L: Ord + Copy,
-    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
-    IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
-{
+pub fn empty<T: Types>(
+    lsn: T::LsnCounter,
+    historic: T::HistoricStuff,
+) -> (Reader<T>, ReadWriter<T>) {
     let state = Arc::new(State {
+        _types: PhantomData::<T>::default(),
         inmem: Mutex::new(None),
         historic: historic,
     });
@@ -119,22 +93,15 @@ pub enum GetError {
     GetReconstructPath(#[from] GetReconstructPathError),
 }
 
-pub struct ReconstructWork<K, L, RD, Layer> {
-    key: K,
-    lsn: L,
-    inmem_records: Vec<RD>,
-    historic_path: Vec<Layer>,
+pub struct ReconstructWork<T: Types> {
+    key: T::Key,
+    lsn: T::Lsn,
+    inmem_records: Vec<T::DeltaRecord>,
+    historic_path: Vec<T::HistoricLayer>,
 }
 
-impl<K, C, L, RD, Layer, H, IML> Reader<K, C, L, RD, Layer, H, IML>
-where
-    K: Copy,
-    C: seqwait::MonotonicCounter<L> + Copy,
-    L: Ord + Copy,
-    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
-    IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
-{
-    pub async fn get(&self, key: K, lsn: L) -> Result<ReconstructWork<K, L, RD, Layer>, GetError> {
+impl<T: Types> Reader<T> {
+    pub async fn get(&self, key: T::Key, lsn: T::Lsn) -> Result<ReconstructWork<T>, GetError> {
         let state = self.shared.wait_for(lsn).await?;
         let inmem_records = state
             .inmem
@@ -153,22 +120,20 @@ where
     }
 }
 
-impl<K, C, L, RD, Layer, H, IML> ReadWriter<K, C, L, RD, Layer, H, IML>
-where
-    K: Copy,
-    C: seqwait::MonotonicCounter<L> + Copy,
-    L: Ord + Copy,
-    H: HistoricStuff<Key = K, Lsn = L, HistoricLayer = Layer, InMemoryLayer = IML>,
-    IML: InMemoryLayer<Key = K, Lsn = L, DeltaRecord = RD>,
-{
-    pub async fn put(&mut self, key: K, lsn: L, delta: RD) -> tokio::io::Result<()> {
-        let shared = self.shared.get_current_data();
+impl<T: Types> ReadWriter<T> {
+    pub async fn put(
+        &mut self,
+        key: T::Key,
+        lsn: T::Lsn,
+        delta: T::DeltaRecord,
+    ) -> tokio::io::Result<()> {
+        let shared: Arc<State<T>> = self.shared.get_current_data();
         let mut inmem_guard = shared
             .inmem
             .try_lock()
             // XXX: use the Advance as witness and only allow witness to access inmem in write mode
             .expect("we are the only ones with the Advance at hand");
-        let inmem = inmem_guard.get_or_insert_with(|| IML::default());
+        let inmem = inmem_guard.get_or_insert_with(|| T::InMemoryLayer::default());
         match inmem.put(key, lsn, delta) {
             Ok(()) => {
                 self.shared.advance(lsn, None);
@@ -187,6 +152,7 @@ where
                 todo!("write out to disk; does the layer map need to distinguish between writing out and finished writing out?");
                 let new_historic = shared.historic.make_historic(inmem_clone);
                 let new_state = Arc::new(State {
+                    _types: PhantomData::<T>::default(),
                     inmem: Mutex::new(None),
                     historic: new_historic,
                 });
@@ -203,7 +169,7 @@ where
             .try_lock()
             // XXX: use the Advance as witness and only allow witness to access inmem in write mode
             .expect("we are the only ones with the Advance at hand");
-        let Some(inmem) = inmem_guard else {
+        let Some(inmem) = &mut *inmem_guard else {
             // nothing to do
             return Ok(());
         };
@@ -211,6 +177,7 @@ where
         let inmem_clone = inmem.clone();
         let new_historic = shared.historic.make_historic(inmem_clone);
         let new_state = Arc::new(State {
+            _types: PhantomData::<T>::default(),
             inmem: Mutex::new(None),
             historic: new_historic,
         });
@@ -219,9 +186,9 @@ where
 
     pub async fn get_nowait(
         &self,
-        key: K,
-        lsn: L,
-    ) -> Result<ReconstructWork<K, L, RD, Layer>, GetError> {
+        key: T::Key,
+        lsn: T::Lsn,
+    ) -> Result<ReconstructWork<T>, GetError> {
         todo!()
     }
 }
@@ -236,7 +203,25 @@ mod tests {
         sync::Arc,
     };
 
-    use crate::seqwait;
+    use crate::{seqwait, HistoricStuff};
+
+    struct TestTypes;
+
+    impl super::Types for TestTypes {
+        type Key = usize;
+
+        type Lsn = usize;
+
+        type LsnCounter = UsizeCounter;
+
+        type DeltaRecord = &'static str;
+
+        type HistoricLayer = Arc<HistoricLayer>;
+
+        type InMemoryLayer = InMemoryLayer;
+
+        type HistoricStuff = LayerMap;
+    }
 
     struct HistoricLayer(InMemoryLayer);
 
@@ -259,23 +244,19 @@ mod tests {
     }
 
     impl super::HistoricStuff for LayerMap {
-        type Key = usize;
-        type Lsn = usize;
-        type HistoricLayer = Arc<HistoricLayer>;
-        type InMemoryLayer = InMemoryLayer;
-
+        type Types = TestTypes;
         fn get_reconstruct_path(
             &self,
-            key: Self::Key,
-            lsn: Self::Lsn,
-        ) -> Result<Vec<Self::HistoricLayer>, super::GetReconstructPathError> {
+            key: usize,
+            lsn: usize,
+        ) -> Result<Vec<Arc<HistoricLayer>>, super::GetReconstructPathError> {
             let Some(bk) = self.by_key.get(&key) else {
                 return Ok(vec![]);
             };
             Ok(bk.range(..=lsn).rev().map(|(_, l)| Arc::clone(l)).collect())
         }
 
-        fn make_historic(&self, inmem: Self::InMemoryLayer) -> Self {
+        fn make_historic(&self, inmem: InMemoryLayer) -> Self {
             let historic = Arc::new(HistoricLayer(inmem));
             // The returned copy of self references `historic` from all the (key,lsn) entries that it covers.
             // In the real codebase, this is a search tree that is less accurate.
@@ -298,16 +279,14 @@ mod tests {
     }
 
     impl super::InMemoryLayer for InMemoryLayer {
-        type Key = usize;
-        type Lsn = usize;
-        type DeltaRecord = &'static str;
+        type Types = TestTypes;
 
         fn put(
             &mut self,
-            key: Self::Key,
-            lsn: Self::Lsn,
-            delta: Self::DeltaRecord,
-        ) -> Result<(), (Self::DeltaRecord, super::InMemoryLayerPutError)> {
+            key: usize,
+            lsn: usize,
+            delta: &'static str,
+        ) -> Result<(), (&'static str, super::InMemoryLayerPutError)> {
             if self.frozen {
                 return Err((delta, super::InMemoryLayerPutError::Frozen));
             }
@@ -324,7 +303,7 @@ mod tests {
             Ok(())
         }
 
-        fn get(&self, key: Self::Key, lsn: Self::Lsn) -> Vec<Self::DeltaRecord> {
+        fn get(&self, key: usize, lsn: usize) -> Vec<&'static str> {
             let by_key = match self.by_key.get(&key) {
                 Some(by_key) => by_key,
                 None => return vec![],
@@ -346,15 +325,7 @@ mod tests {
     fn basic() {
         let lm = LayerMap::default();
 
-        let (r, mut rw) = super::empty::<
-            usize,
-            UsizeCounter,
-            usize,
-            &'static str,
-            Arc<HistoricLayer>,
-            LayerMap,
-            InMemoryLayer,
-        >(UsizeCounter(0), lm);
+        let (r, mut rw) = super::empty::<TestTypes>(UsizeCounter(0), lm);
 
         let r = Arc::new(r);
         let r2 = Arc::clone(&r);
@@ -387,7 +358,5 @@ mod tests {
         let read_res = rt.block_on(async move { r2.get(0, 11).await.unwrap() });
         assert_eq!(read_res.historic_path.len(), 0);
         assert_eq!(read_res.inmem_records, vec!["blup", "baz", "foo"]);
-
-        rw.put(key, lsn, delta)
     }
 }
