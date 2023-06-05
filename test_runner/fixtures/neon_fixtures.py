@@ -629,7 +629,7 @@ class NeonEnvBuilder:
         assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
-    def init_start(self) -> NeonEnv:
+    def init_start(self, initial_tenant_conf: Optional[Dict[str, str]] = None) -> NeonEnv:
         env = self.init_configs()
         self.start()
 
@@ -638,7 +638,9 @@ class NeonEnvBuilder:
         log.info(
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
-        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        initial_tenant, initial_timeline = env.neon_cli.create_tenant(
+            tenant_id=env.initial_tenant, conf=initial_tenant_conf
+        )
         env.initial_timeline = initial_timeline
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
@@ -1613,6 +1615,7 @@ class NeonPageserver(PgProtocol):
             ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
             ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
             ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
+            ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
