@@ -216,15 +216,10 @@ impl<T: Types> ReadWriter<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{
-            btree_map::{Entry, Range},
-            BTreeMap, HashMap,
-        },
-        sync::Arc,
-    };
+    use std::collections::{btree_map::Entry, BTreeMap};
+    use std::sync::Arc;
 
-    use crate::{seqwait, HistoricStuff};
+    use crate::seqwait;
 
     struct TestTypes;
 
@@ -312,8 +307,8 @@ mod tests {
                 return Err((delta, super::InMemoryLayerPutError::Frozen));
             }
             let by_key = self.by_key.entry(key).or_default();
-            let by_key_and_lsn = match by_key.entry(lsn) {
-                Entry::Occupied(record) => {
+            match by_key.entry(lsn) {
+                Entry::Occupied(_record) => {
                     return Err((
                         delta,
                         super::InMemoryLayerPutError::AlreadyHaveRecordForKeyAndLsn,
@@ -379,5 +374,7 @@ mod tests {
         let read_res = rt.block_on(async move { r2.get(0, 11).await.unwrap() });
         assert_eq!(read_res.historic_path.len(), 0);
         assert_eq!(read_res.inmem_records, vec!["blup", "baz", "foo"]);
+
+        drop(rw);
     }
 }
