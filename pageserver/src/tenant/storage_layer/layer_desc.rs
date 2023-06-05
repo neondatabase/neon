@@ -130,6 +130,8 @@ impl PersistentLayerDesc {
         }
     }
 
+    // TODO: remove this in the future once we refactor timeline APIs.
+
     pub fn get_lsn_range(&self) -> Range<Lsn> {
         self.lsn_range.clone()
     }

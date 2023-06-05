@@ -51,6 +51,7 @@ use crate::keyspace::KeyPartitioning;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
+use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -290,7 +291,7 @@ where
     ///
     /// Helper function for BatchedUpdates::insert_historic
     ///
-    /// TODO(chi): remove L generic so that we do not need to pass layer desc.
+    /// TODO(chi): remove L generic so that we do not need to pass layer object.
     pub(self) fn insert_historic_noflush(
         &mut self,
         layer_desc: PersistentLayerDesc,
@@ -311,7 +312,11 @@ where
     }
 
     fn get_layer_from_mapping(&self, key: &PersistentLayerKey) -> &Arc<L> {
-        let layer = self.mapping.get(key).expect("inconsistent layer mapping");
+        let layer = self
+            .mapping
+            .get(key)
+            .with_context(|| format!("{key:?}"))
+            .expect("inconsistent layer mapping");
         layer
     }
 
