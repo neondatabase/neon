@@ -1,3 +1,5 @@
+//! Design with **immutable in-memory** and **immutable historic** stuff.
+
 use std::{marker::PhantomData, time::Duration};
 
 use utils::seqwait::{self, Advance, SeqWait, Wait};

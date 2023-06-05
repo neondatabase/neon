@@ -1,3 +1,5 @@
+//! Design with **mutable in-memory** and **immutable historic** stuff.
+
 use std::{
     marker::PhantomData,
     sync::{Arc, Mutex},
