@@ -107,6 +107,7 @@ pub trait Types {
     type HistoricLayer;
     type InMemoryLayer: InMemoryLayer<Types = Self> + Clone;
     type HistoricStuff: HistoricStuff<Types = Self> + Clone;
+    type GetReconstructPathError;
 }
 
 /// Error returned by [`InMemoryLayer::put`].
@@ -149,9 +150,6 @@ pub trait InMemoryLayer: std::fmt::Debug + Default + Clone {
     ) -> Vec<<Self::Types as Types>::DeltaRecord>;
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum GetReconstructPathError {}
-
 /// The manager of [`Types::HistoricLayer`]s.
 pub trait HistoricStuff {
     type Types: Types;
@@ -159,7 +157,10 @@ pub trait HistoricStuff {
         &self,
         key: <Self::Types as Types>::Key,
         lsn: <Self::Types as Types>::Lsn,
-    ) -> Result<Vec<<Self::Types as Types>::HistoricLayer>, GetReconstructPathError>;
+    ) -> Result<
+        Vec<<Self::Types as Types>::HistoricLayer>,
+        <Self::Types as Types>::GetReconstructPathError,
+    >;
     /// Produce a new version of `self` that includes the given inmem layer.
     fn make_historic(&self, inmem: <Self::Types as Types>::InMemoryLayer) -> Self;
 }
@@ -208,11 +209,11 @@ pub fn new<T: Types>(lsn: T::LsnCounter, historic: T::HistoricStuff) -> (Reader<
 
 /// Error returned by the get-page operations.
 #[derive(Debug, thiserror::Error)]
-pub enum GetError {
+pub enum GetError<T: Types> {
     #[error(transparent)]
-    SeqWait(#[from] seqwait::SeqWaitError),
+    SeqWait(seqwait::SeqWaitError),
     #[error(transparent)]
-    GetReconstructPath(#[from] GetReconstructPathError),
+    GetReconstructPath(T::GetReconstructPathError),
 }
 
 /// Self-contained set of objects required to reconstruct a page image for the given `key` @ `lsn`.
@@ -234,7 +235,7 @@ impl<T: Types> Reader<T> {
     /// This is the `GetPage@LSN` operation.
     ///
     /// See the [`crate`]-level docs for why we return [`ReconstructWork`] instead of a Page Image here.
-    pub async fn get(&self, key: T::Key, lsn: T::Lsn) -> Result<ReconstructWork<T>, GetError> {
+    pub async fn get(&self, key: T::Key, lsn: T::Lsn) -> Result<ReconstructWork<T>, GetError<T>> {
         // XXX dedup with Writer::get_nowait
         let state = self.wait.wait_for(lsn).await?;
         let inmem_records = state
@@ -364,7 +365,7 @@ impl<T: Types> Writer<T> {
         &self,
         key: T::Key,
         lsn: T::Lsn,
-    ) -> Result<ReconstructWork<T>, GetError> {
+    ) -> Result<ReconstructWork<T>, GetError<T>> {
         // XXX dedup with Reader::get
         let state = self
             .advance
