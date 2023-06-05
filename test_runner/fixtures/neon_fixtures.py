@@ -629,7 +629,7 @@ class NeonEnvBuilder:
         assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
-    def init_start(self) -> NeonEnv:
+    def init_start(self, initial_tenant_conf: Optional[Dict[str, str]] = None) -> NeonEnv:
         env = self.init_configs()
         self.start()
 
@@ -638,7 +638,9 @@ class NeonEnvBuilder:
         log.info(
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
-        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        initial_tenant, initial_timeline = env.neon_cli.create_tenant(
+            tenant_id=env.initial_tenant, conf=initial_tenant_conf
+        )
         env.initial_timeline = initial_timeline
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
