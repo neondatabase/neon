@@ -511,12 +511,7 @@ pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> 
         .map(|r| r.name.pg_quote())
         .collect::<Vec<_>>();
 
-    let is_webaccess = spec
-        .cluster
-        .roles
-        .iter()
-        .map(|r| r.name == "web_access")
-        .any(|x| x);
+    let is_webaccess = spec.cluster.roles.iter().any(|r| r.name == "web_access");
 
     if is_webaccess {
         for db in &spec.cluster.databases {
