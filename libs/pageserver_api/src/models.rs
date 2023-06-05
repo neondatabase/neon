@@ -250,6 +250,9 @@ fn parse_json(s: &str) -> Result<serde_json::Value, serde_json::Error> {
 
 impl TenantConfig {
     pub fn deserialize_from_settings(settings: HashMap<&str, &str>) -> Result<Self, anyhow::Error> {
+        // Here we are using `clap` to parse the settings. This is not ideal, but it's the easiest
+        // way to simplify th code. To convert settings into a list of command line arguments, we
+        // need the program name argv0, each key into a long-form option, and each value proceeding it.
         let config = TenantConfig::try_parse_from(
             std::iter::once("argv0".to_string()).chain(
                 settings
