@@ -893,9 +893,6 @@ impl Tenant {
     ///
     /// If the loading fails for some reason, the Tenant will go into Broken
     /// state.
-    ///
-    /// `init_done` is an optional channel used during initial load to delay background task
-    /// start. It is not used later.
     #[instrument(skip_all, fields(tenant_id=%tenant_id))]
     pub fn spawn_load(
         conf: &'static PageServerConf,
@@ -1695,8 +1692,8 @@ impl Tenant {
 
     /// Changes tenant status to active, unless shutdown was already requested.
     ///
-    /// `init_done` is an optional channel used during initial load to delay background task
-    /// start. It is not used later.
+    /// `background_jobs_can_start` is an optional barrier set to a value during pageserver startup
+    /// to delay background jobs. Background jobs can be started right away when None is given.
     fn activate(
         self: &Arc<Self>,
         broker_client: BrokerClientChannel,

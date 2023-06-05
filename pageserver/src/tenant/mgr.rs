@@ -154,8 +154,6 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
-/// `init_done` is an optional channel used during initial load to delay background task
-/// start. It is not used later.
 pub fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,

@@ -337,11 +337,16 @@ fn start_pageserver(
 
     // Startup staging or optimizing:
     //
-    // (init_done_tx, init_done_rx) are used to control when do background loops start. This is to
-    // avoid starving out the BACKGROUND_RUNTIME async worker threads doing heavy work, like
-    // initial repartitioning while we still have Loading tenants.
+    // init_done_rx will notify when all initial load operations have completed.
     //
-    // init_done_rx is a barrier which stops waiting once all init_done_tx clones are dropped.
+    // background_jobs_can_start (same name used to hold off background jobs from starting at
+    // consumer side) will be dropped once we can start the background jobs. Currently it is behind
+    // completing all initial logical size calculations (init_logical_size_done_rx) and a timeout
+    // (background_task_maximum_delay).
+    //
+    // All this is done to allow an orderly deploy minimizing downtime for `page_service`
+    // connections, and trying not to overload BACKGROUND_RUNTIME by doing initial compactions and
+    // initial logical sizes at the same time.
     let (init_done_tx, init_done_rx) = utils::completion::channel();
 
     let (init_logical_size_done_tx, init_logical_size_done_rx) = utils::completion::channel();
