@@ -57,6 +57,7 @@ use pageserver_api::reltag::RelTag;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::to_pg_timestamp;
 use utils::{
+    completion,
     id::{TenantId, TimelineId},
     lsn::{AtomicLsn, Lsn, RecordLsn},
     seqwait::SeqWait,
@@ -525,7 +526,12 @@ impl Timeline {
             Some((cached_lsn, cached_img)) => {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
-                    Ordering::Equal => return Ok(cached_img), // exact LSN match, return the image
+                    Ordering::Equal => {
+                        self.metrics
+                            .materialized_page_cache_hit_upon_request_counter
+                            .inc();
+                        return Ok(cached_img); // exact LSN match, return the image
+                    }
                     Ordering::Greater => {
                         unreachable!("the returned lsn should never be after the requested lsn")
                     }
@@ -540,8 +546,10 @@ impl Timeline {
             img: cached_page_img,
         };
 
+        let timer = self.metrics.get_reconstruct_data_time_histo.start_timer();
         self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
             .await?;
+        timer.stop_and_record();
 
         self.metrics
             .reconstruct_time_histo
@@ -920,10 +928,15 @@ impl Timeline {
         Ok(())
     }
 
-    pub fn activate(self: &Arc<Self>, broker_client: BrokerClientChannel, ctx: &RequestContext) {
+    pub fn activate(
+        self: &Arc<Self>,
+        broker_client: BrokerClientChannel,
+        init_done: Option<&completion::Barrier>,
+        ctx: &RequestContext,
+    ) {
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
-        self.launch_eviction_task();
+        self.launch_eviction_task(init_done);
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -2277,6 +2290,9 @@ impl Timeline {
         let mut timeline_owned;
         let mut timeline = self;
 
+        let mut read_count =
+            scopeguard::guard(0, |cnt| self.metrics.read_num_fs_layers.observe(cnt as f64));
+
         // For debugging purposes, collect the path of layers that we traversed
         // through. It's included in the error message if we fail to find the key.
         let mut traversal_path = Vec::<TraversalPathItem>::new();
@@ -2411,6 +2427,7 @@ impl Timeline {
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
+                            // metrics: open_layer does not count as fs access, so we are not updating `read_count`
                             traversal_path.push((
                                 result,
                                 cont_lsn,
@@ -2437,6 +2454,7 @@ impl Timeline {
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
+                            // metrics: open_layer does not count as fs access, so we are not updating `read_count`
                             traversal_path.push((
                                 result,
                                 cont_lsn,
@@ -2471,6 +2489,7 @@ impl Timeline {
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
+                            *read_count += 1;
                             traversal_path.push((
                                 result,
                                 cont_lsn,
@@ -2536,7 +2555,7 @@ impl Timeline {
                     (DownloadBehavior::Error, false) => {
                         return Err(PageReconstructError::NeedsDownload(
                             TenantTimelineId::new(self.tenant_id, self.timeline_id),
-                            remote_layer.file_name.clone(),
+                            remote_layer.filename(),
                         ))
                     }
                 }
@@ -3069,6 +3088,7 @@ impl Timeline {
                     self.tenant_id,
                     &img_range,
                     lsn,
+                    false, // image layer always covers the full range
                 )?;
 
                 fail_point!("image-layer-writer-fail-before-finish", |_| {
@@ -4128,7 +4148,7 @@ impl Timeline {
                 // Does retries + exponential back-off internally.
                 // When this fails, don't layer further retry attempts here.
                 let result = remote_client
-                    .download_layer_file(&remote_layer.file_name, &remote_layer.layer_metadata)
+                    .download_layer_file(&remote_layer.filename(), &remote_layer.layer_metadata)
                     .await;
 
                 if let Ok(size) = &result {

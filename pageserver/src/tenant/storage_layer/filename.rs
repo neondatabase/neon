@@ -9,6 +9,8 @@ use std::str::FromStr;
 
 use utils::lsn::Lsn;
 
+use super::PersistentLayerDesc;
+
 // Note: Timeline::load_layer_map() relies on this sort order
 #[derive(PartialEq, Eq, Clone, Hash)]
 pub struct DeltaFileName {
@@ -153,7 +155,7 @@ impl Ord for ImageFileName {
 impl ImageFileName {
     pub fn lsn_as_range(&self) -> Range<Lsn> {
         // Saves from having to copypaste this all over
-        self.lsn..(self.lsn + 1)
+        PersistentLayerDesc::image_layer_lsn_range(self.lsn)
     }
 }
 

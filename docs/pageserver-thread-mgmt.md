@@ -52,9 +52,7 @@ completion, or shield the rest of the code from surprise cancellations
 by spawning a separate task. The code that handles incoming HTTP
 requests, for example, spawns a separate task for each request,
 because Hyper will drop the request-handling Future if the HTTP
-connection is lost.  (FIXME: our HTTP handlers do not do that
-currently, but we should fix that. See [issue
-3478](https://github.com/neondatabase/neon/issues/3478)).
+connection is lost.
 
 
 #### How to cancel, then?

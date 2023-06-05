@@ -1,3 +1,6 @@
+//!
+//! Management HTTP API
+//!
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -46,7 +49,6 @@ use utils::{
 };
 
 // Imports only used for testing APIs
-#[cfg(feature = "testing")]
 use super::models::ConfigureFailpointsRequest;
 
 struct State {
@@ -290,13 +292,19 @@ fn build_timeline_info_common(
 }
 
 // healthcheck handler
-async fn status_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn status_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
     let config = get_config(&request);
     json_response(StatusCode::OK, StatusResponse { id: config.id })
 }
 
-async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_create_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_id))?;
@@ -332,7 +340,10 @@ async fn timeline_create_handler(mut request: Request<Body>) -> Result<Response<
     .await
 }
 
-async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_list_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let include_non_incremental_logical_size: Option<bool> =
         parse_query_param(&request, "include-non-incremental-logical-size")?;
@@ -366,7 +377,10 @@ async fn timeline_list_handler(request: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, response_data)
 }
 
-async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_detail_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let include_non_incremental_logical_size: Option<bool> =
@@ -400,7 +414,10 @@ async fn timeline_detail_handler(request: Request<Body>) -> Result<Response<Body
     json_response(StatusCode::OK, timeline_info)
 }
 
-async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn get_lsn_by_timestamp_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -424,7 +441,10 @@ async fn get_lsn_by_timestamp_handler(request: Request<Body>) -> Result<Response
     json_response(StatusCode::OK, result)
 }
 
-async fn tenant_attach_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_attach_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -460,7 +480,10 @@ async fn tenant_attach_handler(mut request: Request<Body>) -> Result<Response<Bo
     json_response(StatusCode::ACCEPTED, ())
 }
 
-async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_delete_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -475,7 +498,10 @@ async fn timeline_delete_handler(request: Request<Body>) -> Result<Response<Body
     json_response(StatusCode::ACCEPTED, ())
 }
 
-async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_detach_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     let detach_ignored: Option<bool> = parse_query_param(&request, "detach_ignored")?;
@@ -489,7 +515,10 @@ async fn tenant_detach_handler(request: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, ())
 }
 
-async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_load_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -509,7 +538,10 @@ async fn tenant_load_handler(request: Request<Body>) -> Result<Response<Body>, A
     json_response(StatusCode::ACCEPTED, ())
 }
 
-async fn tenant_ignore_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_ignore_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -522,7 +554,10 @@ async fn tenant_ignore_handler(request: Request<Body>) -> Result<Response<Body>,
     json_response(StatusCode::OK, ())
 }
 
-async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_list_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     check_permission(&request, None)?;
 
     let response_data = mgr::list_tenants()
@@ -542,7 +577,10 @@ async fn tenant_list_handler(request: Request<Body>) -> Result<Response<Body>, A
     json_response(StatusCode::OK, response_data)
 }
 
-async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_status(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -582,7 +620,10 @@ async fn tenant_status(request: Request<Body>) -> Result<Response<Body>, ApiErro
 /// Note: we don't update the cached size and prometheus metric here.
 /// The retention period might be different, and it's nice to have a method to just calculate it
 /// without modifying anything anyway.
-async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_size_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     let inputs_only: Option<bool> = parse_query_param(&request, "inputs_only")?;
@@ -647,7 +688,10 @@ async fn tenant_size_handler(request: Request<Body>) -> Result<Response<Body>, A
     )
 }
 
-async fn layer_map_info_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn layer_map_info_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     let reset: LayerAccessStatsReset =
@@ -661,7 +705,10 @@ async fn layer_map_info_handler(request: Request<Body>) -> Result<Response<Body>
     json_response(StatusCode::OK, layer_map_info)
 }
 
-async fn layer_download_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn layer_download_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -684,7 +731,10 @@ async fn layer_download_handler(request: Request<Body>) -> Result<Response<Body>
     }
 }
 
-async fn evict_timeline_layer_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn evict_timeline_layer_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -762,7 +812,10 @@ pub fn html_response(status: StatusCode, data: String) -> Result<Response<Body>,
     Ok(response)
 }
 
-async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn tenant_create_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let request_data: TenantCreateRequest = json_request(&mut request).await?;
     let target_tenant_id = request_data.new_tenant_id;
     check_permission(&request, None)?;
@@ -809,7 +862,10 @@ async fn tenant_create_handler(mut request: Request<Body>) -> Result<Response<Bo
     )
 }
 
-async fn get_tenant_config_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn get_tenant_config_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
 
@@ -835,6 +891,7 @@ async fn get_tenant_config_handler(request: Request<Body>) -> Result<Response<Bo
 
 async fn update_tenant_config_handler(
     mut request: Request<Body>,
+    _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let request_data: TenantConfigRequest = json_request(&mut request).await?;
     let tenant_id = request_data.tenant_id;
@@ -852,8 +909,10 @@ async fn update_tenant_config_handler(
 }
 
 /// Testing helper to transition a tenant to [`crate::tenant::TenantState::Broken`].
-#[cfg(feature = "testing")]
-async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_tenant_break(
+    r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&r, "tenant_id")?;
 
     let tenant = crate::tenant::mgr::get_tenant(tenant_id, true)
@@ -865,8 +924,10 @@ async fn handle_tenant_break(r: Request<Body>) -> Result<Response<Body>, ApiErro
     json_response(StatusCode::OK, ())
 }
 
-#[cfg(feature = "testing")]
-async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn failpoints_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     if !fail::has_failpoints() {
         return Err(ApiError::BadRequest(anyhow!(
             "Cannot manage failpoints because pageserver was compiled without failpoints support"
@@ -899,7 +960,10 @@ async fn failpoints_handler(mut request: Request<Body>) -> Result<Response<Body>
 }
 
 // Run GC immediately on given timeline.
-async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_gc_handler(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -918,8 +982,10 @@ async fn timeline_gc_handler(mut request: Request<Body>) -> Result<Response<Body
 }
 
 // Run compaction immediately on given timeline.
-#[cfg(feature = "testing")]
-async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_compact_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -940,8 +1006,10 @@ async fn timeline_compact_handler(request: Request<Body>) -> Result<Response<Bod
 }
 
 // Run checkpoint immediately on given timeline.
-#[cfg(feature = "testing")]
-async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn timeline_checkpoint_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -965,6 +1033,7 @@ async fn timeline_checkpoint_handler(request: Request<Body>) -> Result<Response<
 
 async fn timeline_download_remote_layers_handler_post(
     mut request: Request<Body>,
+    _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -980,6 +1049,7 @@ async fn timeline_download_remote_layers_handler_post(
 
 async fn timeline_download_remote_layers_handler_get(
     request: Request<Body>,
+    _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&request, "tenant_id")?;
     check_permission(&request, Some(tenant_id))?;
@@ -1003,7 +1073,10 @@ async fn active_timeline_of_active_tenant(
         .map_err(ApiError::NotFound)
 }
 
-async fn always_panic_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn always_panic_handler(
+    req: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     // Deliberately cause a panic to exercise the panic hook registered via std::panic::set_hook().
     // For pageserver, the relevant panic hook is `tracing_panic_hook` , and the `sentry` crate's wrapper around it.
     // Use catch_unwind to ensure that tokio nor hyper are distracted by our panic.
@@ -1014,7 +1087,10 @@ async fn always_panic_handler(req: Request<Body>) -> Result<Response<Body>, ApiE
     json_response(StatusCode::NO_CONTENT, ())
 }
 
-async fn disk_usage_eviction_run(mut r: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn disk_usage_eviction_run(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     check_permission(&r, None)?;
 
     #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -1104,8 +1180,10 @@ async fn handler_404(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     )
 }
 
-#[cfg(feature = "testing")]
-async fn post_tracing_event_handler(mut r: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn post_tracing_event_handler(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
     #[derive(Debug, serde::Deserialize)]
     #[serde(rename_all = "lowercase")]
     enum Level {
@@ -1133,6 +1211,85 @@ async fn post_tracing_event_handler(mut r: Request<Body>) -> Result<Response<Bod
     }
 
     json_response(StatusCode::OK, ())
+}
+
+/// Common functionality of all the HTTP API handlers.
+///
+/// - Adds a tracing span to each request (by `request_span`)
+/// - Logs the request depending on the request method (by `request_span`)
+/// - Logs the response if it was not successful (by `request_span`
+/// - Shields the handler function from async cancellations. Hyper can drop the handler
+///   Future if the connection to the client is lost, but most of the pageserver code is
+///   not async cancellation safe. This converts the dropped future into a graceful cancellation
+///   request with a CancellationToken.
+async fn api_handler<R, H>(request: Request<Body>, handler: H) -> Result<Response<Body>, ApiError>
+where
+    R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
+    H: FnOnce(Request<Body>, CancellationToken) -> R + Send + Sync + 'static,
+{
+    // Spawn a new task to handle the request, to protect the handler from unexpected
+    // async cancellations. Most pageserver functions are not async cancellation safe.
+    // We arm a drop-guard, so that if Hyper drops the Future, we signal the task
+    // with the cancellation token.
+    let token = CancellationToken::new();
+    let cancel_guard = token.clone().drop_guard();
+    let result = request_span(request, move |r| async {
+        let handle = tokio::spawn(
+            async {
+                let token_cloned = token.clone();
+                let result = handler(r, token).await;
+                if token_cloned.is_cancelled() {
+                    info!("Cancelled request finished");
+                }
+                result
+            }
+            .in_current_span(),
+        );
+
+        match handle.await {
+            Ok(result) => result,
+            Err(e) => {
+                // The handler task panicked. We have a global panic handler that logs the
+                // panic with its backtrace, so no need to log that here. Only log a brief
+                // message to make it clear that we returned the error to the client.
+                error!("HTTP request handler task panicked: {e:#}");
+
+                // Don't return an Error here, because then fallback error handler that was
+                // installed in make_router() will print the error. Instead, construct the
+                // HTTP error response and return that.
+                Ok(
+                    ApiError::InternalServerError(anyhow!("HTTP request handler task panicked"))
+                        .into_response(),
+                )
+            }
+        }
+    })
+    .await;
+
+    cancel_guard.disarm();
+
+    result
+}
+
+/// Like api_handler, but returns an error response if the server is built without
+/// the 'testing' feature.
+async fn testing_api_handler<R, H>(
+    desc: &str,
+    request: Request<Body>,
+    handler: H,
+) -> Result<Response<Body>, ApiError>
+where
+    R: std::future::Future<Output = Result<Response<Body>, ApiError>> + Send + 'static,
+    H: FnOnce(Request<Body>, CancellationToken) -> R + Send + Sync + 'static,
+{
+    if cfg!(feature = "testing") {
+        api_handler(request, handler).await
+    } else {
+        std::future::ready(Err(ApiError::BadRequest(anyhow!(
+            "Cannot {desc} because pageserver was compiled without testing APIs",
+        ))))
+        .await
+    }
 }
 
 pub fn make_router(
@@ -1164,26 +1321,6 @@ pub fn make_router(
         .expect("construct launch timestamp header middleware"),
     );
 
-    macro_rules! testing_api {
-        ($handler_desc:literal, $handler:path $(,)?) => {{
-            #[cfg(not(feature = "testing"))]
-            async fn cfg_disabled(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
-                Err(ApiError::BadRequest(anyhow!(concat!(
-                    "Cannot ",
-                    $handler_desc,
-                    " because pageserver was compiled without testing APIs",
-                ))))
-            }
-
-            #[cfg(feature = "testing")]
-            let handler = $handler;
-            #[cfg(not(feature = "testing"))]
-            let handler = cfg_disabled;
-
-            move |r| request_span(r, handler)
-        }};
-    }
-
     Ok(router
         .data(Arc::new(
             State::new(
@@ -1195,92 +1332,88 @@ pub fn make_router(
             )
             .context("Failed to initialize router state")?,
         ))
-        .get("/v1/status", |r| request_span(r, status_handler))
-        .put(
-            "/v1/failpoints",
-            testing_api!("manage failpoints", failpoints_handler),
-        )
-        .get("/v1/tenant", |r| request_span(r, tenant_list_handler))
-        .post("/v1/tenant", |r| request_span(r, tenant_create_handler))
-        .get("/v1/tenant/:tenant_id", |r| request_span(r, tenant_status))
+        .get("/v1/status", |r| api_handler(r, status_handler))
+        .put("/v1/failpoints", |r| {
+            testing_api_handler("manage failpoints", r, failpoints_handler)
+        })
+        .get("/v1/tenant", |r| api_handler(r, tenant_list_handler))
+        .post("/v1/tenant", |r| api_handler(r, tenant_create_handler))
+        .get("/v1/tenant/:tenant_id", |r| api_handler(r, tenant_status))
         .get("/v1/tenant/:tenant_id/synthetic_size", |r| {
-            request_span(r, tenant_size_handler)
+            api_handler(r, tenant_size_handler)
         })
         .put("/v1/tenant/config", |r| {
-            request_span(r, update_tenant_config_handler)
+            api_handler(r, update_tenant_config_handler)
         })
         .get("/v1/tenant/:tenant_id/config", |r| {
-            request_span(r, get_tenant_config_handler)
+            api_handler(r, get_tenant_config_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline", |r| {
-            request_span(r, timeline_list_handler)
+            api_handler(r, timeline_list_handler)
         })
         .post("/v1/tenant/:tenant_id/timeline", |r| {
-            request_span(r, timeline_create_handler)
+            api_handler(r, timeline_create_handler)
         })
         .post("/v1/tenant/:tenant_id/attach", |r| {
-            request_span(r, tenant_attach_handler)
+            api_handler(r, tenant_attach_handler)
         })
         .post("/v1/tenant/:tenant_id/detach", |r| {
-            request_span(r, tenant_detach_handler)
+            api_handler(r, tenant_detach_handler)
         })
         .post("/v1/tenant/:tenant_id/load", |r| {
-            request_span(r, tenant_load_handler)
+            api_handler(r, tenant_load_handler)
         })
         .post("/v1/tenant/:tenant_id/ignore", |r| {
-            request_span(r, tenant_ignore_handler)
+            api_handler(r, tenant_ignore_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
-            request_span(r, timeline_detail_handler)
+            api_handler(r, timeline_detail_handler)
         })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/get_lsn_by_timestamp",
-            |r| request_span(r, get_lsn_by_timestamp_handler),
+            |r| api_handler(r, get_lsn_by_timestamp_handler),
         )
         .put("/v1/tenant/:tenant_id/timeline/:timeline_id/do_gc", |r| {
-            request_span(r, timeline_gc_handler)
+            api_handler(r, timeline_gc_handler)
+        })
+        .put("/v1/tenant/:tenant_id/timeline/:timeline_id/compact", |r| {
+            testing_api_handler("run timeline compaction", r, timeline_compact_handler)
         })
         .put(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/compact",
-            testing_api!("run timeline compaction", timeline_compact_handler),
-        )
-        .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/checkpoint",
-            testing_api!("run timeline checkpoint", timeline_checkpoint_handler),
+            |r| testing_api_handler("run timeline checkpoint", r, timeline_checkpoint_handler),
         )
         .post(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
-            |r| request_span(r, timeline_download_remote_layers_handler_post),
+            |r| api_handler(r, timeline_download_remote_layers_handler_post),
         )
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/download_remote_layers",
-            |r| request_span(r, timeline_download_remote_layers_handler_get),
+            |r| api_handler(r, timeline_download_remote_layers_handler_get),
         )
         .delete("/v1/tenant/:tenant_id/timeline/:timeline_id", |r| {
-            request_span(r, timeline_delete_handler)
+            api_handler(r, timeline_delete_handler)
         })
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id/layer", |r| {
-            request_span(r, layer_map_info_handler)
+            api_handler(r, layer_map_info_handler)
         })
         .get(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
-            |r| request_span(r, layer_download_handler),
+            |r| api_handler(r, layer_download_handler),
         )
         .delete(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/layer/:layer_file_name",
-            |r| request_span(r, evict_timeline_layer_handler),
+            |r| api_handler(r, evict_timeline_layer_handler),
         )
         .put("/v1/disk_usage_eviction/run", |r| {
-            request_span(r, disk_usage_eviction_run)
+            api_handler(r, disk_usage_eviction_run)
         })
-        .put(
-            "/v1/tenant/:tenant_id/break",
-            testing_api!("set tenant state to broken", handle_tenant_break),
-        )
-        .get("/v1/panic", |r| request_span(r, always_panic_handler))
-        .post(
-            "/v1/tracing/event",
-            testing_api!("emit a tracing event", post_tracing_event_handler),
-        )
+        .put("/v1/tenant/:tenant_id/break", |r| {
+            testing_api_handler("set tenant state to broken", r, handle_tenant_break)
+        })
+        .get("/v1/panic", |r| api_handler(r, always_panic_handler))
+        .post("/v1/tracing/event", |r| {
+            testing_api_handler("emit a tracing event", r, post_tracing_event_handler)
+        })
         .any(handler_404))
 }
