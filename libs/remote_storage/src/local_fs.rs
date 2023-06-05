@@ -618,15 +618,11 @@ mod fs_tests {
         storage.delete(&upload_target).await?;
         assert!(storage.list().await?.is_empty());
 
-        match storage.delete(&upload_target).await {
-            Ok(()) => panic!("Should not allow deleting non-existing storage files"),
-            Err(e) => {
-                let error_string = e.to_string();
-                assert!(error_string.contains("does not exist"));
-                let expected_path = upload_target.with_base(&storage.storage_root);
-                assert!(error_string.contains(expected_path.to_str().unwrap()));
-            }
-        }
+        storage
+            .delete(&upload_target)
+            .await
+            .expect("Should allow deleting non-existing storage files");
+
         Ok(())
     }
 
