@@ -436,7 +436,7 @@ impl Endpoint {
             format!("postgresql://no_user@{host}:{port}")
         };
         let mut safekeeper_connstrings = Vec::new();
-        if self.mode == ComputeMode::Primary && safekeepers.is_empty() {
+        if self.mode == ComputeMode::Primary {
             for sk_id in safekeepers {
                 let sk = self
                     .env
