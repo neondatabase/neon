@@ -28,6 +28,7 @@ mod tests {
         // Craft some WAL
         let top_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
+            .join("..")
             .join("..");
         let cfg = Conf {
             pg_version,
