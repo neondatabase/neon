@@ -1,11 +1,6 @@
 use std::{
-    cell::{RefCell, RefMut},
-    future::Future,
-    io::Read,
     marker::PhantomData,
-    ops::Deref,
-    pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -95,10 +90,10 @@ pub enum GetError {
 }
 
 pub struct ReconstructWork<T: Types> {
-    key: T::Key,
-    lsn: T::Lsn,
-    inmem_records: Vec<T::DeltaRecord>,
-    historic_path: Vec<T::HistoricLayer>,
+    pub key: T::Key,
+    pub lsn: T::Lsn,
+    pub inmem_records: Vec<T::DeltaRecord>,
+    pub historic_path: Vec<T::HistoricLayer>,
 }
 
 impl<T: Types> Reader<T> {
@@ -122,14 +117,43 @@ impl<T: Types> Reader<T> {
     }
 }
 
+#[derive(thiserror::Error)]
+pub struct PutError<T: Types> {
+    delta: T::DeltaRecord,
+    kind: PutErrorKind,
+}
+#[derive(Debug)]
+pub enum PutErrorKind {
+    AlreadyHaveInMemoryRecordForKeyAndLsn,
+}
+
+impl<T: Types> PutError<T> {
+    pub fn delta(&self) -> &T::DeltaRecord {
+        &self.delta
+    }
+    pub fn kind(&self) -> &PutErrorKind {
+        &self.kind
+    }
+}
+
+impl<T: Types> std::fmt::Debug for PutError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PutError")
+            // would need to require Debug for DeltaRecord
+            // .field("delta", &self.delta)
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
 impl<T: Types> ReadWriter<T> {
     pub async fn put(
         &mut self,
         key: T::Key,
         lsn: T::Lsn,
         delta: T::DeltaRecord,
-    ) -> tokio::io::Result<()> {
-        let shared: Arc<State<T>> = self.shared.get_current_data();
+    ) -> Result<(), PutError<T>> {
+        let shared = self.shared.get_current_data();
         let mut inmem_guard = shared
             .inmem
             .try_lock()
@@ -140,18 +164,20 @@ impl<T: Types> ReadWriter<T> {
             Ok(()) => {
                 self.shared.advance(lsn, None);
             }
-            Err((delta, InMemoryLayerPutError::Frozen)) => {
+            Err((_delta, InMemoryLayerPutError::Frozen)) => {
                 unreachable!("this method is &mut self, so, Rust guarantees that we are the only ones who can put() into the inmem layer, and if we freeze it as part of put, we make sure we don't try to put() again")
             }
             Err((delta, InMemoryLayerPutError::AlreadyHaveRecordForKeyAndLsn)) => {
-                todo!("propagate error to caller")
+                return Err(PutError {
+                    delta,
+                    kind: PutErrorKind::AlreadyHaveInMemoryRecordForKeyAndLsn,
+                });
             }
-            Err((delta, InMemoryLayerPutError::LayerFull)) => {
+            Err((_delta, InMemoryLayerPutError::LayerFull)) => {
                 inmem.freeze();
                 let inmem_clone = inmem.clone();
                 drop(inmem);
                 drop(inmem_guard);
-                todo!("write out to disk; does the layer map need to distinguish between writing out and finished writing out?");
                 let new_historic = shared.historic.make_historic(inmem_clone);
                 let new_state = Arc::new(State {
                     _types: PhantomData::<T>::default(),
@@ -177,12 +203,15 @@ impl<T: Types> ReadWriter<T> {
         };
         inmem.freeze();
         let inmem_clone = inmem.clone();
+        // XXX don't hold the lock while writing the layer to disk ==> needs State::frozen
         let new_historic = shared.historic.make_historic(inmem_clone);
         let new_state = Arc::new(State {
             _types: PhantomData::<T>::default(),
             inmem: Mutex::new(None),
             historic: new_historic,
         });
+        todo!("do something with new_state");
+        drop(inmem_guard);
         Ok(())
     }
 
@@ -259,6 +288,9 @@ mod tests {
         }
     }
 
+    // Our testing impl of HistoricStuff references the frozen InMemoryLayer objects
+    // from all the (key,lsn) entries that it covers.
+    // This mimics the (much more efficient) search tree in the real impl.
     impl super::HistoricStuff for LayerMap {
         type Types = TestTypes;
         fn get_reconstruct_path(
@@ -273,12 +305,13 @@ mod tests {
         }
 
         fn make_historic(&self, inmem: InMemoryLayer) -> Self {
+            // For the purposes of testing, just turn the inmemory layer historic through the type system
             let historic = Arc::new(HistoricLayer(inmem));
-            // The returned copy of self references `historic` from all the (key,lsn) entries that it covers.
-            // In the real codebase, this is a search tree that is less accurate.
+            // Deep-copy
             let mut copy = self.by_key.clone();
+            // Add the references to `inmem` to the deep-copied struct
             for (k, v) in historic.0.by_key.iter() {
-                for (lsn, deltas) in v.into_iter() {
+                for (lsn, _deltas) in v.into_iter() {
                     let by_key = copy.entry(*k).or_default();
                     let overwritten = by_key.insert(*lsn, historic.clone());
                     assert!(matches!(overwritten, None), "layers must not overlap");
