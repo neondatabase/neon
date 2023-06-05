@@ -780,7 +780,6 @@ pub async fn immediate_gc(
     Ok(wait_task_done)
 }
 
-#[cfg(feature = "testing")]
 pub async fn immediate_compact(
     tenant_id: TenantId,
     timeline_id: TimelineId,
