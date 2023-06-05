@@ -127,15 +127,6 @@ pub enum PutErrorKind {
     AlreadyHaveInMemoryRecordForKeyAndLsn,
 }
 
-impl<T: Types> PutError<T> {
-    pub fn delta(&self) -> &T::DeltaRecord {
-        &self.delta
-    }
-    pub fn kind(&self) -> &PutErrorKind {
-        &self.kind
-    }
-}
-
 impl<T: Types> std::fmt::Debug for PutError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PutError")
