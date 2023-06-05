@@ -448,15 +448,13 @@ impl ExpectedError for postgres::Error {
 
 impl ExpectedError for anyhow::Error {
     fn is_expected(&self) -> bool {
-        if let Some(pg_error) = self.downcast_ref::<postgres::Error>() {
-            pg_error.is_expected()
-        } else {
-            self.chain().any(|maybe_pgerr| {
-                maybe_pgerr
-                    .downcast_ref::<postgres::Error>()
-                    .filter(|e| e.is_expected())
-                    .is_some()
-            })
-        }
+        let head = self.downcast_ref::<postgres::Error>();
+
+        let tail = self
+            .chain()
+            .filter_map(|e| e.downcast_ref::<postgres::Error>());
+
+        // check if self or any of the chained/sourced errors are expected
+        head.into_iter().chain(tail).any(|e| e.is_expected())
     }
 }
