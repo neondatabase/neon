@@ -140,6 +140,9 @@ pub fn is_uninit_mark(path: &Path) -> bool {
 
 /// During pageserver startup, we need to order operations not to exhaust tokio worker threads by
 /// blocking.
+///
+/// The instances of this value exist only during startup, otherwise `None` is provided, meaning no
+/// delaying is needed.
 #[derive(Clone)]
 pub struct InitializationOrder {
     /// Each initial tenant load task carries this until completion.
