@@ -3,7 +3,7 @@ EXTVERSION = 0.1.0
 
 MODULE_big = hnsw
 DATA = $(wildcard *--*.sql)
-OBJS = hnsw.o hnswalg.o hnswalg_avx2.o
+OBJS = hnsw.o hnswalg.o
 
 TESTS = $(wildcard test/sql/*.sql)
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
