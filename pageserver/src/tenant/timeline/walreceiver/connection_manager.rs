@@ -419,18 +419,8 @@ impl ConnectionManagerState {
                 match res {
                     Ok(()) => Ok(()),
                     Err(e) => {
-                        let ok_error = if let Some(pg_error) = e.downcast_ref::<postgres::Error>() {
-                            super::walreceiver_connection::is_expected_error(pg_error)
-                        } else {
-                            e.chain().any(|maybe_pgerr| {
-                                maybe_pgerr
-                                    .downcast_ref::<postgres::Error>()
-                                    .filter(|e| super::walreceiver_connection::is_expected_error(e))
-                                    .is_some()
-                            })
-                        };
-
-                        if ok_error {
+                        use super::walreceiver_connection::ExpectedError;
+                        if e.is_expected() {
                             info!("walreceiver connection handling ended: {e:#}");
                             Ok(())
                         } else {

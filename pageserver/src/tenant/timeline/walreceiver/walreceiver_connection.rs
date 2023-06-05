@@ -128,12 +128,13 @@ pub(super) async fn handle_walreceiver_connection(
                 connection_result = connection => match connection_result {
                     Ok(()) => debug!("Walreceiver db connection closed"),
                     Err(connection_error) => {
-                        if let Err(e) = ignore_expected_errors(connection_error) {
-                            warn!("Connection aborted: {e:#}")
+                        if connection_error.is_expected() {
+                            // silence
+                        } else {
+                            warn!("Connection aborted: {connection_error:#}")
                         }
                     }
                 },
-                // Future: replace connection_cancellation with connection_ctx cancellation
                 _ = connection_cancellation.cancelled() => debug!("Connection cancelled"),
             }
             Ok(())
@@ -410,36 +411,52 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
     }
 }
 
-/// We don't want to report connectivity problems as real errors towards connection manager because
-/// 1. they happen frequently enough to make server logs hard to read and
-/// 2. the connection manager can retry other safekeeper.
-///
-/// If this function returns `Ok(pg_error)`, it's such an error.
-/// The caller should log it at info level and then report to connection manager that we're done handling this connection.
-/// Connection manager will then handle reconnections.
-///
-/// If this function returns an `Err()`, the caller can bubble it up using `?`.
-/// The connection manager will log the error at ERROR level.
-fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres::Error> {
-    if is_expected_error(&pg_error) {
-        Ok(pg_error)
-    } else {
-        Err(pg_error).context("connection error")
+/// Trait for avoid reporting walreceiver specific expected or "normal" or "ok" errors.
+pub(super) trait ExpectedError {
+    /// Test if this error is an ok error.
+    ///
+    /// We don't want to report connectivity problems as real errors towards connection manager because
+    /// 1. they happen frequently enough to make server logs hard to read and
+    /// 2. the connection manager can retry other safekeeper.
+    ///
+    /// If this function returns `true`, it's such an error.
+    /// The caller should log it at info level and then report to connection manager that we're done handling this connection.
+    /// Connection manager will then handle reconnections.
+    ///
+    /// If this function returns an `false` the error should be propagated and the connection manager
+    /// will log the error at ERROR level.
+    fn is_expected(&self) -> bool;
+}
+
+impl ExpectedError for postgres::Error {
+    fn is_expected(&self) -> bool {
+        self.is_closed()
+            || self
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(is_expected_io_error)
+                .unwrap_or(false)
+            || self
+                .as_db_error()
+                .filter(|db_error| {
+                    db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
+                        && db_error.message().contains("ending streaming")
+                })
+                .is_some()
     }
 }
 
-pub fn is_expected_error(pg_error: &postgres::Error) -> bool {
-    pg_error.is_closed()
-        || pg_error
-            .source()
-            .and_then(|source| source.downcast_ref::<std::io::Error>())
-            .map(is_expected_io_error)
-            .unwrap_or(false)
-        || pg_error
-            .as_db_error()
-            .filter(|db_error| {
-                db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
-                    && db_error.message().contains("ending streaming")
+impl ExpectedError for anyhow::Error {
+    fn is_expected(&self) -> bool {
+        if let Some(pg_error) = self.downcast_ref::<postgres::Error>() {
+            pg_error.is_expected()
+        } else {
+            self.chain().any(|maybe_pgerr| {
+                maybe_pgerr
+                    .downcast_ref::<postgres::Error>()
+                    .filter(|e| e.is_expected())
+                    .is_some()
             })
-            .is_some()
+        }
+    }
 }
