@@ -1584,7 +1584,7 @@ class NeonPageserver(PgProtocol):
             ".*serving compute connection task.*exited with error: Connection reset by peer.*",
             ".*serving compute connection task.*exited with error: Postgres query error.*",
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
-            ".*Connection aborted: connection error: unexpected message from server*",
+            ".*Connection aborted: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
             ".*: db error:.*ending streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
