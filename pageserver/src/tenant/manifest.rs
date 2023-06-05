@@ -181,7 +181,7 @@ mod tests {
         let (_manifest, operations, corrupted) = Manifest::load(file).unwrap();
         assert!(!corrupted);
         assert_eq!(operations.len(), 3);
-        assert_eq!(&operations[0], &Operation::Snapshot(snapshot.clone()));
+        assert_eq!(&operations[0], &Operation::Snapshot(snapshot));
         assert_eq!(
             &operations[1],
             &Operation::Operation(vec![Record::AddLayer(layer3.clone())])
@@ -189,8 +189,8 @@ mod tests {
         assert_eq!(
             &operations[2],
             &Operation::Operation(vec![
-                Record::RemoveLayer(layer3.clone()),
-                Record::AddLayer(layer4.clone())
+                Record::RemoveLayer(layer3),
+                Record::AddLayer(layer4)
             ])
         );
     }
