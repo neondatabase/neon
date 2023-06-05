@@ -10,6 +10,19 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
 
+macro_rules! xlog_utils_test {
+    ($version:ident) => {
+        #[path = "."]
+        mod $version {
+            pub use postgres_ffi::$version::wal_craft_test_export::*;
+            #[allow(clippy::duplicate_mod)]
+            mod xlog_utils_test;
+        }
+    };
+}
+
+postgres_ffi::for_all_postgres_versions! { xlog_utils_test }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conf {
     pub pg_version: u32,

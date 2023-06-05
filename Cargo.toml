@@ -9,7 +9,20 @@ members = [
     "storage_broker",
     "workspace_hack",
     "trace",
-    "libs/*",
+    "libs/compute_api",
+    "libs/pageserver_api",
+    "libs/postgres_ffi",
+    "libs/safekeeper_api",
+    "libs/utils",
+    "libs/consumption_metrics",
+    "libs/postgres_backend",
+    "libs/pq_proto",
+    "libs/tenant_size_model",
+    "libs/metrics",
+    "libs/postgres_connection",
+    "libs/remote_storage",
+    "libs/tracing-utils",
+    "libs/postgres_ffi/wal_craft",
 ]
 
 [workspace.package]
