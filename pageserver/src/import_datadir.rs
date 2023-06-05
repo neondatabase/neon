@@ -148,17 +148,19 @@ async fn import_rel(
     // because there is no guarantee about the order in which we are processing segments.
     // ignore "relation already exists" error
     //
-    // FIXME: use proper error type for this, instead of parsing the error message.
-    // Or better yet, keep track of which relations we've already created
+    // FIXME: Keep track of which relations we've already created
     // https://github.com/neondatabase/neon/issues/3309
-    if let Err(e) = modification
+    if let Err(err) = modification
         .put_rel_creation(rel, nblocks as u32, ctx)
         .await
     {
-        if e.to_string().contains("already exists") {
-            debug!("relation {} already exists. we must be extending it", rel);
-        } else {
-            return Err(e);
+        match err.downcast_ref::<RelationError>() {
+            Some(RelationError::AlreadyExists) => {
+                debug!("relation {} already exists. we must be extending it", rel);
+            }
+            _ => {
+                return Err(err);
+            }
         }
     }
 

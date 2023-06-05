@@ -43,6 +43,16 @@ pub enum CalculateLogicalSizeError {
     Other(#[from] anyhow::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RelationError {
+    #[error("Relation Already Exists")]
+    AlreadyExists,
+    #[error("invalid relnode")]
+    InvalidRelnode,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 ///
 /// This impl provides all the functionality to store PostgreSQL relations, SLRUs,
 /// and other special kinds of files, in a versioned key-value store. The
@@ -861,8 +871,10 @@ impl<'a> DatadirModification<'a> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+    ) -> Result<(), anyhow::Error> {
+        if rel.relnode == 0 {
+            return Err(RelationError::InvalidRelnode.into());
+        }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
@@ -882,7 +894,7 @@ impl<'a> DatadirModification<'a> {
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            anyhow::bail!("rel {rel} already exists");
+            return Err(RelationError::AlreadyExists.into());
         }
         self.put(
             rel_dir_key,
