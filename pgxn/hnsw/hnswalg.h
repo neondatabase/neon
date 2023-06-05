@@ -22,8 +22,6 @@ struct HierarchicalNSW
 
 	idx_t  enterpoint_node;
 
-	size_t dist_calc;
-
 	size_t dim;
 	size_t data_size;
 	size_t offset_data;
@@ -35,6 +33,10 @@ struct HierarchicalNSW
 	size_t efConstruction;
 
 	char   data_level0_memory[0]; // varying size
+
+#ifdef __x86_64__
+	bool	use_avx2;
+#endif
 
   public:
 	HierarchicalNSW(size_t dim, size_t maxelements, size_t M, size_t maxM, size_t efConstruction);

@@ -3,7 +3,7 @@ EXTVERSION = 0.1.0
 
 MODULE_big = hnsw
 DATA = $(wildcard *--*.sql)
-OBJS = hnsw.o hnswalg.o
+OBJS = hnsw.o hnswalg.o hnswalg_avx2.o
 
 TESTS = $(wildcard test/sql/*.sql)
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
@@ -12,7 +12,7 @@ REGRESS_OPTS = --inputdir=test --load-extension=hnsw
 # For auto-vectorization:
 # - GCC (needs -ftree-vectorize OR -O3) - https://gcc.gnu.org/projects/tree-ssa/vectorization.html
 PG_CFLAGS += -O3
-PG_CXXFLAGS +=  -msse4 -mavx2 -O3 -std=c++11
+PG_CXXFLAGS +=  -O3 -std=c++11
 PG_LDFLAGS += -lstdc++
 
 all: $(EXTENSION)--$(EXTVERSION).sql
