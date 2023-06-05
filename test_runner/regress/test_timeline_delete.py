@@ -305,7 +305,7 @@ def assert_prefix_empty(neon_env_builder: NeonEnvBuilder, prefix: Optional[str] 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
     response = neon_env_builder.remote_storage_client.list_objects_v2(
         Bucket=neon_env_builder.remote_storage.bucket_name,
-        Prefix=prefix or "",
+        Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
     )
     objects = response.get("Contents")
     assert (
