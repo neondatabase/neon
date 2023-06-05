@@ -246,7 +246,12 @@ impl std::fmt::Display for UploadOp {
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
-            UploadOp::Delete(delete) => write!(f, "Delete({})", delete.layer_file_name.file_name()),
+            UploadOp::Delete(delete) => write!(
+                f,
+                "Delete(path: {}, scheduled_from_timeline_delete: {})",
+                delete.layer_file_name.file_name(),
+                delete.scheduled_from_timeline_delete
+            ),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }

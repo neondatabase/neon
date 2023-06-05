@@ -2,7 +2,7 @@ import time
 from typing import Any, Dict, Optional
 
 from fixtures.log_helper import log
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
@@ -191,3 +191,20 @@ def wait_for_upload_queue_empty(
         if all(m.value == 0 for m in tl):
             return
         time.sleep(0.2)
+
+
+def assert_detail_404(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+):
+    try:
+        data = pageserver_http.timeline_detail(tenant_id, timeline_id)
+        log.error(f"detail {data}")
+    except PageserverApiException as e:
+        log.error(e)
+        if e.status_code == 404:
+            return
+        else:
+            raise
+    raise Exception("detail succeeded (it should return 404)")

@@ -15,8 +15,9 @@ from fixtures.neon_fixtures import (
     S3Storage,
     available_remote_storages,
 )
-from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
+    assert_detail_404,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
@@ -174,23 +175,6 @@ def test_delete_timeline_post_rm_failure(
     env.pageserver.allowed_errors.append(
         f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*"
     )
-
-
-def assert_detail_404(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-):
-    try:
-        data = pageserver_http.timeline_detail(tenant_id, timeline_id)
-        log.error(f"detail {data}")
-    except PageserverApiException as e:
-        log.error(e)
-        if e.status_code == 404:
-            return
-        else:
-            raise
-    raise Exception("detail succeeded (it should return 404)")
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
