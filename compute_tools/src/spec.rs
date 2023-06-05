@@ -511,17 +511,26 @@ pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> 
         .map(|r| r.name.pg_quote())
         .collect::<Vec<_>>();
 
-    for db in &spec.cluster.databases {
-        let dbname = &db.name;
+    let is_webaccess = spec
+        .cluster
+        .roles
+        .iter()
+        .map(|r| r.name == "web_access")
+        .any(|x| x);
 
-        let query: String = format!(
-            "GRANT CREATE ON DATABASE {} TO {}",
-            dbname.pg_quote(),
-            roles.join(", ")
-        );
-        info!("grant query {}", &query);
+    if is_webaccess {
+        for db in &spec.cluster.databases {
+            let dbname = &db.name;
 
-        client.execute(query.as_str(), &[])?;
+            let query: String = format!(
+                "GRANT CREATE ON DATABASE {} TO {}",
+                dbname.pg_quote(),
+                roles.join(", ")
+            );
+            info!("grant query {}", &query);
+
+            client.execute(query.as_str(), &[])?;
+        }
     }
 
     // Do some per-database access adjustments. We'd better do this at db creation time,
