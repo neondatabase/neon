@@ -503,17 +503,17 @@ pub async fn shutdown_tasks(
                     warn!(name = task.name, tenant_id = ?tenant_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
                 }
             }
-            let completed = tokio::select! {
+            let join_handle = tokio::select! {
                 biased;
-                _ = &mut join_handle => { true },
+                _ = &mut join_handle => { None },
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
                     // allow some time to elapse before logging to cut down the number of log
                     // lines.
                     info!("waiting for {} to shut down", task.name);
-                    false
+                    Some(join_handle)
                 }
             };
-            if !completed {
+            if let Some(join_handle) = join_handle {
                 // we never handled this return value, but:
                 // - we don't deschedule which would lead to is_cancelled
                 // - panics are already logged (is_panicked)
