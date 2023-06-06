@@ -190,6 +190,13 @@ pub struct PageServerConf {
 
     pub ondemand_download_behavior_treat_error_as_warn: bool,
 
+    /// How long will background tasks be delayed at most after initial load of tenants.
+    ///
+    /// Our largest initialization completions are in the range of 100-200s, so perhaps 10s works
+    /// as we now isolate initial loading, initial logical size calculation and background tasks.
+    /// Smaller nodes will have background tasks "not running" for this long unless every timeline
+    /// has it's initial logical size calculated. Not running background tasks for some seconds is
+    /// not terrible.
     pub background_task_maximum_delay: Duration,
 }
 

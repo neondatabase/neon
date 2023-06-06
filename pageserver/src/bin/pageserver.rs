@@ -393,10 +393,6 @@ fn start_pageserver(
 
             let mut init_sizes_done = std::pin::pin!(init_logical_size_done_rx.wait());
 
-            // it is difficult to define this timeout. our largest initialization completions are
-            // in the range of 100-200s, so perhaps this works. smaller nodes will have background
-            // tasks "not running" for this long unless every timeline has it's initial logical
-            // size calculated. not running background tasks for some seconds is not terrible.
             let timeout = conf.background_task_maximum_delay;
 
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial logical sizes completed"));
