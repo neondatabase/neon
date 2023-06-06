@@ -374,7 +374,7 @@ fn start_pageserver(
     BACKGROUND_RUNTIME.spawn({
         let init_done_rx = init_done_rx;
         let shutdown_pageserver = shutdown_pageserver.clone();
-        let wait_and_report = async move {
+        let drive_init = async move {
             // NOTE: unlike many futures in pageserver, this one is cancellation-safe
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial load completed"));
 
@@ -445,11 +445,11 @@ fn start_pageserver(
         };
 
         async move {
-            let mut wait_and_report = std::pin::pin!(wait_and_report);
+            let mut drive_init = std::pin::pin!(drive_init);
             // just race these tasks
             tokio::select! {
                 _ = shutdown_pageserver.cancelled() => {},
-                _ = &mut wait_and_report => {},
+                _ = &mut drive_init => {},
             }
         }
     });
