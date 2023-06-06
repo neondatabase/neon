@@ -595,6 +595,9 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     client.timeline_delete(tenant_id, timeline_id)
 
     env.pageserver.allowed_errors.append(f".*Timeline {tenant_id}/{timeline_id} was not found.*")
+    env.pageserver.allowed_errors.append(
+        ".*files not bound to index_file.json, proceeding with their deletion.*"
+    )
 
     wait_until(2, 0.5, lambda: assert_timeline_detail_404(client, tenant_id, timeline_id))
 
