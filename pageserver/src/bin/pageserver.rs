@@ -574,7 +574,7 @@ fn start_pageserver(
         );
     }
 
-    let mut shutdown = Some(shutdown_pageserver.drop_guard());
+    let mut shutdown_pageserver = Some(shutdown_pageserver.drop_guard());
 
     // All started up! Now just sit and wait for shutdown signal.
     ShutdownSignals::handle(|signal| match signal {
@@ -591,7 +591,11 @@ fn start_pageserver(
                 "Got {}. Terminating gracefully in fast shutdown mode",
                 signal.name()
             );
-            shutdown.take();
+
+            // This cancels the `shutdown_pageserver` cancellation tree.
+            // Right now that tree doesn't reach very far, and `task_mgr` is used instead.
+            // The plan is to change that over time.
+            shutdown_pageserver.take();
             BACKGROUND_RUNTIME.block_on(pageserver::shutdown_pageserver(0));
             unreachable!()
         }
