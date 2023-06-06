@@ -431,6 +431,8 @@ fn start_pageserver(
                 // consumption metrics.
                 init_sizes_done.await;
 
+                scopeguard::ScopeGuard::into_inner(guard);
+
                 let now = std::time::Instant::now();
                 tracing::info!(
                     from_init_done_millis = (now - init_done).as_millis(),
@@ -438,7 +440,6 @@ fn start_pageserver(
                     "Initial logical sizes completed after timeout (background jobs already started)."
                 );
 
-                scopeguard::ScopeGuard::into_inner(guard);
             }
         };
 
