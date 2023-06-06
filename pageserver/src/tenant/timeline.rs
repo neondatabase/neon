@@ -246,7 +246,7 @@ pub struct Timeline {
     /// Barrier to wait before doing initial logical size calculation. Used only during startup.
     initial_logical_size_can_start: Option<completion::Barrier>,
 
-    /// Completion shared between all timelines created during startup; used to delay heavier
+    /// Completion shared between all timelines loaded during startup; used to delay heavier
     /// background tasks until some logical sizes have been calculated.
     initial_logical_size_attempt: Mutex<Option<completion::Completion>>,
 }
