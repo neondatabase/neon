@@ -379,6 +379,12 @@ impl Storage for PhysicalStorage {
             );
         }
 
+        // Quick exit if nothing to do to avoid writing up to 16 MiB of zeros on
+        // disk (this happens on each connect).
+        if end_pos == self.write_lsn {
+            return Ok(());
+        }
+
         // Close previously opened file, if any
         if let Some(mut unflushed_file) = self.file.take() {
             self.fdatasync_file(&mut unflushed_file)?;
