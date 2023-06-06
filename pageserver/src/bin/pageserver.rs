@@ -397,7 +397,7 @@ fn start_pageserver(
 
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial logical sizes completed"));
 
-            let completed = tokio::select! {
+            let init_sizes_done = tokio::select! {
                 _ = &mut init_sizes_done => {
                     let now = std::time::Instant::now();
                     tracing::info!(
@@ -405,14 +405,14 @@ fn start_pageserver(
                         from_init_millis = (now - init_started_at).as_millis(),
                         "Initial logical sizes completed"
                     );
-                    true
+                    None
                 }
                 _ = tokio::time::sleep(timeout) => {
                     tracing::info!(
                         timeout_millis = timeout.as_millis(),
                         "Initial logical size timeout elapsed; starting background jobs"
                     );
-                    false
+                    Some(init_sizes_done)
                 }
             };
 
@@ -421,10 +421,10 @@ fn start_pageserver(
             // allow background jobs to start
             drop(background_jobs_can_start);
 
-            if !completed {
-                let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial logical sizes completed"));
+            if let Some(init_sizes_done) = init_sizes_done {
                 // ending up here is not a bug; at the latest logical sizes will be queried by
                 // consumption metrics.
+                let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial logical sizes completed"));
                 init_sizes_done.await;
 
                 scopeguard::ScopeGuard::into_inner(guard);
