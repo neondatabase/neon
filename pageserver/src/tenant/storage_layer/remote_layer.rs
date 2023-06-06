@@ -218,15 +218,12 @@ impl RemoteLayer {
     }
 
     /// Create a Layer struct representing this layer, after it has been downloaded.
-    pub fn create_downloaded_layer<L>(
+    pub fn create_downloaded_layer(
         &self,
-        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
+        layer_map_lock_held_witness: &BatchedUpdates<'_>,
         conf: &'static PageServerConf,
         file_size: u64,
-    ) -> Arc<dyn PersistentLayer>
-    where
-        L: ?Sized + Layer,
-    {
+    ) -> Arc<dyn PersistentLayer> {
         if self.desc.is_delta {
             let fname = self.desc.delta_file_name();
             Arc::new(DeltaLayer::new(
