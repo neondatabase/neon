@@ -178,7 +178,7 @@ def test_remote_storage_backup_and_restore(
     wait_until_tenant_active(
         pageserver_http=client,
         tenant_id=tenant_id,
-        iterations=5,
+        iterations=10,  # make it longer for real_s3 tests when unreliable wrapper is involved
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
