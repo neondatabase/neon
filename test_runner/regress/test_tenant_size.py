@@ -318,8 +318,7 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
 
 
 def test_single_branch_get_tenant_size_grows(
-    neon_env_builder: NeonEnvBuilder, test_output_dir: Path,
-    pg_version: PgVersion
+    neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion
 ):
     """
     Operate on single branch reading the tenants size after each transaction.
@@ -333,7 +332,7 @@ def test_single_branch_get_tenant_size_grows(
     # inserts is larger than gc_horizon. for example 0x20000 here hid the fact
     # that there next_gc_cutoff could be smaller than initdb_lsn, which will
     # obviously lead to issues when calculating the size.
-    gc_horizon=0x38000
+    gc_horizon = 0x38000
 
     # it's a bit of a hack, but different versions of postgres have different
     # amount of WAL generated for the same amount of data. so we need to
