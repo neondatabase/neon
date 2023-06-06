@@ -379,6 +379,7 @@ fn start_pageserver(
             let guard = scopeguard::guard_on_success((), |_| tracing::info!("Cancelled before initial load completed"));
 
             init_done_rx.wait().await;
+            // initial logical sizes can now start, as they were waiting on init_done_rx.
 
             scopeguard::ScopeGuard::into_inner(guard);
 
@@ -389,9 +390,6 @@ fn start_pageserver(
                 elapsed_millis = elapsed.as_millis(),
                 "Initial load completed"
             );
-
-            // no need to do anything here for initial_logical_size_can_start, because it was
-            // waiting on the same barrier as above.
 
             let mut init_sizes_done = std::pin::pin!(init_logical_size_done_rx.wait());
 
