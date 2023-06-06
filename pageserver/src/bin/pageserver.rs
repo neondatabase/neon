@@ -337,16 +337,15 @@ fn start_pageserver(
 
     // Startup staging or optimizing:
     //
+    // We want to minimize downtime for `page_service` connections, and trying not to overload
+    // BACKGROUND_RUNTIME by doing initial compactions and initial logical sizes at the same time.
+    //
     // init_done_rx will notify when all initial load operations have completed.
     //
     // background_jobs_can_start (same name used to hold off background jobs from starting at
     // consumer side) will be dropped once we can start the background jobs. Currently it is behind
     // completing all initial logical size calculations (init_logical_size_done_rx) and a timeout
     // (background_task_maximum_delay).
-    //
-    // All this is done to allow an orderly deploy minimizing downtime for `page_service`
-    // connections, and trying not to overload BACKGROUND_RUNTIME by doing initial compactions and
-    // initial logical sizes at the same time.
     let (init_done_tx, init_done_rx) = utils::completion::channel();
 
     let (init_logical_size_done_tx, init_logical_size_done_rx) = utils::completion::channel();
