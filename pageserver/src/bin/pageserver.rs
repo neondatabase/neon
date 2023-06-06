@@ -433,7 +433,7 @@ fn start_pageserver(
                 tracing::info!(
                     from_init_done_millis = (now - init_done).as_millis(),
                     from_init_millis = (now - init_started_at).as_millis(),
-                    "Initial logical sizes completed after timeout (background jobs already started)."
+                    "Initial logical sizes completed after timeout (background jobs already started)"
                 );
 
             }
