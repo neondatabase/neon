@@ -110,8 +110,11 @@ class EvictionEnv:
             overrides=(
                 "--pageserver-config-override=disk_usage_based_eviction="
                 + enc.dump_inline_table(disk_usage_config).replace("\n", " "),
-                # safekeepers are not stopped, but might take a long time to publish new broker messages,
-                # so the initial logical sizes may not complete
+                # Disk usage based eviction runs as a background task.
+                # But pageserver startup delays launch of background tasks for some time, to prioritize initial logical size calculations during startup.
+                # But, initial logical size calculation may not be triggered if safekeepers don't publish new broker messages.
+                # But, we only have a 10-second-timeout in this test.
+                # So, disable the delay for this test.
                 "--pageserver-config-override=background_task_maximum_delay='0s'",
             ),
         )
