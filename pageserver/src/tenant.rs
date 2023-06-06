@@ -1461,6 +1461,13 @@ impl Tenant {
                 }
 
                 let res = if let Some(client) = timeline.remote_client.as_ref() {
+                    // if we did not wait for completion here, it might be our shutdown process
+                    // didn't wait for remote uploads to complete at all, as new tasks can forever
+                    // be spawned.
+                    //
+                    // what is problematic is the shutting down of RemoteTimelineClient, because
+                    // obviously it does not make sense to stop while we wait for it, but what
+                    // about corner cases like s3 suddenly hanging up?
                     client.wait_completion().await
                 } else {
                     Ok(())
@@ -1818,7 +1825,8 @@ impl Tenant {
         };
 
         if freeze_and_flush {
-            // Shut down all existing walreceiver connections and stop making the new ones.
+            // walreceiver has already began to shutdown with TenantState::Stopping, but we need to
+            // await for them to stop.
             task_mgr::shutdown_tasks(
                 Some(TaskKind::WalReceiverManager),
                 Some(self.tenant_id),
@@ -1826,10 +1834,12 @@ impl Tenant {
             )
             .await;
 
+            // this will wait for uploads to complete; in the past, it was done outside tenant
+            // shutdown in pageserver::shutdown_pageserver.
             self.freeze_and_flush_on_shutdown().await;
         }
 
-        // shutdown all tenant and timeline tasks: gc, compaction, page service)
+        // shutdown all tenant and timeline tasks: gc, compaction, page service
         // No new tasks will be started for this tenant because it's in `Stopping` state.
         //
         // this will additionally shutdown and await all timeline tasks.

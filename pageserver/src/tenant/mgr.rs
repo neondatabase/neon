@@ -251,6 +251,8 @@ pub async fn shutdown_all_tenants() {
                 tenants_clone
             }
             TenantsMap::ShuttingDown(_) => {
+                // TODO: it is possible that detach and shutdown happen at the same time. as a
+                // result, during shutdown we do not wait for detach.
                 error!("already shutting down, this function isn't supposed to be called more than once");
                 return;
             }
