@@ -634,7 +634,8 @@ where
         }
 
         // system_id will be updated on mismatch
-        if self.state.server.system_id != msg.system_id {
+        // sync-safekeepers doesn't know sysid and sends 0, ignore it
+        if self.state.server.system_id != msg.system_id && msg.system_id != 0 {
             if self.state.server.system_id != 0 {
                 warn!(
                     "unexpected system ID arrived, got {}, expected {}",
