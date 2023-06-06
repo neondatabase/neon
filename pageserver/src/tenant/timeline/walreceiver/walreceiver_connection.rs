@@ -129,7 +129,8 @@ pub(super) async fn handle_walreceiver_connection(
                     Ok(()) => debug!("Walreceiver db connection closed"),
                     Err(connection_error) => {
                         if connection_error.is_expected() {
-                            // silence
+                            // silence, because most likely we've already exited the outer call
+                            // with a similar error.
                         } else {
                             warn!("Connection aborted: {connection_error:#}")
                         }
