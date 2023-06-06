@@ -383,6 +383,9 @@ def check_neon_works(
     cli_target = NeonCli(config_target)
 
     # And the current binaries to launch computes
+    snapshot_config["neon_distrib_dir"] = str(neon_current_binpath)
+    with (snapshot_config_toml).open("w") as f:
+        toml.dump(snapshot_config, f)
     config_current = copy.copy(config)
     config_current.neon_binpath = neon_current_binpath
     cli_current = NeonCli(config_current)
@@ -391,7 +394,8 @@ def check_neon_works(
     request.addfinalizer(lambda: cli_target.raw_cli(["stop"]))
 
     pg_port = port_distributor.get_port()
-    cli_current.endpoint_start("main", port=pg_port)
+    http_port = port_distributor.get_port()
+    cli_current.endpoint_start("main", pg_port=pg_port, http_port=http_port)
     request.addfinalizer(lambda: cli_current.endpoint_stop("main"))
 
     connstr = f"host=127.0.0.1 port={pg_port} user=cloud_admin dbname=postgres"

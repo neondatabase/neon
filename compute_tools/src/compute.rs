@@ -1,19 +1,3 @@
-//
-// XXX: This starts to be scarry similar to the `PostgresNode` from `control_plane`,
-// but there are several things that makes `PostgresNode` usage inconvenient in the
-// cloud:
-// - it inherits from `LocalEnv`, which contains **all-all** the information about
-//   a complete service running
-// - it uses `PageServerNode` with information about http endpoint, which we do not
-//   need in the cloud again
-// - many tiny pieces like, for example, we do not use `pg_ctl` in the cloud
-//
-// Thus, to use `PostgresNode` in the cloud, we need to 'mock' a bunch of required
-// attributes (not required for the cloud). Yet, it is still tempting to unify these
-// `PostgresNode` and `ComputeNode` and use one in both places.
-//
-// TODO: stabilize `ComputeNode` and think about using it in the `control_plane`.
-//
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -106,26 +90,38 @@ pub struct ParsedSpec {
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
+        // Extract the options from the spec file that are needed to connect to
+        // the storage system.
+        //
+        // For backwards-compatibility, the top-level fields in the spec file
+        // may be empty. In that case, we need to dig them from the GUCs in the
+        // cluster.settings field.
         let pageserver_connstr = spec
-            .cluster
-            .settings
-            .find("neon.pageserver_connstring")
+            .pageserver_connstring
+            .clone()
+            .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
             .ok_or("pageserver connstr should be provided")?;
         let storage_auth_token = spec.storage_auth_token.clone();
-        let tenant_id: TenantId = spec
-            .cluster
-            .settings
-            .find("neon.tenant_id")
-            .ok_or("tenant id should be provided")
-            .map(|s| TenantId::from_str(&s))?
-            .or(Err("invalid tenant id"))?;
-        let timeline_id: TimelineId = spec
-            .cluster
-            .settings
-            .find("neon.timeline_id")
-            .ok_or("timeline id should be provided")
-            .map(|s| TimelineId::from_str(&s))?
-            .or(Err("invalid timeline id"))?;
+        let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
+            tenant_id
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.tenant_id")
+                .ok_or("tenant id should be provided")
+                .map(|s| TenantId::from_str(&s))?
+                .or(Err("invalid tenant id"))?
+        };
+        let timeline_id: TimelineId = if let Some(timeline_id) = spec.timeline_id {
+            timeline_id
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.timeline_id")
+                .ok_or("timeline id should be provided")
+                .map(|s| TimelineId::from_str(&s))?
+                .or(Err("invalid timeline id"))?
+        };
 
         Ok(ParsedSpec {
             spec,
@@ -295,8 +291,8 @@ impl ComputeNode {
         update_pg_hba(pgdata_path)?;
 
         match spec.mode {
-            ComputeMode::Primary | ComputeMode::Static(..) => {}
-            ComputeMode::Replica => {
+            ComputeMode::Primary => {}
+            ComputeMode::Replica | ComputeMode::Static(..) => {
                 add_standby_signal(pgdata_path)?;
             }
         }
@@ -376,7 +372,7 @@ impl ComputeNode {
 
         info!(
             "finished configuration of compute for project {}",
-            spec.cluster.cluster_id
+            spec.cluster.cluster_id.as_deref().unwrap_or("None")
         );
 
         Ok(())
@@ -434,7 +430,7 @@ impl ComputeNode {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            spec.spec.cluster.cluster_id,
+            spec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
             spec.spec.operation_uuid.as_deref().unwrap_or("None"),
             spec.tenant_id,
             spec.timeline_id,
