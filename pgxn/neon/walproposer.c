@@ -254,20 +254,20 @@ nwp_register_gucs(void)
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_reconnect_timeout",
-							"Timeout for reconnecting to offline wal acceptor.",
+							"Walproposer reconnects to offline safekeepers once in this interval.",
 							NULL,
 							&wal_acceptor_reconnect_timeout,
-							1000, 0, INT_MAX,	/* default, min, max */
+							5000, 0, INT_MAX,	/* default, min, max */
 							PGC_SIGHUP, /* context */
 							GUC_UNIT_MS,	/* flags */
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
 							"neon.safekeeper_connect_timeout",
-							"Timeout for connection establishement and it's maintenance against safekeeper",
+							"Connection or connection attempt to safekeeper is terminated if no message is received (or connection attempt doesn't finish) within this period.",
 							NULL,
 							&wal_acceptor_connection_timeout,
-							5000, 0, INT_MAX,
+							10000, 0, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
@@ -441,7 +441,7 @@ WalProposerPoll(void)
 				if (TimestampDifferenceExceeds(sk->latestMsgReceivedAt, now,
 											   wal_acceptor_connection_timeout))
 				{
-					elog(WARNING, "failed to connect to node '%s:%s' in '%s' state: exceeded connection timeout %dms",
+					elog(WARNING, "terminating connection to safekeeper '%s:%s' in '%s' state: no messages received during the last %dms or connection attempt took longer than that",
 						 sk->host, sk->port, FormatSafekeeperState(sk->state), wal_acceptor_connection_timeout);
 					ShutdownConnection(sk);
 				}
@@ -1035,9 +1035,16 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) & sk->greetResponse))
 		return;
 
+	elog(LOG, "received AcceptorGreeting from safekeeper %s:%s", sk->host, sk->port);
+
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
 
+	/* 
+	 * Note: it would be better to track the counter on per safekeeper basis,
+	 * but at worst walproposer would restart with 'term rejected', so leave as
+	 * is for now.
+	 */
 	++n_connected;
 	if (n_connected <= quorum)
 	{
