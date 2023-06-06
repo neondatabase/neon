@@ -83,6 +83,9 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
     # XXX this is quite brittle as the lifecycle of the WAL redo process is an implementation detail
     assert_child_processes(pagserver_pid, wal_redo_present=True, defunct_present=False)
 
+    # Stop the compute before detaching, to avoid errors in the log.
+    endpoint.stop()
+
     last_error = None
     for i in range(3):
         try:

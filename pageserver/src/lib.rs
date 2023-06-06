@@ -58,12 +58,6 @@ pub async fn shutdown_pageserver(exit_code: i32) {
     // the checkpoint and GC tasks.
     tenant::mgr::shutdown_all_tenants().await;
 
-    // Stop syncing with remote storage.
-    //
-    // FIXME: Does this wait for the sync tasks to finish syncing what's queued up?
-    // Should it?
-    task_mgr::shutdown_tasks(Some(TaskKind::RemoteUploadTask), None, None).await;
-
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
     // FIXME: We should probably stop accepting commands like attach/detach earlier.
