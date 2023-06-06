@@ -693,15 +693,15 @@ def test_empty_branch_remote_storage_upload_on_restart(
         f".*POST.* path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
     )
 
-    # index upload is now hitting the failpoint, should not block the shutdown
-    env.pageserver.stop()
+    # index upload is now hitting the failpoint, it should block the shutdown
+    env.pageserver.stop(immediate=True)
 
     timeline_path = (
         Path("tenants") / str(env.initial_tenant) / "timelines" / str(new_branch_timeline_id)
     )
 
     local_metadata = env.repo_dir / timeline_path / "metadata"
-    assert local_metadata.is_file(), "timeout cancelled timeline branching, not the upload"
+    assert local_metadata.is_file()
 
     assert isinstance(env.remote_storage, LocalFsStorage)
     new_branch_on_remote_storage = env.remote_storage.root / timeline_path

@@ -271,8 +271,9 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     env.pageserver.allowed_errors.append(
         ".*Ignoring new state, equal to the existing one: Stopping"
     )
+    # this happens, because the stuck timeline is visible to shutdown
     env.pageserver.allowed_errors.append(
-        ".*during shutdown: cannot flush frozen layers when flush_loop is not running, state is Exited"
+        ".*freeze_and_flush_on_shutdown.+: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
     )
 
     ps_http = env.pageserver.http_client()
