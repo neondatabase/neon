@@ -161,6 +161,10 @@ pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn spec_has_webaccess(spec: &ComputeSpec) -> bool {
+    return spec.cluster.roles.iter().any(|r| r.name == "web_access");
+}
+
 /// Given a cluster spec json and open transaction it handles roles creation,
 /// deletion and update.
 #[instrument(skip_all)]
@@ -274,12 +278,14 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
 
-                let grant_query = format!(
-                    "GRANT pg_read_all_data, pg_write_all_data TO {}",
-                    name.pg_quote()
-                );
-                xact.execute(grant_query.as_str(), &[])?;
-                info!("role grant query: '{}'", &grant_query);
+                if spec_has_webaccess(spec) {
+                    let grant_query = format!(
+                        "GRANT pg_read_all_data, pg_write_all_data TO {}",
+                        name.pg_quote()
+                    );
+                    xact.execute(grant_query.as_str(), &[])?;
+                    info!("role grant query: '{}'", &grant_query);
+                }
             }
         }
 
@@ -511,9 +517,7 @@ pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> 
         .map(|r| r.name.pg_quote())
         .collect::<Vec<_>>();
 
-    let is_webaccess = spec.cluster.roles.iter().any(|r| r.name == "web_access");
-
-    if is_webaccess {
+    if spec_has_webaccess(spec) {
         for db in &spec.cluster.databases {
             let dbname = &db.name;
 
