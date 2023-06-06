@@ -150,7 +150,8 @@ def test_remote_storage_backup_and_restore(
 
     tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
     assert tenant_info["attachment_status"] == {
-        "failed": {"reason": "storage-sync-list-remote-timelines"}
+        "slug": "failed",
+        "data": {"reason": "storage-sync-list-remote-timelines"},
     }
 
     # Ensure that even though the tenant is broken, we can't attach it again.

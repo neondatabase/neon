@@ -112,7 +112,6 @@ impl TenantState {
             // However, it also becomes Broken if the regular load fails.
             // From Console's perspective there's no practical difference
             // because attachment_status is polled by console only during attach operation execution.
-            // If needed BrokenFrom can be used akin to ActivatingFrom above.
             Self::Broken { reason, .. } => Failed {
                 reason: reason.to_owned(),
             },
@@ -312,7 +311,7 @@ impl std::ops::Deref for TenantAttachConfig {
 
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
 #[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "slug", content = "data", rename_all = "snake_case")]
 pub enum TenantAttachmentStatus {
     Maybe,
     Attached,
@@ -810,7 +809,9 @@ mod tests {
                 "slug": "Active",
             },
             "current_physical_size": 42,
-            "attachment_status": "attached",
+            "attachment_status": {
+                "slug":"attached",
+            }
         });
 
         let original_broken = TenantInfo {
@@ -832,7 +833,9 @@ mod tests {
                 }
             },
             "current_physical_size": 42,
-            "attachment_status": "attached",
+            "attachment_status": {
+                "slug":"attached",
+            }
         });
 
         assert_eq!(

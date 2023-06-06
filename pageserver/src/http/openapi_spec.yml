@@ -936,20 +936,19 @@ components:
               manually before proceeding with a retry.
 
             See the tenant `/attach` endpoint for more information.
-          oneOf:
-            - type: string
-              enum: [ "maybe", "attached" ]
+          type: object
+          required:
+            - slug
+            - data
+          properties:
+            slug:
+              type: string
+              enum: [ "maybe", "attached", "failed" ]
+            data:
             - type: object
-              required:
-                - failed
               properties:
-                failed:
-                  type: object
-                  required:
-                    - reason
-                  properties:
-                    reason:
-                      type: string
+                reason:
+                  type: string
 
     TenantCreateRequest:
       allOf:
