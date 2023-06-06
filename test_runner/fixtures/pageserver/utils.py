@@ -198,6 +198,7 @@ def assert_detail_404(
     tenant_id: TenantId,
     timeline_id: TimelineId,
 ):
+    """Asserts that timeline_detail returns 404, or dumps the detail."""
     try:
         data = pageserver_http.timeline_detail(tenant_id, timeline_id)
         log.error(f"detail {data}")
