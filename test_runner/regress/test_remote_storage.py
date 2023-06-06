@@ -20,7 +20,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    assert_detail_404,
+    assert_timeline_detail_404,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
@@ -596,7 +596,7 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
 
     env.pageserver.allowed_errors.append(f".*Timeline {tenant_id}/{timeline_id} was not found.*")
 
-    wait_until(2, 0.5, lambda: assert_detail_404(client, tenant_id, timeline_id))
+    wait_until(2, 0.5, lambda: assert_timeline_detail_404(client, tenant_id, timeline_id))
 
     assert not timeline_path.exists()
 

@@ -227,6 +227,7 @@ use crate::metrics::{
     RemoteTimelineClientMetricsCallTrackSize, REMOTE_ONDEMAND_DOWNLOADED_BYTES,
     REMOTE_ONDEMAND_DOWNLOADED_LAYERS,
 };
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::upload_queue::Delete;
 use crate::{
@@ -795,9 +796,12 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
+    /// Prerequisites: UploadQueue should be in stopped state and deleted_at should be successfuly set.
+    /// The function deletes layer files one by one, then lists the prefix to see if we leaked something
+    /// deletes leaked files if any and proceeds with deletion of index file at the end.
     pub(crate) async fn delete_all(self: &Arc<Self>) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_and_timeline_id();
-        
+
         let (mut receiver, deletions_queued) = {
             let mut deletions_queued = 0;
 
@@ -869,7 +873,8 @@ impl RemoteTimelineClient {
         }
 
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
-       debug!("deleting index part");
+
+        debug!("deleting index part");
         self.storage_impl.delete(&index_file_path).await?;
 
         info!(deletions_queued, "done deleting, including index_part.json");

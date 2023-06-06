@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
-    assert_detail_404,
+    assert_timeline_detail_404,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
@@ -253,7 +253,7 @@ def test_timeline_resurrection_on_attach(
         f".*Timeline {tenant_id}/{branch_timeline_id} was not found.*"
     )
 
-    wait_until(2, 0.5, lambda: assert_detail_404(ps_http, tenant_id, branch_timeline_id))
+    wait_until(2, 0.5, lambda: assert_timeline_detail_404(ps_http, tenant_id, branch_timeline_id))
 
     ##### Stop the pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -359,7 +359,9 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     env.pageserver.allowed_errors.append(
         f".*Timeline {env.initial_tenant}/{leaf_timeline_id} was not found.*"
     )
-    wait_until(2, 0.5, lambda: assert_detail_404(ps_http, env.initial_tenant, leaf_timeline_id))
+    wait_until(
+        2, 0.5, lambda: assert_timeline_detail_404(ps_http, env.initial_tenant, leaf_timeline_id)
+    )
 
     assert (
         not leaf_timeline_path.exists()
@@ -391,7 +393,9 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         env.pageserver.allowed_errors.append(
             f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
         )
-        wait_until(2, 0.5, lambda: assert_detail_404(ps_http, env.initial_tenant, timeline_id))
+        wait_until(
+            2, 0.5, lambda: assert_timeline_detail_404(ps_http, env.initial_tenant, timeline_id)
+        )
 
         assert_prefix_empty(
             neon_env_builder,
@@ -617,7 +621,7 @@ def test_timeline_delete_works_for_remote_smoke(
         env.pageserver.allowed_errors.append(
             f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
         )
-        wait_until(2, 0.5, lambda: assert_detail_404(ps_http, tenant_id, timeline_id))
+        wait_until(2, 0.5, lambda: assert_timeline_detail_404(ps_http, tenant_id, timeline_id))
 
         assert_prefix_empty(
             neon_env_builder,

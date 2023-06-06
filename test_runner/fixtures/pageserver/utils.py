@@ -193,7 +193,7 @@ def wait_for_upload_queue_empty(
         time.sleep(0.2)
 
 
-def assert_detail_404(
+def assert_timeline_detail_404(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,

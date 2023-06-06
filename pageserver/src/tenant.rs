@@ -1495,7 +1495,6 @@ impl Tenant {
 
     /// Shuts down a timeline's tasks, removes its in-memory structures, and deletes its
     /// data from both disk and s3.
-    #[instrument(skip(self, timeline))]
     async fn delete_timeline(
         &self,
         timeline_id: TimelineId,
@@ -1756,7 +1755,7 @@ impl Tenant {
             }
             .instrument({
                 let span =
-                    tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_id);
+                    tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_id, timeline_id=%timeline_id);
                 span.follows_from(Span::current());
                 span
             }),
