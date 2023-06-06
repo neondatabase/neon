@@ -77,7 +77,8 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
     try:
         trigger_wait_lsn_timeout(env, tenant_id)
     except Exception as e:
-        exception_string = str(e)
+        # Strip out the part before stdout, as it contains full command with the list of all safekeepers
+        exception_string = str(e).split("stdout", 1)[-1]
         assert expected_timeout_error in exception_string, "Should time out during waiting for WAL"
 
         for safekeeper in env.safekeepers:

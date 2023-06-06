@@ -1,3 +1,9 @@
+//! Code to manage the storage broker
+//!
+//! In the local test environment, the data for each safekeeper is stored in
+//!
+//!   .neon/safekeepers/<safekeeper id>
+//!
 use anyhow::Context;
 
 use std::path::PathBuf;

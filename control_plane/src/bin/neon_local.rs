@@ -476,9 +476,10 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
 
             println!("Creating endpoint for imported timeline ...");
             cplane.new_endpoint(
-                tenant_id,
                 name,
+                tenant_id,
                 timeline_id,
+                None,
                 None,
                 pg_version,
                 ComputeMode::Primary,
@@ -591,7 +592,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
 
                 table.add_row([
                     endpoint_id.as_str(),
-                    &endpoint.address.to_string(),
+                    &endpoint.pg_address.to_string(),
                     &endpoint.timeline_id.to_string(),
                     branch_name,
                     lsn_str.as_str(),
@@ -620,8 +621,8 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .get_branch_timeline_id(branch_name, tenant_id)
                 .ok_or_else(|| anyhow!("Found no timeline id for branch name '{branch_name}'"))?;
 
-            let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
-
+            let pg_port: Option<u16> = sub_args.get_one::<u16>("pg-port").copied();
+            let http_port: Option<u16> = sub_args.get_one::<u16>("http-port").copied();
             let pg_version = sub_args
                 .get_one::<u32>("pg-version")
                 .copied()
@@ -639,13 +640,37 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
             };
 
-            cplane.new_endpoint(tenant_id, &endpoint_id, timeline_id, port, pg_version, mode)?;
+            cplane.new_endpoint(
+                &endpoint_id,
+                tenant_id,
+                timeline_id,
+                pg_port,
+                http_port,
+                pg_version,
+                mode,
+            )?;
         }
         "start" => {
-            let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
+            let pg_port: Option<u16> = sub_args.get_one::<u16>("pg-port").copied();
+            let http_port: Option<u16> = sub_args.get_one::<u16>("http-port").copied();
             let endpoint_id = sub_args
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
+
+            // If --safekeepers argument is given, use only the listed safekeeper nodes.
+            let safekeepers =
+                if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
+                    let mut safekeepers: Vec<NodeId> = Vec::new();
+                    for sk_id in safekeepers_str.split(',').map(str::trim) {
+                        let sk_id = NodeId(u64::from_str(sk_id).map_err(|_| {
+                            anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list")
+                        })?);
+                        safekeepers.push(sk_id);
+                    }
+                    safekeepers
+                } else {
+                    env.safekeepers.iter().map(|sk| sk.id).collect()
+                };
 
             let endpoint = cplane.endpoints.get(endpoint_id.as_str());
 
@@ -673,7 +698,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     _ => {}
                 }
                 println!("Starting existing endpoint {endpoint_id}...");
-                endpoint.start(&auth_token)?;
+                endpoint.start(&auth_token, safekeepers)?;
             } else {
                 let branch_name = sub_args
                     .get_one::<String>("branch-name")
@@ -709,14 +734,15 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 println!("Starting new endpoint {endpoint_id} (PostgreSQL v{pg_version}) on timeline {timeline_id} ...");
 
                 let ep = cplane.new_endpoint(
-                    tenant_id,
                     endpoint_id,
+                    tenant_id,
                     timeline_id,
-                    port,
+                    pg_port,
+                    http_port,
                     pg_version,
                     mode,
                 )?;
-                ep.start(&auth_token)?;
+                ep.start(&auth_token, safekeepers)?;
             }
         }
         "stop" => {
@@ -944,11 +970,22 @@ fn cli() -> Command {
         .value_parser(value_parser!(u32))
         .default_value(DEFAULT_PG_VERSION);
 
-    let port_arg = Arg::new("port")
-        .long("port")
+    let pg_port_arg = Arg::new("pg-port")
+        .long("pg-port")
         .required(false)
         .value_parser(value_parser!(u16))
-        .value_name("port");
+        .value_name("pg-port");
+
+    let http_port_arg = Arg::new("http-port")
+        .long("http-port")
+        .required(false)
+        .value_parser(value_parser!(u16))
+        .value_name("http-port");
+
+    let safekeepers_arg = Arg::new("safekeepers")
+        .long("safekeepers")
+        .required(false)
+        .value_name("safekeepers");
 
     let stop_mode_arg = Arg::new("stop-mode")
         .short('m')
@@ -1093,7 +1130,8 @@ fn cli() -> Command {
                     .arg(branch_name_arg.clone())
                     .arg(tenant_id_arg.clone())
                     .arg(lsn_arg.clone())
-                    .arg(port_arg.clone())
+                    .arg(pg_port_arg.clone())
+                    .arg(http_port_arg.clone())
                     .arg(
                         Arg::new("config-only")
                             .help("Don't do basebackup, create endpoint directory with only config files")
@@ -1109,9 +1147,11 @@ fn cli() -> Command {
                     .arg(branch_name_arg)
                     .arg(timeline_id_arg)
                     .arg(lsn_arg)
-                    .arg(port_arg)
+                    .arg(pg_port_arg)
+                    .arg(http_port_arg)
                     .arg(pg_version_arg)
                     .arg(hot_standby_arg)
+                    .arg(safekeepers_arg)
                 )
                 .subcommand(
                     Command::new("stop")

@@ -59,6 +59,9 @@ fn main() -> Result<()> {
 
     let matches = cli().get_matches();
 
+    let http_port = *matches
+        .get_one::<u16>("http-port")
+        .expect("http-port is required");
     let pgdata = matches
         .get_one::<String>("pgdata")
         .expect("PGDATA path is required");
@@ -178,7 +181,8 @@ fn main() -> Result<()> {
 
     // Launch http service first, so we were able to serve control-plane
     // requests, while configuration is still in progress.
-    let _http_handle = launch_http_server(&compute).expect("cannot launch http endpoint thread");
+    let _http_handle =
+        launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
     if !spec_set {
         // No spec provided, hang waiting for it.
@@ -286,6 +290,14 @@ fn cli() -> clap::Command {
     let version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
     clap::Command::new("compute_ctl")
         .version(version)
+        .arg(
+            Arg::new("http-port")
+                .long("http-port")
+                .value_name("HTTP_PORT")
+                .default_value("3080")
+                .value_parser(clap::value_parser!(u16))
+                .required(false),
+        )
         .arg(
             Arg::new("connstr")
                 .short('C')
