@@ -1,4 +1,4 @@
-///! A group of high-level tests for connection establishing logic and auth.
+//! A group of high-level tests for connection establishing logic and auth.
 use super::*;
 use crate::{auth, sasl, scram};
 use async_trait::async_trait;

@@ -25,6 +25,7 @@ mod walreceiver_connection;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::timeline::walreceiver::connection_manager::{
     connection_manager_loop_step, ConnectionManagerState,
 };
@@ -85,7 +86,8 @@ impl WalReceiver {
             &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
             false,
             async move {
-                info!("WAL receiver manager started, connecting to broker");
+                debug_assert_current_span_has_tenant_and_timeline_id();
+                debug!("WAL receiver manager started, connecting to broker");
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
@@ -93,7 +95,7 @@ impl WalReceiver {
                 loop {
                     select! {
                         _ = task_mgr::shutdown_watcher() => {
-                            info!("WAL receiver shutdown requested, shutting down");
+                            trace!("WAL receiver shutdown requested, shutting down");
                             break;
                         },
                         loop_step_result = connection_manager_loop_step(
@@ -104,7 +106,7 @@ impl WalReceiver {
                         ) => match loop_step_result {
                             ControlFlow::Continue(()) => continue,
                             ControlFlow::Break(()) => {
-                                info!("Connection manager loop ended, shutting down");
+                                trace!("Connection manager loop ended, shutting down");
                                 break;
                             }
                         },
@@ -115,7 +117,7 @@ impl WalReceiver {
                 *loop_status.write().unwrap() = None;
                 Ok(())
             }
-            .instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
+            .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_id, timeline_id = %timeline_id))
         );
 
         Self {
@@ -198,29 +200,19 @@ impl<E: Clone> TaskHandle<E> {
                 TaskEvent::End(match self.join_handle.as_mut() {
                     Some(jh) => {
                         if !jh.is_finished() {
-                            // Barring any implementation errors in this module, we can
-                            // only arrive here while the task that executes the future
-                            // passed to `Self::spawn()` is still execution. Cf the comment
-                            // in Self::spawn().
-                            //
-                            // This was logging at warning level in earlier versions, presumably
-                            // to leave some breadcrumbs in case we had an implementation
-                            // error that would would make us get stuck in `jh.await`.
-                            //
-                            // There hasn't been such a bug so far.
-                            // But in a busy system, e.g., during pageserver restart,
-                            // we arrive here often enough that the warning-level logs
-                            // became a distraction.
-                            // So, tone them down to info-level.
-                            //
-                            // XXX: rewrite this module to eliminate the race condition.
-                            info!("sender is dropped while join handle is still alive");
+                            // See: https://github.com/neondatabase/neon/issues/2885
+                            trace!("sender is dropped while join handle is still alive");
                         }
 
-                        let res = jh
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to join task: {e}"))
-                            .and_then(|x| x);
+                        let res = match jh.await {
+                            Ok(res) => res,
+                            Err(je) if je.is_cancelled() => unreachable!("not used"),
+                            Err(je) if je.is_panic() => {
+                                // already logged
+                                Ok(())
+                            }
+                            Err(je) => Err(anyhow::Error::new(je).context("join walreceiver task")),
+                        };
 
                         // For cancellation-safety, drop join_handle only after successful .await.
                         self.join_handle = None;
@@ -243,12 +235,12 @@ impl<E: Clone> TaskHandle<E> {
             match jh.await {
                 Ok(Ok(())) => debug!("Shutdown success"),
                 Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
-                Err(join_error) => {
-                    if join_error.is_cancelled() {
-                        error!("Shutdown task was cancelled");
-                    } else {
-                        error!("Shutdown task join error: {join_error}")
-                    }
+                Err(je) if je.is_cancelled() => unreachable!("not used"),
+                Err(je) if je.is_panic() => {
+                    // already logged
+                }
+                Err(je) => {
+                    error!("Shutdown task join error: {je}")
                 }
             }
         }

@@ -20,6 +20,11 @@ def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
         test_name="test_attach_tenant_config",
     )
     env = neon_env_builder.init_start()
+
+    # eviction might be the first one after an attach to access the layers
+    env.pageserver.allowed_errors.append(
+        ".*unexpectedly on-demand downloading remote layer remote.* for task kind Eviction"
+    )
     assert isinstance(env.remote_storage, LocalFsStorage)
     return env
 
