@@ -1602,7 +1602,7 @@ impl Tenant {
         Ok(())
     }
 
-    /// Removes timeline-related in-memory data
+    /// Removes timeline-related in-memory data and schedules removal from remote storage.
     #[instrument(skip(self, _ctx))]
     pub async fn prepare_and_schedule_delete_timeline(
         self: Arc<Self>,
@@ -1731,7 +1731,7 @@ impl Tenant {
         Ok(())
     }
 
-    pub fn schedule_delete_timeline(
+    fn schedule_delete_timeline(
         self: Arc<Self>,
         timeline_id: TimelineId,
         timeline: Arc<Timeline>,

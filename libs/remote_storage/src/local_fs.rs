@@ -121,7 +121,7 @@ impl RemoteStorage for LocalFs {
             prefixes.push(
                 prefix
                     .strip_prefix(&self.storage_root)
-                    .context("Failed to strip preifix")
+                    .context("Failed to strip prefix")
                     .and_then(RemotePath::new)
                     .expect(
                         "We list files for storage root, hence should be able to remote the prefix",

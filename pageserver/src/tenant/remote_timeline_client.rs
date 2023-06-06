@@ -796,6 +796,8 @@ impl RemoteTimelineClient {
     }
 
     pub(crate) async fn delete_all(self: &Arc<Self>) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        
         let (mut receiver, deletions_queued) = {
             let mut deletions_queued = 0;
 
@@ -867,7 +869,7 @@ impl RemoteTimelineClient {
         }
 
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
-        info!("deleting index part");
+       debug!("deleting index part");
         self.storage_impl.delete(&index_file_path).await?;
 
         info!(deletions_queued, "done deleting, including index_part.json");
