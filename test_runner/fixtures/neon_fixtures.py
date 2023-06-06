@@ -1585,6 +1585,7 @@ class NeonPageserver(PgProtocol):
             ".*serving compute connection task.*exited with error: Postgres connection error.*",
             ".*serving compute connection task.*exited with error: Connection reset by peer.*",
             ".*serving compute connection task.*exited with error: Postgres query error.*",
+            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
             ".*Connection aborted: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
