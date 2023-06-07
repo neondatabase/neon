@@ -1,10 +1,12 @@
 import concurrent.futures
 import os
+import re
 from typing import List, Tuple
 
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder
+from fixtures.pageserver.utils import wait_until_tenant_state
 from fixtures.types import TenantId, TimelineId
 
 
@@ -158,6 +160,115 @@ def test_timeline_init_break_before_checkpoint(neon_simple_env: NeonEnv):
     assert (
         timeline_dirs == initial_timeline_dirs
     ), "pageserver should clean its temp timeline files on timeline creation failure"
+
+
+def test_timeline_init_crash_restart_cleans_up_intermediate_files(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    pageserver_http = env.pageserver.http_client()
+
+    tenant_id, _ = env.neon_cli.create_tenant()
+
+    timelines_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines"
+    old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
+
+    # simulate crash during timeline init (some intermediate files are on disk), before it's checkpointed.
+    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "exit"))
+    with pytest.raises(Exception):
+        _ = env.neon_cli.create_timeline("test_timeline_init_break_before_checkpoint", tenant_id)
+    # it should already be dead, any way to check that?
+    env.neon_cli.pageserver_stop(immediate=True)
+
+    # self-test: ensure that we crashed the pageserver whith intermediate files present
+    crashed_timeline_dirs = [d for d in timelines_dir.iterdir()]
+    assert set(crashed_timeline_dirs).issuperset(set(initial_timeline_dirs))
+    new_dirs = set(crashed_timeline_dirs) - set(initial_timeline_dirs)
+    expected = {
+        "initdb dir": r"^basebackup-.*\.___temp$",
+        "timeline dir": r"^[0-9a-f]+$",
+        "timeline uninit marker file": r"^[0-9a-f]+\.___uninit$",
+    }
+    assert len(new_dirs) == len(expected.keys()), f"unexpected new directories: {new_dirs}"
+    for new_dir in new_dirs:
+        for direntry_type, pattern in expected.items():
+            if re.match(pattern, new_dir.name):
+                expected.pop(direntry_type)
+                break
+    assert len(expected.keys()) == 0, f"unexpected new directories: {expected}"
+
+    # start the pageserver and assert that it cleans up
+    env.neon_cli.pageserver_start()
+
+    # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
+    new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    assert (
+        new_tenant_timelines == old_tenant_timelines
+    ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
+
+    timeline_dirs = [d for d in timelines_dir.iterdir()]
+    assert (
+        timeline_dirs == initial_timeline_dirs
+    ), "pageserver should clean its temp timeline files on timeline creation failure"
+
+
+def test_timeline_init_crash_removal_failure_breaks_tenant(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    pageserver_http = env.pageserver.http_client()
+
+    tenant_id, _ = env.neon_cli.create_tenant()
+
+    timelines_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines"
+    initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
+
+    # simulate crash during timeline init (some intermediate files are on disk), before it's checkpointed.
+    pageserver_http.configure_failpoints(("before-checkpoint-new-timeline", "exit"))
+    with pytest.raises(Exception):
+        _ = env.neon_cli.create_timeline("test_timeline_init_break_before_checkpoint", tenant_id)
+    # it should already be dead, any way to check that?
+    env.neon_cli.pageserver_stop(immediate=True)
+
+    # self-test: ensure that we crashed the pageserver whith intermediate files present
+    crashed_timeline_dirs = [d for d in timelines_dir.iterdir()]
+    assert set(crashed_timeline_dirs).issuperset(set(initial_timeline_dirs))
+    new_dirs = set(crashed_timeline_dirs) - set(initial_timeline_dirs)
+    expected = {
+        "initdb dir": r"^basebackup-.*\.___temp$",
+        "timeline dir": r"^[0-9a-f]+$",
+        "timeline uninit marker file": r"^[0-9a-f]+\.___uninit$",
+    }
+    assert len(new_dirs) == len(expected.keys()), f"unexpected new directories: {new_dirs}"
+    for new_dir in new_dirs:
+        for direntry_type, pattern in expected.items():
+            if re.match(pattern, new_dir.name):
+                expected.pop(direntry_type)
+                break
+    assert len(expected.keys()) == 0, f"unexpected new directories: {expected}"
+
+    try:
+        # make the directory unremovable
+        for new_dir in new_dirs:
+            new_dir.chmod(0o444)
+
+        # start the pageserver, it should attempt the removal
+        env.neon_cli.pageserver_start()
+        # and the removal should fail, causing the tenant to be Broken
+        wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 5)
+
+        # inspect the reason
+        status = pageserver_http.tenant_status(tenant_id)
+        assert "remove" in status["state"]["data"]["reason"]
+        log_line = r".*load.*Failed to remove uninit marked timeline directory"
+        assert env.pageserver.log_contains(log_line)
+        env.pageserver.allowed_errors.append(log_line)
+
+        env.neon_cli.pageserver_stop(immediate=True)
+    finally:
+        # make the directory removable again
+        for new_dir in new_dirs:
+            new_dir.chmod(0o755)
+
+    env.neon_cli.pageserver_start()
+    wait_until_tenant_state(pageserver_http, tenant_id, "Active", 5)
 
 
 def test_timeline_create_break_after_uninit_mark(neon_simple_env: NeonEnv):
