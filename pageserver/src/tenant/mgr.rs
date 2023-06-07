@@ -21,9 +21,8 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
-use crate::IGNORED_TENANT_FILE_NAME;
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 
-use utils::completion;
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
@@ -65,7 +64,7 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
-    init_done: (completion::Completion, completion::Barrier),
+    init_order: InitializationOrder,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
@@ -122,7 +121,7 @@ pub async fn init_tenant_mgr(
                         &tenant_dir_path,
                         broker_client.clone(),
                         remote_storage.clone(),
-                        Some(init_done.clone()),
+                        Some(init_order.clone()),
                         &ctx,
                     ) {
                         Ok(tenant) => {
@@ -153,14 +152,12 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
-/// `init_done` is an optional channel used during initial load to delay background task
-/// start. It is not used later.
 pub fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
-    init_done: Option<(completion::Completion, completion::Barrier)>,
+    init_order: Option<InitializationOrder>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -219,7 +216,7 @@ pub fn schedule_local_tenant_processing(
             tenant_id,
             broker_client,
             remote_storage,
-            init_done,
+            init_order,
             ctx,
         )
     };

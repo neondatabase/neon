@@ -83,7 +83,7 @@ pub fn launch_disk_usage_global_eviction_task(
     conf: &'static PageServerConf,
     storage: GenericRemoteStorage,
     state: Arc<State>,
-    init_done: completion::Barrier,
+    background_jobs_barrier: completion::Barrier,
 ) -> anyhow::Result<()> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
@@ -100,17 +100,16 @@ pub fn launch_disk_usage_global_eviction_task(
         "disk usage based eviction",
         false,
         async move {
-            // wait until initial load is complete, because we cannot evict from loading tenants.
-            init_done.wait().await;
+            let cancel = task_mgr::shutdown_token();
 
-            disk_usage_eviction_task(
-                &state,
-                task_config,
-                storage,
-                &conf.tenants_path(),
-                task_mgr::shutdown_token(),
-            )
-            .await;
+            // wait until initial load is complete, because we cannot evict from loading tenants.
+            tokio::select! {
+                _ = cancel.cancelled() => { return Ok(()); },
+                _ = background_jobs_barrier.wait() => { }
+            };
+
+            disk_usage_eviction_task(&state, task_config, storage, &conf.tenants_path(), cancel)
+                .await;
             info!("disk usage based eviction task finishing");
             Ok(())
         },
