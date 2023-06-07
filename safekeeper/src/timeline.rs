@@ -234,7 +234,6 @@ impl SharedState {
             flush_lsn: self.sk.wal_store.flush_lsn().0,
             // note: this value is not flushed to control file yet and can be lost
             commit_lsn: self.sk.inmem.commit_lsn.0,
-            // TODO: rework feedbacks to avoid max here
             remote_consistent_lsn: remote_consistent_lsn.0,
             peer_horizon_lsn: self.sk.inmem.peer_horizon_lsn.0,
             safekeeper_connstr: conf.listen_pg_addr.clone(),
@@ -671,6 +670,17 @@ impl Timeline {
         let mut shared_state = self.write_shared_state();
         shared_state.last_removed_segno = horizon_segno;
         Ok(())
+    }
+
+    /// Persist control file if there is something to save and enough time
+    /// passed after the last save. This helps to keep remote_consistent_lsn up
+    /// to date so that storage nodes restart doesn't cause many pageserver ->
+    /// safekeeper reconnections.
+    pub fn maybe_pesist_control_file(&self) -> Result<()> {
+        let remote_consistent_lsn = self.walsenders.get_remote_consistent_lsn();
+        self.write_shared_state()
+            .sk
+            .maybe_persist_control_file(remote_consistent_lsn)
     }
 
     /// Returns full timeline info, required for the metrics. If the timeline is

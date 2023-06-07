@@ -146,7 +146,12 @@ def test_remote_storage_backup_and_restore(
     # listing the remote timelines will fail because of the failpoint,
     # and the tenant will be marked as Broken.
     client.tenant_attach(tenant_id)
-    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+
+    tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+    assert tenant_info["attachment_status"] == {
+        "slug": "failed",
+        "data": {"reason": "storage-sync-list-remote-timelines"},
+    }
 
     # Ensure that even though the tenant is broken, we can't attach it again.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):

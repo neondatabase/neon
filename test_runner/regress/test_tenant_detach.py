@@ -532,7 +532,7 @@ def test_ignored_tenant_reattach(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
+        test_name="test_ignored_tenant_reattach",
     )
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()

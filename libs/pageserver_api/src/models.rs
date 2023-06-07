@@ -110,12 +110,11 @@ impl TenantState {
             Self::Active => Attached,
             // If the (initial or resumed) attach procedure fails, the tenant becomes Broken.
             // However, it also becomes Broken if the regular load fails.
-            // We would need a separate TenantState variant to distinguish these cases.
-            // However, there's no practical difference from Console's perspective.
-            // It will run a Postgres-level health check as soon as it observes Attached.
-            // That will fail on Broken tenants.
-            // Console can then rollback the attach, or, wait for operator to fix the Broken tenant.
-            Self::Broken { .. } => Attached,
+            // From Console's perspective there's no practical difference
+            // because attachment_status is polled by console only during attach operation execution.
+            Self::Broken { reason, .. } => Failed {
+                reason: reason.to_owned(),
+            },
             // Why is Stopping a Maybe case? Because, during pageserver shutdown,
             // we set the Stopping state irrespective of whether the tenant
             // has finished attaching or not.
@@ -313,10 +312,11 @@ impl std::ops::Deref for TenantAttachConfig {
 
 /// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
 #[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "slug", content = "data", rename_all = "snake_case")]
 pub enum TenantAttachmentStatus {
     Maybe,
     Attached,
+    Failed { reason: String },
 }
 
 #[serde_as]
@@ -810,7 +810,9 @@ mod tests {
                 "slug": "Active",
             },
             "current_physical_size": 42,
-            "attachment_status": "attached",
+            "attachment_status": {
+                "slug":"attached",
+            }
         });
 
         let original_broken = TenantInfo {
@@ -832,7 +834,9 @@ mod tests {
                 }
             },
             "current_physical_size": 42,
-            "attachment_status": "attached",
+            "attachment_status": {
+                "slug":"attached",
+            }
         });
 
         assert_eq!(
