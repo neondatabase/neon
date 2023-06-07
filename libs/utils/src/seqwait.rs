@@ -152,7 +152,7 @@ where
     /// This call won't complete until someone has called `advance`
     /// with a number greater than or equal to the one we're waiting for.
     pub async fn wait_for(&self, num: V) -> Result<T, SeqWaitError> {
-        match self.queue_for_wait(num) {
+        match self.queue_for_wait(num, false) {
             Ok(Either::Left(data)) => Ok(data),
             Ok(Either::Right(rx)) => match rx.await {
                 Err(_) => Err(SeqWaitError::Shutdown),
@@ -169,12 +169,15 @@ where
     ///
     /// If that hasn't happened after the specified timeout duration,
     /// [`SeqWaitError::Timeout`] will be returned.
+    ///
+    /// Pass `timeout_duration.is_zero() == true` to guarantee that the
+    /// future that is this function will never await.
     pub async fn wait_for_timeout(
         &self,
         num: V,
         timeout_duration: Duration,
     ) -> Result<T, SeqWaitError> {
-        match self.queue_for_wait(num) {
+        match self.queue_for_wait(num, timeout_duration.is_zero()) {
             Ok(Either::Left(data)) => Ok(data),
             Ok(Either::Right(rx)) => match timeout(timeout_duration, rx).await {
                 Ok(Ok(data)) => Ok(data),
@@ -187,13 +190,16 @@ where
 
     /// Register and return a channel that will be notified when a number arrives,
     /// or None, if it has already arrived.
-    fn queue_for_wait(&self, num: V) -> Result<Either<T, Receiver<T>>, SeqWaitError> {
+    fn queue_for_wait(&self, num: V, nowait: bool) -> Result<Either<T, Receiver<T>>, SeqWaitError> {
         let mut internal = self.internal.lock().unwrap();
         if internal.current.cnt_value() >= num {
             return Ok(Either::Left(internal.data.clone()));
         }
         if internal.shutdown {
             return Err(SeqWaitError::Shutdown);
+        }
+        if nowait {
+            return Err(SeqWaitError::Timeout);
         }
 
         // Create a new channel.
