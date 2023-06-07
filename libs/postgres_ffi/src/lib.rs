@@ -33,6 +33,7 @@ macro_rules! postgres_ffi {
             }
             pub mod controlfile_utils;
             pub mod nonrelfile_utils;
+            pub mod wal_craft_test_export;
             pub mod waldecoder_handler;
             pub mod xlog_utils;
 
@@ -45,8 +46,15 @@ macro_rules! postgres_ffi {
     };
 }
 
-postgres_ffi!(v14);
-postgres_ffi!(v15);
+#[macro_export]
+macro_rules! for_all_postgres_versions {
+    ($macro:tt) => {
+        $macro!(v14);
+        $macro!(v15);
+    };
+}
+
+for_all_postgres_versions! { postgres_ffi }
 
 pub mod pg_constants;
 pub mod relfile_utils;
