@@ -242,6 +242,13 @@ pub struct Timeline {
     pub delete_lock: tokio::sync::Mutex<bool>,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
+
+    /// Barrier to wait before doing initial logical size calculation. Used only during startup.
+    initial_logical_size_can_start: Option<completion::Barrier>,
+
+    /// Completion shared between all timelines loaded during startup; used to delay heavier
+    /// background tasks until some logical sizes have been calculated.
+    initial_logical_size_attempt: Mutex<Option<completion::Completion>>,
 }
 
 /// Internal structure to hold all data needed for logical size calculation.
@@ -932,12 +939,12 @@ impl Timeline {
     pub fn activate(
         self: &Arc<Self>,
         broker_client: BrokerClientChannel,
-        init_done: Option<&completion::Barrier>,
+        background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
-        self.launch_eviction_task(init_done);
+        self.launch_eviction_task(background_jobs_can_start);
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
@@ -955,6 +962,14 @@ impl Timeline {
                 error!("Not activating a Stopping timeline");
             }
             (_, new_state) => {
+                if matches!(new_state, TimelineState::Stopping | TimelineState::Broken) {
+                    // drop the copmletion guard, if any; it might be holding off the completion
+                    // forever needlessly
+                    self.initial_logical_size_attempt
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take();
+                }
                 self.state.send_replace(new_state);
             }
         }
@@ -1345,6 +1360,8 @@ impl Timeline {
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         remote_client: Option<RemoteTimelineClient>,
         pg_version: u32,
+        initial_logical_size_can_start: Option<completion::Barrier>,
+        initial_logical_size_attempt: Option<completion::Completion>,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
         let (state, _) = watch::channel(TimelineState::Loading);
@@ -1439,6 +1456,9 @@ impl Timeline {
                     EvictionTaskTimelineState::default(),
                 ),
                 delete_lock: tokio::sync::Mutex::new(false),
+
+                initial_logical_size_can_start,
+                initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
             };
             result.repartition_threshold = result.get_checkpoint_distance() / 10;
             result
@@ -1927,7 +1947,27 @@ impl Timeline {
             false,
             // NB: don't log errors here, task_mgr will do that.
             async move {
-                // no cancellation here, because nothing really waits for this to complete compared
+
+                let cancel = task_mgr::shutdown_token();
+
+                // in case we were created during pageserver initialization, wait for
+                // initialization to complete before proceeding. startup time init runs on the same
+                // runtime.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); },
+                    _ = completion::Barrier::maybe_wait(self_clone.initial_logical_size_can_start.clone()) => {}
+                };
+
+                // hold off background tasks from starting until all timelines get to try at least
+                // once initial logical size calculation; though retry will rarely be useful.
+                // holding off is done because heavier tasks execute blockingly on the same
+                // runtime.
+                //
+                // dropping this at every outcome is probably better than trying to cling on to it,
+                // delay will be terminated by a timeout regardless.
+                let _completion = { self_clone.initial_logical_size_attempt.lock().expect("unexpected initial_logical_size_attempt poisoned").take() };
+
+                // no extra cancellation here, because nothing really waits for this to complete compared
                 // to spawn_ondemand_logical_size_calculation.
                 let cancel = CancellationToken::new();
 
