@@ -3064,6 +3064,21 @@ def fork_at_current_lsn(
     return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
 
 
+def last_flush_lsn_checkpoint(
+    env: NeonEnv, endpoint: Endpoint, tenant_id: TenantId, timeline_id: TimelineId
+) -> Lsn:
+    """
+    Wait for pageserver to catch to the latest flush LSN of given endpoint, then
+    checkpoint pageserver.
+    """
+    last_flush_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    ps_http = env.pageserver.http_client()
+    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, last_flush_lsn)
+    # force a checkpoint to trigger upload
+    ps_http.timeline_checkpoint(tenant_id, timeline_id)
+    return last_flush_lsn
+
+
 def last_flush_lsn_upload(
     env: NeonEnv, endpoint: Endpoint, tenant_id: TenantId, timeline_id: TimelineId
 ) -> Lsn:
@@ -3072,10 +3087,7 @@ def last_flush_lsn_upload(
     checkpoint pageserver, and wait for it to be uploaded (remote_consistent_lsn
     reaching flush LSN).
     """
-    last_flush_lsn = wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+    last_flush_lsn = last_flush_lsn_checkpoint(env, endpoint, tenant_id, timeline_id)
     ps_http = env.pageserver.http_client()
-    wait_for_last_record_lsn(ps_http, tenant_id, timeline_id, last_flush_lsn)
-    # force a checkpoint to trigger upload
-    ps_http.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(ps_http, tenant_id, timeline_id, last_flush_lsn)
     return last_flush_lsn

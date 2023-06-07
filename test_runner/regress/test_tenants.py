@@ -20,6 +20,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
     available_remote_storages,
+    last_flush_lsn_checkpoint,
     last_flush_lsn_upload,
 )
 from fixtures.types import Lsn, TenantId, TimelineId
@@ -275,7 +276,10 @@ def test_pageserver_metrics_removed_after_detach(
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
                 assert cur.fetchone() == (5000050000,)
-            last_flush_lsn_upload(env, endpoint, endpoint.tenant_id, timeline_id)
+            if remote_storage_kind != RemoteStorageKind.NOOP:
+                last_flush_lsn_upload(env, endpoint, endpoint.tenant_id, timeline_id)
+            else:
+                last_flush_lsn_checkpoint(env, endpoint, endpoint.tenant_id, timeline_id)
         endpoint.stop()
 
     def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
