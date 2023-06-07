@@ -613,12 +613,11 @@ def test_timeline_delete_works_for_remote_smoke(
 
         timeline_ids.append(timeline_id)
 
-    # schedule all deletes first
     for timeline_id in reversed(timeline_ids):
+        # note that we need to finish previous deletion before scheduling next one
+        # otherwise we can get an "HasChildren" error if deletion is not fast enough (real_s3)
         ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
 
-    # then wait for them to finish
-    for timeline_id in reversed(timeline_ids):
         env.pageserver.allowed_errors.append(
             f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
         )
