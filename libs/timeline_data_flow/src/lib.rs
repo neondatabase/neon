@@ -108,7 +108,7 @@ pub trait Types {
     type HistoricLayer;
     type InMemoryLayer: InMemoryLayer<Types = Self> + Clone;
     type HistoricStuff: HistoricStuff<Types = Self> + Clone;
-    type GetReconstructPathError;
+    type GetReconstructPathError: std::error::Error;
 }
 
 /// Error returned by [`InMemoryLayer::put`].
@@ -238,13 +238,16 @@ impl<T: Types> Reader<T> {
     /// See the [`crate`]-level docs for why we return [`ReconstructWork`] instead of a Page Image here.
     pub async fn get(&self, key: T::Key, lsn: T::Lsn) -> Result<ReconstructWork<T>, GetError<T>> {
         // XXX dedup with Writer::get_nowait
-        let state = self.wait.wait_for(lsn).await?;
+        let state = self.wait.wait_for(lsn).await.map_err(GetError::SeqWait)?;
         let inmem_records = state
             .inmem
             .as_ref()
             .map(|iml| iml.get(key, lsn))
             .unwrap_or_default();
-        let historic_path = state.historic.get_reconstruct_path(key, lsn)?;
+        let historic_path = state
+            .historic
+            .get_reconstruct_path(key, lsn)
+            .map_err(GetError::GetReconstructPath)?;
         Ok(ReconstructWork {
             key,
             lsn,
@@ -287,7 +290,7 @@ impl<T: Types> Writer<T> {
         lsn: T::Lsn,
         delta: T::DeltaRecord,
     ) -> Result<(), PutError<T>> {
-        let (snapshot_lsn, snapshot) = self.advance.get_current_data();
+        let (_snapshot_lsn, snapshot) = self.advance.get_current_data();
         // TODO ensure snapshot_lsn <= lsn?
         let mut inmem = snapshot
             .inmem
@@ -372,13 +375,17 @@ impl<T: Types> Writer<T> {
             .advance
             .wait_for_timeout(lsn, Duration::from_secs(0))
             // The await is never going to block because we pass from_secs(0).
-            .await?;
+            .await
+            .map_err(GetError::SeqWait)?;
         let inmem_records = state
             .inmem
             .as_ref()
             .map(|iml| iml.get(key, lsn))
             .unwrap_or_default();
-        let historic_path = state.historic.get_reconstruct_path(key, lsn)?;
+        let historic_path = state
+            .historic
+            .get_reconstruct_path(key, lsn)
+            .map_err(GetError::GetReconstructPath)?;
         Ok(ReconstructWork {
             key,
             lsn,

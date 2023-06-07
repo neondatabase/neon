@@ -1989,16 +1989,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "layer_map"
-version = "0.1.0"
-dependencies = [
- "thiserror",
- "tokio",
- "utils",
- "workspace_hack",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3999,6 +3989,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d967f99f534ca7e495c575c62638eebc2898a8c84c119b89e250477bc4ba16b2"
 dependencies = [
  "time-core",
+]
+
+[[package]]
+name = "timeline_data_flow"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "utils",
+ "workspace_hack",
 ]
 
 [[package]]
