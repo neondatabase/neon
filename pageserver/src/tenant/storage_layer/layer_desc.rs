@@ -61,6 +61,7 @@ impl PersistentLayerDesc {
             lsn_range: Lsn(0)..Lsn(1),
             is_delta: false,
             is_incremental: false,
+            file_size: 0,
         }
     }
 
