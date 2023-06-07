@@ -1,8 +1,8 @@
-//! Generic implementation of WAL record data flows.
+//! The Timeline's core data path.
 //!
 //! # Overview
 //!
-//! This crate implements the core data flows inside pageserver:
+//! This crate implements the core data path of a Timeline inside Pageserver:
 //!
 //! 1. WAL records from `walreceiver`, via in-memory layers, into persistent L0 layers.
 //! 1. `GetPage@LSN`: retrieval of WAL records and page images for feeding into WAL redo.
