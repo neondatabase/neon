@@ -142,10 +142,6 @@ impl PersistentLayer for RemoteLayer {
         true
     }
 
-    fn file_size(&self) -> u64 {
-        self.layer_metadata.file_size()
-    }
-
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let lsn_range = self.get_lsn_range();
@@ -190,6 +186,7 @@ impl RemoteLayer {
                 fname.key_range.clone(),
                 fname.lsn,
                 false,
+                layer_metadata.file_size(),
             ),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -211,6 +208,7 @@ impl RemoteLayer {
                 timelineid,
                 fname.key_range.clone(),
                 fname.lsn_range.clone(),
+                layer_metadata.file_size(),
             ),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
