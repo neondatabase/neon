@@ -1,7 +1,35 @@
+//! This module contains the encoding and decoding of the local manifest file.
+//!
+//! MANIFEST is a write-ahead log which is stored locally to each timeline. It
+//! records the state of the storage engine. It contains a snapshot of the
+//! state and all operations proceeding that snapshot. The file begins with a
+//! header recording MANIFEST version number. After that, it contains a snapshot.
+//! The snapshot is followed by a list of operations. Each operation is a list
+//! of records. Each record is either an addition or a removal of a layer.
+//!
+//! With MANIFEST, we can:
+//!
+//! 1. recover state quickly by reading the file, potentially boosting the
+//!    startup speed.
+//! 2. ensure all operations are atomic and avoid corruption, solving issues
+//!    like redundant image layer and preparing us for future compaction
+//!    strategies.
+//!
+//! There is also a format for storing all layer files on S3, called
+//! `index_part.json`. Compared with index_part, MANIFEST is an WAL which
+//! records all operations as logs, and therefore we can easily replay the
+//! operations when recovering from crash, while ensuring those operations
+//! are atomic upon restart.
+//!
+//! Currently, this is not used in the system. Future refactors will ensure
+//! the storage state will be recorded in this file, and the system can be
+//! recovered from this file. This is tracked in
+//! https://github.com/neondatabase/neon/issues/4418
+
 use std::io::{Read, Write};
 
 use crate::virtual_file::VirtualFile;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::crc32c;
 use serde::{Deserialize, Serialize};
@@ -26,7 +54,14 @@ pub enum Record {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+pub struct ManifestHeader {
+    version: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum Operation {
+    /// The header of the manifest (always the first record)
+    Header(ManifestHeader),
     /// A snapshot of the current state
     Snapshot(Snapshot, Lsn),
     /// An atomic operation that changes the state
@@ -60,6 +95,7 @@ impl Header {
 impl Manifest {
     pub fn init(file: VirtualFile, snapshot: Snapshot, lsn: Lsn) -> Result<Self> {
         let mut manifest = Self { file };
+        manifest.append_operation(Operation::Header(ManifestHeader { version: 1 }))?;
         manifest.append_operation(Operation::Snapshot(snapshot, lsn))?;
         Ok(manifest)
     }
@@ -92,9 +128,16 @@ impl Manifest {
                 warn!("checksum mismatch when decoding manifest, could be corrupted");
                 break true;
             }
+            // if the following decode fails, we cannot use the manifest or safely ignore any record.
             operations.push(serde_json::from_slice(data)?);
             buf.advance(size);
         };
+        let Operation::Header(header) = operations.remove(0) else {
+            bail!("cannot find manifest header");
+        };
+        if header.version != 1 {
+            bail!("unsupported manifest version: {}", header.version);
+        }
         Ok((Self { file }, operations, corrupted))
     }
 
@@ -113,6 +156,8 @@ impl Manifest {
         Ok(())
     }
 
+    /// Add an operation to the manifest. The operation will be appended to the end of the file,
+    /// and the file will fsync.
     pub fn append_operation(&mut self, operation: Operation) -> Result<()> {
         let encoded = Vec::from(serde_json::to_string(&operation)?);
         self.append_data(&encoded)
