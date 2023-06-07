@@ -208,92 +208,46 @@ The extension store does not have to be S3 directly, but could be a Node-local
 caching service on top of S3. This would reduce the load on the network for
 popular extensions.
 
-## Extension Store implementation
+## Extension Storage implementation
 
-Extension Store in our case is a private S3 bucket.
-Extensions are stored as tarballs in the bucket. The tarball contains the extension's control file and all the files that the extension needs to run.
+Extension Storage in our case is an S3 bucket with a directory per postgres version,
+where extension files are stored as plain files in the bucketm following the same directory structure as in the postgres.
 
-We may also store the control file separately from the tarball to speed up the extension loading.
+i.e.
 
-`s3://<the-bucket>/extensions/ext-name/sha-256+1234abcd1234abcd1234abcd1234abcd/bundle.tar`
+`s3://<the-bucket>/15/lib/postgis-3.1.so`
+`s3://<the-bucket>/15/share/extension/postgis.control`
+`s3://<the-bucket>/15/share/extension/postgis--3.1.sql`
 
-where `ext-name` is an extension name and `sha-256+1234abcd1234abcd1234abcd1234abcd` is a hash of a specific extension version tarball.
+To handle private extensions, that available only to specific users, we use per-project directories:
 
-To ensure security, there is no direct access to the S3 bucket from compute node.
+i.e.
+`s3://<the-bucket>/<tenant-id>/15/lib/postgis-3.1.so`, etc.
 
-Control plane forms a list of extensions available to the compute node 
-and forms a short-lived [pre-signed URL](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ShareObjectPreSignedURL.html) 
-for each extension that is available to the compute node.
+To get the list of available extensions,`compute_ctl` downloads control files from both 
 
-so, `compute_ctl` receives spec in the following format
+`s3://<the-bucket>/15/share/extension/` and `s3://<the-bucket>/<tenant-id>/15/share/extension/`
 
-```
-"extensions": [{
-  "meta_format": 1,
-  "extension_name": "postgis",
-  "link": "https://<the-bucket>/extensions/sha-256+1234abcd1234abcd1234abcd1234abcd/bundle.tar?AWSAccessKeyId=1234abcd1234abcd1234abcd1234abcd&Expires=1234567890&Signature=1234abcd1234abcd1234abcd1234abcd",
-  ...
-}]
-```
 
-`compute_ctl` then downloads the extension from the link and unpacks it to the right place.
+No spec changes are required.
 
-### How do we handle private extensions?
 
-Private and public extensions are treated equally from the Extension Store perspective.
-The only difference is that the private extensions are not listed in the user UI (managed by control plane).
+### How to add new extension to the Extension Storage?
 
-### How to add new extension to the Extension Store?
+Simply upload build artifacts to the S3 bucket.
+Implement a CI step for that. Splitting it from ompute-node-image build.
 
-Since we need to verify that the extension is compatible with the compute node and doesn't contain any malicious code, 
-we need to review the extension before adding it to the Extension Store.
+### How do we deal with extension versions and updates?
 
-I do not expect that we will have a lot of extensions to review, so we can do it manually for now.
+TLDR: we don't.
 
-Some admin UI may be added later to automate this process.
+We rely on the PostgreSQL extension versioning mechanism (sql update scripts) and extension authors to not break backwards compatibility within one major version of PostgreSQL.
 
-The list of extensions available to a compute node is stored in the console database.
+Whenever we decide to support new version of an extension, we just upload it to the S3 bucket, possiblly overwriting the old version.
 
-### How is the list of available extensions managed? 
+This is the same approach as we use now with extensions built into the compute image.
 
-We need to add new tables to the console database to store the list of available extensions, their versions and access rights.
-
-something like this:
-
-```
-CREATE TABLE extensions (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    version VARCHAR(255) NOT NULL,
-    hash VARCHAR(255) NOT NULL, // this is the path to the extension in the Extension Store
-    supported_postgres_versions integer[] NOT NULL, 
-    is_public BOOLEAN NOT NULL, // public extensions are available to all users
-    is_shared_preload BOOLEAN NOT NULL, // these extensions require postgres restart
-    is_preload BOOLEAN NOT NULL,
-    license VARCHAR(255) NOT NULL,
-);
-
-CREATE TABLE user_extensions (
-    user_id INTEGER NOT NULL,
-    extension_id INTEGER NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users (id),
-    FOREIGN KEY (extension_id) REFERENCES extensions (id)
-);
-```
-
-When new extension is added to the Extension Store, we add a new record to the table and set permissions.
- 
-In UI, user may select the extensions that they want to use with their compute node.
-
-NOTE: Extensions that require postgres restart will not be available until the next compute restart.
-Also, currently user cannot force postgres restart. We should add this feature later.
-
-For other extensions, we must communicate updates to `compute_ctl` and they will be downloaded in the background.
-
-### How can user update the extension?
-
-User can update the extension by selecting the new version of the extension in the UI.
-
+In case of an incompatible library update, the user will have to update the extension version in their database.
 ### Alternatives
 
 For extensions written on trusted languages we can also adopt
