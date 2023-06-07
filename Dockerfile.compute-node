@@ -531,7 +531,7 @@ RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.0.tar.gz -
     mkdir pgx_ulid-src && cd pgx_ulid-src && tar xvzf ../pgx_ulid.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgx        = "=0.7.3"/pgx = { version = "0.7.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgx install --release && \
-    echo "trusted = true" >> /usr/local/pgsql/share/extension/pgx_ulid.control
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/ulid.control
 
 #########################################################################################
 #
