@@ -5,12 +5,11 @@
 //! This crate implements the core data flows inside pageserver:
 //!
 //! 1. WAL records from `walreceiver`, via in-memory layers, into persistent L0 layers.
-//! 2. Data re-shuffeling through compaction (TODO).
-//! 3. Page image creation & garbage collection through GC (TODO).
-//! 4. `GetPage@LSN`: retrieval of WAL records and page images for feeding into WAL redo.
+//! 1. `GetPage@LSN`: retrieval of WAL records and page images for feeding into WAL redo.
+//! 1. Data re-shuffeling through compaction (TODO).
+//! 1. Page image creation & garbage collection through GC (TODO).
 //!
-//! The implementation assumes the following concepts,
-//! but is fully generic over their implementation in order to facilitate unit testing:
+//! This crate assumes the following concepts, but is fully generic over their implementation:
 //!
 //! - **Delta Records**: data is written into the system in the form of self-descriptive deltas.
 //!   For the Pageserver use case, these deltas are derived from Postgres WAL records.
@@ -49,10 +48,10 @@
 //!
 //! As an example for what "immutable" means, take the case where we add a new Historic Layer to HistoricStuff.
 //! Traditionally, one would use shared mutable state, i.e. `Arc<RwLock<...>>`.
-//! To insert the new Historic Layer, we would acquire the RwLock in write mode, and modifying a lookup data structure to accomodate the new layer.
+//! To insert the new Historic Layer, we would acquire the RwLock in write mode and modify a lookup data structure to accomodate the new layer.
 //! The Read-ends would use RwLock in read mode to read from the data structure.
 //!
-//! Conversely, with  *immutable data structures*, writers create new version (aka *snapshot*) of the lookup data structure.
+//! Conversely, with  *immutable data structures*, writers create new version (aka *snapshots*) of the lookup data structure.
 //! New reads on the Read-ends will use the new snapshot, but old ongoing reads would use the old version(s).
 //! An efficient implementation would likely share the Historic Layer objects, e.g., using `Arc`.
 //! And maybe there's internally mutable state inside the layer objects, e.g., to track residence (i.e., *on-demand downloaded* vs *evicted*).
@@ -68,14 +67,16 @@
 //!   Likely the implementation of `HistoricStuff` plays a role here, because it is responsible for persisting the layer files.
 //! - **Layer Eviction & On-Demand Download**: this is just an aspect of the above.
 //!   The crate consumer can choose to implement eviction & on-demand download however they wish.
-//!   The only requirement is that the Historic Layer object give the same answers at all time.
+//!   The only requirement is that the Historic Layers don't change their contents, i.e., they always returnt he same reconstruct values for the same lookup.
 //!   - For example, a `LayerCache` modoule or service could take care of layer uploads, eviction, and on-demand downloads.
 //!     Initially, the `layer cache` can be local-only.
-//!     But over time, it can be multi-machine / clustered pagesevers / aka "sharding".
+//!     But in the future, it can be multi-machine / clustered pagesevers / aka "sharding".
 //!
 //! # Example
 //!
-//! See the test cases.
+//! The [`new`] function is the entrypoint to this crate.
+//!
+//! See the test cases for how it is used.
 
 use std::{marker::PhantomData, time::Duration};
 
