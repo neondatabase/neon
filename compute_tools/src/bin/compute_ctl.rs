@@ -59,8 +59,10 @@ fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let matches = cli().get_matches();
-    let config = get_S3_config(matches);
-    download_extension(&matches, ExtensionType::Shared);
+    let config = get_s3_config(&matches)
+        .expect("hopefully get_s3_config works");
+    download_extension(&config, ExtensionType::Shared)
+        .expect("dont error");
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -206,7 +208,7 @@ fn main() -> Result<()> {
     let mut state = compute.state.lock().unwrap();
 
     // Now we have the spec, and also the tenant id, so we can download the user's personal extensions
-    // download_extension(&matches, ExtensionType::Tenant(FIXME tenant_id.into()));
+    // download_extension(&config, ExtensionType::Tenant(FIXME tenant_id.into()));
 
     // Record for how long we slept waiting for the spec.
     state.metrics.wait_for_spec_ms = Utc::now()
@@ -228,7 +230,7 @@ fn main() -> Result<()> {
         launch_configurator(&compute).expect("cannot launch configurator thread");
 
     // Now we are ready to download library extensions
-    // download_extension(&matches, ExtensionType::Library(FIXME library_name.into()));
+    // download_extension(&config, ExtensionType::Library(FIXME library_name.into()));
     
     // Start Postgres
     let mut delay_exit = false;

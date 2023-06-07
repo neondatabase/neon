@@ -931,6 +931,7 @@ dependencies = [
  "tar",
  "tokio",
  "tokio-postgres",
+ "toml_edit",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
