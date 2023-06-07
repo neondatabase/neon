@@ -109,8 +109,6 @@ pub struct ImageLayer {
     // This entry contains an image of all pages as of this LSN, should be the same as desc.lsn
     pub lsn: Lsn,
 
-    pub file_size: u64,
-
     access_stats: LayerAccessStats,
 
     inner: RwLock<ImageLayerInner>,
@@ -122,7 +120,7 @@ impl std::fmt::Debug for ImageLayer {
 
         f.debug_struct("ImageLayer")
             .field("key_range", &RangeDisplayDebug(&self.desc.key_range))
-            .field("file_size", &self.file_size)
+            .field("file_size", &self.desc.file_size)
             .field("lsn", &self.lsn)
             .field("inner", &self.inner)
             .finish()
@@ -258,17 +256,13 @@ impl PersistentLayer for ImageLayer {
         Ok(())
     }
 
-    fn file_size(&self) -> u64 {
-        self.file_size
-    }
-
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let lsn_range = self.get_lsn_range();
 
         HistoricLayerInfo::Image {
             layer_file_name,
-            layer_file_size: self.file_size,
+            layer_file_size: self.desc.file_size,
             lsn_start: lsn_range.start,
             remote: false,
             access_stats: self.access_stats.as_api_model(reset),
@@ -411,9 +405,9 @@ impl ImageLayer {
                 filename.key_range.clone(),
                 filename.lsn,
                 false,
+                file_size,
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: filename.lsn,
-            file_size,
             access_stats,
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
@@ -443,9 +437,9 @@ impl ImageLayer {
                 summary.key_range,
                 summary.lsn,
                 false,
+                metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
-            file_size: metadata.len(),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
@@ -578,14 +572,6 @@ impl ImageLayerWriterInner {
             file.write_all(buf.as_ref())?;
         }
 
-        let desc = PersistentLayerDesc::new_img(
-            self.tenant_id,
-            self.timeline_id,
-            self.key_range.clone(),
-            self.lsn,
-            self.is_incremental, // for now, image layer ALWAYS covers the full range
-        );
-
         // Fill in the summary on blk 0
         let summary = Summary {
             magic: IMAGE_FILE_MAGIC,
@@ -604,6 +590,15 @@ impl ImageLayerWriterInner {
             .metadata()
             .context("get metadata to determine file size")?;
 
+        let desc = PersistentLayerDesc::new_img(
+            self.tenant_id,
+            self.timeline_id,
+            self.key_range.clone(),
+            self.lsn,
+            self.is_incremental, // for now, image layer ALWAYS covers the full range
+            metadata.len(),
+        );
+
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
@@ -611,7 +606,6 @@ impl ImageLayerWriterInner {
             path_or_conf: PathOrConf::Conf(self.conf),
             desc,
             lsn: self.lsn,
-            file_size: metadata.len(),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
