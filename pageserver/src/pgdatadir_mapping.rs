@@ -871,7 +871,7 @@ impl<'a> DatadirModification<'a> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> Result<(), anyhow::Error> {
+    ) -> anyhow::Result<()> {
         if rel.relnode == 0 {
             return Err(RelationError::InvalidRelnode.into());
         }
