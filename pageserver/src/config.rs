@@ -63,6 +63,7 @@ pub mod defaults {
     pub const DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL: &str = "1 hour";
     pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
     pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
+    pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
 
     ///
     /// Default built-in configuration file.
@@ -91,8 +92,9 @@ pub mod defaults {
 #cached_metric_collection_interval = '{DEFAULT_CACHED_METRIC_COLLECTION_INTERVAL}'
 #synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
 
-
 #disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
+
+#background_task_maximum_delay = '{DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY}'
 
 # [tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
@@ -187,6 +189,15 @@ pub struct PageServerConf {
     pub test_remote_failures: u64,
 
     pub ondemand_download_behavior_treat_error_as_warn: bool,
+
+    /// How long will background tasks be delayed at most after initial load of tenants.
+    ///
+    /// Our largest initialization completions are in the range of 100-200s, so perhaps 10s works
+    /// as we now isolate initial loading, initial logical size calculation and background tasks.
+    /// Smaller nodes will have background tasks "not running" for this long unless every timeline
+    /// has it's initial logical size calculated. Not running background tasks for some seconds is
+    /// not terrible.
+    pub background_task_maximum_delay: Duration,
 }
 
 /// We do not want to store this in a PageServerConf because the latter may be logged
@@ -259,6 +270,8 @@ struct PageServerConfigBuilder {
     test_remote_failures: BuilderValue<u64>,
 
     ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
+
+    background_task_maximum_delay: BuilderValue<Duration>,
 }
 
 impl Default for PageServerConfigBuilder {
@@ -316,6 +329,11 @@ impl Default for PageServerConfigBuilder {
             test_remote_failures: Set(0),
 
             ondemand_download_behavior_treat_error_as_warn: Set(false),
+
+            background_task_maximum_delay: Set(humantime::parse_duration(
+                DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
+            )
+            .unwrap()),
         }
     }
 }
@@ -440,6 +458,10 @@ impl PageServerConfigBuilder {
             BuilderValue::Set(ondemand_download_behavior_treat_error_as_warn);
     }
 
+    pub fn background_task_maximum_delay(&mut self, delay: Duration) {
+        self.background_task_maximum_delay = BuilderValue::Set(delay);
+    }
+
     pub fn build(self) -> anyhow::Result<PageServerConf> {
         let concurrent_tenant_size_logical_size_queries = self
             .concurrent_tenant_size_logical_size_queries
@@ -522,6 +544,9 @@ impl PageServerConfigBuilder {
                 .ok_or(anyhow!(
                     "missing ondemand_download_behavior_treat_error_as_warn"
                 ))?,
+            background_task_maximum_delay: self
+                .background_task_maximum_delay
+                .ok_or(anyhow!("missing background_task_maximum_delay"))?,
         })
     }
 }
@@ -710,6 +735,7 @@ impl PageServerConf {
                     )
                 },
                 "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
+                "background_task_maximum_delay" => builder.background_task_maximum_delay(parse_toml_duration(key, item)?),
                 _ => bail!("unrecognized pageserver option '{key}'"),
             }
         }
@@ -877,6 +903,7 @@ impl PageServerConf {
             disk_usage_based_eviction: None,
             test_remote_failures: 0,
             ondemand_download_behavior_treat_error_as_warn: false,
+            background_task_maximum_delay: Duration::ZERO,
         }
     }
 }
@@ -1036,6 +1063,7 @@ metric_collection_endpoint = 'http://localhost:80/metrics'
 synthetic_size_calculation_interval = '333 s'
 
 log_format = 'json'
+background_task_maximum_delay = '334 s'
 
 "#;
 
@@ -1094,6 +1122,9 @@ log_format = 'json'
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
+                background_task_maximum_delay: humantime::parse_duration(
+                    defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
+                )?,
             },
             "Correct defaults should be used when no config values are provided"
         );
@@ -1148,6 +1179,7 @@ log_format = 'json'
                 disk_usage_based_eviction: None,
                 test_remote_failures: 0,
                 ondemand_download_behavior_treat_error_as_warn: false,
+                background_task_maximum_delay: Duration::from_secs(334),
             },
             "Should be able to parse all basic config values correctly"
         );

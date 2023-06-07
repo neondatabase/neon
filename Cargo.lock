@@ -2876,7 +2876,6 @@ dependencies = [
  "serde",
  "thiserror",
  "utils",
- "wal_craft",
  "workspace_hack",
 ]
 
@@ -4896,7 +4895,9 @@ dependencies = [
  "once_cell",
  "postgres",
  "postgres_ffi",
+ "regex",
  "tempfile",
+ "utils",
  "workspace_hack",
 ]
 

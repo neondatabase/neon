@@ -65,6 +65,7 @@ use crate::tenant::remote_timeline_client::PersistIndexPartWithDeletedFlagError;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
+use crate::InitializationOrder;
 
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
@@ -510,6 +511,7 @@ impl Tenant {
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
+        init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
@@ -535,6 +537,7 @@ impl Tenant {
                 up_to_date_metadata,
                 ancestor.clone(),
                 remote_client,
+                init_order,
             )?;
 
             let timeline = UninitializedTimeline {
@@ -559,6 +562,7 @@ impl Tenant {
                             timeline_id,
                             up_to_date_metadata,
                             ancestor.clone(),
+                            None,
                             None,
                         )
                         .with_context(|| {
@@ -858,6 +862,7 @@ impl Tenant {
             local_metadata,
             ancestor,
             true,
+            None,
             ctx,
         )
         .await
@@ -892,16 +897,13 @@ impl Tenant {
     ///
     /// If the loading fails for some reason, the Tenant will go into Broken
     /// state.
-    ///
-    /// `init_done` is an optional channel used during initial load to delay background task
-    /// start. It is not used later.
     #[instrument(skip_all, fields(tenant_id=%tenant_id))]
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
-        init_done: Option<(completion::Completion, completion::Barrier)>,
+        init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         debug_assert_current_span_has_tenant_id();
@@ -937,17 +939,17 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
-                // keep the sender alive as long as we have the initial load ongoing; it will be
-                // None for loads spawned after init_tenant_mgr.
-                let (_tx, rx) = if let Some((tx, rx)) = init_done {
-                    (Some(tx), Some(rx))
-                } else {
-                    (None, None)
-                };
-                match tenant_clone.load(&ctx).await {
+                let mut init_order = init_order;
+
+                // take the completion because initial tenant loading will complete when all of
+                // these tasks complete.
+                let _completion = init_order.as_mut().and_then(|x| x.initial_tenant_load.take());
+
+                match tenant_clone.load(init_order.as_ref(), &ctx).await {
                     Ok(()) => {
                         debug!("load finished, activating");
-                        tenant_clone.activate(broker_client, rx.as_ref(), &ctx);
+                        let background_jobs_can_start = init_order.as_ref().map(|x| &x.background_jobs_can_start);
+                        tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
                     }
                     Err(err) => {
                         error!("load failed, setting tenant state to Broken: {err:?}");
@@ -974,7 +976,11 @@ impl Tenant {
     /// files on disk. Used at pageserver startup.
     ///
     /// No background tasks are started as part of this routine.
-    async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn load(
+        self: &Arc<Tenant>,
+        init_order: Option<&InitializationOrder>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
 
         debug!("loading tenant task");
@@ -1094,7 +1100,7 @@ impl Tenant {
         //    1. "Timeline has no ancestor and no layer files"
 
         for (timeline_id, local_metadata) in sorted_timelines {
-            self.load_local_timeline(timeline_id, local_metadata, ctx)
+            self.load_local_timeline(timeline_id, local_metadata, init_order, ctx)
                 .await
                 .with_context(|| format!("load local timeline {timeline_id}"))?;
         }
@@ -1112,6 +1118,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
+        init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
@@ -1181,6 +1188,7 @@ impl Tenant {
             Some(local_metadata),
             ancestor,
             false,
+            init_order,
             ctx,
         )
         .await
@@ -1724,12 +1732,12 @@ impl Tenant {
 
     /// Changes tenant status to active, unless shutdown was already requested.
     ///
-    /// `init_done` is an optional channel used during initial load to delay background task
-    /// start. It is not used later.
+    /// `background_jobs_can_start` is an optional barrier set to a value during pageserver startup
+    /// to delay background jobs. Background jobs can be started right away when None is given.
     fn activate(
         self: &Arc<Self>,
         broker_client: BrokerClientChannel,
-        init_done: Option<&completion::Barrier>,
+        background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
         debug_assert_current_span_has_tenant_id();
@@ -1762,12 +1770,12 @@ impl Tenant {
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
-            tasks::start_background_loops(self, init_done);
+            tasks::start_background_loops(self, background_jobs_can_start);
 
             let mut activated_timelines = 0;
 
             for timeline in not_broken_timelines {
-                timeline.activate(broker_client.clone(), init_done, ctx);
+                timeline.activate(broker_client.clone(), background_jobs_can_start, ctx);
                 activated_timelines += 1;
             }
 
@@ -2158,6 +2166,7 @@ impl Tenant {
         new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
+        init_order: Option<&InitializationOrder>,
     ) -> anyhow::Result<Arc<Timeline>> {
         if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
             anyhow::ensure!(
@@ -2165,6 +2174,9 @@ impl Tenant {
                 "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
             )
         }
+
+        let initial_logical_size_can_start = init_order.map(|x| &x.initial_logical_size_can_start);
+        let initial_logical_size_attempt = init_order.map(|x| &x.initial_logical_size_attempt);
 
         let pg_version = new_metadata.pg_version();
         Ok(Timeline::new(
@@ -2177,6 +2189,8 @@ impl Tenant {
             Arc::clone(&self.walredo_mgr),
             remote_client,
             pg_version,
+            initial_logical_size_can_start.cloned(),
+            initial_logical_size_attempt.cloned(),
         ))
     }
 
@@ -2852,7 +2866,7 @@ impl Tenant {
         remote_client: Option<RemoteTimelineClient>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_data = self
-            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client)
+            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client, None)
             .context("Failed to create timeline data structure")?;
         crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
 
@@ -3420,7 +3434,7 @@ pub mod harness {
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
             tenant
-                .load(ctx)
+                .load(None, ctx)
                 .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
                 .await?;
             tenant.state.send_replace(TenantState::Active);
