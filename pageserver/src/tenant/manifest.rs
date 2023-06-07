@@ -6,6 +6,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::crc32c;
 use serde::{Deserialize, Serialize};
 use tracing::log::warn;
+use utils::lsn::Lsn;
 
 use super::storage_layer::PersistentLayerDesc;
 
@@ -27,9 +28,9 @@ pub enum Record {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum Operation {
     /// A snapshot of the current state
-    Snapshot(Snapshot),
+    Snapshot(Snapshot, Lsn),
     /// An atomic operation that changes the state
-    Operation(Vec<Record>),
+    Operation(Vec<Record>, Lsn),
 }
 
 struct Header {
@@ -57,9 +58,9 @@ impl Header {
 }
 
 impl Manifest {
-    pub fn init(file: VirtualFile, snapshot: Snapshot) -> Result<Self> {
+    pub fn init(file: VirtualFile, snapshot: Snapshot, lsn: Lsn) -> Result<Self> {
         let mut manifest = Self { file };
-        manifest.append_operation(Operation::Snapshot(snapshot))?;
+        manifest.append_operation(Operation::Snapshot(snapshot, lsn))?;
         Ok(manifest)
     }
 
@@ -138,9 +139,12 @@ mod tests {
         let snapshot = Snapshot {
             layers: vec![layer1, layer2],
         };
-        let mut manifest = Manifest::init(file, snapshot.clone()).unwrap();
+        let mut manifest = Manifest::init(file, snapshot.clone(), Lsn::from(0)).unwrap();
         manifest
-            .append_operation(Operation::Operation(vec![Record::AddLayer(layer3.clone())]))
+            .append_operation(Operation::Operation(
+                vec![Record::AddLayer(layer3.clone())],
+                Lsn::from(1),
+            ))
             .unwrap();
         drop(manifest);
         // Open the second time and write
@@ -156,16 +160,22 @@ mod tests {
         let (mut manifest, operations, corrupted) = Manifest::load(file).unwrap();
         assert!(!corrupted);
         assert_eq!(operations.len(), 2);
-        assert_eq!(&operations[0], &Operation::Snapshot(snapshot.clone()));
+        assert_eq!(
+            &operations[0],
+            &Operation::Snapshot(snapshot.clone(), Lsn::from(0))
+        );
         assert_eq!(
             &operations[1],
-            &Operation::Operation(vec![Record::AddLayer(layer3.clone())])
+            &Operation::Operation(vec![Record::AddLayer(layer3.clone())], Lsn::from(1))
         );
         manifest
-            .append_operation(Operation::Operation(vec![
-                Record::RemoveLayer(layer3.clone()),
-                Record::AddLayer(layer4.clone()),
-            ]))
+            .append_operation(Operation::Operation(
+                vec![
+                    Record::RemoveLayer(layer3.clone()),
+                    Record::AddLayer(layer4.clone()),
+                ],
+                Lsn::from(2),
+            ))
             .unwrap();
         drop(manifest);
         // Open the third time and verify
@@ -181,14 +191,17 @@ mod tests {
         let (_manifest, operations, corrupted) = Manifest::load(file).unwrap();
         assert!(!corrupted);
         assert_eq!(operations.len(), 3);
-        assert_eq!(&operations[0], &Operation::Snapshot(snapshot));
+        assert_eq!(&operations[0], &Operation::Snapshot(snapshot, Lsn::from(0)));
         assert_eq!(
             &operations[1],
-            &Operation::Operation(vec![Record::AddLayer(layer3.clone())])
+            &Operation::Operation(vec![Record::AddLayer(layer3.clone())], Lsn::from(1))
         );
         assert_eq!(
             &operations[2],
-            &Operation::Operation(vec![Record::RemoveLayer(layer3), Record::AddLayer(layer4)])
+            &Operation::Operation(
+                vec![Record::RemoveLayer(layer3), Record::AddLayer(layer4)],
+                Lsn::from(2)
+            )
         );
     }
 }
