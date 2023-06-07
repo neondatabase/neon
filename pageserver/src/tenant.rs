@@ -2680,7 +2680,10 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             self.create_timeline_uninit_mark(timeline_id, &timelines)?
         };
-        // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
+
+        // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
+
+        // 1. create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
         let initdb_path = path_with_suffix_extension(
             self.conf
@@ -2688,26 +2691,20 @@ impl Tenant {
                 .join(format!("basebackup-{timeline_id}")),
             TEMP_FILE_SUFFIX,
         );
-
-        // an uninit mark was placed before, nothing else can access this timeline files
-        // current initdb was not run yet, so remove whatever was left from the previous runs
-        if initdb_path.exists() {
-            fs::remove_dir_all(&initdb_path).with_context(|| {
-                format!(
-                    "Failed to remove already existing initdb directory: {}",
-                    initdb_path.display()
-                )
-            })?;
-        }
-        // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
-        run_initdb(self.conf, &initdb_path, pg_version)?;
-        // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
-        scopeguard::defer! {
-            if let Err(e) = fs::remove_dir_all(&initdb_path) {
+        // 2. the initdb directory is very temporary, set to remove it immediately after bootstrap, we don't need it
+        let remove_initdb_dir = || {
+            fs::remove_dir_all(&initdb_path)
+                .with_context(|| format!("remove temporary initdb directory {initdb_path:?}"))
+        };
+        let remove_initdb_dir_guard = scopeguard::guard(remove_initdb_dir, |remove_initdb_dir| {
+            if let Err(e) = remove_initdb_dir() {
                 // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
-                error!("Failed to remove temporary initdb directory '{}': {}", initdb_path.display(), e);
+                error!("failed to {e:?}");
             }
-        }
+        });
+        // 3. do it. if we bail out, the scopeguard takes care of removing the dir.
+        run_initdb(self.conf, &initdb_path, pg_version)?;
+
         let pgdata_path = &initdb_path;
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(pgdata_path)?.align();
 
@@ -2746,6 +2743,11 @@ impl Tenant {
             format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
         })?;
 
+        // fail the bootstrap if we can't clean up after ourselves
+        remove_initdb_dir()?;
+        // no more cleanup necessary
+        let _ = scopeguard::ScopeGuard::into_inner(remove_initdb_dir_guard);
+
         // Flush the new layer files to disk, before we make the timeline as available to
         // the outside world.
         //
@@ -2777,12 +2779,22 @@ impl Tenant {
         Ok(timeline)
     }
 
-    /// Creates intermediate timeline structure and its files.
+    /// Creates intermediate timeline structure and its files, along with an uninit marker file.
     ///
     /// An empty layer map is initialized, and new data and WAL can be imported starting
     /// at 'disk_consistent_lsn'. After any initial data has been imported, call
     /// `finish_creation` to insert the Timeline into the timelines map and to remove the
     /// uninit mark file.
+    ///
+    /// No background tasks are launched by this function.
+    ///
+    /// In case of an error, the function returns it as Err() but also does best-effort cleanup
+    /// of the created on-disk state, including the `uninit_mark`.
+    /// If that cleanup fails, it will log the error at error! level.
+    /// It is guaranteed that the uninit marker is cleaned up last, so that, if cleanup is interrupted or fails,
+    /// the cleanup will resumed on pageserver restart.
+    /// In combination with O_EXCL being used to create the uninit marker, the resulting behavior
+    /// is that subsequent creation attempts will fail until the cleanup is complete.
     fn prepare_new_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -2877,7 +2889,10 @@ impl Tenant {
         let uninit_mark_path = self
             .conf
             .timeline_uninit_mark_file_path(tenant_id, timeline_id);
-        fs::File::create(&uninit_mark_path)
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&uninit_mark_path)
             .context("Failed to create uninit mark file")
             .and_then(|_| {
                 crashsafe::fsync_file_and_parent(&uninit_mark_path)
