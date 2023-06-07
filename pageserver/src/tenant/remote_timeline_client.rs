@@ -365,7 +365,7 @@ impl RemoteTimelineClient {
         Ok(())
     }
 
-    /// Initialuize the queue in stopped state. Used in startup path
+    /// Initialize the queue in stopped state. Used in startup path
     /// to continue deletion operation interrupted by pageserver crash or restart.
     pub fn init_upload_queue_stopped_to_continue_deletion(
         &self,

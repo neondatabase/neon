@@ -37,7 +37,7 @@ pub const DEFAULT_PG_VERSION: u32 = 15;
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub struct LocalEnv {
     // Base directory for all the nodes (the pageserver, safekeepers and
-    // compute nodes).
+    // compute endpoints).
     //
     // This is not stored in the config file. Rather, this is the path where the
     // config file itself is. It is read from the NEON_REPO_DIR env variable or
