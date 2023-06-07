@@ -1,5 +1,5 @@
 //
-// The script parses Allure reports and posts a comment with a summary of the test results to the PR.
+// The script parses Allure reports and posts a comment with a summary of the test results to the PR or to the latest commit in the branch.
 //
 // The comment is updated on each run with the latest results.
 //
@@ -7,7 +7,7 @@
 // - uses: actions/github-script@v6
 //   with:
 //     script: |
-//       const script = require("./scripts/pr-comment-test-report.js")
+//       const script = require("./scripts/comment-test-report.js")
 //       await script({
 //         github,
 //         context,
@@ -35,8 +35,12 @@ class DefaultMap extends Map {
 module.exports = async ({ github, context, fetch, report }) => {
     // Marker to find the comment in the subsequent runs
     const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
+    // If we run the script in the PR or in the branch (main/release/...)
+    const isPullRequest = !!context.payload.pull_request
+    // Latest commit in PR or in the branch
+    const commitSha = isPullRequest ? context.payload.pull_request.head.sha : context.sha
     // Let users know that the comment is updated automatically
-    const autoupdateNotice = `<div align="right"><sub>The comment gets automatically updated with the latest test results<br>${context.payload.pull_request.head.sha} at ${new Date().toISOString()} :recycle:</sub></div>`
+    const autoupdateNotice = `<div align="right"><sub>The comment gets automatically updated with the latest test results<br>${commitSha} at ${new Date().toISOString()} :recycle:</sub></div>`
     // GitHub bot id taken from (https://api.github.com/users/github-actions[bot])
     const githubActionsBotId = 41898282
     // Commend body itself
@@ -166,22 +170,39 @@ module.exports = async ({ github, context, fetch, report }) => {
 
     commentBody += autoupdateNotice
 
-    const { data: comments } = await github.rest.issues.listComments({
-        issue_number: context.payload.number,
+    let createCommentFn, listCommentsFn, updateCommentFn, issueNumberOrSha
+    if (isPullRequest) {
+        createCommentFn  = github.rest.issues.createComment
+        listCommentsFn   = github.rest.issues.listComments
+        updateCommentFn  = github.rest.issues.updateComment
+        issueNumberOrSha = {
+            issue_number: context.payload.number,
+        }
+    } else {
+        updateCommentFn  = github.rest.repos.updateCommitComment
+        listCommentsFn   = github.rest.repos.listCommentsForCommit
+        createCommentFn  = github.rest.repos.createCommitComment
+        issueNumberOrSha = {
+            commit_sha: commitSha,
+        }
+    }
+
+    const { data: comments } = await listCommentsFn({
+        ...issueNumberOrSha,
         ...ownerRepoParams,
     })
 
     const comment = comments.find(comment => comment.user.id === githubActionsBotId && comment.body.startsWith(startMarker))
     if (comment) {
-        await github.rest.issues.updateComment({
+        await updateCommentFn({
             comment_id: comment.id,
             body: commentBody,
             ...ownerRepoParams,
         })
     } else {
-        await github.rest.issues.createComment({
-            issue_number: context.payload.number,
+        await createCommentFn({
             body: commentBody,
+            ...issueNumberOrSha,
             ...ownerRepoParams,
         })
     }

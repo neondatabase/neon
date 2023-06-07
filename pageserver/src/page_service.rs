@@ -50,7 +50,9 @@ use crate::import_datadir::import_wal_from_tar;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant;
 use crate::tenant::mgr;
+use crate::tenant::mgr::GetTenantError;
 use crate::tenant::{Tenant, Timeline};
 use crate::trace::Tracer;
 
@@ -1150,7 +1152,9 @@ enum GetActiveTenantError {
         wait_time: Duration,
     },
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    NotFound(GetTenantError),
+    #[error(transparent)]
+    WaitTenantActive(tenant::WaitToBecomeActiveError),
 }
 
 impl From<GetActiveTenantError> for QueryError {
@@ -1159,7 +1163,8 @@ impl From<GetActiveTenantError> for QueryError {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
                 ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
-            GetActiveTenantError::Other(e) => QueryError::Other(e),
+            GetActiveTenantError::WaitTenantActive(e) => QueryError::Other(anyhow::Error::new(e)),
+            GetActiveTenantError::NotFound(e) => QueryError::Other(anyhow::Error::new(e)),
         }
     }
 }
@@ -1175,13 +1180,16 @@ async fn get_active_tenant_with_timeout(
 ) -> Result<Arc<Tenant>, GetActiveTenantError> {
     let tenant = match mgr::get_tenant(tenant_id, false).await {
         Ok(tenant) => tenant,
-        Err(e) => return Err(GetActiveTenantError::Other(e.into())),
+        Err(e @ GetTenantError::NotFound(_)) => return Err(GetActiveTenantError::NotFound(e)),
+        Err(GetTenantError::NotActive(_)) => {
+            unreachable!("we're calling get_tenant with active=false")
+        }
     };
     let wait_time = Duration::from_secs(30);
     match tokio::time::timeout(wait_time, tenant.wait_to_become_active()).await {
         Ok(Ok(())) => Ok(tenant),
         // no .context(), the error message is good enough and some tests depend on it
-        Ok(Err(wait_error)) => Err(GetActiveTenantError::Other(wait_error)),
+        Ok(Err(e)) => Err(GetActiveTenantError::WaitTenantActive(e)),
         Err(_) => {
             let latest_state = tenant.current_state();
             if latest_state == TenantState::Active {
@@ -1196,13 +1204,35 @@ async fn get_active_tenant_with_timeout(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum GetActiveTimelineError {
+    #[error(transparent)]
+    Tenant(GetActiveTenantError),
+    #[error(transparent)]
+    Timeline(anyhow::Error),
+}
+
+impl From<GetActiveTimelineError> for QueryError {
+    fn from(e: GetActiveTimelineError) -> Self {
+        match e {
+            GetActiveTimelineError::Tenant(e) => e.into(),
+            GetActiveTimelineError::Timeline(e) => QueryError::Other(e),
+        }
+    }
+}
+
 /// Shorthand for getting a reference to a Timeline of an Active tenant.
 async fn get_active_tenant_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     ctx: &RequestContext,
-) -> Result<Arc<Timeline>, GetActiveTenantError> {
-    let tenant = get_active_tenant_with_timeout(tenant_id, ctx).await?;
-    let timeline = tenant.get_timeline(timeline_id, true).await?;
+) -> Result<Arc<Timeline>, GetActiveTimelineError> {
+    let tenant = get_active_tenant_with_timeout(tenant_id, ctx)
+        .await
+        .map_err(GetActiveTimelineError::Tenant)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .await
+        .map_err(GetActiveTimelineError::Timeline)?;
     Ok(timeline)
 }

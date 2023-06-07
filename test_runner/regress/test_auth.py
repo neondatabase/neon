@@ -3,7 +3,7 @@ from contextlib import closing
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, PgProtocol
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.types import TenantId
+from fixtures.types import TenantId, TimelineId
 
 
 def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
@@ -25,21 +25,19 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
     ps.safe_psql("set FOO", password=tenant_token)
     ps.safe_psql("set FOO", password=pageserver_token)
 
-    new_timeline_id = env.neon_cli.create_branch(
-        "test_pageserver_auth", tenant_id=env.initial_tenant
-    )
-
     # tenant can create branches
     tenant_http_client.timeline_create(
         pg_version=env.pg_version,
         tenant_id=env.initial_tenant,
-        ancestor_timeline_id=new_timeline_id,
+        new_timeline_id=TimelineId.generate(),
+        ancestor_timeline_id=env.initial_timeline,
     )
     # console can create branches for tenant
     pageserver_http_client.timeline_create(
         pg_version=env.pg_version,
         tenant_id=env.initial_tenant,
-        ancestor_timeline_id=new_timeline_id,
+        new_timeline_id=TimelineId.generate(),
+        ancestor_timeline_id=env.initial_timeline,
     )
 
     # fail to create branch using token with different tenant_id
@@ -49,18 +47,19 @@ def test_pageserver_auth(neon_env_builder: NeonEnvBuilder):
         invalid_tenant_http_client.timeline_create(
             pg_version=env.pg_version,
             tenant_id=env.initial_tenant,
-            ancestor_timeline_id=new_timeline_id,
+            new_timeline_id=TimelineId.generate(),
+            ancestor_timeline_id=env.initial_timeline,
         )
 
     # create tenant using management token
-    pageserver_http_client.tenant_create()
+    pageserver_http_client.tenant_create(TenantId.generate())
 
     # fail to create tenant using tenant token
     with pytest.raises(
         PageserverApiException,
         match="Forbidden: Attempt to access management api with tenant scope. Permission denied",
     ):
-        tenant_http_client.tenant_create()
+        tenant_http_client.tenant_create(TenantId.generate())
 
 
 def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):

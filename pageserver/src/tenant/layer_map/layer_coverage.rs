@@ -1,8 +1,8 @@
 use std::ops::Range;
 
-// TODO the `im` crate has 20x more downloads and also has
-// persistent/immutable BTree. It also runs a bit faster but
-// results are not the same on some tests.
+// NOTE the `im` crate has 20x more downloads and also has
+// persistent/immutable BTree. But it's bugged so rpds is a
+// better choice https://github.com/neondatabase/neon/issues/3395
 use rpds::RedBlackTreeMapSync;
 
 /// Data structure that can efficiently:
@@ -10,19 +10,22 @@ use rpds::RedBlackTreeMapSync;
 /// - iterate the latest layers in a key range
 /// - insert layers in non-decreasing lsn.start order
 ///
-/// The struct is parameterized over Value for easier
-/// testing, but in practice it's some sort of layer.
+/// For a detailed explanation and justification of this approach, see:
+/// https://neon.tech/blog/persistent-structures-in-neons-wal-indexing
+///
+/// NOTE The struct is parameterized over Value for easier
+///      testing, but in practice it's some sort of layer.
 pub struct LayerCoverage<Value> {
     /// For every change in coverage (as we sweep the key space)
     /// we store (lsn.end, value).
     ///
-    /// We use an immutable/persistent tree so that we can keep historic
-    /// versions of this coverage without cloning the whole thing and
-    /// incurring quadratic memory cost. See HistoricLayerCoverage.
+    /// NOTE We use an immutable/persistent tree so that we can keep historic
+    ///      versions of this coverage without cloning the whole thing and
+    ///      incurring quadratic memory cost. See HistoricLayerCoverage.
     ///
-    /// We use the Sync version of the map because we want Self to
-    /// be Sync. Using nonsync might be faster, if we can work with
-    /// that.
+    /// NOTE We use the Sync version of the map because we want Self to
+    ///      be Sync. Using nonsync might be faster, if we can work with
+    ///      that.
     nodes: RedBlackTreeMapSync<i128, Option<(u64, Value)>>,
 }
 
@@ -40,6 +43,13 @@ impl<Value: Clone> LayerCoverage<Value> {
     }
 
     /// Helper function to subdivide the key range without changing any values
+    ///
+    /// This operation has no semantic effect by itself. It only helps us pin in
+    /// place the part of the coverage we don't want to change when inserting.
+    ///
+    /// As an analogy, think of a polygon. If you add a vertex along one of the
+    /// segments, the polygon is still the same, but it behaves differently when
+    /// we move or delete one of the other points.
     ///
     /// Complexity: O(log N)
     fn add_node(&mut self, key: i128) {
@@ -74,7 +84,7 @@ impl<Value: Clone> LayerCoverage<Value> {
         let mut to_update = Vec::new();
         let mut to_remove = Vec::new();
         let mut prev_covered = false;
-        for (k, node) in self.nodes.range(key.clone()) {
+        for (k, node) in self.nodes.range(key) {
             let needs_cover = match node {
                 None => true,
                 Some((h, _)) => h < &lsn.end,
@@ -87,9 +97,8 @@ impl<Value: Clone> LayerCoverage<Value> {
             }
             prev_covered = needs_cover;
         }
-        if !prev_covered {
-            to_remove.push(key.end);
-        }
+        // TODO check if the nodes inserted at key.start and key.end are safe
+        //      to remove. It's fine to keep them but they could be redundant.
         for k in to_update {
             self.nodes.insert_mut(k, Some((lsn.end, value.clone())));
         }

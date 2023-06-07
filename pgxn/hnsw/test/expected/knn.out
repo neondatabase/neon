@@ -1,0 +1,28 @@
+SET enable_seqscan = off;
+CREATE TABLE t (val real[]);
+INSERT INTO t (val) VALUES ('{0,0,0}'), ('{1,2,3}'), ('{1,1,1}'), (NULL);
+CREATE INDEX ON t USING hnsw (val) WITH (maxelements = 10, dims=3, m=3);
+INSERT INTO t (val) VALUES (array[1,2,4]);
+explain SELECT * FROM t ORDER BY val <-> array[3,3,3];
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Index Scan using t_val_idx on t  (cost=4.02..8.06 rows=3 width=36)
+   Order By: (val <-> '{3,3,3}'::real[])
+(2 rows)
+
+SELECT * FROM t ORDER BY val <-> array[3,3,3];
+   val   
+---------
+ {1,2,3}
+ {1,2,4}
+ {1,1,1}
+ {0,0,0}
+(4 rows)
+
+SELECT COUNT(*) FROM t;
+ count 
+-------
+     5
+(1 row)
+
+DROP TABLE t;

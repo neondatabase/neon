@@ -60,6 +60,9 @@ pub mod tracing_span_assert;
 
 pub mod rate_limit;
 
+/// Simple once-barrier and a guard which keeps barrier awaiting.
+pub mod completion;
+
 mod failpoint_macro_helpers {
 
     /// use with fail::cfg("$name", "return(2000)")
