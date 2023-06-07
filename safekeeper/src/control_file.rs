@@ -7,6 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::control_file_upgrade::upgrade_control_file;
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
@@ -28,6 +29,9 @@ pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 pub trait Storage: Deref<Target = SafeKeeperState> {
     /// Persist safekeeper state on disk and update internal state.
     fn persist(&mut self, s: &SafeKeeperState) -> Result<()>;
+
+    /// Timestamp of last persist.
+    fn last_persist_at(&self) -> Instant;
 }
 
 #[derive(Debug)]
@@ -38,6 +42,8 @@ pub struct FileStorage {
 
     /// Last state persisted to disk.
     state: SafeKeeperState,
+    /// Not preserved across restarts.
+    last_persist_at: Instant,
 }
 
 impl FileStorage {
@@ -51,6 +57,7 @@ impl FileStorage {
             timeline_dir,
             conf: conf.clone(),
             state,
+            last_persist_at: Instant::now(),
         })
     }
 
@@ -66,6 +73,7 @@ impl FileStorage {
             timeline_dir,
             conf: conf.clone(),
             state,
+            last_persist_at: Instant::now(),
         };
 
         Ok(store)
@@ -215,6 +223,10 @@ impl Storage for FileStorage {
         // update internal state
         self.state = s.clone();
         Ok(())
+    }
+
+    fn last_persist_at(&self) -> Instant {
+        self.last_persist_at
     }
 }
 
