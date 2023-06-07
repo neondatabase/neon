@@ -697,8 +697,8 @@ def test_empty_branch_remote_storage_upload_failure(
         f".*POST.* path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
     )
 
-    # index upload is now hitting the failpoint, should not block the shutdown
-    env.pageserver.stop()
+    # index upload is now hitting the failpoint, it should block the shutdown
+    env.pageserver.stop(immediate=True)
 
     env.pageserver.allowed_errors.append(
         f".*failed to create on-disk state for new_timeline_id={new_branch_timeline_id}.*wait for initial uploads to complete.*upload queue was stopped"
@@ -709,12 +709,8 @@ def test_empty_branch_remote_storage_upload_failure(
     )
     uninit_marker_path = env.repo_dir / timeline_path.with_suffix(".___uninit")
 
-    assert (
-        not uninit_marker_path.exists()
-    ), "uninit marker should be deleted during orderly shutdown"
-    assert not (
-        env.repo_dir / timeline_path
-    ).exists(), "unfinished timeline dir should be deleted during orderly shutdown"
+    local_metadata = env.repo_dir / timeline_path / "metadata"
+    assert local_metadata.is_file()
 
     assert isinstance(env.remote_storage, LocalFsStorage)
     new_branch_on_remote_storage = env.remote_storage.root / timeline_path

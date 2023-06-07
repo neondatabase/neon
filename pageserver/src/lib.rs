@@ -24,7 +24,7 @@ pub mod walredo;
 use std::path::Path;
 
 use crate::task_mgr::TaskKind;
-use tracing::{info, instrument};
+use tracing::info;
 
 /// Current storage format version
 ///
@@ -45,7 +45,7 @@ static ZERO_PAGE: bytes::Bytes = bytes::Bytes::from_static(&[0u8; 8192]);
 
 pub use crate::metrics::preinitialize_metrics;
 
-#[instrument(skip_all)]
+#[tracing::instrument]
 pub async fn shutdown_pageserver(exit_code: i32) {
     // Shut down the libpq endpoint task. This prevents new connections from
     // being accepted.
@@ -57,12 +57,6 @@ pub async fn shutdown_pageserver(exit_code: i32) {
     // Shut down all the tenants. This flushes everything to disk and kills
     // the checkpoint and GC tasks.
     tenant::mgr::shutdown_all_tenants().await;
-
-    // Stop syncing with remote storage.
-    //
-    // FIXME: Does this wait for the sync tasks to finish syncing what's queued up?
-    // Should it?
-    task_mgr::shutdown_tasks(Some(TaskKind::RemoteUploadTask), None, None).await;
 
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.

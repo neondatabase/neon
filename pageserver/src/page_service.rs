@@ -565,7 +565,7 @@ impl PageServerHandler {
         // since we discard some log files.
 
         info!("done, activating timeline");
-        real_timeline_not_in_tenants_map.activate(self.broker_client.clone(), &ctx);
+        real_timeline_not_in_tenants_map.activate(self.broker_client.clone(), None, &ctx);
 
         Ok(())
     }

@@ -21,11 +21,11 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{
-    create_tenant_files, CreateTenantFilesMode, SetStoppingError, Tenant, TenantState,
-    TimelineLoadCause,
+    create_tenant_files, CreateTenantFilesMode, Tenant, TenantState, TimelineLoadCause,
 };
 use crate::IGNORED_TENANT_FILE_NAME;
 
+use utils::completion;
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
@@ -67,6 +67,7 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    init_done: (completion::Completion, completion::Barrier),
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
@@ -124,6 +125,7 @@ pub async fn init_tenant_mgr(
                         broker_client.clone(),
                         remote_storage.clone(),
                         TimelineLoadCause::Startup,
+                        Some(init_done.clone()),
                         &ctx,
                     ) {
                         Ok(tenant) => {
@@ -154,12 +156,15 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
+/// `init_done` is an optional channel used during initial load to delay background task
+/// start. It is not used later.
 pub fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
     cause: TimelineLoadCause,
+    init_done: Option<(completion::Completion, completion::Barrier)>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -214,7 +219,15 @@ pub fn schedule_local_tenant_processing(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, broker_client, remote_storage, cause, ctx)
+        Tenant::spawn_load(
+            conf,
+            tenant_id,
+            broker_client,
+            remote_storage,
+            cause,
+            init_done,
+            ctx,
+        )
     };
     Ok(tenant)
 }
@@ -229,7 +242,7 @@ pub fn schedule_local_tenant_processing(
 /// That could be easily misinterpreted by control plane, the consumer of the
 /// management API. For example, it could attach the tenant on a different pageserver.
 /// We would then be in split-brain once this pageserver restarts.
-#[instrument(skip_all)]
+#[instrument]
 pub async fn shutdown_all_tenants() {
     // Prevent new tenants from being created.
     let tenants_to_shut_down = {
@@ -246,83 +259,51 @@ pub async fn shutdown_all_tenants() {
                 tenants_clone
             }
             TenantsMap::ShuttingDown(_) => {
+                // TODO: it is possible that detach and shutdown happen at the same time. as a
+                // result, during shutdown we do not wait for detach.
                 error!("already shutting down, this function isn't supposed to be called more than once");
                 return;
             }
         }
     };
 
-    // Set tenant (and its timlines) to Stoppping state.
-    // Since we can only transition into Stopping state after activation is complete,
-    // run it in a JoinSet so all tenants have a chance to stop before we git SIGKILLed.
-    //
-    // Transitioning tenants to Stopping state has a couple of non-obvious side effects:
-    // 1. Lock out any new requests to the tenants.
-    // 2. Signal cancellation to WAL receivers (we wait on it below).
-    // 3. Signal cancellation for othher tenant background loops.
-    // 4. ???
-    //
-    // The waiting for the cancellation is not done uniformly.
-    // We certainly wait for WAL receivers to shut down.
-    // That is necessary so that no new data comes in before the freeze_and_flush.
-    // But the tenant background loops are joined-on in our caller.
-    // It's mesed up.
     let mut join_set = JoinSet::new();
-    let mut tenants_to_freeze_and_flush = Vec::with_capacity(tenants_to_shut_down.len());
-    for (_, tenant) in tenants_to_shut_down {
-        join_set.spawn(async move {
-            match tenant.set_stopping().await {
-                Ok(()) => Ok(tenant),
-                Err(e) => Err((tenant, e)),
+    for (tenant_id, tenant) in tenants_to_shut_down {
+        join_set.spawn(
+            async move {
+                let freeze_and_flush = true;
+
+                match tenant.shutdown(freeze_and_flush).await {
+                    Ok(()) => debug!("tenant successfully stopped"),
+                    Err(super::ShutdownError::AlreadyStopping) => {
+                        warn!("tenant was already shutting down")
+                    }
+                }
             }
-        });
+            .instrument(info_span!("shutdown", %tenant_id)),
+        );
     }
+
+    let mut panicked = 0;
+
     while let Some(res) = join_set.join_next().await {
         match res {
+            Ok(()) => {}
             Err(join_error) if join_error.is_cancelled() => {
                 unreachable!("we are not cancelling any of the futures");
             }
-            Err(join_error) => {
+            Err(join_error) if join_error.is_panic() => {
                 // cannot really do anything, as this panic is likely a bug
-                error!("task that calls set_stopping() panicked, don't know which tenant this is, and probably freeze_and_flush won't work anyways: {join_error:#}");
+                panicked += 1;
             }
-            Ok(retval) => match retval {
-                Ok(tenant) => {
-                    // success
-                    debug!("tenant successfully stopped: {}", tenant.tenant_id);
-                    tenants_to_freeze_and_flush.push(tenant);
-                }
-                // our task_mgr::shutdown_tasks are going to coalesce on that just fine
-                Err((tenant, SetStoppingError::AlreadyStopping)) => {
-                    tenants_to_freeze_and_flush.push(tenant);
-                }
-                Err((tenant, SetStoppingError::Broken)) => {
-                    info!("tenant is broken, so stopping failed, freeze_and_flush is likely going to make noise as well: {}", tenant.tenant_id);
-                    tenants_to_freeze_and_flush.push(tenant);
-                }
-            },
+            Err(join_error) => {
+                warn!("unknown kind of JoinError: {join_error}");
+            }
         }
     }
 
-    // Shut down all existing walreceiver connections and stop accepting the new ones.
-    task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
-
-    // Ok, no background tasks running anymore. Flush any remaining data in
-    // memory to disk.
-    //
-    // We assume that any incoming connections that might request pages from
-    // the tenant have already been terminated by the caller, so there
-    // should be no more activity in any of the repositories.
-    //
-    // On error, log it but continue with the shutdown for other tenants.
-    for tenant in tenants_to_freeze_and_flush {
-        let tenant_id = tenant.tenant_id();
-        debug!("freeze_and_flush tenant {tenant_id}");
-
-        // TODO this could probably run in a JoinSet as well?
-        if let Err(err) = tenant.freeze_and_flush().await {
-            error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
-        }
+    if panicked > 0 {
+        warn!(panicked, "observed panicks while shutting down tenants");
     }
 }
 
@@ -343,7 +324,7 @@ pub async fn create_tenant(
         //       See https://github.com/neondatabase/neon/issues/4233
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, TimelineLoadCause::TenantCreate, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, TimelineLoadCause::TenantCreate, None, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -489,7 +470,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, TimelineLoadCause::TenantLoad,  ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, TimelineLoadCause::TenantLoad, None, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -562,7 +543,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), TimelineLoadCause::Attach  ,ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), TimelineLoadCause::Attach, None, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -638,34 +619,25 @@ where
     // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
     // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
     // avoid holding the lock for the entire process.
-    {
-        let tenants_accessor = TENANTS.write().await;
-        match tenants_accessor.get(&tenant_id) {
-            Some(tenant) => {
-                let tenant = Arc::clone(tenant);
-                // don't hold TENANTS lock while set_stopping waits for activation to finish
-                drop(tenants_accessor);
-                match tenant.set_stopping().await {
-                    Ok(()) => {
-                        // we won, continue stopping procedure
-                    }
-                    Err(SetStoppingError::Broken) => {
-                        // continue the procedure, let's hope the closure can deal with broken tenants
-                    }
-                    Err(SetStoppingError::AlreadyStopping) => {
-                        // the tenant is already stopping or broken, don't do anything
-                        return Err(TenantStateError::IsStopping(tenant_id));
-                    }
-                }
-            }
-            None => return Err(TenantStateError::NotFound(tenant_id)),
+    let tenant = {
+        TENANTS
+            .write()
+            .await
+            .get(&tenant_id)
+            .cloned()
+            .ok_or(TenantStateError::NotFound(tenant_id))?
+    };
+
+    let freeze_and_flush = false;
+
+    // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
+    // that we can continue safely to cleanup.
+    match tenant.shutdown(freeze_and_flush).await {
+        Ok(()) => {}
+        Err(super::ShutdownError::AlreadyStopping) => {
+            return Err(TenantStateError::IsStopping(tenant_id))
         }
     }
-
-    // shutdown all tenant and timeline tasks: gc, compaction, page service)
-    // No new tasks will be started for this tenant because it's in `Stopping` state.
-    // Hence, once we're done here, the `tenant_cleanup` callback can mutate tenant on-disk state freely.
-    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
 
     match tenant_cleanup
         .await
@@ -748,7 +720,6 @@ pub async fn immediate_gc(
     Ok(wait_task_done)
 }
 
-#[cfg(feature = "testing")]
 pub async fn immediate_compact(
     tenant_id: TenantId,
     timeline_id: TimelineId,

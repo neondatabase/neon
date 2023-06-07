@@ -48,7 +48,6 @@ use bytes::{BufMut, Bytes, BytesMut};
     serde::Serialize,
     serde::Deserialize,
     strum_macros::Display,
-    strum_macros::EnumString,
     strum_macros::EnumVariantNames,
     strum_macros::AsRefStr,
     strum_macros::IntoStaticStr,
@@ -68,7 +67,7 @@ pub enum TenantState {
     /// While in this state, the individual timelines are being activated.
     ///
     /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
-    Activating,
+    Activating(ActivatingFrom),
     /// The tenant has finished activating and is open for business.
     ///
     /// Transitions out of this state are possible through `set_stopping()` and `set_broken()`.
@@ -93,17 +92,19 @@ pub enum TenantState {
 impl TenantState {
     pub fn attachment_status(&self) -> TenantAttachmentStatus {
         use TenantAttachmentStatus::*;
+
+        // Below TenantState::Activating is used as "transient" or "transparent" state for
+        // attachment_status determining.
         match self {
             // The attach procedure writes the marker file before adding the Attaching tenant to the tenants map.
             // So, technically, we can return Attached here.
             // However, as soon as Console observes Attached, it will proceed with the Postgres-level health check.
             // But, our attach task might still be fetching the remote timelines, etc.
             // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
-            Self::Attaching => Maybe,
+            Self::Attaching | Self::Activating(ActivatingFrom::Attaching) => Maybe,
             // tenant mgr startup distinguishes attaching from loading via marker file.
             // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
-            Self::Loading => Attached,
-            Self::Activating => todo!(),
+            Self::Loading | Self::Activating(ActivatingFrom::Loading) => Attached,
             // We only reach Active after successful load / attach.
             // So, call atttachment status Attached.
             Self::Active => Attached,
@@ -140,6 +141,15 @@ impl std::fmt::Debug for TenantState {
             _ => write!(f, "{self}"),
         }
     }
+}
+
+/// The only [`TenantState`] variants we could be `TenantState::Activating` from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ActivatingFrom {
+    /// Arrived to [`TenantState::Activating`] from [`TenantState::Loading`]
+    Loading,
+    /// Arrived to [`TenantState::Activating`] from [`TenantState::Attaching`]
+    Attaching,
 }
 
 /// A state of a timeline in pageserver's memory.
@@ -214,6 +224,7 @@ pub struct TenantConfig {
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
+    pub gc_feedback: Option<bool>,
 }
 
 #[serde_as]
@@ -272,6 +283,7 @@ impl TenantConfigRequest {
             eviction_policy: None,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: None,
+            gc_feedback: None,
         };
         TenantConfigRequest { tenant_id, config }
     }
@@ -873,5 +885,56 @@ mod tests {
             "expect unknown field `unknown_field` error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn tenantstatus_activating_serde() {
+        let states = [
+            TenantState::Activating(ActivatingFrom::Loading),
+            TenantState::Activating(ActivatingFrom::Attaching),
+        ];
+        let expected = "[{\"slug\":\"Activating\",\"data\":\"Loading\"},{\"slug\":\"Activating\",\"data\":\"Attaching\"}]";
+
+        let actual = serde_json::to_string(&states).unwrap();
+
+        assert_eq!(actual, expected);
+
+        let parsed = serde_json::from_str::<Vec<TenantState>>(&actual).unwrap();
+
+        assert_eq!(states.as_slice(), &parsed);
+    }
+
+    #[test]
+    fn tenantstatus_activating_strum() {
+        // tests added, because we use these for metrics
+        let examples = [
+            (line!(), TenantState::Loading, "Loading"),
+            (line!(), TenantState::Attaching, "Attaching"),
+            (
+                line!(),
+                TenantState::Activating(ActivatingFrom::Loading),
+                "Activating",
+            ),
+            (
+                line!(),
+                TenantState::Activating(ActivatingFrom::Attaching),
+                "Activating",
+            ),
+            (line!(), TenantState::Active, "Active"),
+            (line!(), TenantState::Stopping, "Stopping"),
+            (
+                line!(),
+                TenantState::Broken {
+                    reason: "Example".into(),
+                    backtrace: "Looooong backtrace".into(),
+                },
+                "Broken",
+            ),
+        ];
+
+        for (line, rendered, expected) in examples {
+            let actual: &'static str = rendered.into();
+            assert_eq!(actual, expected, "example on {line}");
+        }
     }
 }

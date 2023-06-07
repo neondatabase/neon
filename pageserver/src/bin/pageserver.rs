@@ -335,12 +335,37 @@ fn start_pageserver(
     // Set up remote storage client
     let remote_storage = create_remote_storage_client(conf)?;
 
+    // Startup staging or optimizing:
+    //
+    // (init_done_tx, init_done_rx) are used to control when do background loops start. This is to
+    // avoid starving out the BACKGROUND_RUNTIME async worker threads doing heavy work, like
+    // initial repartitioning while we still have Loading tenants.
+    //
+    // init_done_rx is a barrier which stops waiting once all init_done_tx clones are dropped.
+    let (init_done_tx, init_done_rx) = utils::completion::channel();
+
     // Scan the local 'tenants/' directory and start loading the tenants
+    let init_started_at = std::time::Instant::now();
     BACKGROUND_RUNTIME.block_on(mgr::init_tenant_mgr(
         conf,
         broker_client.clone(),
         remote_storage.clone(),
+        (init_done_tx, init_done_rx.clone()),
     ))?;
+
+    BACKGROUND_RUNTIME.spawn({
+        let init_done_rx = init_done_rx.clone();
+        async move {
+            init_done_rx.wait().await;
+
+            let elapsed = init_started_at.elapsed();
+
+            tracing::info!(
+                elapsed_millis = elapsed.as_millis(),
+                "Initial load completed."
+            );
+        }
+    });
 
     // shared state between the disk-usage backed eviction background task and the http endpoint
     // that allows triggering disk-usage based eviction manually. note that the http endpoint
@@ -353,6 +378,7 @@ fn start_pageserver(
             conf,
             remote_storage.clone(),
             disk_usage_eviction_state.clone(),
+            init_done_rx.clone(),
         )?;
     }
 
@@ -390,6 +416,7 @@ fn start_pageserver(
         );
 
         if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
+            let init_done_rx = init_done_rx;
             let metrics_ctx = RequestContext::todo_child(
                 TaskKind::MetricsCollection,
                 // This task itself shouldn't download anything.
@@ -405,6 +432,13 @@ fn start_pageserver(
                 "consumption metrics collection",
                 true,
                 async move {
+                    // first wait for initial load to complete before first iteration.
+                    //
+                    // this is because we only process active tenants and timelines, and the
+                    // Timeline::get_current_logical_size will spawn the logical size calculation,
+                    // which will not be rate-limited.
+                    init_done_rx.wait().await;
+
                     pageserver::consumption_metrics::collect_metrics(
                         metric_collection_endpoint,
                         conf.metric_collection_interval,

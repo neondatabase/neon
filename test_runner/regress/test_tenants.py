@@ -276,6 +276,7 @@ def test_pageserver_metrics_removed_after_detach(
                 cur.execute("SELECT sum(key) FROM t")
                 assert cur.fetchone() == (5000050000,)
             last_flush_lsn_upload(env, endpoint, endpoint.tenant_id, timeline_id)
+        endpoint.stop()
 
     def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
         ps_metrics = env.pageserver.http_client().get_metrics()
@@ -318,7 +319,7 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.allowed_errors.append(
         ".*marking .* as locally complete, while it doesnt exist in remote index.*"
     )
-    env.pageserver.allowed_errors.append(".*load failed.*Failed to list timelines directory.*")
+    env.pageserver.allowed_errors.append(".*load failed.*list timelines directory.*")
 
     client = env.pageserver.http_client()
 

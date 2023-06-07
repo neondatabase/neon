@@ -4,6 +4,7 @@ pub mod delta_layer;
 mod filename;
 mod image_layer;
 mod inmemory_layer;
+mod layer_desc;
 mod remote_layer;
 
 use crate::config::PageServerConf;
@@ -37,6 +38,7 @@ pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
+pub use layer_desc::PersistentLayerDesc;
 pub use remote_layer::RemoteLayer;
 
 use super::layer_map::BatchedUpdates;
@@ -406,14 +408,23 @@ pub type LayerKeyIter<'i> = Box<dyn Iterator<Item = (Key, Lsn, u64)> + 'i>;
 /// An image layer is a snapshot of all the data in a key-range, at a single
 /// LSN.
 pub trait PersistentLayer: Layer {
-    fn get_tenant_id(&self) -> TenantId;
+    /// Get the layer descriptor.
+    fn layer_desc(&self) -> &PersistentLayerDesc;
+
+    fn get_tenant_id(&self) -> TenantId {
+        self.layer_desc().tenant_id
+    }
 
     /// Identify the timeline this layer belongs to
-    fn get_timeline_id(&self) -> TimelineId;
+    fn get_timeline_id(&self) -> TimelineId {
+        self.layer_desc().timeline_id
+    }
 
     /// File name used for this layer, both in the pageserver's local filesystem
     /// state as well as in the remote storage.
-    fn filename(&self) -> LayerFileName;
+    fn filename(&self) -> LayerFileName {
+        self.layer_desc().filename()
+    }
 
     // Path to the layer file in the local filesystem.
     // `None` for `RemoteLayer`.
