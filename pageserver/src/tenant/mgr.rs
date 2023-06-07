@@ -20,12 +20,9 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{
-    create_tenant_files, CreateTenantFilesMode, SetStoppingError, Tenant, TenantState,
-};
-use crate::IGNORED_TENANT_FILE_NAME;
+use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 
-use utils::completion;
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
 
@@ -67,7 +64,7 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
-    init_done: (completion::Completion, completion::Barrier),
+    init_order: InitializationOrder,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
@@ -124,7 +121,7 @@ pub async fn init_tenant_mgr(
                         &tenant_dir_path,
                         broker_client.clone(),
                         remote_storage.clone(),
-                        Some(init_done.clone()),
+                        Some(init_order.clone()),
                         &ctx,
                     ) {
                         Ok(tenant) => {
@@ -155,14 +152,12 @@ pub async fn init_tenant_mgr(
     Ok(())
 }
 
-/// `init_done` is an optional channel used during initial load to delay background task
-/// start. It is not used later.
 pub fn schedule_local_tenant_processing(
     conf: &'static PageServerConf,
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
-    init_done: Option<(completion::Completion, completion::Barrier)>,
+    init_order: Option<InitializationOrder>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -221,7 +216,7 @@ pub fn schedule_local_tenant_processing(
             tenant_id,
             broker_client,
             remote_storage,
-            init_done,
+            init_order,
             ctx,
         )
     };
@@ -255,46 +250,28 @@ pub async fn shutdown_all_tenants() {
                 tenants_clone
             }
             TenantsMap::ShuttingDown(_) => {
+                // TODO: it is possible that detach and shutdown happen at the same time. as a
+                // result, during shutdown we do not wait for detach.
                 error!("already shutting down, this function isn't supposed to be called more than once");
                 return;
             }
         }
     };
 
-    // Set tenant (and its timlines) to Stoppping state.
-    //
-    // Since we can only transition into Stopping state after activation is complete,
-    // run it in a JoinSet so all tenants have a chance to stop before we get SIGKILLed.
-    //
-    // Transitioning tenants to Stopping state has a couple of non-obvious side effects:
-    // 1. Lock out any new requests to the tenants.
-    // 2. Signal cancellation to WAL receivers (we wait on it below).
-    // 3. Signal cancellation for other tenant background loops.
-    // 4. ???
-    //
-    // The waiting for the cancellation is not done uniformly.
-    // We certainly wait for WAL receivers to shut down.
-    // That is necessary so that no new data comes in before the freeze_and_flush.
-    // But the tenant background loops are joined-on in our caller.
-    // It's mesed up.
     let mut join_set = JoinSet::new();
-    let mut tenants_to_freeze_and_flush = Vec::with_capacity(tenants_to_shut_down.len());
     for (tenant_id, tenant) in tenants_to_shut_down {
         join_set.spawn(
             async move {
-                match tenant.set_stopping().await {
+                let freeze_and_flush = true;
+
+                match tenant.shutdown(freeze_and_flush).await {
                     Ok(()) => debug!("tenant successfully stopped"),
-                    Err(SetStoppingError::Broken) => {
-                        info!("tenant is broken, so stopping failed, freeze_and_flush is likely going to make noise as well");
-                    },
-                    Err(SetStoppingError::AlreadyStopping) => {
-                        // our task_mgr::shutdown_tasks are going to coalesce on that just fine
+                    Err(super::ShutdownError::AlreadyStopping) => {
+                        warn!("tenant was already shutting down")
                     }
                 }
-
-                tenant
             }
-            .instrument(info_span!("set_stopping", %tenant_id)),
+            .instrument(info_span!("shutdown", %tenant_id)),
         );
     }
 
@@ -302,6 +279,7 @@ pub async fn shutdown_all_tenants() {
 
     while let Some(res) = join_set.join_next().await {
         match res {
+            Ok(()) => {}
             Err(join_error) if join_error.is_cancelled() => {
                 unreachable!("we are not cancelling any of the futures");
             }
@@ -312,50 +290,11 @@ pub async fn shutdown_all_tenants() {
             Err(join_error) => {
                 warn!("unknown kind of JoinError: {join_error}");
             }
-            Ok(tenant) => tenants_to_freeze_and_flush.push(tenant),
         }
     }
 
     if panicked > 0 {
-        warn!(panicked, "observed panicks while stopping tenants");
-    }
-
-    // Shut down all existing walreceiver connections and stop accepting the new ones.
-    task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
-
-    // Ok, no background tasks running anymore. Flush any remaining data in
-    // memory to disk.
-    //
-    // We assume that any incoming connections that might request pages from
-    // the tenant have already been terminated by the caller, so there
-    // should be no more activity in any of the repositories.
-    //
-    // On error, log it but continue with the shutdown for other tenants.
-
-    let mut join_set = tokio::task::JoinSet::new();
-
-    for tenant in tenants_to_freeze_and_flush {
-        let tenant_id = tenant.tenant_id();
-
-        join_set.spawn(
-            async move {
-                if let Err(err) = tenant.freeze_and_flush().await {
-                    warn!("Could not checkpoint tenant during shutdown: {err:?}");
-                }
-            }
-            .instrument(info_span!("freeze_and_flush", %tenant_id)),
-        );
-    }
-
-    while let Some(next) = join_set.join_next().await {
-        match next {
-            Ok(()) => {}
-            Err(join_error) if join_error.is_cancelled() => {
-                unreachable!("no cancelling")
-            }
-            Err(join_error) if join_error.is_panic() => { /* reported already */ }
-            Err(join_error) => warn!("unknown kind of JoinError: {join_error}"),
-        }
+        warn!(panicked, "observed panicks while shutting down tenants");
     }
 }
 
@@ -671,34 +610,25 @@ where
     // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
     // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
     // avoid holding the lock for the entire process.
-    {
-        let tenants_accessor = TENANTS.write().await;
-        match tenants_accessor.get(&tenant_id) {
-            Some(tenant) => {
-                let tenant = Arc::clone(tenant);
-                // don't hold TENANTS lock while set_stopping waits for activation to finish
-                drop(tenants_accessor);
-                match tenant.set_stopping().await {
-                    Ok(()) => {
-                        // we won, continue stopping procedure
-                    }
-                    Err(SetStoppingError::Broken) => {
-                        // continue the procedure, let's hope the closure can deal with broken tenants
-                    }
-                    Err(SetStoppingError::AlreadyStopping) => {
-                        // the tenant is already stopping or broken, don't do anything
-                        return Err(TenantStateError::IsStopping(tenant_id));
-                    }
-                }
-            }
-            None => return Err(TenantStateError::NotFound(tenant_id)),
+    let tenant = {
+        TENANTS
+            .write()
+            .await
+            .get(&tenant_id)
+            .cloned()
+            .ok_or(TenantStateError::NotFound(tenant_id))?
+    };
+
+    let freeze_and_flush = false;
+
+    // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
+    // that we can continue safely to cleanup.
+    match tenant.shutdown(freeze_and_flush).await {
+        Ok(()) => {}
+        Err(super::ShutdownError::AlreadyStopping) => {
+            return Err(TenantStateError::IsStopping(tenant_id))
         }
     }
-
-    // shutdown all tenant and timeline tasks: gc, compaction, page service)
-    // No new tasks will be started for this tenant because it's in `Stopping` state.
-    // Hence, once we're done here, the `tenant_cleanup` callback can mutate tenant on-disk state freely.
-    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
 
     match tenant_cleanup
         .await

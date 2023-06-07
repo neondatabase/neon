@@ -1,5 +1,5 @@
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
@@ -72,7 +72,7 @@ def wait_until_tenant_state(
     expected_state: str,
     iterations: int,
     period: float = 1.0,
-) -> bool:
+) -> Dict[str, Any]:
     """
     Does not use `wait_until` for debugging purposes
     """
@@ -81,7 +81,7 @@ def wait_until_tenant_state(
             tenant = pageserver_http.tenant_status(tenant_id=tenant_id)
             log.debug(f"Tenant {tenant_id} data: {tenant}")
             if tenant["state"]["slug"] == expected_state:
-                return True
+                return tenant
         except Exception as e:
             log.debug(f"Tenant {tenant_id} state retrieval failure: {e}")
 

@@ -147,7 +147,12 @@ def test_remote_storage_backup_and_restore(
     # listing the remote timelines will fail because of the failpoint,
     # and the tenant will be marked as Broken.
     client.tenant_attach(tenant_id)
-    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+
+    tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+    assert tenant_info["attachment_status"] == {
+        "slug": "failed",
+        "data": {"reason": "storage-sync-list-remote-timelines"},
+    }
 
     # Ensure that even though the tenant is broken, we can't attach it again.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
@@ -693,15 +698,15 @@ def test_empty_branch_remote_storage_upload_on_restart(
         f".*POST.* path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
     )
 
-    # index upload is now hitting the failpoint, should not block the shutdown
-    env.pageserver.stop()
+    # index upload is now hitting the failpoint, it should block the shutdown
+    env.pageserver.stop(immediate=True)
 
     timeline_path = (
         Path("tenants") / str(env.initial_tenant) / "timelines" / str(new_branch_timeline_id)
     )
 
     local_metadata = env.repo_dir / timeline_path / "metadata"
-    assert local_metadata.is_file(), "timeout cancelled timeline branching, not the upload"
+    assert local_metadata.is_file()
 
     assert isinstance(env.remote_storage, LocalFsStorage)
     new_branch_on_remote_storage = env.remote_storage.root / timeline_path

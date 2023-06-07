@@ -65,6 +65,7 @@ use crate::tenant::remote_timeline_client::PersistIndexPartWithDeletedFlagError;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
+use crate::InitializationOrder;
 
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
@@ -487,6 +488,10 @@ impl std::fmt::Display for WaitToBecomeActiveError {
     }
 }
 
+pub(crate) enum ShutdownError {
+    AlreadyStopping,
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -507,6 +512,7 @@ impl Tenant {
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
+        init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
@@ -532,6 +538,7 @@ impl Tenant {
                 up_to_date_metadata,
                 ancestor.clone(),
                 remote_client,
+                init_order,
             )?;
 
             let timeline = UninitializedTimeline {
@@ -556,6 +563,7 @@ impl Tenant {
                             timeline_id,
                             up_to_date_metadata,
                             ancestor.clone(),
+                            None,
                             None,
                         )
                         .with_context(|| {
@@ -855,6 +863,7 @@ impl Tenant {
             local_metadata,
             ancestor,
             true,
+            None,
             ctx,
         )
         .await
@@ -889,16 +898,13 @@ impl Tenant {
     ///
     /// If the loading fails for some reason, the Tenant will go into Broken
     /// state.
-    ///
-    /// `init_done` is an optional channel used during initial load to delay background task
-    /// start. It is not used later.
     #[instrument(skip_all, fields(tenant_id=%tenant_id))]
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
         broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
-        init_done: Option<(completion::Completion, completion::Barrier)>,
+        init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
         debug_assert_current_span_has_tenant_id();
@@ -934,17 +940,17 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
-                // keep the sender alive as long as we have the initial load ongoing; it will be
-                // None for loads spawned after init_tenant_mgr.
-                let (_tx, rx) = if let Some((tx, rx)) = init_done {
-                    (Some(tx), Some(rx))
-                } else {
-                    (None, None)
-                };
-                match tenant_clone.load(&ctx).await {
+                let mut init_order = init_order;
+
+                // take the completion because initial tenant loading will complete when all of
+                // these tasks complete.
+                let _completion = init_order.as_mut().and_then(|x| x.initial_tenant_load.take());
+
+                match tenant_clone.load(init_order.as_ref(), &ctx).await {
                     Ok(()) => {
                         debug!("load finished, activating");
-                        tenant_clone.activate(broker_client, rx.as_ref(), &ctx);
+                        let background_jobs_can_start = init_order.as_ref().map(|x| &x.background_jobs_can_start);
+                        tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
                     }
                     Err(err) => {
                         error!("load failed, setting tenant state to Broken: {err:?}");
@@ -971,7 +977,11 @@ impl Tenant {
     /// files on disk. Used at pageserver startup.
     ///
     /// No background tasks are started as part of this routine.
-    async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn load(
+        self: &Arc<Tenant>,
+        init_order: Option<&InitializationOrder>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
 
         debug!("loading tenant task");
@@ -1091,7 +1101,7 @@ impl Tenant {
         //    1. "Timeline has no ancestor and no layer files"
 
         for (timeline_id, local_metadata) in sorted_timelines {
-            self.load_local_timeline(timeline_id, local_metadata, ctx)
+            self.load_local_timeline(timeline_id, local_metadata, init_order, ctx)
                 .await
                 .with_context(|| format!("load local timeline {timeline_id}"))?;
         }
@@ -1109,6 +1119,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
+        init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
@@ -1178,6 +1189,7 @@ impl Tenant {
             Some(local_metadata),
             ancestor,
             false,
+            init_order,
             ctx,
         )
         .await
@@ -1440,28 +1452,63 @@ impl Tenant {
         Ok(())
     }
 
-    /// Flush all in-memory data to disk.
+    /// Flush all in-memory data to disk and remote storage, if any.
     ///
     /// Used at graceful shutdown.
-    ///
-    pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
-        // Scan through the hashmap and collect a list of all the timelines,
-        // while holding the lock. Then drop the lock and actually perform the
-        // flushing. We don't want to block everything else while the
-        // flushing is performed.
-        let timelines_to_flush = {
+    async fn freeze_and_flush_on_shutdown(&self) {
+        let mut js = tokio::task::JoinSet::new();
+
+        // execute on each timeline on the JoinSet, join after.
+        let per_timeline = |timeline_id: TimelineId, timeline: Arc<Timeline>| {
+            async move {
+                debug_assert_current_span_has_tenant_and_timeline_id();
+
+                match timeline.freeze_and_flush().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!("failed to freeze and flush: {e:#}");
+                        return;
+                    }
+                }
+
+                let res = if let Some(client) = timeline.remote_client.as_ref() {
+                    // if we did not wait for completion here, it might be our shutdown process
+                    // didn't wait for remote uploads to complete at all, as new tasks can forever
+                    // be spawned.
+                    //
+                    // what is problematic is the shutting down of RemoteTimelineClient, because
+                    // obviously it does not make sense to stop while we wait for it, but what
+                    // about corner cases like s3 suddenly hanging up?
+                    client.wait_completion().await
+                } else {
+                    Ok(())
+                };
+
+                if let Err(e) = res {
+                    warn!("failed to await for frozen and flushed uploads: {e:#}");
+                }
+            }
+            .instrument(tracing::info_span!("freeze_and_flush_on_shutdown", %timeline_id))
+        };
+
+        {
             let timelines = self.timelines.lock().unwrap();
             timelines
                 .iter()
-                .map(|(_id, timeline)| Arc::clone(timeline))
-                .collect::<Vec<_>>()
+                .map(|(id, tl)| (*id, Arc::clone(tl)))
+                .for_each(|(timeline_id, timeline)| {
+                    js.spawn(per_timeline(timeline_id, timeline));
+                })
         };
 
-        for timeline in &timelines_to_flush {
-            timeline.freeze_and_flush().await?;
+        while let Some(res) = js.join_next().await {
+            match res {
+                Ok(()) => {}
+                Err(je) if je.is_cancelled() => unreachable!("no cancelling used"),
+                Err(je) if je.is_panic() => { /* logged already */ }
+                Err(je) => warn!("unexpected JoinError: {je:?}"),
+            }
         }
-
-        Ok(())
     }
 
     /// Shuts down a timeline's tasks, removes its in-memory structures, and deletes its
@@ -1686,12 +1733,12 @@ impl Tenant {
 
     /// Changes tenant status to active, unless shutdown was already requested.
     ///
-    /// `init_done` is an optional channel used during initial load to delay background task
-    /// start. It is not used later.
+    /// `background_jobs_can_start` is an optional barrier set to a value during pageserver startup
+    /// to delay background jobs. Background jobs can be started right away when None is given.
     fn activate(
         self: &Arc<Self>,
         broker_client: BrokerClientChannel,
-        init_done: Option<&completion::Barrier>,
+        background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
         debug_assert_current_span_has_tenant_id();
@@ -1724,12 +1771,12 @@ impl Tenant {
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
-            tasks::start_background_loops(self, init_done);
+            tasks::start_background_loops(self, background_jobs_can_start);
 
             let mut activated_timelines = 0;
 
             for timeline in not_broken_timelines {
-                timeline.activate(broker_client.clone(), init_done, ctx);
+                timeline.activate(broker_client.clone(), background_jobs_can_start, ctx);
                 activated_timelines += 1;
             }
 
@@ -1757,12 +1804,70 @@ impl Tenant {
         }
     }
 
+    /// Shutdown the tenant and join all of the spawned tasks.
+    ///
+    /// The method caters for all use-cases:
+    /// - pageserver shutdown (freeze_and_flush == true)
+    /// - detach + ignore (freeze_and_flush == false)
+    ///
+    /// This will attempt to shutdown even if tenant is broken.
+    pub(crate) async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
+        debug_assert_current_span_has_tenant_id();
+        // Set tenant (and its timlines) to Stoppping state.
+        //
+        // Since we can only transition into Stopping state after activation is complete,
+        // run it in a JoinSet so all tenants have a chance to stop before we get SIGKILLed.
+        //
+        // Transitioning tenants to Stopping state has a couple of non-obvious side effects:
+        // 1. Lock out any new requests to the tenants.
+        // 2. Signal cancellation to WAL receivers (we wait on it below).
+        // 3. Signal cancellation for other tenant background loops.
+        // 4. ???
+        //
+        // The waiting for the cancellation is not done uniformly.
+        // We certainly wait for WAL receivers to shut down.
+        // That is necessary so that no new data comes in before the freeze_and_flush.
+        // But the tenant background loops are joined-on in our caller.
+        // It's mesed up.
+        // we just ignore the failure to stop
+        match self.set_stopping().await {
+            Ok(()) => {}
+            Err(SetStoppingError::Broken) => {
+                // assume that this is acceptable
+            }
+            Err(SetStoppingError::AlreadyStopping) => return Err(ShutdownError::AlreadyStopping),
+        };
+
+        if freeze_and_flush {
+            // walreceiver has already began to shutdown with TenantState::Stopping, but we need to
+            // await for them to stop.
+            task_mgr::shutdown_tasks(
+                Some(TaskKind::WalReceiverManager),
+                Some(self.tenant_id),
+                None,
+            )
+            .await;
+
+            // this will wait for uploads to complete; in the past, it was done outside tenant
+            // shutdown in pageserver::shutdown_pageserver.
+            self.freeze_and_flush_on_shutdown().await;
+        }
+
+        // shutdown all tenant and timeline tasks: gc, compaction, page service
+        // No new tasks will be started for this tenant because it's in `Stopping` state.
+        //
+        // this will additionally shutdown and await all timeline tasks.
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
+
+        Ok(())
+    }
+
     /// Change tenant status to Stopping, to mark that it is being shut down.
     ///
     /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
     ///
     /// This function is not cancel-safe!
-    pub async fn set_stopping(&self) -> Result<(), SetStoppingError> {
+    async fn set_stopping(&self) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
 
         // cannot stop before we're done activating, so wait out until we're done activating
@@ -2062,6 +2167,7 @@ impl Tenant {
         new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
+        init_order: Option<&InitializationOrder>,
     ) -> anyhow::Result<Arc<Timeline>> {
         if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
             anyhow::ensure!(
@@ -2069,6 +2175,9 @@ impl Tenant {
                 "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
             )
         }
+
+        let initial_logical_size_can_start = init_order.map(|x| &x.initial_logical_size_can_start);
+        let initial_logical_size_attempt = init_order.map(|x| &x.initial_logical_size_attempt);
 
         let pg_version = new_metadata.pg_version();
         Ok(Timeline::new(
@@ -2081,6 +2190,8 @@ impl Tenant {
             Arc::clone(&self.walredo_mgr),
             remote_client,
             pg_version,
+            initial_logical_size_can_start.cloned(),
+            initial_logical_size_attempt.cloned(),
         ))
     }
 
@@ -2756,7 +2867,7 @@ impl Tenant {
         remote_client: Option<RemoteTimelineClient>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_data = self
-            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client)
+            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client, None)
             .context("Failed to create timeline data structure")?;
         crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
 
@@ -3324,7 +3435,7 @@ pub mod harness {
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
             tenant
-                .load(ctx)
+                .load(None, ctx)
                 .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
                 .await?;
             tenant.state.send_replace(TenantState::Active);

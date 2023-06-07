@@ -1446,11 +1446,12 @@ class NeonCli(AbstractNeonCli):
     def endpoint_create(
         self,
         branch_name: str,
+        pg_port: int,
+        http_port: int,
         endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
-        port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1464,8 +1465,10 @@ class NeonCli(AbstractNeonCli):
         ]
         if lsn is not None:
             args.extend(["--lsn", str(lsn)])
-        if port is not None:
-            args.extend(["--port", str(port)])
+        if pg_port is not None:
+            args.extend(["--pg-port", str(pg_port)])
+        if http_port is not None:
+            args.extend(["--http-port", str(http_port)])
         if endpoint_id is not None:
             args.append(endpoint_id)
         if hot_standby:
@@ -1478,9 +1481,11 @@ class NeonCli(AbstractNeonCli):
     def endpoint_start(
         self,
         endpoint_id: str,
+        pg_port: int,
+        http_port: int,
+        safekeepers: Optional[List[int]] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
-        port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1492,8 +1497,10 @@ class NeonCli(AbstractNeonCli):
         ]
         if lsn is not None:
             args.append(f"--lsn={lsn}")
-        if port is not None:
-            args.append(f"--port={port}")
+        args.extend(["--pg-port", str(pg_port)])
+        args.extend(["--http-port", str(http_port)])
+        if safekeepers is not None:
+            args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         if endpoint_id is not None:
             args.append(endpoint_id)
 
@@ -1585,6 +1592,7 @@ class NeonPageserver(PgProtocol):
             ".*serving compute connection task.*exited with error: Postgres connection error.*",
             ".*serving compute connection task.*exited with error: Connection reset by peer.*",
             ".*serving compute connection task.*exited with error: Postgres query error.*",
+            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
             ".*Connection aborted: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
@@ -1687,6 +1695,9 @@ class NeonPageserver(PgProtocol):
                         break
                 else:
                     errors.append(line)
+
+        for error in errors:
+            log.info(f"not allowed error: {error.strip()}")
 
         assert not errors
 
@@ -2280,17 +2291,24 @@ class Endpoint(PgProtocol):
     """An object representing a Postgres compute endpoint managed by the control plane."""
 
     def __init__(
-        self, env: NeonEnv, tenant_id: TenantId, port: int, check_stop_result: bool = True
+        self,
+        env: NeonEnv,
+        tenant_id: TenantId,
+        pg_port: int,
+        http_port: int,
+        check_stop_result: bool = True,
     ):
-        super().__init__(host="localhost", port=port, user="cloud_admin", dbname="postgres")
+        super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
         self.env = env
         self.running = False
         self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
-        self.port = port
+        self.pg_port = pg_port
+        self.http_port = http_port
         self.check_stop_result = check_stop_result
+        self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
     def create(
@@ -2320,7 +2338,8 @@ class Endpoint(PgProtocol):
             tenant_id=self.tenant_id,
             lsn=lsn,
             hot_standby=hot_standby,
-            port=self.port,
+            pg_port=self.pg_port,
+            http_port=self.http_port,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
@@ -2345,7 +2364,13 @@ class Endpoint(PgProtocol):
 
         log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
-        self.env.neon_cli.endpoint_start(self.endpoint_id, tenant_id=self.tenant_id, port=self.port)
+        self.env.neon_cli.endpoint_start(
+            self.endpoint_id,
+            pg_port=self.pg_port,
+            http_port=self.http_port,
+            tenant_id=self.tenant_id,
+            safekeepers=self.active_safekeepers,
+        )
         self.running = True
 
         return self
@@ -2369,32 +2394,8 @@ class Endpoint(PgProtocol):
         return os.path.join(self.pg_data_dir_path(), "pg_twophase")
 
     def config_file_path(self) -> str:
-        """Path to postgresql.conf"""
-        return os.path.join(self.pg_data_dir_path(), "postgresql.conf")
-
-    def adjust_for_safekeepers(self, safekeepers: str) -> "Endpoint":
-        """
-        Adjust instance config for working with wal acceptors instead of
-        pageserver (pre-configured by CLI) directly.
-        """
-
-        # TODO: reuse config()
-        with open(self.config_file_path(), "r") as f:
-            cfg_lines = f.readlines()
-        with open(self.config_file_path(), "w") as f:
-            for cfg_line in cfg_lines:
-                # walproposer uses different application_name
-                if (
-                    "synchronous_standby_names" in cfg_line
-                    or
-                    # don't repeat safekeepers/wal_acceptors multiple times
-                    "neon.safekeepers" in cfg_line
-                ):
-                    continue
-                f.write(cfg_line)
-            f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("neon.safekeepers = '{}'\n".format(safekeepers))
-        return self
+        """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
+        return os.path.join(self.endpoint_path(), "postgresql.conf")
 
     def config(self, lines: List[str]) -> "Endpoint":
         """
@@ -2499,7 +2500,8 @@ class EndpointFactory:
         ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
-            port=self.env.port_distributor.get_port(),
+            pg_port=self.env.port_distributor.get_port(),
+            http_port=self.env.port_distributor.get_port(),
         )
         self.num_instances += 1
         self.endpoints.append(ep)
@@ -2524,7 +2526,8 @@ class EndpointFactory:
         ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
-            port=self.env.port_distributor.get_port(),
+            pg_port=self.env.port_distributor.get_port(),
+            http_port=self.env.port_distributor.get_port(),
         )
 
         if endpoint_id is None:
@@ -2907,6 +2910,7 @@ SKIP_FILES = frozenset(
         "pg_internal.init",
         "pg.log",
         "zenith.signal",
+        "pg_hba.conf",
         "postgresql.conf",
         "postmaster.opts",
         "postmaster.pid",
