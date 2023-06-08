@@ -264,7 +264,7 @@ jobs:
           export REMOTE_STORAGE_S3_BUCKET=neon-github-public-dev
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test pagination_tests -- s3_pagination_should_work --exact
+          ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
 
       - name: Install rust binaries
         run: |

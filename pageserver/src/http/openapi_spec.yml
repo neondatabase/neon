@@ -215,7 +215,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
         "412":
-          description: Tenant is missing
+          description: Tenant is missing, or timeline has children
           content:
             application/json:
               schema:
