@@ -72,7 +72,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
         ps_http.timeline_delete(env.initial_tenant, parent_timeline_id)
 
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 412
 
     timeline_path = (
         env.repo_dir / "tenants" / str(env.initial_tenant) / "timelines" / str(leaf_timeline_id)
