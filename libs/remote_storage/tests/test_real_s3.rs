@@ -121,9 +121,9 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
     let path2 = RemotePath::new(&PathBuf::from(format!("{}/path2", ctx.base_prefix,)))
         .with_context(|| "RemotePath conversion")?;
 
-    let data1 = format!("remote blob data1").into_bytes();
+    let data1 = "remote blob data1".as_bytes();
     let data1_len = data1.len();
-    let data2 = format!("remote blob data2").into_bytes();
+    let data2 = "remote blob data2".as_bytes();
     let data2_len = data2.len();
     ctx.client
         .upload(std::io::Cursor::new(data1), data1_len, &path1, None)
@@ -134,7 +134,7 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
         .await?;
 
     ctx.client
-        .delete_objects(&vec![path1, path2])
+        .delete_objects(&[path1, path2])
         .await
         .expect("should succeed");
 
