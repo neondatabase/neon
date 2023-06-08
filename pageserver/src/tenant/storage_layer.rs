@@ -38,7 +38,7 @@ pub use delta_layer::{DeltaLayer, DeltaLayerWriter};
 pub use filename::{DeltaFileName, ImageFileName, LayerFileName};
 pub use image_layer::{ImageLayer, ImageLayerWriter};
 pub use inmemory_layer::InMemoryLayer;
-pub use layer_desc::PersistentLayerDesc;
+pub use layer_desc::{PersistentLayerDesc, PersistentLayerKey};
 pub use remote_layer::RemoteLayer;
 
 use super::layer_map::BatchedUpdates;
@@ -454,7 +454,9 @@ pub trait PersistentLayer: Layer {
     ///
     /// Should not change over the lifetime of the layer object because
     /// current_physical_size is computed as the som of this value.
-    fn file_size(&self) -> u64;
+    fn file_size(&self) -> u64 {
+        self.layer_desc().file_size
+    }
 
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo;
 
@@ -481,6 +483,20 @@ pub struct LayerDescriptor {
     pub lsn: Range<Lsn>,
     pub is_incremental: bool,
     pub short_id: String,
+}
+
+impl LayerDescriptor {
+    /// `LayerDescriptor` is only used for testing purpose so it does not matter whether it is image / delta,
+    /// and the tenant / timeline id does not matter.
+    pub fn get_persistent_layer_desc(&self) -> PersistentLayerDesc {
+        PersistentLayerDesc::new_delta(
+            TenantId::from_array([0; 16]),
+            TimelineId::from_array([0; 16]),
+            self.key.clone(),
+            self.lsn.clone(),
+            233,
+        )
+    }
 }
 
 impl Layer for LayerDescriptor {

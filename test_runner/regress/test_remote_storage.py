@@ -20,6 +20,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
+    assert_timeline_detail_404,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
@@ -147,7 +148,12 @@ def test_remote_storage_backup_and_restore(
     # listing the remote timelines will fail because of the failpoint,
     # and the tenant will be marked as Broken.
     client.tenant_attach(tenant_id)
-    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+
+    tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+    assert tenant_info["attachment_status"] == {
+        "slug": "failed",
+        "data": {"reason": "storage-sync-list-remote-timelines"},
+    }
 
     # Ensure that even though the tenant is broken, we can't attach it again.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
@@ -177,7 +183,7 @@ def test_remote_storage_backup_and_restore(
     wait_until_tenant_active(
         pageserver_http=client,
         tenant_id=tenant_id,
-        iterations=5,
+        iterations=10,  # make it longer for real_s3 tests when unreliable wrapper is involved
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
@@ -593,7 +599,22 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     )
     client.timeline_delete(tenant_id, timeline_id)
 
+    env.pageserver.allowed_errors.append(f".*Timeline {tenant_id}/{timeline_id} was not found.*")
+    env.pageserver.allowed_errors.append(
+        ".*files not bound to index_file.json, proceeding with their deletion.*"
+    )
+
+    wait_until(2, 0.5, lambda: assert_timeline_detail_404(client, tenant_id, timeline_id))
+
     assert not timeline_path.exists()
+
+    # to please mypy
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    remote_timeline_path = (
+        env.remote_storage.root / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    )
+
+    assert not list(remote_timeline_path.iterdir())
 
     # timeline deletion should kill ongoing uploads, so, the metric will be gone
     assert get_queued_count(file_kind="index", op_kind="upload") is None
