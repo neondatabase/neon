@@ -3376,16 +3376,16 @@ fn create_neon_superuser(
     target_dir: &Path,
     pg_version: u32,
 ) -> anyhow::Result<()> {
-    let createrole_bin_path = conf.pg_bin_dir(pg_version)?.join("createrole");
-    let createrole_lib_dir = conf.pg_lib_dir(pg_version)?;
+    let createuser_bin_path = conf.pg_bin_dir(pg_version)?.join("createuser");
+    let createuser_lib_dir = conf.pg_lib_dir(pg_version)?;
     info!(
         "running {} in {}, libdir: {}",
-        createrole_bin_path.display(),
+        createuser_bin_path.display(),
         target_dir.display(),
-        createrole_lib_dir.display()
+        createuser_lib_dir.display()
     );
 
-    let createrole_output = Command::new(&createrole_bin_path)
+    let createuser_output = Command::new(&createuser_bin_path)
         .arg("neon_superuser")
         .arg("-d") // CREATEDB
         .arg("-L") // NOLOGIN
@@ -3393,22 +3393,22 @@ fn create_neon_superuser(
         .args(["-g", "pg_read_all_data"])
         .args(["-g", "pg_write_all_data"])
         .env_clear()
-        .env("LD_LIBRARY_PATH", &createrole_lib_dir)
-        .env("DYLD_LIBRARY_PATH", &createrole_lib_dir)
+        .env("LD_LIBRARY_PATH", &createuser_lib_dir)
+        .env("DYLD_LIBRARY_PATH", &createuser_lib_dir)
         .stdout(Stdio::null())
         .output()
         .with_context(|| {
             format!(
                 "failed to execute {} at target dir {}",
-                createrole_bin_path.display(),
+                createuser_bin_path.display(),
                 target_dir.display()
             )
         })?;
 
-    if !createrole_output.status.success() {
+    if !createuser_output.status.success() {
         bail!(
-            "createrole failed: '{}'",
-            String::from_utf8_lossy(&createrole_output.stderr)
+            "createuser failed: '{}'",
+            String::from_utf8_lossy(&createuser_output.stderr)
         );
     }
     Ok(())
