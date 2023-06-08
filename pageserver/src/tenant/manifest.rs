@@ -133,6 +133,9 @@ pub enum ManifestLoadError {
     Io(io::Error),
 }
 
+#[must_use = "Should check if the manifest is partially corrupted"]
+pub struct ManifestPartiallyCorrupted(bool);
+
 impl Manifest {
     /// Create a new manifest by writing the manifest header and a snapshot record to the given file.
     pub fn init(file: VirtualFile, snapshot: Snapshot, lsn: Lsn) -> Result<Self> {
@@ -148,7 +151,9 @@ impl Manifest {
     /// Load a manifest. Returns the manifest and a list of operations. If the manifest is corrupted,
     /// the bool flag will be set to true and the user is responsible to reconstruct a new manifest and
     /// backup the current one.
-    pub fn load(mut file: VirtualFile) -> Result<(Self, Vec<Operation>, bool), ManifestLoadError> {
+    pub fn load(
+        mut file: VirtualFile,
+    ) -> Result<(Self, Vec<Operation>, ManifestPartiallyCorrupted), ManifestLoadError> {
         let mut buf = vec![];
         file.read_to_end(&mut buf).map_err(ManifestLoadError::Io)?;
 
@@ -192,7 +197,11 @@ impl Manifest {
             operations.push(serde_json::from_slice(data).map_err(ManifestLoadError::DecodeRecord)?);
             buf.advance(size);
         };
-        Ok((Self { file }, operations, corrupted))
+        Ok((
+            Self { file },
+            operations,
+            ManifestPartiallyCorrupted(corrupted),
+        ))
     }
 
     fn append_data(&mut self, data: &[u8]) -> Result<()> {
@@ -266,7 +275,7 @@ mod tests {
         )
         .unwrap();
         let (mut manifest, operations, corrupted) = Manifest::load(file).unwrap();
-        assert!(!corrupted);
+        assert!(!corrupted.0);
         assert_eq!(operations.len(), 2);
         assert_eq!(
             &operations[0],
@@ -298,7 +307,7 @@ mod tests {
         )
         .unwrap();
         let (_manifest, operations, corrupted) = Manifest::load(file).unwrap();
-        assert!(!corrupted);
+        assert!(!corrupted.0);
         assert_eq!(operations.len(), 3);
         assert_eq!(&operations[0], &Operation::Snapshot(snapshot, Lsn::from(0)));
         assert_eq!(
