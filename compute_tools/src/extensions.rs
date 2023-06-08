@@ -50,8 +50,6 @@ pub async fn download_extension(config: &RemoteStorageConfig, ext_type: Extensio
                 .list_prefixes(public_dir.as_ref())
                 .await?;
             for remote_from_path in from_paths {
-                // TODO: downcast remote_from_path to PathBuf?
-                // TODO: extension() returns a `Some`
                 if remote_from_path.extension() == Some("control") {
                     download_helper(&remote_storage, &remote_from_path, &sharedir)?;
                 }
