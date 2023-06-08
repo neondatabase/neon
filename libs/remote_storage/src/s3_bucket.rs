@@ -416,7 +416,7 @@ impl RemoteStorage for S3Bucket {
             .await
             .context("Concurrency limiter semaphore got closed during S3 delete")?;
 
-        let mut delete_objects = vec![];
+        let mut delete_objects = Vec::with_capacity(paths.len());
         for path in paths {
             let obj_id = ObjectIdentifier::builder()
                 .set_key(Some(self.relative_path_to_s3_object(path)))
