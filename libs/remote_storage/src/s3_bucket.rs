@@ -409,7 +409,7 @@ impl RemoteStorage for S3Bucket {
         })
         .await
     }
-    async fn delete_objects(&self, paths: &Vec<RemotePath>) -> anyhow::Result<()> {
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
         let _guard = self
             .concurrency_limiter
             .acquire()

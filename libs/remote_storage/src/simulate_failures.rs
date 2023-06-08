@@ -120,7 +120,7 @@ impl RemoteStorage for UnreliableWrapper {
         self.inner.delete(path).await
     }
 
-    async fn delete_objects(&self, paths: &Vec<RemotePath>) -> anyhow::Result<()> {
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
         for path in paths {
             self.delete(path).await?
         }
