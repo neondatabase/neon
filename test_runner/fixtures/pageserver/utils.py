@@ -2,7 +2,7 @@ import time
 from typing import Any, Dict, Optional
 
 from fixtures.log_helper import log
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
@@ -92,6 +92,41 @@ def wait_until_tenant_state(
     )
 
 
+def wait_until_timeline_state(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    expected_state: str,
+    iterations: int,
+    period: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Does not use `wait_until` for debugging purposes
+    """
+    for i in range(iterations):
+        try:
+            timeline = pageserver_http.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
+            log.debug(f"Timeline {tenant_id}/{timeline_id} data: {timeline}")
+            if isinstance(timeline["state"], str):
+                if timeline["state"] == expected_state:
+                    return timeline
+            elif isinstance(timeline, Dict):
+                if timeline["state"].get(expected_state):
+                    return timeline
+
+        except Exception as e:
+            log.debug(f"Timeline {tenant_id}/{timeline_id} state retrieval failure: {e}")
+
+        if i == iterations - 1:
+            # do not sleep last time, we already know that we failed
+            break
+        time.sleep(period)
+
+    raise Exception(
+        f"Timeline {tenant_id}/{timeline_id} did not become {expected_state} within {iterations * period} seconds"
+    )
+
+
 def wait_until_tenant_active(
     pageserver_http: PageserverHttpClient,
     tenant_id: TenantId,
@@ -156,3 +191,21 @@ def wait_for_upload_queue_empty(
         if all(m.value == 0 for m in tl):
             return
         time.sleep(0.2)
+
+
+def assert_timeline_detail_404(
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+):
+    """Asserts that timeline_detail returns 404, or dumps the detail."""
+    try:
+        data = pageserver_http.timeline_detail(tenant_id, timeline_id)
+        log.error(f"detail {data}")
+    except PageserverApiException as e:
+        log.error(e)
+        if e.status_code == 404:
+            return
+        else:
+            raise
+    raise Exception("detail succeeded (it should return 404)")

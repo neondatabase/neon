@@ -396,7 +396,9 @@ pub async fn delete_timeline(
     ctx: &RequestContext,
 ) -> Result<(), DeleteTimelineError> {
     let tenant = get_tenant(tenant_id, true).await?;
-    tenant.delete_timeline(timeline_id, ctx).await?;
+    tenant
+        .prepare_and_schedule_delete_timeline(timeline_id, ctx)
+        .await?;
     Ok(())
 }
 
