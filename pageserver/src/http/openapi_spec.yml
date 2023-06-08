@@ -386,6 +386,7 @@ paths:
         "202":
           description: Tenant attaching scheduled
         "400":
+          description: Bad Request
           content:
             application/json:
               schema:
@@ -945,7 +946,7 @@ components:
               type: string
               enum: [ "maybe", "attached", "failed" ]
             data:
-            - type: object
+              type: object
               properties:
                 reason:
                   type: string
