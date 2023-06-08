@@ -371,6 +371,11 @@ impl RemoteTimelineClient {
         &self,
         index_part: &IndexPart,
     ) -> anyhow::Result<()> {
+        // FIXME: consider newtype for DeletedIndexPart.
+        let deleted_at = index_part.deleted_at.ok_or(anyhow::anyhow!(
+            "bug: it is responsibility of the caller to provide index part from MaybeDeletedIndexPart::Deleted"
+        ))?;
+
         {
             let mut upload_queue = self.upload_queue.lock().unwrap();
             upload_queue.initialize_with_current_remote_index_part(index_part)?;
@@ -380,11 +385,6 @@ impl RemoteTimelineClient {
         self.stop().expect("initialized line above");
 
         let mut upload_queue = self.upload_queue.lock().unwrap();
-
-        // FIXME: consider newtype for DeletedIndexPart.
-        let deleted_at = index_part.deleted_at.ok_or(anyhow::anyhow!(
-            "bug: it is responsibility of the caller to provide index part from MaybeDeletedIndexPart::Deleted"
-        ))?;
 
         upload_queue
             .stopped_mut()

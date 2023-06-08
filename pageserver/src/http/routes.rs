@@ -183,9 +183,10 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
         use crate::tenant::DeleteTimelineError::*;
         match value {
             NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found")),
-            HasChildren(children) => ApiError::BadRequest(anyhow::anyhow!(
-                "Cannot delete timeline which has child timelines: {children:?}"
-            )),
+            HasChildren(children) => ApiError::PreconditionFailed(
+                format!("Cannot delete timeline which has child timelines: {children:?}")
+                    .into_boxed_str(),
+            ),
             Other(e) => ApiError::InternalServerError(e),
         }
     }
@@ -197,9 +198,9 @@ impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
         match value {
             // Report Precondition failed so client can distinguish between
             // "tenant is missing" case from "timeline is missing"
-            Tenant(GetTenantError::NotFound(..)) => {
-                ApiError::PreconditionFailed("Requested tenant is missing")
-            }
+            Tenant(GetTenantError::NotFound(..)) => ApiError::PreconditionFailed(
+                "Requested tenant is missing".to_owned().into_boxed_str(),
+            ),
             Tenant(t) => ApiError::from(t),
             Timeline(t) => ApiError::from(t),
         }
