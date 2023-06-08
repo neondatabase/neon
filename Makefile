@@ -108,6 +108,7 @@ postgres-%: postgres-configure-% \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_buffercache install
 	+@echo "Compiling pageinspect $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pg_stat_statements install
 
 .PHONY: postgres-clean-%
 postgres-clean-%:

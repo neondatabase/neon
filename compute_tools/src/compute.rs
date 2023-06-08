@@ -442,8 +442,43 @@ impl ComputeNode {
 
         let pg = self.start_postgres(spec.storage_auth_token.clone())?;
 
+        // Maybe apply the spec
         if spec.spec.mode == ComputeMode::Primary {
-            self.apply_config(&compute_state)?;
+            let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
+
+            // Get spec_id or make it up by hashing
+            //
+            // TODO Make spec_id required so there would be no need to hash.
+            let spec_id = spec.operation_uuid.clone().unwrap_or_else(|| {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+
+                // HACK Exclude postgresql.conf because it doesn't need
+                //      to be applied like the other fields in the spec
+                let mut spec_no_conf = spec.clone();
+                spec_no_conf.cluster.postgresql_conf = None;
+
+                let json = serde_json::to_vec(&spec_no_conf).unwrap();
+                let mut hasher = DefaultHasher::new();
+                json.hash(&mut hasher);
+                let hash = hasher.finish();
+                format!("{:x}", hash)
+            });
+
+            // Get current spec_id
+            // TODO use pageserver instead of local storage
+            let path = Path::new("/home/bojan/tmp/spec_id.txt");
+            let current_spec_id = std::fs::read_to_string(path).ok();
+
+            // Respec if needed
+            if current_spec_id == Some(spec_id.clone()) {
+                info!("no need to respec");
+            } else {
+                info!("respeccing {:?} {:?}", current_spec_id, spec_id.clone());
+
+                self.apply_config(&compute_state)?;
+                std::fs::write(path, spec_id)?;
+            }
         }
 
         let startup_end_time = Utc::now();

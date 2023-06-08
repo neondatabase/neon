@@ -43,6 +43,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use compute_api::spec::Database;
+use compute_api::spec::GenericOption;
+use compute_api::spec::Role;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -456,9 +459,87 @@ impl Endpoint {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
                 state: None,
-                roles: vec![],
-                databases: vec![],
-                settings: None,
+                // TODO pass this info from the test
+                roles: vec![
+                    Role {
+                        name: "cloud_admin".into(),
+                        encrypted_password: None,
+                        options: None,
+                    },
+                    Role {
+                        name: "foo".into(),
+                        encrypted_password: Some("bar".into()),
+                        options: None,
+                    },
+                    Role {
+                        name: "foo2".into(),
+                        encrypted_password: Some("bar2".into()),
+                        options: None,
+                    },
+                    Role {
+                        name: "foo3".into(),
+                        encrypted_password: Some("bar3".into()),
+                        options: None,
+                    },
+                    Role {
+                        name: "foo4".into(),
+                        encrypted_password: Some("bar4".into()),
+                        options: None,
+                    },
+                ],
+                databases: vec![
+                    Database {
+                        name: "postgres".into(),
+                        owner: "cloud_admin".into(),
+                        options: None,
+                    },
+                    Database {
+                        name: "postgres_2".into(),
+                        owner: "cloud_admin".into(),
+                        options: None,
+                    },
+                    Database {
+                        name: "postgres_3".into(),
+                        owner: "cloud_admin".into(),
+                        options: None,
+                    },
+                    Database {
+                        name: "postgres_4".into(),
+                        owner: "cloud_admin".into(),
+                        options: None,
+                    },
+                    Database {
+                        name: "postgres_5".into(),
+                        owner: "cloud_admin".into(),
+                        options: None,
+                    },
+                    Database {
+                        name: "postgres_6".into(),
+                        owner: "cloud_admin".into(),
+                        options: None,
+                    },
+                    Database {
+                        name: "postgres_7".into(),
+                        owner: "cloud_admin".into(),
+                        options: None,
+                    },
+                    Database {
+                        name: "postgres_8".into(),
+                        owner: "cloud_admin".into(),
+                        options: None,
+                    },
+                ],
+                settings: Some(vec![
+                    GenericOption {
+                        name: "shared_preload_libraries".into(),
+                        value: Some("neon,pg_stat_statements".into()),
+                        // TODO test with this larger list of extensions. But first they
+                        //      need to be built (see compute dockerfile).
+                        //
+                        // value: Some("neon,pg_stat_statements,timescaledb,pg_cron".into()),
+                        vartype: "string".into(),
+                    },
+                ]),
                 postgresql_conf: Some(postgresql_conf),
             },
             delta_operations: None,
