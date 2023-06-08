@@ -144,6 +144,16 @@ pub struct Timeline {
     /// See [`storage_sync`] module comment for details.
     pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
+    /// Master remote storage client (for cross-region pageserver replica).
+    /// All layers created by replica are stored in local region S3 bucket, but
+    /// pageserver may need to download older layers from master S3 bucket.
+    pub master_client: Option<Arc<RemoteTimelineClient>>,
+
+    /// Remote consistent LSN at which cross-region replica was created.
+    /// All layers which start ls smaller than this point should be downloaded from master S3 bucket
+    /// (see master_client).
+    pub replica_lsn: Option<Lsn>,
+
     // What page versions do we hold in the repository? If we get a
     // request > last_record_lsn, we need to wait until we receive all
     // the WAL up to the request. The SeqWait provides functions for
@@ -1056,7 +1066,10 @@ impl Timeline {
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
         let Some(layer) = self.find_layer(layer_file_name) else { return Ok(None) };
         let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
-        if self.remote_client.is_none() {
+        if self
+            .get_download_source(remote_layer.get_lsn_range().start)
+            .is_none()
+        {
             return Ok(Some(false));
         }
 
@@ -1370,6 +1383,17 @@ impl Timeline {
         }
     }
 
+    fn get_download_source(&self, layer_start_lsn: Lsn) -> Option<&Arc<RemoteTimelineClient>> {
+        self.replica_lsn
+            .map_or(self.remote_client.as_ref(), |replica_lsn| {
+                if layer_start_lsn < replica_lsn {
+                    self.master_client.as_ref()
+                } else {
+                    self.remote_client.as_ref()
+                }
+            })
+    }
+
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory, but not the layer map.
@@ -1383,6 +1407,8 @@ impl Timeline {
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
         remote_client: Option<RemoteTimelineClient>,
+        master_client: Option<RemoteTimelineClient>,
+        replica_lsn: Option<Lsn>,
         pg_version: u32,
         initial_logical_size_can_start: Option<completion::Barrier>,
         initial_logical_size_attempt: Option<completion::Completion>,
@@ -1417,6 +1443,9 @@ impl Timeline {
                 walreceiver: Mutex::new(None),
 
                 remote_client: remote_client.map(Arc::new),
+
+                master_client: master_client.map(Arc::new),
+                replica_lsn,
 
                 // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
                 last_record_lsn: SeqWait::new(RecordLsn {
@@ -4191,7 +4220,7 @@ impl Timeline {
             &format!("download layer {}", remote_layer.short_id()),
             false,
             async move {
-                let remote_client = self_clone.remote_client.as_ref().unwrap();
+                let remote_client = self_clone.get_download_source(remote_layer.get_lsn_range().start).unwrap();
 
                 // Does retries + exponential back-off internally.
                 // When this fails, don't layer further retry attempts here.

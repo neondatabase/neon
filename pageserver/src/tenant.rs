@@ -2276,6 +2276,8 @@ impl Tenant {
             self.tenant_id,
             Arc::clone(&self.walredo_mgr),
             remote_client,
+            None,
+            None,
             pg_version,
             initial_logical_size_can_start.cloned(),
             initial_logical_size_attempt.cloned(),
