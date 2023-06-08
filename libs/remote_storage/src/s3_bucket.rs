@@ -17,6 +17,7 @@ use aws_sdk_s3::{
     error::SdkError,
     operation::get_object::GetObjectError,
     primitives::ByteStream,
+    types::{Delete, ObjectIdentifier},
     Client,
 };
 use aws_smithy_http::body::SdkBody;
@@ -81,10 +82,22 @@ pub(super) mod metrics {
             .inc();
     }
 
+    pub fn inc_delete_objects(count: u64) {
+        S3_REQUESTS_COUNT
+            .with_label_values(&["delete_object"])
+            .inc_by(count);
+    }
+
     pub fn inc_delete_object_fail() {
         S3_REQUESTS_FAIL_COUNT
             .with_label_values(&["delete_object"])
             .inc();
+    }
+
+    pub fn inc_delete_objects_fail(count: u64) {
+        S3_REQUESTS_FAIL_COUNT
+            .with_label_values(&["delete_object"])
+            .inc_by(count);
     }
 
     pub fn inc_list_objects() {
@@ -395,6 +408,34 @@ impl RemoteStorage for S3Bucket {
             range,
         })
         .await
+    }
+    async fn delete_objects(&self, paths: &Vec<RemotePath>) -> anyhow::Result<()> {
+        let _guard = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .context("Concurrency limiter semaphore got closed during S3 delete")?;
+
+        let mut delete_objects = vec![];
+        for path in paths {
+            let obj_id = ObjectIdentifier::builder()
+                .set_key(Some(self.relative_path_to_s3_object(path)))
+                .build();
+            delete_objects.push(obj_id);
+        }
+
+        metrics::inc_delete_objects(paths.len() as u64);
+        self.client
+            .delete_objects()
+            .bucket(self.bucket_name.clone())
+            .delete(Delete::builder().set_objects(Some(delete_objects)).build())
+            .send()
+            .await
+            .map_err(|e| {
+                metrics::inc_delete_objects_fail(paths.len() as u64);
+                e
+            })?;
+        Ok(())
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
