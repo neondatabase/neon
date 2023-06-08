@@ -2879,7 +2879,7 @@ impl Tenant {
         run_initdb(self.conf, &initdb_path, pg_version)?;
 
         // Create the special neon_superuser role
-        create_neon_superuser(self.conf,  &initdb_path, pg_version)?;
+        create_neon_superuser(self.conf, &initdb_path, pg_version)?;
 
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
@@ -3371,12 +3371,7 @@ fn run_initdb(
 
 /// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
 /// that we give to customers
-fn create_neon_superuser(
-    conf: &'static PageServerConf,
-    target_dir: &Path,
-    pg_version: u32,
-)
-{
+fn create_neon_superuser(conf: &'static PageServerConf, target_dir: &Path, pg_version: u32) {
     let createrole_bin_path = conf.pg_bin_dir(pg_version)?.join("createrole");
     let createrole_lib_dir = conf.pg_lib_dir(pg_version)?;
     info!(
@@ -3393,8 +3388,7 @@ fn create_neon_superuser(
         .arg("-r") // CREATEROLE
         .args("-g", "pg_read_all_data")
         .args("-g", "pg_write_all_data");
-    if !createrole_output.status.success()
-    {
+    if !createrole_output.status.success() {
         bail!(
             "createrole failed: '{}'",
             String::from_utf8_lossy(&createrole_output.stderr)

@@ -273,7 +273,8 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 xact.execute(query.as_str(), &[])?;
             }
             RoleAction::Create => {
-                let mut query: String = format!("CREATE ROLE {} IN ROLE neon_superuser", name.pg_quote());
+                let mut query: String =
+                    format!("CREATE ROLE {} IN ROLE neon_superuser", name.pg_quote());
                 info!("role create query: '{}'", &query);
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
@@ -483,7 +484,8 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 query.push_str(&db.to_pg_options());
                 let _guard = info_span!("executing", query).entered();
                 client.execute(query.as_str(), &[])?;
-                let grant_query: String = format!("GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser");
+                let grant_query: String =
+                    format!("GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser");
                 client.execute(grant_query.as_str(), &[])?;
             }
         };
