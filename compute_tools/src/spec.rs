@@ -484,8 +484,10 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 query.push_str(&db.to_pg_options());
                 let _guard = info_span!("executing", query).entered();
                 client.execute(query.as_str(), &[])?;
-                let grant_query: String =
-                    format!("GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser");
+                let grant_query: String = format!(
+                    "GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser",
+                    name.pg_quote()
+                );
                 client.execute(grant_query.as_str(), &[])?;
             }
         };

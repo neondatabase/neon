@@ -3371,7 +3371,11 @@ fn run_initdb(
 
 /// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
 /// that we give to customers
-fn create_neon_superuser(conf: &'static PageServerConf, target_dir: &Path, pg_version: u32) {
+fn create_neon_superuser(
+    conf: &'static PageServerConf,
+    target_dir: &Path,
+    pg_version: u32,
+) -> anyhow::Result<()> {
     let createrole_bin_path = conf.pg_bin_dir(pg_version)?.join("createrole");
     let createrole_lib_dir = conf.pg_lib_dir(pg_version)?;
     info!(
@@ -3386,8 +3390,21 @@ fn create_neon_superuser(conf: &'static PageServerConf, target_dir: &Path, pg_ve
         .arg("-d") // CREATEDB
         .arg("-L") // NOLOGIN
         .arg("-r") // CREATEROLE
-        .args("-g", "pg_read_all_data")
-        .args("-g", "pg_write_all_data");
+        .args(["-g", "pg_read_all_data"])
+        .args(["-g", "pg_write_all_data"])
+        .env_clear()
+        .env("LD_LIBRARY_PATH", &createrole_lib_dir)
+        .env("DYLD_LIBRARY_PATH", &createrole_lib_dir)
+        .stdout(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to execute {} at target dir {}",
+                createrole_bin_path.display(),
+                target_dir.display()
+            )
+        })?;
+
     if !createrole_output.status.success() {
         bail!(
             "createrole failed: '{}'",
