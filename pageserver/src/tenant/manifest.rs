@@ -152,6 +152,7 @@ impl Manifest {
         let mut buf = vec![];
         file.read_to_end(&mut buf).map_err(ManifestLoadError::Io)?;
 
+        // Read manifest header
         let mut buf = Bytes::from(buf);
         if buf.remaining() < MANIFEST_HEADER_LEN {
             return Err(ManifestLoadError::CorruptedManifestHeader);
@@ -165,6 +166,7 @@ impl Manifest {
             ));
         }
 
+        // Read operations
         let mut operations = Vec::new();
         let corrupted = loop {
             if buf.remaining() == 0 {
@@ -239,6 +241,8 @@ mod tests {
         let layer2 = PersistentLayerDesc::new_test(Key::from_i128(233)..Key::from_i128(2333));
         let layer3 = PersistentLayerDesc::new_test(Key::from_i128(2333)..Key::from_i128(23333));
         let layer4 = PersistentLayerDesc::new_test(Key::from_i128(23333)..Key::from_i128(233333));
+
+        // Write a manifest with a snapshot and some operations
         let snapshot = Snapshot {
             layers: vec![layer1, layer2],
         };
@@ -250,6 +254,7 @@ mod tests {
             ))
             .unwrap();
         drop(manifest);
+
         // Open the second time and write
         let file = VirtualFile::open_with_options(
             &testdir.join("MANIFEST"),
@@ -281,6 +286,7 @@ mod tests {
             ))
             .unwrap();
         drop(manifest);
+
         // Open the third time and verify
         let file = VirtualFile::open_with_options(
             &testdir.join("MANIFEST"),
