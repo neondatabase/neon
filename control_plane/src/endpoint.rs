@@ -460,75 +460,16 @@ impl Endpoint {
                 name: None,       // project name: not used
                 state: None,
                 // TODO pass this info from the test
-                roles: vec![
-                    Role {
-                        name: "cloud_admin".into(),
-                        encrypted_password: None,
-                        options: None,
-                    },
-                    Role {
-                        name: "foo".into(),
-                        encrypted_password: Some("bar".into()),
-                        options: None,
-                    },
-                    Role {
-                        name: "foo2".into(),
-                        encrypted_password: Some("bar2".into()),
-                        options: None,
-                    },
-                    Role {
-                        name: "foo3".into(),
-                        encrypted_password: Some("bar3".into()),
-                        options: None,
-                    },
-                    Role {
-                        name: "foo4".into(),
-                        encrypted_password: Some("bar4".into()),
-                        options: None,
-                    },
-                ],
-                databases: vec![
-                    Database {
-                        name: "postgres".into(),
-                        owner: "cloud_admin".into(),
-                        options: None,
-                    },
-                    Database {
-                        name: "postgres_2".into(),
-                        owner: "cloud_admin".into(),
-                        options: None,
-                    },
-                    Database {
-                        name: "postgres_3".into(),
-                        owner: "cloud_admin".into(),
-                        options: None,
-                    },
-                    Database {
-                        name: "postgres_4".into(),
-                        owner: "cloud_admin".into(),
-                        options: None,
-                    },
-                    Database {
-                        name: "postgres_5".into(),
-                        owner: "cloud_admin".into(),
-                        options: None,
-                    },
-                    Database {
-                        name: "postgres_6".into(),
-                        owner: "cloud_admin".into(),
-                        options: None,
-                    },
-                    Database {
-                        name: "postgres_7".into(),
-                        owner: "cloud_admin".into(),
-                        options: None,
-                    },
-                    Database {
-                        name: "postgres_8".into(),
-                        owner: "cloud_admin".into(),
-                        options: None,
-                    },
-                ],
+                roles: (0..100).map(|i| Role {
+                    name: format!("test_role_{i}").into(),
+                    encrypted_password: None,
+                    options: None,
+                }).collect(),
+                databases: (0..100).map(|i| Database {
+                    name: format!("test_database_{i}").into(),
+                    owner: "test_role_0".into(),
+                    options: None,
+                }).collect(),
                 settings: Some(vec![
                     GenericOption {
                         name: "shared_preload_libraries".into(),
