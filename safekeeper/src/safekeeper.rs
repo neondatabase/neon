@@ -10,6 +10,7 @@ use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
+use std::time::Duration;
 use storage_broker::proto::SafekeeperTimelineInfo;
 
 use tracing::*;
@@ -634,7 +635,8 @@ where
         }
 
         // system_id will be updated on mismatch
-        if self.state.server.system_id != msg.system_id {
+        // sync-safekeepers doesn't know sysid and sends 0, ignore it
+        if self.state.server.system_id != msg.system_id && msg.system_id != 0 {
             if self.state.server.system_id != 0 {
                 warn!(
                     "unexpected system ID arrived, got {}, expected {}",
@@ -836,6 +838,26 @@ where
         self.state.persist(&state)
     }
 
+    /// Persist control file if there is something to save and enough time
+    /// passed after the last save.
+    pub fn maybe_persist_control_file(&mut self, inmem_remote_consistent_lsn: Lsn) -> Result<()> {
+        const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
+        if self.state.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
+            return Ok(());
+        }
+        let need_persist = self.inmem.commit_lsn > self.state.commit_lsn
+            || self.inmem.backup_lsn > self.state.backup_lsn
+            || self.inmem.peer_horizon_lsn > self.state.peer_horizon_lsn
+            || inmem_remote_consistent_lsn > self.state.remote_consistent_lsn;
+        if need_persist {
+            let mut state = self.state.clone();
+            state.remote_consistent_lsn = inmem_remote_consistent_lsn;
+            self.persist_control_file(state)?;
+            trace!("saved control file: {CF_SAVE_INTERVAL:?} passed");
+        }
+        Ok(())
+    }
+
     /// Handle request to append WAL.
     #[allow(clippy::comparison_chain)]
     fn handle_append_request(
@@ -948,9 +970,8 @@ where
 
         if sync_control_file {
             let mut state = self.state.clone();
-            // Note: we do not persist remote_consistent_lsn in other paths of
-            // persisting cf -- that is not much needed currently. We could do
-            // that by storing Arc to walsenders in Safekeeper.
+            // Note: we could make remote_consistent_lsn update in cf common by
+            // storing Arc to walsenders in Safekeeper.
             state.remote_consistent_lsn = new_remote_consistent_lsn;
             self.persist_control_file(state)?;
         }
@@ -980,7 +1001,7 @@ mod tests {
 
     use super::*;
     use crate::wal_storage::Storage;
-    use std::ops::Deref;
+    use std::{ops::Deref, time::Instant};
 
     // fake storage for tests
     struct InMemoryState {
@@ -991,6 +1012,10 @@ mod tests {
         fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
             self.persisted_state = s.clone();
             Ok(())
+        }
+
+        fn last_persist_at(&self) -> Instant {
+            Instant::now()
         }
     }
 

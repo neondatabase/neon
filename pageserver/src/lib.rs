@@ -58,12 +58,6 @@ pub async fn shutdown_pageserver(exit_code: i32) {
     // the checkpoint and GC tasks.
     tenant::mgr::shutdown_all_tenants().await;
 
-    // Stop syncing with remote storage.
-    //
-    // FIXME: Does this wait for the sync tasks to finish syncing what's queued up?
-    // Should it?
-    task_mgr::shutdown_tasks(Some(TaskKind::RemoteUploadTask), None, None).await;
-
     // Shut down the HTTP endpoint last, so that you can still check the server's
     // status while it's shutting down.
     // FIXME: We should probably stop accepting commands like attach/detach earlier.
@@ -136,6 +130,29 @@ pub fn is_uninit_mark(path: &Path) -> bool {
             .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
         None => false,
     }
+}
+
+/// During pageserver startup, we need to order operations not to exhaust tokio worker threads by
+/// blocking.
+///
+/// The instances of this value exist only during startup, otherwise `None` is provided, meaning no
+/// delaying is needed.
+#[derive(Clone)]
+pub struct InitializationOrder {
+    /// Each initial tenant load task carries this until completion.
+    pub initial_tenant_load: Option<utils::completion::Completion>,
+
+    /// Barrier for when we can start initial logical size calculations.
+    pub initial_logical_size_can_start: utils::completion::Barrier,
+
+    /// Each timeline owns a clone of this to be consumed on the initial logical size calculation
+    /// attempt. It is important to drop this once the attempt has completed.
+    pub initial_logical_size_attempt: utils::completion::Completion,
+
+    /// Barrier for when we can start any background jobs.
+    ///
+    /// This can be broken up later on, but right now there is just one class of a background job.
+    pub background_jobs_can_start: utils::completion::Barrier,
 }
 
 #[cfg(test)]

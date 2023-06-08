@@ -49,9 +49,12 @@ pub struct EvictionTaskTenantState {
 }
 
 impl Timeline {
-    pub(super) fn launch_eviction_task(self: &Arc<Self>, init_done: Option<&completion::Barrier>) {
+    pub(super) fn launch_eviction_task(
+        self: &Arc<Self>,
+        background_tasks_can_start: Option<&completion::Barrier>,
+    ) {
         let self_clone = Arc::clone(self);
-        let init_done = init_done.cloned();
+        let background_tasks_can_start = background_tasks_can_start.cloned();
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
@@ -60,8 +63,13 @@ impl Timeline {
             &format!("layer eviction for {}/{}", self.tenant_id, self.timeline_id),
             false,
             async move {
-                completion::Barrier::maybe_wait(init_done).await;
-                self_clone.eviction_task(task_mgr::shutdown_token()).await;
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); }
+                    _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
+                };
+
+                self_clone.eviction_task(cancel).await;
                 info!("eviction task finishing");
                 Ok(())
             },
