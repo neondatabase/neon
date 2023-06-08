@@ -21,14 +21,20 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 # `sudo tc qdisc del dev lo root netem`
 #
 # NOTE this test might not represent the real startup time because the basebackup
-#      for a large database might be larger, or safekeepers might need more syncing,
-#      or there might be more operations to apply during config step.
+#      for a large database might be larger if there's a lof of transaction metadata,
+#      or safekeepers might need more syncing, or there might be more operations to
+#      apply during config step, like more users, databases, or extensions. By default
+#      we load extensions 'neon,pg_stat_statements,timescaledb,pg_cron', but in this
+#      test we only load neon.
 def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_startup")
 
+    # We do two iterations so we can see if the second startup is faster. It should
+    # be because the compute node should already be configured with roles, databases,
+    # extensions, etc from the first run.
     for i in range(2):
         # Start
         with zenbenchmark.record_duration(f"{i}_start_and_select"):
