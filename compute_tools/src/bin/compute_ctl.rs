@@ -53,16 +53,20 @@ use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
-use compute_tools::pg_extensions::*;
+use compute_tools::extensions::*;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let matches = cli().get_matches();
     let config = get_s3_config(&matches)
-        .expect("hopefully get_s3_config works");
+        .expect("Hopefully get_s3_config works");
     download_extension(&config, ExtensionType::Shared)
-        .expect("dont error");
+        .await
+        .expect("Assume downloads can't error.");
+    // let mut file = File::create("alek.txt")?;
+    // file.write_all(b"success?")?;
 
     let http_port = *matches
         .get_one::<u16>("http-port")

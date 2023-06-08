@@ -70,6 +70,10 @@ impl RemotePath {
     pub fn join(&self, segment: &Path) -> Self {
         Self(self.0.join(segment))
     }
+
+    pub fn extension(&self) -> Option<&str> {
+        self.0.extension()?.to_str()
+    }
 }
 
 /// Storage (potentially remote) API to manage its state.

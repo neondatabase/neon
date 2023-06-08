@@ -1,9 +1,10 @@
 // This is some code for downloading postgres extensions from AWS s3
 use std::path::Path;
+use std::fs::File;
+use std::io::Write;
 use clap::{ArgMatches};
 use toml_edit;
 use remote_storage::*;
-use anyhow::Context;
 
 fn get_pg_config(argument: &str) -> String {
     // NOTE: this function panics if it runs into any issues;
@@ -18,14 +19,11 @@ fn get_pg_config(argument: &str) -> String {
     stdout.trim().to_string()
 }
 
-fn download_helper(config: &RemoteStorageConfig, from_path: &str, to_path: &str) -> anyhow::Result<()> {
-    let remote_storage = GenericRemoteStorage::from_config(config)?;
-    let remote_from_path = RemotePath::new(Path::new(from_path))?;
-    let _data = remote_storage.download(&remote_from_path);
-    println!("received data, hopefully");
-    // TODO: somehow write "data" to "to_path"
-    // std::fs::write(to_path, XXX.to_string())
-    println!("{:?}",to_path);
+fn download_helper(remote_storage: &GenericRemoteStorage, remote_from_path: &RemotePath, to_path: &str) -> anyhow::Result<()> {
+    let data = remote_storage.download(&remote_from_path);
+    // TODO: actually write "data" to "to_path"
+    let mut file = File::create(to_path)?;
+    file.write_all(b"recieved data, hopefully -alek")?;
     Ok(())
 }
 
@@ -35,46 +33,66 @@ pub enum ExtensionType {
     Library(String)
 }
 
-// TODO: should I make this async?
-pub fn download_extension(config: &RemoteStorageConfig, ext_type: ExtensionType) -> anyhow::Result<()>{
+pub async fn download_extension(config: &RemoteStorageConfig, ext_type: ExtensionType) -> anyhow::Result<()>{
     let sharedir = get_pg_config("--sharedir");
     let sharedir = format!("{}/extension", sharedir);
     let libdir = get_pg_config("--libdir");
+    let remote_storage = GenericRemoteStorage::from_config(config)?;
 
     match ext_type {
         ExtensionType::Shared => {
             // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
             // We can do this step even before we have spec,
             // because public extensions are common for all projects.
-            let from_path = "s3-bucket/public/*.control";
-            download_helper(config, from_path, &sharedir)?;
+            let public_dir = "neon-dev-extensions/public/";
+            let public_dir = Some(RemotePath::new(Path::new(public_dir))?);
+            let from_paths = remote_storage
+                .list_prefixes(public_dir.as_ref())
+                .await?;
+            for remote_from_path in from_paths {
+                // TODO: downcast remote_from_path to PathBuf?
+                // TODO: extension() returns a `Some`
+                if remote_from_path.extension() == Some("control") {
+                    download_helper(&remote_storage, &remote_from_path, &sharedir)?;
+                }
+            }
         }
         ExtensionType::Tenant(tenant_id) => {
             // 2. After we have spec, before project start
             // Download control files from s3-bucket/[tenant-id]/*.control to SHAREDIR/extension
-            let from_path = format!("s3-bucket/{tenant_id}/*.control");
-            download_helper(config, &from_path, &sharedir)?;
+            let tenant_dir = format!("neon-dev-extensions/{tenant_id}");
+            let tenant_dir = Some(RemotePath::new(Path::new(&tenant_dir))?);
+            let from_paths = remote_storage
+                .list_prefixes(tenant_dir.as_ref())
+                .await?;
+            for remote_from_path in from_paths {
+                if remote_from_path.extension() == Some("control") {
+                    download_helper(&remote_storage, &remote_from_path, &sharedir)?;
+                }
+            }
         }
         ExtensionType::Library(library_name) => {
             // 3. After we have spec, before postgres start
             // Download preload_shared_libraries from s3-bucket/public/[library-name].control into LIBDIR/
-            let from_path = format!("s3-bucket/public/{library_name}.control");
-            download_helper(config, &from_path, &libdir)?;
+            let from_path = format!("neon-dev-extensions/public/{library_name}.control");
+            let remote_from_path = RemotePath::new(Path::new(&from_path))?;
+            download_helper(&remote_storage, &remote_from_path, &libdir)?;
         }
     }
     Ok(())
 }
 
 pub fn get_s3_config(arg_matches: &ArgMatches) -> anyhow::Result<RemoteStorageConfig> {
-    let workdir = arg_matches
-        .get_one::<String>("workdir")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new(".neon"));
-    let workdir = workdir.canonicalize()
-        .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
+    println!("{:?}", arg_matches);
+    // let workdir = arg_matches
+    //     .get_one::<String>("workdir")
+    //     .map(Path::new)
+    //     .unwrap_or_else(|| Path::new(".neon"));
+    // let workdir = workdir.canonicalize()
+    //     .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
 
-    // TODO: is this the correct file location? I mean I can't see the file...
-    let cfg_file_path = workdir.join("pageserver.toml");
+    // let cfg_file_path = workdir.join("pageserver.toml");
+    let cfg_file_path = Path::new("./../.neon/pageserver.toml");
 
     if cfg_file_path.is_file() {
         // Supplement the CLI arguments with the config file
