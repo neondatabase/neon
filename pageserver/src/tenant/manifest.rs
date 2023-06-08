@@ -26,10 +26,10 @@
 //! recovered from this file. This is tracked in
 //! https://github.com/neondatabase/neon/issues/4418
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 
 use crate::virtual_file::VirtualFile;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crc32c::crc32c;
 use serde::{Deserialize, Serialize};
@@ -47,44 +47,73 @@ pub struct Snapshot {
     pub layers: Vec<PersistentLayerDesc>,
 }
 
+/// serde by default encode this in tagged enum, and therefore it will be something
+/// like `{ "AddLayer": { ... } }`.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum Record {
     AddLayer(PersistentLayerDesc),
     RemoveLayer(PersistentLayerDesc),
 }
 
+/// `echo neon.manifest | sha1sum` and take the leading 8 bytes.
+const MANIFEST_MAGIC_NUMBER: u64 = 0xf5c44592b806109c;
+const MANIFEST_VERSION: u64 = 1;
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct ManifestHeader {
-    version: usize,
+    magic_number: u64,
+    version: u64,
+}
+
+const MANIFEST_HEADER_LEN: usize = 16;
+
+impl ManifestHeader {
+    fn encode(&self) -> BytesMut {
+        let mut buf = BytesMut::with_capacity(MANIFEST_HEADER_LEN);
+        buf.put_u64(self.magic_number);
+        buf.put_u64(self.version);
+        buf
+    }
+
+    fn decode(mut buf: &[u8]) -> Self {
+        assert!(buf.len() == MANIFEST_HEADER_LEN, "invalid header");
+        Self {
+            magic_number: buf.get_u64(),
+            version: buf.get_u64(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum Operation {
-    /// The header of the manifest (always the first record)
-    Header(ManifestHeader),
-    /// A snapshot of the current state
+    /// A snapshot of the current state.
+    ///
+    /// Lsn field represents the LSN that is persisted to disk for this snapshot.
     Snapshot(Snapshot, Lsn),
-    /// An atomic operation that changes the state
+    /// An atomic operation that changes the state.
+    ///
+    /// Lsn field represents the LSN that is persisted to disk after the operation is done.
+    /// This will only change when new L0 is flushed to the disk.
     Operation(Vec<Record>, Lsn),
 }
 
-struct Header {
+struct RecordHeader {
     size: u32,
     checksum: u32,
 }
 
-const HEADER_LEN: usize = 8;
+const RECORD_HEADER_LEN: usize = 8;
 
-impl Header {
+impl RecordHeader {
     fn encode(&self) -> BytesMut {
-        let mut buf = BytesMut::with_capacity(HEADER_LEN);
+        let mut buf = BytesMut::with_capacity(RECORD_HEADER_LEN);
         buf.put_u32(self.size);
         buf.put_u32(self.checksum);
         buf
     }
 
     fn decode(mut buf: &[u8]) -> Self {
-        assert!(buf.len() == HEADER_LEN, "invalid header");
+        assert!(buf.len() == RECORD_HEADER_LEN, "invalid header");
         Self {
             size: buf.get_u32(),
             checksum: buf.get_u32(),
@@ -92,10 +121,26 @@ impl Header {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestLoadError {
+    #[error("manifest header is corrupted")]
+    CorruptedManifestHeader,
+    #[error("unsupported manifest version: got {0}, expected {1}")]
+    UnsupportedVersion(u64, u64),
+    #[error("error when decoding record: {0}")]
+    DecodeRecord(serde_json::Error),
+    #[error("I/O error: {0}")]
+    Io(io::Error),
+}
+
 impl Manifest {
+    /// Create a new manifest by writing the manifest header and a snapshot record to the given file.
     pub fn init(file: VirtualFile, snapshot: Snapshot, lsn: Lsn) -> Result<Self> {
         let mut manifest = Self { file };
-        manifest.append_operation(Operation::Header(ManifestHeader { version: 1 }))?;
+        manifest.append_manifest_header(ManifestHeader {
+            magic_number: MANIFEST_MAGIC_NUMBER,
+            version: MANIFEST_VERSION,
+        })?;
         manifest.append_operation(Operation::Snapshot(snapshot, lsn))?;
         Ok(manifest)
     }
@@ -103,22 +148,35 @@ impl Manifest {
     /// Load a manifest. Returns the manifest and a list of operations. If the manifest is corrupted,
     /// the bool flag will be set to true and the user is responsible to reconstruct a new manifest and
     /// backup the current one.
-    pub fn load(mut file: VirtualFile) -> Result<(Self, Vec<Operation>, bool)> {
+    pub fn load(mut file: VirtualFile) -> Result<(Self, Vec<Operation>, bool), ManifestLoadError> {
         let mut buf = vec![];
-        file.read_to_end(&mut buf)?;
+        file.read_to_end(&mut buf).map_err(ManifestLoadError::Io)?;
+
         let mut buf = Bytes::from(buf);
+        if buf.remaining() < MANIFEST_HEADER_LEN {
+            return Err(ManifestLoadError::CorruptedManifestHeader);
+        }
+        let header = ManifestHeader::decode(&buf[..MANIFEST_HEADER_LEN]);
+        buf.advance(MANIFEST_HEADER_LEN);
+        if header.version != MANIFEST_VERSION {
+            return Err(ManifestLoadError::UnsupportedVersion(
+                header.version,
+                MANIFEST_VERSION,
+            ));
+        }
+
         let mut operations = Vec::new();
         let corrupted = loop {
             if buf.remaining() == 0 {
                 break false;
             }
-            if buf.remaining() < HEADER_LEN {
+            if buf.remaining() < RECORD_HEADER_LEN {
                 warn!("incomplete header when decoding manifest, could be corrupted");
                 break true;
             }
-            let Header { size, checksum } = Header::decode(&buf[..HEADER_LEN]);
+            let RecordHeader { size, checksum } = RecordHeader::decode(&buf[..RECORD_HEADER_LEN]);
             let size = size as usize;
-            buf.advance(HEADER_LEN);
+            buf.advance(RECORD_HEADER_LEN);
             if buf.remaining() < size {
                 warn!("incomplete data when decoding manifest, could be corrupted");
                 break true;
@@ -129,15 +187,9 @@ impl Manifest {
                 break true;
             }
             // if the following decode fails, we cannot use the manifest or safely ignore any record.
-            operations.push(serde_json::from_slice(data)?);
+            operations.push(serde_json::from_slice(data).map_err(ManifestLoadError::DecodeRecord)?);
             buf.advance(size);
         };
-        let Operation::Header(header) = operations.remove(0) else {
-            bail!("cannot find manifest header");
-        };
-        if header.version != 1 {
-            bail!("unsupported manifest version: {}", header.version);
-        }
         Ok((Self { file }, operations, corrupted))
     }
 
@@ -145,7 +197,7 @@ impl Manifest {
         if data.len() >= u32::MAX as usize {
             panic!("data too large");
         }
-        let header = Header {
+        let header = RecordHeader {
             size: data.len() as u32,
             checksum: crc32c(data),
         };
@@ -153,6 +205,12 @@ impl Manifest {
         self.file.write_all(&header)?;
         self.file.write_all(data)?;
         self.file.sync_all()?;
+        Ok(())
+    }
+
+    fn append_manifest_header(&mut self, header: ManifestHeader) -> Result<()> {
+        let encoded = header.encode();
+        self.file.write_all(&encoded)?;
         Ok(())
     }
 
