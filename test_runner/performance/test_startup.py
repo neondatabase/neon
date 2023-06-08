@@ -28,21 +28,28 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
     env = neon_env_builder.init_start()
 
     env.neon_cli.create_branch("test_startup")
-    with zenbenchmark.record_duration("start_and_select"):
-        endpoint = env.endpoints.create_start("test_startup")
-        endpoint.safe_psql("select 1;")
 
-    metrics = requests.get(f"http://localhost:{endpoint.http_port}/metrics.json").json()
-    durations = {
-        "wait_for_spec_ms": "wait_for_spec",
-        "sync_safekeepers_ms": "sync_safekeepers",
-        "basebackup_ms": "basebackup",
-        "config_ms": "config",
-        "total_startup_ms": "total_startup",
-    }
-    for key, name in durations.items():
-        value = metrics[key]
-        zenbenchmark.record(name, value, "ms", report=MetricReport.LOWER_IS_BETTER)
+    for i in range(2):
+        # Start
+        with zenbenchmark.record_duration(f"{i}_start_and_select"):
+            endpoint = env.endpoints.create_start("test_startup")
+            endpoint.safe_psql("select 1;")
+
+        # Get metrics
+        metrics = requests.get(f"http://localhost:{endpoint.http_port}/metrics.json").json()
+        durations = {
+            "wait_for_spec_ms": f"{i}_wait_for_spec",
+            "sync_safekeepers_ms": f"{i}_sync_safekeepers",
+            "basebackup_ms": f"{i}_basebackup",
+            "config_ms": f"{i}_config",
+            "total_startup_ms": f"{i}_total_startup",
+        }
+        for key, name in durations.items():
+            value = metrics[key]
+            zenbenchmark.record(name, value, "ms", report=MetricReport.LOWER_IS_BETTER)
+
+        # Stop so we can restart
+        endpoint.stop()
 
 
 # This test sometimes runs for longer than the global 5 minute timeout.
