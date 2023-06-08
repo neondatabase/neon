@@ -625,11 +625,10 @@ jobs:
 
 
   neon-image-depot:
-    # For testing this will run side-by-side for a few merges.
-    # This action is not really optimized yet, but gets the job done
-    runs-on: [ self-hosted, gen3, large ]
+    # For testing this will run side-by-side for a lot of merges.
+    runs-on: [ self-hosted, gen3, small ]
     needs: [ tag ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
+    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/depot:pinned
     permissions:
       contents: read
       id-token: write
@@ -640,17 +639,6 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0
-
-      - name: Setup go
-        uses: actions/setup-go@v3
-        with:
-          go-version: '1.19'
-
-      - name: Set up Depot CLI
-        uses: depot/setup-action@v1
-
-      - name: Install Crane & ECR helper
-        run: go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
 
       - name: Configure ECR login
         run: |
