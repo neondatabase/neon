@@ -2877,7 +2877,6 @@ impl Tenant {
         }
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
         run_initdb(self.conf, &initdb_path, pg_version)?;
-
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&initdb_path) {
