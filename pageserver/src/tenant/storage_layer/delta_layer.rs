@@ -917,7 +917,7 @@ impl Drop for DeltaLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             match inner.blob_writer.into_inner().into_inner() {
-                Ok(vfile) => vfile.remove(),
+                Ok(vfile) => vfile.remove().unwrap(),
                 Err(err) => warn!(
                     "error while flushing buffer of image layer temporary file: {}",
                     err

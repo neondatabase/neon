@@ -709,7 +709,7 @@ impl ImageLayerWriter {
 impl Drop for ImageLayerWriter {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
-            inner.blob_writer.into_inner().remove();
+            inner.blob_writer.into_inner().remove().unwrap();
         }
     }
 }
