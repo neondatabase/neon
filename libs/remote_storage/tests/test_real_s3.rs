@@ -107,6 +107,37 @@ async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result
     Ok(())
 }
 
+#[test_context(MaybeEnabledS3)]
+#[tokio::test]
+async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
+    let ctx = match ctx {
+        MaybeEnabledS3::Enabled(ctx) => ctx,
+        MaybeEnabledS3::Disabled => return Ok(()),
+    };
+
+    let path1 = RemotePath::new(&PathBuf::from(format!("{}/path1", ctx.base_prefix,)))
+        .with_context(|| "RemotePath conversion")?;
+
+    let path2 = RemotePath::new(&PathBuf::from(format!("{}/path2", ctx.base_prefix,)))
+        .with_context(|| "RemotePath conversion")?;
+
+    let data1 = "remote blob data1".as_bytes();
+    let data1_len = data1.len();
+    let data2 = "remote blob data2".as_bytes();
+    let data2_len = data2.len();
+    ctx.client
+        .upload(std::io::Cursor::new(data1), data1_len, &path1, None)
+        .await?;
+
+    ctx.client
+        .upload(std::io::Cursor::new(data2), data2_len, &path2, None)
+        .await?;
+
+    ctx.client.delete_objects(&[path1, path2]).await?;
+
+    Ok(())
+}
+
 fn ensure_logging_ready() {
     LOGGING_DONE.get_or_init(|| {
         utils::logging::init(

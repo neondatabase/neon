@@ -320,6 +320,13 @@ impl RemoteStorage for LocalFs {
             .await
             .map_err(|e| anyhow::anyhow!(e))?)
     }
+
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        for path in paths {
+            self.delete(path).await?
+        }
+        Ok(())
+    }
 }
 
 fn storage_metadata_path(original_path: &Path) -> PathBuf {

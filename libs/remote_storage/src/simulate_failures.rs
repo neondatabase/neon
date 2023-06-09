@@ -119,4 +119,11 @@ impl RemoteStorage for UnreliableWrapper {
         self.attempt(RemoteOp::Delete(path.clone()))?;
         self.inner.delete(path).await
     }
+
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        for path in paths {
+            self.delete(path).await?
+        }
+        Ok(())
+    }
 }
