@@ -8,7 +8,7 @@ use anyhow::Error;
 use anyhow::Result;
 
 use storage_broker::parse_proto_ttid;
-use storage_broker::proto::broker_service_client::BrokerServiceClient;
+
 use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey as ProtoSubscriptionKey;
 use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::Request;
@@ -45,7 +45,8 @@ pub fn thread_main(conf: SafeKeeperConf) {
 
 /// Push once in a while data about all active timelines to the broker.
 async fn push_loop(conf: SafeKeeperConf) -> anyhow::Result<()> {
-    let mut client = BrokerServiceClient::connect(conf.broker_endpoint.clone()).await?;
+    let mut client =
+        storage_broker::connect(conf.broker_endpoint.clone(), conf.broker_keepalive_interval)?;
     let push_interval = Duration::from_millis(PUSH_INTERVAL_MSEC);
 
     let outbound = async_stream::stream! {

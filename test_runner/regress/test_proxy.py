@@ -225,3 +225,37 @@ def test_sql_over_http(static_proxy: NeonProxy):
     res = q("drop table t")
     assert res["command"] == "DROP"
     assert res["rowCount"] is None
+
+
+def test_sql_over_http_output_options(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http2 with login password 'http2' superuser")
+
+    def q(sql: str, raw_text: bool, array_mode: bool, params: List[Any] = []) -> Any:
+        connstr = (
+            f"postgresql://http2:http2@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+        )
+        response = requests.post(
+            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+            data=json.dumps({"query": sql, "params": params}),
+            headers={
+                "Content-Type": "application/sql",
+                "Neon-Connection-String": connstr,
+                "Neon-Raw-Text-Output": "true" if raw_text else "false",
+                "Neon-Array-Mode": "true" if array_mode else "false",
+            },
+            verify=str(static_proxy.test_output_dir / "proxy.crt"),
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    rows = q("select 1 as n, 'a' as s, '{1,2,3}'::int4[] as arr", False, False)["rows"]
+    assert rows == [{"arr": [1, 2, 3], "n": 1, "s": "a"}]
+
+    rows = q("select 1 as n, 'a' as s, '{1,2,3}'::int4[] as arr", False, True)["rows"]
+    assert rows == [[1, "a", [1, 2, 3]]]
+
+    rows = q("select 1 as n, 'a' as s, '{1,2,3}'::int4[] as arr", True, False)["rows"]
+    assert rows == [{"arr": "{1,2,3}", "n": "1", "s": "a"}]
+
+    rows = q("select 1 as n, 'a' as s, '{1,2,3}'::int4[] as arr", True, True)["rows"]
+    assert rows == [["1", "a", "{1,2,3}"]]
