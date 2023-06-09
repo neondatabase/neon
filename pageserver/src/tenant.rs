@@ -1277,7 +1277,7 @@ impl Tenant {
     /// Once the caller is done setting up the timeline, they should call
     /// `UninitializedTimeline::initialize_with_lock` to remove the uninit mark.
     ///
-    /// For tests, use `DatadirModification::init_empty` + `commit` to setup the
+    /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
     /// minimum amount of keys required to get a writable timeline.
     /// (Without it, `put` might fail due to `repartition` failing.)
     pub fn create_empty_timeline(
@@ -1333,10 +1333,12 @@ impl Tenant {
 
         // Setup minimum keys required for the timeline to be usable.
         let mut modification = tline.begin_modification(initdb_lsn);
-        modification.init_empty().context("init_empty")?;
+        modification
+            .init_empty_test_timeline()
+            .context("init_empty_test_timeline")?;
         modification
             .commit()
-            .context("commit init_empty modification")?;
+            .context("commit init_empty_test_timeline modification")?;
 
         let mut timelines = self.timelines.lock().unwrap();
         // load_layers=false because create_empty_timeline already did that what's necessary (set next_open_layer)
@@ -4385,6 +4387,73 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_at_initdb_lsn_takes_optimization_code_path() -> anyhow::Result<()> {
+        let (tenant, ctx) = TenantHarness::create("test_empty_test_timeline_is_usable")?
+            .load()
+            .await;
+
+        let initdb_lsn = Lsn(0x20);
+        let utline =
+            tenant.create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)?;
+        let tline = utline.raw_timeline().unwrap();
+
+        // Spawn flush loop now so that we can set the `expect_initdb_optimization`
+        tline.maybe_spawn_flush_loop();
+
+        // Make sure the timeline has the minimum set of required keys for operation.
+        // The only operation you can always do on an empty timeline is to `put` new data.
+        // Except if you `put` at `initdb_lsn`.
+        // In that case, there's an optimization to directly create image layers instead of delta layers.
+        // It uses `repartition()`, which assumes some keys to be present.
+        // Let's make sure the test timeline can handle that case.
+        {
+            let mut state = tline.flush_loop_state.lock().unwrap();
+            assert_eq!(
+                timeline::FlushLoopState::Running {
+                    expect_initdb_optimization: false,
+                    initdb_optimization_count: 0,
+                },
+                *state
+            );
+            *state = timeline::FlushLoopState::Running {
+                expect_initdb_optimization: true,
+                initdb_optimization_count: 0,
+            };
+        }
+
+        // Make writes at the initdb_lsn. When we flush it below, it should be handled by the optimization.
+        // As explained above, the optimization requires some keys to be present.
+        // As per `create_empty_timeline` documentation, use init_empty to set them.
+        // This is what `create_test_timeline` does, by the way.
+        let mut modification = tline.begin_modification(initdb_lsn);
+        modification
+            .init_empty_test_timeline()
+            .context("init_empty_test_timeline")?;
+        modification
+            .commit()
+            .context("commit init_empty_test_timeline modification")?;
+
+        // Do the flush. The flush code will check the expectations that we set above.
+        tline.freeze_and_flush().await?;
+
+        // assert freeze_and_flush exercised the initdb optimization
+        {
+            let state = tline.flush_loop_state.lock().unwrap();
+            let
+                timeline::FlushLoopState::Running {
+                    expect_initdb_optimization,
+                    initdb_optimization_count,
+                } = *state else {
+                    panic!("unexpected state: {:?}", *state);
+                };
+            assert!(expect_initdb_optimization);
+            assert!(initdb_optimization_count > 0);
+        }
+
         Ok(())
     }
 }
