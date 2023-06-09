@@ -213,6 +213,7 @@ impl RemoteStorage for LocalFs {
 
     async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
         let target_path = from.with_base(&self.storage_root);
+        println!("{:?}",target_path);
         if file_exists(&target_path).map_err(DownloadError::BadInput)? {
             let source = io::BufReader::new(
                 fs::OpenOptions::new()

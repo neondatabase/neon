@@ -231,8 +231,10 @@ impl GenericRemoteStorage {
 
 impl GenericRemoteStorage {
     pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
+        println!("ALEK: is this fn fn even called");
         Ok(match &storage_config.storage {
             RemoteStorageKind::LocalFs(root) => {
+                println!("local{}", root.display());
                 info!("Using fs root '{}' as a remote storage", root.display());
                 Self::LocalFs(LocalFs::new(root.clone())?)
             }

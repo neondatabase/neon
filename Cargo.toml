@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "alek_ext",
     "compute_tools",
     "control_plane",
     "pageserver",
