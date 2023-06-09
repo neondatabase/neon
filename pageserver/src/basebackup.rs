@@ -417,6 +417,16 @@ where
     // Also send zenith.signal file with extra bootstrap data.
     //
     async fn add_pgcontrol_file(&mut self) -> anyhow::Result<()> {
+        // Add neon_compute_spec_id.txt
+        if let Some(spec_id) = &self.timeline.compute_spec_id.lock().await.clone() {
+            self.ar
+                .append(
+                    &new_tar_header("neon_compute_spec_id.txt", spec_id.len() as u64)?,
+                    spec_id.as_bytes(),
+                )
+                .await?;
+        }
+
         // add zenith.signal file
         let mut zenith_signal = String::new();
         if self.prev_record_lsn == Lsn(0) {

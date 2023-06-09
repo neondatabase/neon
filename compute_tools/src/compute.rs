@@ -466,9 +466,8 @@ impl ComputeNode {
             });
 
             // Get current spec_id
-            // TODO use pageserver instead of local storage
-            let path = Path::new("/home/bojan/tmp/spec_id.txt");
-            let current_spec_id = std::fs::read_to_string(path).ok();
+            let path = Path::new(&self.pgdata).join("neon_compute_spec_id.txt");
+            let current_spec_id = std::fs::read_to_string(&path).ok();
 
             // Respec if needed
             if current_spec_id == Some(spec_id.clone()) {
@@ -477,7 +476,7 @@ impl ComputeNode {
                 info!("respeccing {:?} {:?}", current_spec_id, spec_id.clone());
 
                 self.apply_config(&compute_state)?;
-                std::fs::write(path, spec_id)?;
+                self.cache_spec_id(&compute_state, spec_id)?;
             }
         }
 
@@ -498,6 +497,30 @@ impl ComputeNode {
         self.set_status(ComputeStatus::Running);
 
         Ok(pg)
+    }
+
+    fn cache_spec_id(&self, compute_state: &ComputeState, spec_id: String) -> anyhow::Result<()>{
+        let spec = &compute_state.pspec.as_ref().expect("spec must be set");
+        let cmd = format!(
+            "set_compute_spec_id {} {} {}",
+            spec.tenant_id,
+            spec.timeline_id,
+            spec_id,
+        );
+        let mut config = postgres::Config::from_str(&spec.pageserver_connstr)?;
+
+        // Use the storage auth token from the config file, if given.
+        // Note: this overrides any password set in the connection string.
+        if let Some(storage_auth_token) = &spec.storage_auth_token {
+            info!("Got storage auth token from spec file");
+            config.password(storage_auth_token);
+        } else {
+            info!("Storage auth token not set");
+        }
+        let mut client = config.connect(NoTls)?;
+        client.simple_query(&cmd)?;
+
+        Ok(())
     }
 
     // Look for core dumps and collect backtraces.

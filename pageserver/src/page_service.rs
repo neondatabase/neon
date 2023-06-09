@@ -916,6 +916,28 @@ where
                 .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
         }
+        else if query_string.starts_with("set_compute_spec_id ") {
+            let (_, params_raw) = query_string.split_at("set_compute_spec_id ".len());
+            let params = params_raw.split_whitespace().collect::<Vec<_>>();
+
+            if params.len() != 3 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for set_compute_spec_id command"
+                )));
+            }
+
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+            let spec_id = params[2].to_string();
+
+            self.check_permission(Some(tenant_id))?;
+            let timeline = get_active_tenant_timeline(tenant_id, timeline_id, &ctx).await?;
+            *timeline.compute_spec_id.lock().await = Some(spec_id);
+
+            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        }
         // return pair of prev_lsn and last_lsn
         else if query_string.starts_with("get_last_record_rlsn ") {
             let (_, params_raw) = query_string.split_at("get_last_record_rlsn ".len());

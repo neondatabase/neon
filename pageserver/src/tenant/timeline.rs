@@ -215,6 +215,10 @@ pub struct Timeline {
     // though let's keep them both for better error visibility.
     pub initdb_lsn: Lsn,
 
+    // Compute nodes can set this field after successful application
+    // of a new spec, in order to avoid reapplying it on next restart.
+    pub compute_spec_id: tokio::sync::Mutex<Option<String>>,
+
     /// When did we last calculate the partitioning?
     partitioning: Mutex<(KeyPartitioning, Lsn)>,
 
@@ -1456,6 +1460,7 @@ impl Timeline {
 
                 latest_gc_cutoff_lsn: Rcu::new(metadata.latest_gc_cutoff_lsn()),
                 initdb_lsn: metadata.initdb_lsn(),
+                compute_spec_id: tokio::sync::Mutex::new(None),
 
                 current_logical_size: if disk_consistent_lsn.is_valid() {
                     // we're creating timeline data with some layer files existing locally,
