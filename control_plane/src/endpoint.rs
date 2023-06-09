@@ -450,6 +450,7 @@ impl Endpoint {
 
         // Create spec file
         let spec = ComputeSpec {
+            already_configured: false,
             format_version: 1.0,
             operation_uuid: None,
             cluster: Cluster {
