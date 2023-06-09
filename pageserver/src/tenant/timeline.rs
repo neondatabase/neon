@@ -684,8 +684,11 @@ impl Timeline {
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
     pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+        debug!("start");
         self.freeze_inmem_layer(false);
-        self.flush_frozen_layers_and_wait().await
+        let ret = self.flush_frozen_layers_and_wait().await;
+        debug!(is_err = ret.is_err(), "complete");
+        ret
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.

@@ -1926,6 +1926,8 @@ impl Tenant {
     /// This will attempt to shutdown even if tenant is broken.
     pub(crate) async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
         debug_assert_current_span_has_tenant_id();
+        debug!("start");
+
         // Set tenant (and its timlines) to Stoppping state.
         //
         // Since we can only transition into Stopping state after activation is complete,
@@ -1972,6 +1974,7 @@ impl Tenant {
         // this will additionally shutdown and await all timeline tasks.
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
 
+        debug!("complete");
         Ok(())
     }
 
