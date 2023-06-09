@@ -133,10 +133,7 @@ async fn s3_delete_objects_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()>
         .upload(std::io::Cursor::new(data2), data2_len, &path2, None)
         .await?;
 
-    ctx.client
-        .delete_objects(&[path1, path2])
-        .await
-        .expect("should succeed");
+    ctx.client.delete_objects(&[path1, path2]).await?;
 
     Ok(())
 }
