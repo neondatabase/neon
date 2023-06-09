@@ -699,6 +699,20 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn init_empty_test_timeline(&mut self) -> anyhow::Result<()> {
+        self.init_empty()?;
+        self.put_control_file(bytes::Bytes::from_static(
+            b"control_file contents do not matter",
+        ))
+        .context("put_control_file")?;
+        self.put_checkpoint(bytes::Bytes::from_static(
+            b"checkpoint_file contents do not matter",
+        ))
+        .context("put_checkpoint_file")?;
+        Ok(())
+    }
+
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// NOTE: this will *not* implicitly extend the relation, if the page is beyond the
