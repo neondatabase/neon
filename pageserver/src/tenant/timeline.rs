@@ -2865,14 +2865,21 @@ impl Timeline {
         // in-memory layer from the map now.
         {
             let mut layers = self.layers.write().unwrap();
-            let l = layers.frozen_layers.pop_front();
+            let l = layers.frozen_layers.pop_front().unwrap();
 
             // Only one thread may call this function at a time (for this
             // timeline). If two threads tried to flush the same frozen
             // layer to disk at the same time, that would not work.
-            assert!(LayerMap::compare_arced_layers(&l.unwrap(), &frozen_layer));
-
-            // release lock on 'layers'
+            assert!(LayerMap::compare_arced_layers(&l, &frozen_layer));
+            drop(frozen_layer);
+            // XXX once we upgrade to Rust 1.70, use Arc::into_inner.
+            // It does the following checks atomically.
+            assert_eq!(Arc::weak_count(&l), 0);
+            let l =
+                Arc::try_unwrap(l).expect("no-one except us holds references to this layer");
+            drop(layers); // don't hold layer map lock when doing disk IO
+            info!("dropping frozen layer, this should remove the ephemeral file on disk");
+            drop(l);
         }
 
         fail_point!("checkpoint-after-sync");
