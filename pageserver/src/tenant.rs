@@ -1054,6 +1054,13 @@ impl Tenant {
                         );
                     }
                 } else if is_uninit_mark(&timeline_dir) {
+                    if !timeline_dir.exists() {
+                        warn!(
+                            "Timeline dir entry become invalid: {}",
+                            timeline_dir.display()
+                        );
+                        continue;
+                    }
                     let timeline_uninit_mark_file = &timeline_dir;
                     info!(
                         "Found an uninit mark file {}, removing the timeline and its uninit mark",
@@ -1077,6 +1084,13 @@ impl Tenant {
                         error!("Failed to clean up uninit marked timeline: {e:?}");
                     }
                 } else {
+                    if !timeline_dir.exists() {
+                        warn!(
+                            "Timeline dir entry become invalid: {}",
+                            timeline_dir.display()
+                        );
+                        continue;
+                    }
                     let timeline_id = timeline_dir
                         .file_name()
                         .and_then(OsStr::to_str)
