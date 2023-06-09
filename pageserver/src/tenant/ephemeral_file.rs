@@ -52,7 +52,10 @@ impl EphemeralFile {
     ) -> Result<EphemeralFile, io::Error> {
         let mut l = EPHEMERAL_FILES.write().unwrap();
         let file_id = l.next_file_id;
-        l.next_file_id += 1;
+        l.next_file_id = l
+            .next_file_id
+            .checked_add(1)
+            .expect("next_file_id is u64, expecting it to not overflow");
 
         let filename = conf
             .timeline_path(&timeline_id, &tenant_id)
@@ -60,7 +63,12 @@ impl EphemeralFile {
 
         let file = VirtualFile::open_with_options(
             &filename,
-            OpenOptions::new().read(true).write(true).create(true),
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                // The next_file_id doesn't overlfow, so technically, `create_new` is not needed.
+                // But it's cheap, so why not.
+                .create_new(true),
         )?;
         let file_rc = Arc::new(file);
         l.files.insert(file_id, file_rc.clone());
