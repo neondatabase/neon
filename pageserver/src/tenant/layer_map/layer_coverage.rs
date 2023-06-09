@@ -15,6 +15,7 @@ use rpds::RedBlackTreeMapSync;
 ///
 /// NOTE The struct is parameterized over Value for easier
 ///      testing, but in practice it's some sort of layer.
+#[derive(Clone)]
 pub struct LayerCoverage<Value> {
     /// For every change in coverage (as we sweep the key space)
     /// we store (lsn.end, value).
@@ -139,6 +140,7 @@ impl<Value: Clone> LayerCoverage<Value> {
 }
 
 /// Image and delta coverage at a specific LSN.
+#[derive(Clone)]
 pub struct LayerCoverageTuple<Value> {
     pub image_coverage: LayerCoverage<Value>,
     pub delta_coverage: LayerCoverage<Value>,

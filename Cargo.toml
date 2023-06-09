@@ -32,6 +32,7 @@ license = "Apache-2.0"
 ## All dependency versions, used in the project
 [workspace.dependencies]
 anyhow = { version = "1.0", features = ["backtrace"] }
+arc-swap = "1.6"
 async-stream = "0.3"
 async-trait = "0.1"
 atty = "0.2.14"
