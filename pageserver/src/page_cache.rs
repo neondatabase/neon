@@ -799,8 +799,12 @@ impl PageCache {
                             // a different victim. But if the problem persists, the page cache
                             // could fill up with dirty pages that we cannot evict, and we will
                             // loop retrying the writebacks indefinitely.
-                            error!("writeback of buffer {:?} failed: {}", old_key, err);
-                            continue;
+                            if cfg!(test) {
+                                anyhow::bail!("writeback of buffer {:?} failed: {}", old_key, err);
+                            } else {
+                                error!("writeback of buffer {:?} failed: {}", old_key, err);
+                                continue;
+                            }
                         }
                     }
 

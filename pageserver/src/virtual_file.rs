@@ -324,16 +324,8 @@ impl VirtualFile {
         Ok(result)
     }
 
-    pub fn remove(self) {
-        let path = self.path.clone();
-        drop(self);
-        std::fs::remove_file(path).expect("failed to remove the virtual file");
-    }
-}
-
-impl Drop for VirtualFile {
-    /// If a VirtualFile is dropped, close the underlying file if it was open.
-    fn drop(&mut self) {
+    /// Idempotently close the file descriptor we might have or have not open for this VirtualFile.
+    pub fn close(&mut self) {
         let handle = self.handle.get_mut().unwrap();
 
         // We could check with a read-lock first, to avoid waiting on an
@@ -350,6 +342,26 @@ impl Drop for VirtualFile {
                 .with_label_values(&["close", &self.tenant_id, &self.timeline_id])
                 .observe_closure_duration(|| slot_guard.file.take());
         }
+    }
+
+    /// Caller can retry if we return an `Err`.
+    #[allow(clippy::result_large_err)]
+    pub fn remove(mut self) -> Result<(), (Self, std::io::Error)> {
+        // close our fd before unlink system call, so that the unlink actually performs the removal
+        self.close();
+        // Try to remove file on disk.
+        // If it fails, we idempotently closed the fd, but the caller can choose to retry.
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) => Err((self, e)),
+        }
+    }
+}
+
+impl Drop for VirtualFile {
+    /// If a VirtualFile is dropped, close the underlying file if it was open.
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

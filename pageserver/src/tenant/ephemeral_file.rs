@@ -39,7 +39,7 @@ pub struct EphemeralFile {
     file_id: u64,
     _tenant_id: TenantId,
     _timeline_id: TimelineId,
-    file: Arc<VirtualFile>,
+    file: Option<Arc<VirtualFile>>,
 
     pub size: u64,
 }
@@ -52,7 +52,10 @@ impl EphemeralFile {
     ) -> Result<EphemeralFile, io::Error> {
         let mut l = EPHEMERAL_FILES.write().unwrap();
         let file_id = l.next_file_id;
-        l.next_file_id += 1;
+        l.next_file_id = l
+            .next_file_id
+            .checked_add(1)
+            .expect("next_file_id is u64, expecting it to not overflow");
 
         let filename = conf
             .timeline_path(&timeline_id, &tenant_id)
@@ -60,16 +63,30 @@ impl EphemeralFile {
 
         let file = VirtualFile::open_with_options(
             &filename,
-            OpenOptions::new().read(true).write(true).create(true),
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                // The next_file_id doesn't overlfow, so technically, `create_new` is not needed.
+                // But it's cheap, so why not.
+                .create_new(true),
         )?;
         let file_rc = Arc::new(file);
         l.files.insert(file_id, file_rc.clone());
+
+        #[cfg(debug_assertions)]
+        debug!(
+            "created ephemeral file {}\n{}",
+            filename.display(),
+            std::backtrace::Backtrace::force_capture()
+        );
+        #[cfg(not(debug_assertions))]
+        debug!("created ephemeral file {}", filename.display());
 
         Ok(EphemeralFile {
             file_id,
             _tenant_id: tenant_id,
             _timeline_id: timeline_id,
-            file: file_rc,
+            file: Some(file_rc),
             size: 0,
         })
     }
@@ -79,6 +96,8 @@ impl EphemeralFile {
         while off < PAGE_SZ {
             let n = self
                 .file
+                .as_ref()
+                .unwrap()
                 .read_at(&mut buf[off..], blkno as u64 * PAGE_SZ as u64 + off as u64)?;
 
             if n == 0 {
@@ -261,17 +280,43 @@ impl Drop for EphemeralFile {
         cache.drop_buffers_for_ephemeral(self.file_id);
 
         // remove entry from the hash map
-        EPHEMERAL_FILES.write().unwrap().files.remove(&self.file_id);
+        let virtual_file = EPHEMERAL_FILES
+            .write()
+            .unwrap()
+            .files
+            .remove(&self.file_id)
+            .unwrap();
+
+        // remove file from self
+        let self_file = self.file.take().unwrap();
+
+        assert_eq!(
+            Arc::as_ptr(&virtual_file) as *const (),
+            Arc::as_ptr(&self_file) as *const ()
+        );
+        drop(self_file);
+
+        // XXX once we upgrade to Rust 1.70, use Arc::into_inner.
+        // It does the following checks atomically.
+        assert_eq!(Arc::weak_count(&virtual_file), 0);
+        let virtual_file = Arc::try_unwrap(virtual_file).expect(
+            "we are being dropped and EPHEMERAL_FILES is the only other place where we put the Arc",
+        );
 
         // unlink the file
-        let res = std::fs::remove_file(&self.file.path);
-        if let Err(e) = res {
-            warn!(
-                "could not remove ephemeral file '{}': {}",
-                self.file.path.display(),
-                e
-            );
-        }
+        // TODO: we should be able to unwrap here, but, timeline delete and tenant detach do
+        //       std::fs::remove_dir_all without dropping all InMemoryLayer => EphemeralFile
+        //       of the tenant => need to fix that first.
+        match virtual_file.remove() {
+            Ok(()) => (),
+            Err((virtual_file, e)) => {
+                warn!(
+                    "could not remove ephemeral file '{}': {}",
+                    virtual_file.path.display(),
+                    e
+                );
+            }
+        };
     }
 }
 
