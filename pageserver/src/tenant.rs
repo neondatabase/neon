@@ -4390,9 +4390,10 @@ mod tests {
         // The only operation you can do on an empty timeline is to write new data.
         // Repartition is the only code on the write path that requires other keys to be present.
         // Make sure it works.
-        let cache = tline.partitioning.lock().unwrap();
-        assert_eq!(cache.1, Lsn(0), "must not have repartitioned yet, otherwise the repartition call below might just use the cache");
-        drop(cache);
+        {
+            let cache = tline.partitioning.lock().unwrap();
+            assert_eq!(cache.1, Lsn(0), "must not have repartitioned yet, otherwise the repartition call below might just use the cache");
+        }
         tline
             .repartition(Lsn(0x20), tline.get_compaction_target_size(), &ctx)
             .await?;
