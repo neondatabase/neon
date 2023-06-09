@@ -43,9 +43,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use compute_api::spec::Database;
-use compute_api::spec::GenericOption;
-use compute_api::spec::Role;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use utils::id::{NodeId, TenantId, TimelineId};
@@ -459,28 +456,9 @@ impl Endpoint {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
                 state: None,
-                // TODO pass this info from the test
-                roles: (0..100).map(|i| Role {
-                    name: format!("test_role_{i}").into(),
-                    encrypted_password: None,
-                    options: None,
-                }).collect(),
-                databases: (0..100).map(|i| Database {
-                    name: format!("test_database_{i}").into(),
-                    owner: "test_role_0".into(),
-                    options: None,
-                }).collect(),
-                settings: Some(vec![
-                    GenericOption {
-                        name: "shared_preload_libraries".into(),
-                        value: Some("neon,pg_stat_statements".into()),
-                        // TODO test with this larger list of extensions. But first they
-                        //      need to be built (see compute dockerfile).
-                        //
-                        // value: Some("neon,pg_stat_statements,timescaledb,pg_cron".into()),
-                        vartype: "string".into(),
-                    },
-                ]),
+                roles: vec![],
+                databases: vec![],
+                settings: None,
                 postgresql_conf: Some(postgresql_conf),
             },
             delta_operations: None,
