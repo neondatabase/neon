@@ -1340,8 +1340,9 @@ impl Tenant {
             .context("commit init_empty modification")?;
 
         let mut timelines = self.timelines.lock().unwrap();
-        // Call with `load_layers=true` to get next_open_layer set up.
-        let tl = uninit_tl.initialize_with_lock(ctx, &mut timelines, true)?;
+        // load_layers=false because create_empty_timeline already did that what's necessary (set next_open_layer)
+        // and modification.init_empty() already created layers.
+        let tl = uninit_tl.initialize_with_lock(ctx, &mut timelines, false)?;
         // The non-test code would call tl.activate() here.
         tl.set_state(TimelineState::Active);
         Ok(tl)
