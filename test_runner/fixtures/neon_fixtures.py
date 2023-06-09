@@ -2912,6 +2912,7 @@ SKIP_FILES = frozenset(
         "pg_internal.init",
         "pg.log",
         "zenith.signal",
+        "neon_compute_spec_id.txt",
         "pg_hba.conf",
         "postgresql.conf",
         "postmaster.opts",
