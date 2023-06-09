@@ -2878,9 +2878,6 @@ impl Tenant {
         // Init temporarily repo to get bootstrap data, this creates a directory in the `initdb_path` path
         run_initdb(self.conf, &initdb_path, pg_version)?;
 
-        // Create the special neon_superuser role
-        create_neon_superuser(self.conf, &initdb_path, pg_version)?;
-
         // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
         scopeguard::defer! {
             if let Err(e) = fs::remove_dir_all(&initdb_path) {
@@ -3366,51 +3363,6 @@ fn run_initdb(
         );
     }
 
-    Ok(())
-}
-
-/// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
-/// that we give to customers
-fn create_neon_superuser(
-    conf: &'static PageServerConf,
-    target_dir: &Path,
-    pg_version: u32,
-) -> anyhow::Result<()> {
-    let createuser_bin_path = conf.pg_bin_dir(pg_version)?.join("createuser");
-    let createuser_lib_dir = conf.pg_lib_dir(pg_version)?;
-    info!(
-        "running {} in {}, libdir: {}",
-        createuser_bin_path.display(),
-        target_dir.display(),
-        createuser_lib_dir.display()
-    );
-
-    let createuser_output = Command::new(&createuser_bin_path)
-        .arg("neon_superuser")
-        .arg("-d") // CREATEDB
-        .arg("-L") // NOLOGIN
-        .arg("-r") // CREATEROLE
-        .args(["-g", "pg_read_all_data"])
-        .args(["-g", "pg_write_all_data"])
-        .env_clear()
-        .env("LD_LIBRARY_PATH", &createuser_lib_dir)
-        .env("DYLD_LIBRARY_PATH", &createuser_lib_dir)
-        .stdout(Stdio::null())
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to execute {} at target dir {}",
-                createuser_bin_path.display(),
-                target_dir.display()
-            )
-        })?;
-
-    if !createuser_output.status.success() {
-        bail!(
-            "createuser failed: '{}'",
-            String::from_utf8_lossy(&createuser_output.stderr)
-        );
-    }
     Ok(())
 }
 

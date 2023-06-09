@@ -133,6 +133,23 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
     }
 }
 
+/// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
+/// that we give to customers
+fn create_neon_superuser(client: &mut Client) -> Result<()> {
+    client.simple_query(r#"
+            DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
+                    THEN
+                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
+                    END IF;
+                END
+            $$"#
+        )?;
+    Ok(())
+}
+
 impl ComputeNode {
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
@@ -356,6 +373,8 @@ impl ComputeNode {
             }
             Ok(client) => client,
         };
+
+        create_neon_superuser(&mut client)?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
         // Disable DDL forwarding because control plane already knows about these roles/databases.
