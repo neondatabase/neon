@@ -489,6 +489,7 @@ impl std::fmt::Display for WaitToBecomeActiveError {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum ShutdownError {
     AlreadyStopping,
 }
@@ -3451,6 +3452,7 @@ pub mod harness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
+        tenant: std::sync::Mutex<Option<Arc<Tenant>>>,
 
         pub lock_guard: (
             Option<RwLockReadGuard<'a, ()>>,
@@ -3510,6 +3512,7 @@ pub mod harness {
                 tenant_conf,
                 tenant_id,
                 lock_guard,
+                tenant: std::sync::Mutex::new(None),
             })
         }
 
@@ -3558,11 +3561,38 @@ pub mod harness {
             for timeline in tenant.timelines.lock().unwrap().values() {
                 timeline.set_state(TimelineState::Active);
             }
+            *self.tenant.lock().unwrap() = Some(Arc::clone(&tenant));
             Ok(tenant)
         }
 
         pub fn timeline_path(&self, timeline_id: &TimelineId) -> PathBuf {
             self.conf.timeline_path(timeline_id, &self.tenant_id)
+        }
+    }
+
+    impl<'a> Drop for TenantHarness<'a> {
+        fn drop(&mut self) {
+            if let Some(tenant) = self.tenant.lock().unwrap().take() {
+                // Shutdown with freeze_and_flush so that we don't drop `EphemeralFile` objects in `InMemoryLayer`s.
+                // Without this, we remove the ephemeral files on disk but they remain in pageserver's PageCache.
+                // This causes write-back failures down the line.
+                let tenant = Arc::clone(&tenant);
+                std::thread::Builder::new()
+                    .name("TenantHarness::drop thread".to_owned())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+                        rt.block_on(tenant.shutdown(true).instrument(
+                            info_span!("tenant_harness_drop_shutdown", tenant_id=%tenant.tenant_id),
+                        ))
+                        .unwrap()
+                    })
+                    .unwrap()
+                    .join()
+                    .unwrap();
+            }
         }
     }
 
@@ -3614,7 +3644,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_basic")?.load().await;
+        let harness = TenantHarness::create("test_basic")?;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)?;
 
@@ -3646,9 +3677,9 @@ mod tests {
 
     #[tokio::test]
     async fn no_duplicate_timelines() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("no_duplicate_timelines")?
-            .load()
-            .await;
+        let harness = TenantHarness::create("no_duplicate_timelines")?;
+        let harness = harness;
+        let (tenant, ctx) = harness.load().await;
         let _ = tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
 
         match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx) {
@@ -3678,8 +3709,9 @@ mod tests {
     #[tokio::test]
     async fn test_branch() -> anyhow::Result<()> {
         use std::str::from_utf8;
-
-        let (tenant, ctx) = TenantHarness::create("test_branch")?.load().await;
+        let harness = TenantHarness::create("test_branch")?;
+        let harness = harness;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
         let writer = tline.writer();
@@ -3774,10 +3806,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
-        let (tenant, ctx) =
-            TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
-                .load()
-                .await;
+        let harness =
+            TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?;
+        let harness = harness;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
@@ -3811,10 +3843,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_prohibit_branch_creation_on_pre_initdb_lsn() -> anyhow::Result<()> {
-        let (tenant, ctx) =
-            TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?
-                .load()
-                .await;
+        let harness = TenantHarness::create("test_prohibit_branch_creation_on_pre_initdb_lsn")?;
+        let harness = harness;
+        let (tenant, ctx) = harness.load().await;
 
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x50), DEFAULT_PG_VERSION, &ctx)?;
@@ -3862,10 +3893,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_branchpoints_from_an_inactive_timeline() -> anyhow::Result<()> {
-        let (tenant, ctx) =
-            TenantHarness::create("test_get_branchpoints_from_an_inactive_timeline")?
-                .load()
-                .await;
+        let harness = TenantHarness::create("test_get_branchpoints_from_an_inactive_timeline")?;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
@@ -3911,10 +3940,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_retain_data_in_parent_which_is_needed_for_child() -> anyhow::Result<()> {
-        let (tenant, ctx) =
-            TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
-                .load()
-                .await;
+        let harness =
+            TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
@@ -3935,10 +3963,8 @@ mod tests {
     }
     #[tokio::test]
     async fn test_parent_keeps_data_forever_after_branching() -> anyhow::Result<()> {
-        let (tenant, ctx) =
-            TenantHarness::create("test_parent_keeps_data_forever_after_branching")?
-                .load()
-                .await;
+        let harness = TenantHarness::create("test_parent_keeps_data_forever_after_branching")?;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
@@ -4068,7 +4094,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_images() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_images")?.load().await;
+        let harness = TenantHarness::create("test_images")?;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)?;
 
@@ -4134,7 +4161,8 @@ mod tests {
     //
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
+        let harness = TenantHarness::create("test_bulk_insert")?;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)?;
 
@@ -4177,7 +4205,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_random_updates")?.load().await;
+        let harness = TenantHarness::create("test_random_updates")?;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
 
@@ -4249,9 +4278,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_traverse_branches() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_traverse_branches")?
-            .load()
-            .await;
+        let harness = TenantHarness::create("test_traverse_branches")?;
+        let (tenant, ctx) = harness.load().await;
         let mut tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
 
@@ -4332,9 +4360,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_traverse_ancestors() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_traverse_ancestors")?
-            .load()
-            .await;
+        let harness = TenantHarness::create("test_traverse_ancestors")?;
+        let (tenant, ctx) = harness.load().await;
         let mut tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)?;
 
@@ -4394,9 +4421,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_test_timeline_is_usable() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_empty_test_timeline_is_usable")?
-            .load()
-            .await;
+        let harness = TenantHarness::create("test_empty_test_timeline_is_usable")?;
+        let (tenant, ctx) = harness.load().await;
         let tline =
             tenant.create_test_timeline(TIMELINE_ID, Lsn(0x20), DEFAULT_PG_VERSION, &ctx)?;
 
