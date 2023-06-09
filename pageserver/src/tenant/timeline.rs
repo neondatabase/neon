@@ -216,7 +216,7 @@ pub struct Timeline {
     pub initdb_lsn: Lsn,
 
     /// When did we last calculate the partitioning?
-    partitioning: Mutex<(KeyPartitioning, Lsn)>,
+    pub(super) partitioning: Mutex<(KeyPartitioning, Lsn)>,
 
     /// Configuration: how often should the partitioning be recalculated.
     repartition_threshold: u64,
@@ -1306,7 +1306,7 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.checkpoint_timeout)
     }
 
-    fn get_compaction_target_size(&self) -> u64 {
+    pub(super) fn get_compaction_target_size(&self) -> u64 {
         let tenant_conf = self.tenant_conf.read().unwrap();
         tenant_conf
             .compaction_target_size
@@ -2386,8 +2386,11 @@ impl Timeline {
                 ValueReconstructResult::Missing => {
                     return Err(layer_traversal_error(
                         format!(
-                            "could not find data for key {} at LSN {}, for request at LSN {}",
-                            key, cont_lsn, request_lsn
+                            "could not find data for key {} at LSN {}, for request at LSN {}\n{}",
+                            key,
+                            cont_lsn,
+                            request_lsn,
+                            std::backtrace::Backtrace::force_capture(),
                         ),
                         traversal_path,
                     ));
@@ -3000,7 +3003,7 @@ impl Timeline {
         Ok((new_delta_filename, LayerFileMetadata::new(sz)))
     }
 
-    async fn repartition(
+    pub(super) async fn repartition(
         &self,
         lsn: Lsn,
         partition_size: u64,
