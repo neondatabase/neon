@@ -364,6 +364,8 @@ impl ComputeNode {
                     .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
 
                 let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
+                // Disable forwarding so that users don't get a cloud_admin role
+                client.simple_query("SET neon.forward_ddl = false")?;
                 client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
                 client.simple_query("GRANT zenith_admin TO cloud_admin")?;
                 drop(client);
@@ -374,11 +376,11 @@ impl ComputeNode {
             Ok(client) => client,
         };
 
-        create_neon_superuser(&mut client)?;
-
-        // Proceed with post-startup configuration. Note, that order of operations is important.
         // Disable DDL forwarding because control plane already knows about these roles/databases.
         client.simple_query("SET neon.forward_ddl = false")?;
+
+        // Proceed with post-startup configuration. Note, that order of operations is important.
+        create_neon_superuser(&mut client)?;
         let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
