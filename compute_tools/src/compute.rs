@@ -467,13 +467,13 @@ impl ComputeNode {
 
             // Get current spec_id
             let path = Path::new(&self.pgdata).join("neon_compute_spec_id.txt");
-            let current_spec_id = std::fs::read_to_string(&path).ok();
+            let current_spec_id = std::fs::read_to_string(path).ok();
 
             // Respec if needed
             if current_spec_id == Some(spec_id.clone()) {
                 info!("no need to respec");
             } else {
-                info!("respeccing {:?} {:?}", current_spec_id, spec_id.clone());
+                info!("respeccing {:?} {:?}", current_spec_id, &spec_id);
 
                 self.apply_config(&compute_state)?;
                 self.cache_spec_id(&compute_state, spec_id)?;
@@ -499,13 +499,11 @@ impl ComputeNode {
         Ok(pg)
     }
 
-    fn cache_spec_id(&self, compute_state: &ComputeState, spec_id: String) -> anyhow::Result<()>{
+    fn cache_spec_id(&self, compute_state: &ComputeState, spec_id: String) -> anyhow::Result<()> {
         let spec = &compute_state.pspec.as_ref().expect("spec must be set");
         let cmd = format!(
             "set_compute_spec_id {} {} {}",
-            spec.tenant_id,
-            spec.timeline_id,
-            spec_id,
+            spec.tenant_id, spec.timeline_id, spec_id,
         );
         let mut config = postgres::Config::from_str(&spec.pageserver_connstr)?;
 

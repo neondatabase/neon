@@ -915,8 +915,7 @@ where
             self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, None, false, ctx)
                 .await?;
             pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-        }
-        else if query_string.starts_with("set_compute_spec_id ") {
+        } else if query_string.starts_with("set_compute_spec_id ") {
             let (_, params_raw) = query_string.split_at("set_compute_spec_id ".len());
             let params = params_raw.split_whitespace().collect::<Vec<_>>();
 
