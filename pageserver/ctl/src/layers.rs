@@ -107,8 +107,7 @@ fn read_delta_segments(path: impl AsRef<Path>) -> Result<Vec<(i128, usize)>> {
     let group_sizes = group_iter
         .into_iter()
         .map(|(segment, lengths_group)| {
-            let lengths: Vec<_> = lengths_group.collect();
-            let sum: usize = lengths.iter().map(|(_k, len)| len).sum();
+            let sum: usize = lengths_group.map(|(_k, len)| len).sum();
             (segment, sum)
         });
     Ok(group_sizes.collect())
