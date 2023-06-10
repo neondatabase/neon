@@ -48,7 +48,7 @@ pub(crate) enum LayerCmd {
         timeline: String,
         /// The id from list-layer command
         id: usize,
-    }
+    },
 }
 
 // Return (key, value.len) for all keys, sorted by key.
@@ -93,24 +93,25 @@ fn read_delta_file(path: impl AsRef<Path>) -> Result<Vec<(Key, usize)>> {
 // 8MB each. Group keys by segment, and report segment size for each.
 //
 // 8MB is chosen as the segment size because we're unlikely to make
-// s3 partial downloads smaller than 8KB (due to cost). So summarizing
-// layer metadata in 8KB segments could be enough to generate good test
+// s3 partial downloads smaller than 8MB (due to cost). So summarizing
+// layer metadata in 8MB segments could be enough to generate good test
 // data for write amplification tests.
+//
+// Note that the segments are fixed, and don't depend on what keyspace
+// is actually in use.
 fn read_delta_segments(path: impl AsRef<Path>) -> Result<Vec<(i128, usize)>> {
     fn key_to_segment(key: &Key) -> i128 {
-        key.to_i128() >> 26
+        // A page is 8KB. So 1024 pages are 8MB.
+        key.to_i128() >> 10
     }
 
     use itertools::Itertools;
     let delta_metadata = read_delta_file(path)?;
     let group_iter = delta_metadata.iter().group_by(|(k, _)| key_to_segment(k));
-    let group_sizes = group_iter
-        .into_iter()
-        .map(|(segment, lengths_group)| {
-            let lengths: Vec<_> = lengths_group.collect();
-            let sum: usize = lengths.iter().map(|(_k, len)| len).sum();
-            (segment, sum)
-        });
+    let group_sizes = group_iter.into_iter().map(|(segment, lengths_group)| {
+        let sum: usize = lengths_group.map(|(_k, len)| len).sum();
+        (segment, sum)
+    });
     Ok(group_sizes.collect())
 }
 
@@ -210,7 +211,7 @@ pub(crate) fn main(cmd: &LayerCmd) -> Result<()> {
                     idx += 1;
                 }
             }
-        },
+        }
         LayerCmd::GetStats {
             path,
             tenant,
@@ -239,7 +240,7 @@ pub(crate) fn main(cmd: &LayerCmd) -> Result<()> {
                     idx += 1;
                 }
             }
-        },
+        }
     }
     Ok(())
 }
