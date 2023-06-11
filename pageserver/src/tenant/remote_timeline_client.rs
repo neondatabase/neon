@@ -866,10 +866,8 @@ impl RemoteTimelineClient {
                 "Found {} files not bound to index_file.json, proceeding with their deletion",
                 remaining.len()
             );
-            for file in remaining {
-                warn!("Removing {}", file.object_name().unwrap_or_default());
-                self.storage_impl.delete(&file).await?;
-            }
+            warn!("About to remove {} files", remaining.len());
+            self.storage_impl.delete_objects(&remaining).await?;
         }
 
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
