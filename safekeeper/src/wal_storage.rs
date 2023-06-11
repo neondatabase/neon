@@ -146,15 +146,7 @@ impl PhysicalStorage {
         //      If not, maybe it's better to call fsync() here to be sure?
         let flush_lsn = write_lsn;
 
-        debug!(
-            "initialized storage for timeline {}, flush_lsn={}, commit_lsn={}, peer_horizon_lsn={}",
-            ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
-        );
-        if flush_lsn < state.commit_lsn || flush_lsn < state.peer_horizon_lsn {
-            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than either commit_lsn or peer_horizon_lsn from control file", ttid.timeline_id);
-        }
-
-        Ok(PhysicalStorage {
+        let mut storage = PhysicalStorage {
             metrics: WalStorageMetrics::default(),
             timeline_dir,
             conf: conf.clone(),
@@ -164,7 +156,39 @@ impl PhysicalStorage {
             flush_record_lsn: flush_lsn,
             decoder: WalStreamDecoder::new(write_lsn, state.server.pg_version / 10000),
             file: None,
-        })
+        };
+
+        if write_lsn != Lsn::INVALID {
+            // fsync last segment as we're setting flush_lsn to write_lsn.
+            // Previous segments must have been fsynced before starting new one.
+            let mut last_segno = storage.write_lsn.segment_number(storage.wal_seg_size);
+            // We could have stopped on the segment boundary; fsync the previous
+            // segment then, we might have crashed before that.
+            if storage.write_lsn.segment_offset(storage.wal_seg_size) == 0 {
+                last_segno -= 1;
+            }
+            // 1 is the first segment
+            if last_segno >= 1 {
+                // We can create timeline without underlying WAL (and do that in
+                // s3_wal_reply test) if e.g. it is in s3, so ignore missing
+                // file.
+                if let Ok((mut last_file, _)) = storage.open_or_create(last_segno) {
+                    storage
+                        .fsync_file(&mut last_file)
+                        .with_context(|| format!("fsync last segment segno={last_segno}"))?;
+                }
+            }
+        }
+
+        debug!(
+            "initialized storage for timeline {}, flush_lsn={}, commit_lsn={}, peer_horizon_lsn={}",
+            ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
+        );
+        if flush_lsn < state.commit_lsn || flush_lsn < state.peer_horizon_lsn {
+            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than either commit_lsn or peer_horizon_lsn from control file", ttid.timeline_id);
+        }
+
+        Ok(storage)
     }
 
     /// Get all known state of the storage.
@@ -382,6 +406,15 @@ impl Storage for PhysicalStorage {
         // Quick exit if nothing to do to avoid writing up to 16 MiB of zeros on
         // disk (this happens on each connect).
         if end_pos == self.write_lsn {
+            // ... we still need to rename last to partial to confirm asserts.
+            // It's likely better to remove .partial altogether.
+            let segno = end_pos.segment_number(self.wal_seg_size);
+            let (_, is_partial) = self.open_or_create(segno)?;
+            if !is_partial {
+                let (wal_file_path, wal_file_partial_path) =
+                    wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+                fs::rename(wal_file_path, wal_file_partial_path)?;
+            }
             return Ok(());
         }
 
