@@ -1,3 +1,5 @@
+#! /usr/bin/env node
+
 //
 // The script parses Allure reports and posts a comment with a summary of the test results to the PR or to the latest commit in the branch.
 //
@@ -19,7 +21,7 @@
 //       })
 //
 
-// Analog of Python's defaultdict.
+// Equivalent of Python's defaultdict.
 //
 // const dm = new DefaultMap(() => new DefaultMap(() => []))
 // dm["firstKey"]["secondKey"].push("value")
@@ -206,4 +208,61 @@ module.exports = async ({ github, context, fetch, report }) => {
             ...ownerRepoParams,
         })
     }
+}
+
+// Equivalent of Python's `if __name__ == "__main__":`
+// https://nodejs.org/docs/latest/api/modules.html#accessing-the-main-module
+if (require.main === module) {
+    // Poor man's argument parsing: we expect the third argument is a JSON URL (0: node binary, 1: this script, 2: JSON url)
+    if (process.argv.length !== 3) {
+        console.error(`Unexpected number of arguments\nUsage: node ${process.argv[1]} <jsonUrl>`)
+        process.exit(1)
+    }
+    const jsonUrl = process.argv[2]
+
+    try {
+        new URL(jsonUrl)
+    } catch (error) {
+        console.error(`Invalid URL: ${jsonUrl}\nUsage: node ${process.argv[1]} <jsonUrl>`)
+        process.exit(1)
+    }
+
+    const htmlUrl = jsonUrl.replace("/data/suites.json", "/index.html")
+
+    const githubMock = {
+        rest: {
+            issues: {
+                createComment: console.log,
+                listComments: async () => ({ data: [] }),
+                updateComment: console.log
+            },
+            repos: {
+                createCommitComment: console.log,
+                listCommentsForCommit: async () => ({ data: [] }),
+                updateCommitComment: console.log
+            }
+        }
+    }
+
+    const contextMock = {
+        repo: {
+            owner: 'testOwner',
+            repo: 'testRepo'
+        },
+        payload: {
+            number: 42,
+            pull_request: null,
+        },
+        sha: '0000000000000000000000000000000000000000',
+    }
+
+    module.exports({
+        github: githubMock,
+        context: contextMock,
+        fetch: fetch,
+        report: {
+            reportUrl: htmlUrl,
+            reportJsonUrl: jsonUrl,
+        }
+    })
 }
