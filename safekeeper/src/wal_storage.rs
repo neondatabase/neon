@@ -98,6 +98,22 @@ pub struct PhysicalStorage {
     /// - points to write_lsn, so no seek is needed for writing
     /// - doesn't point to the end of the segment
     file: Option<File>,
+
+    /// When false, we have just initialized storage using the LSN from find_end_of_wal().
+    /// In this case, [`write_lsn`] can be less than actually written WAL on disk. In particular,
+    /// there can be a case with unexpected .partial file.
+    ///
+    /// Imagine the following:
+    /// - 000000010000000000000001
+    ///   - it was fully written, but the last record is split between 2 segments
+    ///   - after restart, find_end_of_wal() returned 0/1FFFFF0, which is in the end of this segment
+    ///   - write_lsn, write_record_lsn and flush_record_lsn were initialized to 0/1FFFFF0
+    /// - 000000010000000000000002.partial
+    ///   - it has only 1 byte written, which is not enough to make a full WAL record
+    ///
+    /// Partial segment 002 has no WAL records, and it will be removed by the next truncate_wal().
+    /// This flag will be set to true after the first truncate_wal() call.
+    is_truncated_after_restart: bool,
 }
 
 impl PhysicalStorage {
@@ -157,6 +173,7 @@ impl PhysicalStorage {
             flush_record_lsn: flush_lsn,
             decoder: WalStreamDecoder::new(write_lsn, state.server.pg_version / 10000),
             file: None,
+            is_truncated_after_restart: false,
         })
     }
 
@@ -381,7 +398,10 @@ impl Storage for PhysicalStorage {
 
         // Quick exit if nothing to do to avoid writing up to 16 MiB of zeros on
         // disk (this happens on each connect).
-        if end_pos == self.write_lsn {
+        if self.is_truncated_after_restart
+            && end_pos == self.write_lsn
+            && end_pos == self.flush_record_lsn
+        {
             return Ok(());
         }
 
@@ -414,6 +434,7 @@ impl Storage for PhysicalStorage {
         self.write_lsn = end_pos;
         self.write_record_lsn = end_pos;
         self.flush_record_lsn = end_pos;
+        self.is_truncated_after_restart = true;
         Ok(())
     }
 
