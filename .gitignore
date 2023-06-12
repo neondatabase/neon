@@ -1,5 +1,6 @@
 /pg_install
 /target
+/alek_ext/target
 /tmp_check
 /tmp_check_cli
 __pycache__/
