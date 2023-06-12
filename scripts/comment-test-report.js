@@ -34,34 +34,7 @@ class DefaultMap extends Map {
     }
 }
 
-module.exports = async ({ github, context, fetch, report }) => {
-    // Marker to find the comment in the subsequent runs
-    const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
-    // If we run the script in the PR or in the branch (main/release/...)
-    const isPullRequest = !!context.payload.pull_request
-    // Latest commit in PR or in the branch
-    const commitSha = isPullRequest ? context.payload.pull_request.head.sha : context.sha
-    // Let users know that the comment is updated automatically
-    const autoupdateNotice = `<div align="right"><sub>The comment gets automatically updated with the latest test results<br>${commitSha} at ${new Date().toISOString()} :recycle:</sub></div>`
-    // GitHub bot id taken from (https://api.github.com/users/github-actions[bot])
-    const githubActionsBotId = 41898282
-    // Commend body itself
-    let commentBody = `${startMarker}\n`
-
-    // Common parameters for GitHub API requests
-    const ownerRepoParams = {
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-    }
-
-    const {reportUrl, reportJsonUrl} = report
-
-    if (!reportUrl || !reportJsonUrl) {
-        commentBody += `#### No tests were run or test report is not available\n`
-        commentBody += autoupdateNotice
-        return
-    }
-
+const parseReportJson = async ({ reportJsonUrl, fetch }) => {
     const suites = await (await fetch(reportJsonUrl)).json()
 
     // Allure distinguishes "failed" (with an assertion error) and "broken" (with any other error) tests.
@@ -85,7 +58,7 @@ module.exports = async ({ github, context, fetch, report }) => {
                 let buildType, pgVersion
                 const match = test.name.match(/[\[-](?<buildType>debug|release)-pg(?<pgVersion>\d+)[-\]]/)?.groups
                 if (match) {
-                    ({buildType, pgVersion} = match)
+                    ({ buildType, pgVersion } = match)
                 } else {
                     // It's ok, we embed BUILD_TYPE and Postgres Version into the test name only for regress suite and do not for other suites (like performance).
                     console.info(`Cannot get BUILD_TYPE and Postgres Version from test name: "${test.name}", defaulting to "release" and "14"`)
@@ -125,37 +98,68 @@ module.exports = async ({ github, context, fetch, report }) => {
         }
     }
 
+    return {
+        failedTests,
+        failedTestsCount,
+        passedTests,
+        passedTestsCount,
+        skippedTests,
+        skippedTestsCount,
+        flakyTests,
+        flakyTestsCount,
+        retriedTests,
+        pgVersions,
+    }
+}
+
+const reportSummary = async (params) => {
+    const {
+        failedTests,
+        failedTestsCount,
+        passedTests,
+        passedTestsCount,
+        skippedTests,
+        skippedTestsCount,
+        flakyTests,
+        flakyTestsCount,
+        retriedTests,
+        pgVersions,
+        reportUrl,
+    } = params
+
+    let summary = ""
+
     const totalTestsCount = failedTestsCount + passedTestsCount + skippedTestsCount
-    commentBody += `### ${totalTestsCount} tests run: ${passedTestsCount} passed, ${failedTestsCount} failed, ${skippedTestsCount} skipped ([full report](${reportUrl}))\n___\n`
+    summary += `### ${totalTestsCount} tests run: ${passedTestsCount} passed, ${failedTestsCount} failed, ${skippedTestsCount} skipped ([full report](${reportUrl}))\n___\n`
 
     // Print test resuls from the newest to the oldest Postgres version for release and debug builds.
     for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
         if (Object.keys(failedTests[pgVersion]).length > 0) {
-            commentBody += `#### Failures on Posgres ${pgVersion}\n\n`
+            summary += `#### Failures on Posgres ${pgVersion}\n\n`
             for (const [testName, tests] of Object.entries(failedTests[pgVersion])) {
                 const links = []
                 for (const test of tests) {
                     const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}`
                     links.push(`[${test.buildType}](${allureLink})`)
                 }
-                commentBody += `- \`${testName}\`: ${links.join(", ")}\n`
+                summary += `- \`${testName}\`: ${links.join(", ")}\n`
             }
 
             const testsToRerun = Object.values(failedTests[pgVersion]).map(x => x[0].name)
             const command = `DEFAULT_PG_VERSION=${pgVersion} scripts/pytest -k "${testsToRerun.join(" or ")}"`
 
-            commentBody += "```\n"
-            commentBody += `# Run failed on Postgres ${pgVersion} tests locally:\n`
-            commentBody += `${command}\n`
-            commentBody += "```\n"
+            summary += "```\n"
+            summary += `# Run failed on Postgres ${pgVersion} tests locally:\n`
+            summary += `${command}\n`
+            summary += "```\n"
         }
     }
 
     if (flakyTestsCount > 0) {
-        commentBody += `<details>\n<summary>Flaky tests (${flakyTestsCount})</summary>\n\n`
+        summary += `<details>\n<summary>Flaky tests (${flakyTestsCount})</summary>\n\n`
         for (const pgVersion of Array.from(pgVersions).sort().reverse()) {
             if (Object.keys(flakyTests[pgVersion]).length > 0) {
-                commentBody += `#### Postgres ${pgVersion}\n\n`
+                summary += `#### Postgres ${pgVersion}\n\n`
                 for (const [testName, tests] of Object.entries(flakyTests[pgVersion])) {
                     const links = []
                     for (const test of tests) {
@@ -163,11 +167,57 @@ module.exports = async ({ github, context, fetch, report }) => {
                         const status = test.status === "passed" ? ":white_check_mark:" : ":x:"
                         links.push(`[${status} ${test.buildType}](${allureLink})`)
                     }
-                    commentBody += `- \`${testName}\`: ${links.join(", ")}\n`
+                    summary += `- \`${testName}\`: ${links.join(", ")}\n`
                 }
             }
         }
-        commentBody += "\n</details>\n"
+        summary += "\n</details>\n"
+    }
+
+    return summary
+}
+
+module.exports = async ({ github, context, fetch, report }) => {
+    // Marker to find the comment in the subsequent runs
+    const startMarker = `<!--AUTOMATIC COMMENT START #${context.payload.number}-->`
+    // If we run the script in the PR or in the branch (main/release/...)
+    const isPullRequest = !!context.payload.pull_request
+    // Latest commit in PR or in the branch
+    const commitSha = isPullRequest ? context.payload.pull_request.head.sha : context.sha
+    // Let users know that the comment is updated automatically
+    const autoupdateNotice = `<div align="right"><sub>The comment gets automatically updated with the latest test results<br>${commitSha} at ${new Date().toISOString()} :recycle:</sub></div>`
+    // GitHub bot id taken from (https://api.github.com/users/github-actions[bot])
+    const githubActionsBotId = 41898282
+    // Commend body itself
+    let commentBody = `${startMarker}\n`
+
+    // Common parameters for GitHub API requests
+    const ownerRepoParams = {
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+    }
+
+    const {reportUrl, reportJsonUrl} = report
+
+    if (!reportUrl || !reportJsonUrl) {
+        commentBody += `#### No tests were run or test report is not available\n`
+        commentBody += autoupdateNotice
+        return
+    }
+
+    try {
+        const parsed = await parseReportJson({ reportJsonUrl, fetch })
+        commentBody += await reportSummary({ ...parsed, reportUrl })
+    } catch (error) {
+        commentBody += `### [full report](${reportUrl})\n___\n`
+        commentBody += `#### Failed to create a summary for the test run: \n`
+        commentBody += "```\n"
+        commentBody += `${error.stack}\n`
+        commentBody += "```\n"
+        commentBody += "\nTo reproduce and debug the error locally run:\n"
+        commentBody += "```\n"
+        commentBody += `scripts/comment-test-report.js ${reportJsonUrl}`
+        commentBody += "\n```\n"
     }
 
     commentBody += autoupdateNotice
