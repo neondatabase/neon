@@ -1605,20 +1605,6 @@ fn is_slru_block_key(key: Key) -> bool {
         && key.field6 != 0xffffffff // and not SlruSegSize
 }
 
-#[cfg(test)]
-pub fn create_test_timeline(
-    tenant: &crate::tenant::Tenant,
-    timeline_id: utils::id::TimelineId,
-    pg_version: u32,
-    ctx: &RequestContext,
-) -> anyhow::Result<std::sync::Arc<Timeline>> {
-    let tline = tenant.create_test_timeline(timeline_id, Lsn(8), pg_version, ctx)?;
-    let mut m = tline.begin_modification(Lsn(8));
-    m.init_empty()?;
-    m.commit()?;
-    Ok(tline)
-}
-
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
