@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import pytest
 from _pytest.config import Config
@@ -56,3 +56,17 @@ def pytest_collection_modifyitems(config: Config, items: List[pytest.Item]):
             # Rerun 3 times = 1 original run + 2 reruns
             log.info(f"Marking {item.nodeid} as flaky. It will be rerun up to 3 times")
             item.add_marker(pytest.mark.flaky(reruns=2))
+
+            # pytest-rerunfailures is not compatible with pytest-timeout (timeout is not set for reruns),
+            #   we can workaround it by setting `timeout_func_only` to True[1].
+            # Unfortunately, setting `timeout_func_only = True` globally in pytest.ini is broken[2],
+            #   but we still can do it using pytest marker.
+            #
+            # - [1] https://github.com/pytest-dev/pytest-rerunfailures/issues/99
+            # - [2] https://github.com/pytest-dev/pytest-timeout/issues/142
+
+            # Slap Any to avoid mypy error: Unsupported target for indexed assignment ("Mapping[str, Any]"),
+            #   which is, strictly speaking correct, but we need to modify marker kwargs in place
+            timeout_marker: Any = item.get_closest_marker("timeout")
+            if timeout_marker is not None:
+                timeout_marker.kwargs["func_only"] = True
