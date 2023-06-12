@@ -16,9 +16,12 @@ use futures::FutureExt;
 use pageserver_api::models::TimelineState;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
+use tokio::sync::OwnedMutexGuard;
 use tokio::task::JoinSet;
 use tracing::*;
+use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
 
 use std::cmp::min;
@@ -63,6 +66,7 @@ use crate::tenant::remote_timeline_client::PersistIndexPartWithDeletedFlagError;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
 use crate::tenant::storage_layer::Layer;
+use crate::InitializationOrder;
 
 use crate::virtual_file::VirtualFile;
 use crate::walredo::PostgresRedoManager;
@@ -77,11 +81,12 @@ use utils::{
     lsn::{Lsn, RecordLsn},
 };
 
-mod blob_io;
+pub mod blob_io;
 pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
+pub mod manifest;
 
 pub mod metadata;
 mod par_fsync;
@@ -184,24 +189,14 @@ impl UninitializedTimeline<'_> {
     /// Ensures timeline data is valid, loads it into pageserver's memory and removes
     /// uninit mark file on success.
     ///
-    /// The new timeline is initialized in Active state, and its background jobs are
-    /// started
-    pub fn initialize(self, ctx: &RequestContext) -> anyhow::Result<Arc<Timeline>> {
-        let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(ctx, &mut timelines, true, true)
-    }
-
-    /// Like `initialize`, but the caller is already holding lock on Tenant::timelines.
-    /// If `launch_wal_receiver` is false, the WAL receiver not launched, even though
-    /// timeline is initialized in Active state. This is used during tenant load and
-    /// attach, where the WAL receivers are launched only after all the timelines have
-    /// been initialized.
+    /// This function launches the flush loop if not already done.
+    ///
+    /// The caller is responsible for activating the timeline (function `.activate()`).
     fn initialize_with_lock(
         mut self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         timelines: &mut HashMap<TimelineId, Arc<Timeline>>,
         load_layer_map: bool,
-        activate: bool,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_id = self.timeline_id;
         let tenant_id = self.owning_tenant.tenant_id;
@@ -237,12 +232,6 @@ impl UninitializedTimeline<'_> {
                 v.insert(Arc::clone(&new_timeline));
 
                 new_timeline.maybe_spawn_flush_loop();
-
-                if activate {
-                    new_timeline
-                        .activate(ctx)
-                        .context("initializing timeline activation")?;
-                }
             }
         }
 
@@ -254,6 +243,7 @@ impl UninitializedTimeline<'_> {
         self,
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
         let raw_timeline = self.raw_timeline()?;
@@ -279,7 +269,9 @@ impl UninitializedTimeline<'_> {
         // Initialize without loading the layer map. We started with an empty layer map, and already
         // updated it for the layers that we created during the import.
         let mut timelines = self.owning_tenant.timelines.lock().unwrap();
-        self.initialize_with_lock(ctx, &mut timelines, false, true)
+        let tl = self.initialize_with_lock(ctx, &mut timelines, false)?;
+        tl.activate(broker_client, None, ctx);
+        Ok(tl)
     }
 
     fn raw_timeline(&self) -> anyhow::Result<&Arc<Timeline>> {
@@ -454,14 +446,51 @@ pub enum DeleteTimelineError {
     #[error("NotFound")]
     NotFound,
     #[error("HasChildren")]
-    HasChildren,
+    HasChildren(Vec<TimelineId>),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+pub enum SetStoppingError {
+    AlreadyStopping,
+    Broken,
 }
 
 struct RemoteStartupData {
     index_part: IndexPart,
     remote_metadata: TimelineMetadata,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WaitToBecomeActiveError {
+    WillNotBecomeActive {
+        tenant_id: TenantId,
+        state: TenantState,
+    },
+    TenantDropped {
+        tenant_id: TenantId,
+    },
+}
+
+impl std::fmt::Display for WaitToBecomeActiveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaitToBecomeActiveError::WillNotBecomeActive { tenant_id, state } => {
+                write!(
+                    f,
+                    "Tenant {} will not become active. Current state: {:?}",
+                    tenant_id, state
+                )
+            }
+            WaitToBecomeActiveError::TenantDropped { tenant_id } => {
+                write!(f, "Tenant {tenant_id} will not become active (dropped)")
+            }
+        }
+    }
+}
+
+pub(crate) enum ShutdownError {
+    AlreadyStopping,
 }
 
 impl Tenant {
@@ -484,6 +513,7 @@ impl Tenant {
         local_metadata: Option<TimelineMetadata>,
         ancestor: Option<Arc<Timeline>>,
         first_save: bool,
+        init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_id;
@@ -509,6 +539,7 @@ impl Tenant {
                 up_to_date_metadata,
                 ancestor.clone(),
                 remote_client,
+                init_order,
             )?;
 
             let timeline = UninitializedTimeline {
@@ -519,7 +550,7 @@ impl Tenant {
             // Do not start walreceiver here. We do need loaded layer map for reconcile_with_remote
             // But we shouldnt start walreceiver before we have all the data locally, because working walreceiver
             // will ingest data which may require looking at the layers which are not yet available locally
-            match timeline.initialize_with_lock(ctx, &mut timelines_accessor, true, false) {
+            match timeline.initialize_with_lock(ctx, &mut timelines_accessor, true) {
                 Ok(new_timeline) => new_timeline,
                 Err(e) => {
                     error!("Failed to initialize timeline {tenant_id}/{timeline_id}: {e:?}");
@@ -534,11 +565,12 @@ impl Tenant {
                             up_to_date_metadata,
                             ancestor.clone(),
                             None,
+                            None,
                         )
                         .with_context(|| {
                             format!("creating broken timeline data for {tenant_id}/{timeline_id}")
                         })?;
-                    broken_timeline.set_state(TimelineState::Broken);
+                    broken_timeline.set_broken(e.to_string());
                     timelines_accessor.insert(timeline_id, broken_timeline);
                     return Err(e);
                 }
@@ -599,6 +631,7 @@ impl Tenant {
     pub(crate) fn spawn_attach(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
+        broker_client: storage_broker::BrokerClientChannel,
         remote_storage: GenericRemoteStorage,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Tenant>> {
@@ -628,15 +661,26 @@ impl Tenant {
             "attach tenant",
             false,
             async move {
-                match tenant_clone.attach(ctx).await {
-                    Ok(_) => {}
+                match tenant_clone.attach(&ctx).await {
+                    Ok(()) => {
+                        info!("attach finished, activating");
+                        tenant_clone.activate(broker_client, None, &ctx);
+                    }
                     Err(e) => {
-                        tenant_clone.set_broken(e.to_string());
-                        error!("error attaching tenant: {:?}", e);
+                        error!("attach failed, setting tenant state to Broken: {:?}", e);
+                        tenant_clone.state.send_modify(|state| {
+                            assert_eq!(*state, TenantState::Attaching, "the attach task owns the tenant state until activation is complete");
+                            *state = TenantState::broken_from_reason(e.to_string());
+                        });
                     }
                 }
                 Ok(())
-            },
+            }
+            .instrument({
+                let span = tracing::info_span!(parent: None, "attach", tenant_id=%tenant_id);
+                span.follows_from(Span::current());
+                span
+            }),
         );
         Ok(tenant)
     }
@@ -644,8 +688,11 @@ impl Tenant {
     ///
     /// Background task that downloads all data for a tenant and brings it to Active state.
     ///
-    #[instrument(skip_all, fields(tenant_id=%self.tenant_id))]
-    async fn attach(self: &Arc<Tenant>, ctx: RequestContext) -> anyhow::Result<()> {
+    /// No background tasks are started as part of this routine.
+    ///
+    async fn attach(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
         let marker_file = self.conf.tenant_attaching_mark_file_path(&self.tenant_id);
         if !tokio::fs::try_exists(&marker_file)
             .await
@@ -718,7 +765,7 @@ impl Tenant {
                     );
                     remote_index_and_client.insert(timeline_id, (index_part, client));
                 }
-                MaybeDeletedIndexPart::Deleted => {
+                MaybeDeletedIndexPart::Deleted(_) => {
                     info!("timeline {} is deleted, skipping", timeline_id);
                     continue;
                 }
@@ -735,20 +782,14 @@ impl Tenant {
                 .expect("just put it in above");
 
             // TODO again handle early failure
-            self.load_remote_timeline(
-                timeline_id,
-                index_part,
-                remote_metadata,
-                remote_client,
-                &ctx,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load remote timeline {} for tenant {}",
-                    timeline_id, self.tenant_id
-                )
-            })?;
+            self.load_remote_timeline(timeline_id, index_part, remote_metadata, remote_client, ctx)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load remote timeline {} for tenant {}",
+                        timeline_id, self.tenant_id
+                    )
+                })?;
         }
 
         std::fs::remove_file(&marker_file)
@@ -757,10 +798,6 @@ impl Tenant {
             .context("fsync tenant directory after unlinking attach marker file")?;
 
         utils::failpoint_sleep_millis_async!("attach-before-activate");
-
-        // Start background operations and open the tenant for business.
-        // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate(&ctx)?;
 
         info!("Done");
 
@@ -827,6 +864,7 @@ impl Tenant {
             local_metadata,
             ancestor,
             true,
+            None,
             ctx,
         )
         .await
@@ -852,7 +890,6 @@ impl Tenant {
         ))
     }
 
-    ///
     /// Load a tenant that's available on local disk
     ///
     /// This is used at pageserver startup, to rebuild the in-memory
@@ -862,14 +899,17 @@ impl Tenant {
     ///
     /// If the loading fails for some reason, the Tenant will go into Broken
     /// state.
-    ///
-    #[instrument(skip(conf, remote_storage, ctx), fields(tenant_id=%tenant_id))]
+    #[instrument(skip_all, fields(tenant_id=%tenant_id))]
     pub fn spawn_load(
         conf: &'static PageServerConf,
         tenant_id: TenantId,
+        broker_client: storage_broker::BrokerClientChannel,
         remote_storage: Option<GenericRemoteStorage>,
+        init_order: Option<InitializationOrder>,
         ctx: &RequestContext,
     ) -> Arc<Tenant> {
+        debug_assert_current_span_has_tenant_id();
+
         let tenant_conf = match Self::load_tenant_config(conf, tenant_id) {
             Ok(conf) => conf,
             Err(e) => {
@@ -901,19 +941,34 @@ impl Tenant {
             "initial tenant load",
             false,
             async move {
-                match tenant_clone.load(&ctx).await {
-                    Ok(()) => {}
+                let mut init_order = init_order;
+
+                // take the completion because initial tenant loading will complete when all of
+                // these tasks complete.
+                let _completion = init_order.as_mut().and_then(|x| x.initial_tenant_load.take());
+
+                match tenant_clone.load(init_order.as_ref(), &ctx).await {
+                    Ok(()) => {
+                        debug!("load finished, activating");
+                        let background_jobs_can_start = init_order.as_ref().map(|x| &x.background_jobs_can_start);
+                        tenant_clone.activate(broker_client, background_jobs_can_start, &ctx);
+                    }
                     Err(err) => {
-                        tenant_clone.set_broken(err.to_string());
-                        error!("could not load tenant {tenant_id}: {err:?}");
+                        error!("load failed, setting tenant state to Broken: {err:?}");
+                        tenant_clone.state.send_modify(|state| {
+                            assert_eq!(*state, TenantState::Loading, "the loading task owns the tenant state until activation is complete");
+                            *state = TenantState::broken_from_reason(err.to_string());
+                        });
                     }
                 }
-                info!("initial load for tenant {tenant_id} finished!");
-                Ok(())
-            },
+               Ok(())
+            }
+            .instrument({
+                let span = tracing::info_span!(parent: None, "load", tenant_id=%tenant_id);
+                span.follows_from(Span::current());
+                span
+            }),
         );
-
-        info!("spawned load into background");
 
         tenant
     }
@@ -922,9 +977,15 @@ impl Tenant {
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
     ///
-    #[instrument(skip(self, ctx), fields(tenant_id=%self.tenant_id))]
-    async fn load(self: &Arc<Tenant>, ctx: &RequestContext) -> anyhow::Result<()> {
-        info!("loading tenant task");
+    /// No background tasks are started as part of this routine.
+    async fn load(
+        self: &Arc<Tenant>,
+        init_order: Option<&InitializationOrder>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        debug_assert_current_span_has_tenant_id();
+
+        debug!("loading tenant task");
 
         utils::failpoint_sleep_millis_async!("before-loading-tenant");
 
@@ -934,116 +995,119 @@ impl Tenant {
         //
         // Scan the directory, peek into the metadata file of each timeline, and
         // collect a list of timelines and their ancestors.
-        let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-        let timelines_dir = self.conf.timelines_path(&self.tenant_id);
-        for entry in std::fs::read_dir(&timelines_dir).with_context(|| {
-            format!(
-                "Failed to list timelines directory for tenant {}",
-                self.tenant_id
-            )
-        })? {
-            let entry = entry.with_context(|| {
-                format!("cannot read timeline dir entry for {}", self.tenant_id)
-            })?;
-            let timeline_dir = entry.path();
+        let tenant_id = self.tenant_id;
+        let conf = self.conf;
+        let span = info_span!("blocking");
 
-            if crate::is_temporary(&timeline_dir) {
-                info!(
-                    "Found temporary timeline directory, removing: {}",
-                    timeline_dir.display()
-                );
-                if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
-                    error!(
-                        "Failed to remove temporary directory '{}': {:?}",
-                        timeline_dir.display(),
-                        e
+        let sorted_timelines: Vec<(_, _)> = tokio::task::spawn_blocking(move || {
+            let _g = span.entered();
+            let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
+            let timelines_dir = conf.timelines_path(&tenant_id);
+
+            for entry in
+                std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
+            {
+                let entry = entry.context("read timeline dir entry")?;
+                let timeline_dir = entry.path();
+
+                if crate::is_temporary(&timeline_dir) {
+                    info!(
+                        "Found temporary timeline directory, removing: {}",
+                        timeline_dir.display()
                     );
-                }
-            } else if is_uninit_mark(&timeline_dir) {
-                let timeline_uninit_mark_file = &timeline_dir;
-                info!(
-                    "Found an uninit mark file {}, removing the timeline and its uninit mark",
-                    timeline_uninit_mark_file.display()
-                );
-                let timeline_id = timeline_uninit_mark_file
-                    .file_stem()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or_default()
-                    .parse::<TimelineId>()
-                    .with_context(|| {
-                        format!(
+                    if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
+                        error!(
+                            "Failed to remove temporary directory '{}': {:?}",
+                            timeline_dir.display(),
+                            e
+                        );
+                    }
+                } else if is_uninit_mark(&timeline_dir) {
+                    let timeline_uninit_mark_file = &timeline_dir;
+                    info!(
+                        "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                        timeline_uninit_mark_file.display()
+                    );
+                    let timeline_id = timeline_uninit_mark_file
+                        .file_stem()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
                             "Could not parse timeline id out of the timeline uninit mark name {}",
                             timeline_uninit_mark_file.display()
                         )
-                    })?;
-                let timeline_dir = self.conf.timeline_path(&timeline_id, &self.tenant_id);
-                if let Err(e) =
-                    remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
-                {
-                    error!("Failed to clean up uninit marked timeline: {e:?}");
-                }
-            } else {
-                let timeline_id = timeline_dir
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or_default()
-                    .parse::<TimelineId>()
-                    .with_context(|| {
-                        format!(
-                            "Could not parse timeline id out of the timeline dir name {}",
-                            timeline_dir.display()
-                        )
-                    })?;
-                let timeline_uninit_mark_file = self
-                    .conf
-                    .timeline_uninit_mark_file_path(self.tenant_id, timeline_id);
-                if timeline_uninit_mark_file.exists() {
-                    info!(
-                        "Found an uninit mark file for timeline {}/{}, removing the timeline and its uninit mark",
-                        self.tenant_id, timeline_id
-                    );
+                        })?;
+                    let timeline_dir = conf.timeline_path(&timeline_id, &tenant_id);
                     if let Err(e) =
-                        remove_timeline_and_uninit_mark(&timeline_dir, &timeline_uninit_mark_file)
+                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
                     {
                         error!("Failed to clean up uninit marked timeline: {e:?}");
                     }
-                    continue;
-                }
-
-                let file_name = entry.file_name();
-                if let Ok(timeline_id) =
-                    file_name.to_str().unwrap_or_default().parse::<TimelineId>()
-                {
-                    let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
-                        .context("failed to load metadata")?;
-                    timelines_to_load.insert(timeline_id, metadata);
                 } else {
-                    // A file or directory that doesn't look like a timeline ID
-                    warn!(
-                        "unexpected file or directory in timelines directory: {}",
-                        file_name.to_string_lossy()
-                    );
+                    let timeline_id = timeline_dir
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                                "Could not parse timeline id out of the timeline dir name {}",
+                                timeline_dir.display()
+                            )
+                        })?;
+                    let timeline_uninit_mark_file =
+                        conf.timeline_uninit_mark_file_path(tenant_id, timeline_id);
+                    if timeline_uninit_mark_file.exists() {
+                        info!(
+                            %timeline_id,
+                            "Found an uninit mark file, removing the timeline and its uninit mark",
+                        );
+                        if let Err(e) = remove_timeline_and_uninit_mark(
+                            &timeline_dir,
+                            &timeline_uninit_mark_file,
+                        ) {
+                            error!("Failed to clean up uninit marked timeline: {e:?}");
+                        }
+                        continue;
+                    }
+
+                    let file_name = entry.file_name();
+                    if let Ok(timeline_id) =
+                        file_name.to_str().unwrap_or_default().parse::<TimelineId>()
+                    {
+                        let metadata = load_metadata(conf, timeline_id, tenant_id)
+                            .context("failed to load metadata")?;
+                        timelines_to_load.insert(timeline_id, metadata);
+                    } else {
+                        // A file or directory that doesn't look like a timeline ID
+                        warn!(
+                            "unexpected file or directory in timelines directory: {}",
+                            file_name.to_string_lossy()
+                        );
+                    }
                 }
             }
-        }
 
-        // Sort the array of timeline IDs into tree-order, so that parent comes before
-        // all its children.
-        let sorted_timelines = tree_sort_timelines(timelines_to_load)?;
+            // Sort the array of timeline IDs into tree-order, so that parent comes before
+            // all its children.
+            tree_sort_timelines(timelines_to_load)
+        })
+        .await
+        .context("load spawn_blocking")
+        .and_then(|res| res)?;
+
         // FIXME original collect_timeline_files contained one more check:
         //    1. "Timeline has no ancestor and no layer files"
 
         for (timeline_id, local_metadata) in sorted_timelines {
-            self.load_local_timeline(timeline_id, local_metadata, ctx)
+            self.load_local_timeline(timeline_id, local_metadata, init_order, ctx)
                 .await
                 .with_context(|| format!("load local timeline {timeline_id}"))?;
         }
 
-        // Start background operations and open the tenant for business.
-        // The loops will shut themselves down when they notice that the tenant is inactive.
-        self.activate(ctx)?;
-
-        info!("Done");
+        trace!("Done");
 
         Ok(())
     }
@@ -1051,11 +1115,12 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip_all, fields(timeline_id))]
+    #[instrument(skip(self, local_metadata, init_order, ctx))]
     async fn load_local_timeline(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         local_metadata: TimelineMetadata,
+        init_order: Option<&InitializationOrder>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         debug_assert_current_span_has_tenant_id();
@@ -1069,12 +1134,20 @@ impl Tenant {
             )
         });
 
-        let remote_startup_data = match &remote_client {
+        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
+            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
+                .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
+            Some(ancestor_timeline)
+        } else {
+            None
+        };
+
+        let (remote_startup_data, remote_client) = match remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
                 Ok(index_part) => {
                     let index_part = match index_part {
                         MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
-                        MaybeDeletedIndexPart::Deleted => {
+                        MaybeDeletedIndexPart::Deleted(index_part) => {
                             // TODO: we won't reach here if remote storage gets de-configured after start of the deletion operation.
                             // Example:
                             //  start deletion operation
@@ -1085,37 +1158,59 @@ impl Tenant {
                             //
                             // We don't really anticipate remote storage to be de-configured, so, for now, this is fine.
                             // Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
-                            info!("is_deleted is set on remote, resuming removal of local data originally done by timeline deletion handler");
-                            std::fs::remove_dir_all(
-                                self.conf.timeline_path(&timeline_id, &self.tenant_id),
-                            )
-                            .context("remove_dir_all")?;
+                            info!("is_deleted is set on remote, resuming removal of timeline data originally done by timeline deletion handler");
+
+                            remote_client
+                                .init_upload_queue_stopped_to_continue_deletion(&index_part)?;
+
+                            let timeline = self
+                                .create_timeline_data(
+                                    timeline_id,
+                                    &local_metadata,
+                                    ancestor,
+                                    Some(remote_client),
+                                    init_order,
+                                )
+                                .context("create_timeline_data")?;
+
+                            let guard = Arc::clone(&timeline.delete_lock).lock_owned().await;
+
+                            // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
+                            // RemoteTimelineClient is the only functioning part.
+                            timeline.set_state(TimelineState::Stopping);
+                            // We meed to do this because when console retries delete request we shouldnt answer with 404
+                            // because 404 means successful deletion.
+                            // FIXME consider TimelineState::Deleting.
+                            let mut locked = self.timelines.lock().unwrap();
+                            locked.insert(timeline_id, Arc::clone(&timeline));
+
+                            Tenant::schedule_delete_timeline(
+                                Arc::clone(self),
+                                timeline_id,
+                                timeline,
+                                guard,
+                            );
 
                             return Ok(());
                         }
                     };
 
                     let remote_metadata = index_part.parse_metadata().context("parse_metadata")?;
-                    Some(RemoteStartupData {
-                        index_part,
-                        remote_metadata,
-                    })
+                    (
+                        Some(RemoteStartupData {
+                            index_part,
+                            remote_metadata,
+                        }),
+                        Some(remote_client),
+                    )
                 }
                 Err(DownloadError::NotFound) => {
                     info!("no index file was found on the remote");
-                    None
+                    (None, Some(remote_client))
                 }
                 Err(e) => return Err(anyhow::anyhow!(e)),
             },
-            None => None,
-        };
-
-        let ancestor = if let Some(ancestor_timeline_id) = local_metadata.ancestor_timeline() {
-            let ancestor_timeline = self.get_timeline(ancestor_timeline_id, false)
-            .with_context(|| anyhow::anyhow!("cannot find ancestor timeline {ancestor_timeline_id} for timeline {timeline_id}"))?;
-            Some(ancestor_timeline)
-        } else {
-            None
+            None => (None, remote_client),
         };
 
         self.timeline_init_and_sync(
@@ -1125,6 +1220,7 @@ impl Tenant {
             Some(local_metadata),
             ancestor,
             false,
+            init_order,
             ctx,
         )
         .await
@@ -1206,6 +1302,27 @@ impl Tenant {
         )
     }
 
+    /// Helper for unit tests to create an emtpy timeline.
+    ///
+    /// The timeline is has state value `Active` but its background loops are not running.
+    // This makes the various functions which anyhow::ensure! for Active state work in tests.
+    // Our current tests don't need the background loops.
+    #[cfg(test)]
+    pub fn create_test_timeline(
+        &self,
+        new_timeline_id: TimelineId,
+        initdb_lsn: Lsn,
+        pg_version: u32,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let uninit_tl = self.create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)?;
+        let mut timelines = self.timelines.lock().unwrap();
+        let tl = uninit_tl.initialize_with_lock(ctx, &mut timelines, true)?;
+        // The non-test code would call tl.activate() here.
+        tl.set_state(TimelineState::Active);
+        Ok(tl)
+    }
+
     /// Create a new timeline.
     ///
     /// Returns the new timeline ID and reference to its Timeline object.
@@ -1219,6 +1336,7 @@ impl Tenant {
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
         pg_version: u32,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> anyhow::Result<Option<Arc<Timeline>>> {
         anyhow::ensure!(
@@ -1285,6 +1403,8 @@ impl Tenant {
             }
         };
 
+        loaded_timeline.activate(broker_client, None, ctx);
+
         if let Some(remote_client) = loaded_timeline.remote_client.as_ref() {
             // Wait for the upload of the 'index_part.json` file to finish, so that when we return
             // Ok, the timeline is durable in remote storage.
@@ -1319,6 +1439,7 @@ impl Tenant {
         pitr: Duration,
         ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
+        // there is a global allowed_error for this
         anyhow::ensure!(
             self.is_active(),
             "Cannot run GC iteration on inactive tenant"
@@ -1362,127 +1483,81 @@ impl Tenant {
         Ok(())
     }
 
-    /// Flush all in-memory data to disk.
+    /// Flush all in-memory data to disk and remote storage, if any.
     ///
     /// Used at graceful shutdown.
-    ///
-    pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
-        // Scan through the hashmap and collect a list of all the timelines,
-        // while holding the lock. Then drop the lock and actually perform the
-        // flushing. We don't want to block everything else while the
-        // flushing is performed.
-        let timelines_to_flush = {
+    async fn freeze_and_flush_on_shutdown(&self) {
+        let mut js = tokio::task::JoinSet::new();
+
+        // execute on each timeline on the JoinSet, join after.
+        let per_timeline = |timeline_id: TimelineId, timeline: Arc<Timeline>| {
+            async move {
+                debug_assert_current_span_has_tenant_and_timeline_id();
+
+                match timeline.freeze_and_flush().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        warn!("failed to freeze and flush: {e:#}");
+                        return;
+                    }
+                }
+
+                let res = if let Some(client) = timeline.remote_client.as_ref() {
+                    // if we did not wait for completion here, it might be our shutdown process
+                    // didn't wait for remote uploads to complete at all, as new tasks can forever
+                    // be spawned.
+                    //
+                    // what is problematic is the shutting down of RemoteTimelineClient, because
+                    // obviously it does not make sense to stop while we wait for it, but what
+                    // about corner cases like s3 suddenly hanging up?
+                    client.wait_completion().await
+                } else {
+                    Ok(())
+                };
+
+                if let Err(e) = res {
+                    warn!("failed to await for frozen and flushed uploads: {e:#}");
+                }
+            }
+            .instrument(tracing::info_span!("freeze_and_flush_on_shutdown", %timeline_id))
+        };
+
+        {
             let timelines = self.timelines.lock().unwrap();
             timelines
                 .iter()
-                .map(|(_id, timeline)| Arc::clone(timeline))
-                .collect::<Vec<_>>()
+                .map(|(id, tl)| (*id, Arc::clone(tl)))
+                .for_each(|(timeline_id, timeline)| {
+                    js.spawn(per_timeline(timeline_id, timeline));
+                })
         };
 
-        for timeline in &timelines_to_flush {
-            timeline.freeze_and_flush().await?;
-        }
-
-        Ok(())
-    }
-
-    /// Removes timeline-related in-memory data
-    pub async fn delete_timeline(
-        &self,
-        timeline_id: TimelineId,
-        _ctx: &RequestContext,
-    ) -> Result<(), DeleteTimelineError> {
-        timeline::debug_assert_current_span_has_tenant_and_timeline_id();
-
-        // Transition the timeline into TimelineState::Stopping.
-        // This should prevent new operations from starting.
-        let timeline = {
-            let mut timelines = self.timelines.lock().unwrap();
-
-            // Ensure that there are no child timelines **attached to that pageserver**,
-            // because detach removes files, which will break child branches
-            let children_exist = timelines
-                .iter()
-                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
-
-            if children_exist {
-                return Err(DeleteTimelineError::HasChildren);
-            }
-
-            let timeline_entry = match timelines.entry(timeline_id) {
-                Entry::Occupied(e) => e,
-                Entry::Vacant(_) => return Err(DeleteTimelineError::NotFound),
-            };
-
-            let timeline = Arc::clone(timeline_entry.get());
-            timeline.set_state(TimelineState::Stopping);
-
-            drop(timelines);
-            timeline
-        };
-
-        // Now that the Timeline is in Stopping state, request all the related tasks to
-        // shut down.
-        //
-        // NB: If you call delete_timeline multiple times concurrently, they will
-        // all go through the motions here. Make sure the code here is idempotent,
-        // and don't error out if some of the shutdown tasks have already been
-        // completed!
-
-        // Stop the walreceiver first.
-        debug!("waiting for wal receiver to shutdown");
-        timeline.walreceiver.stop().await;
-        debug!("wal receiver shutdown confirmed");
-
-        // Prevent new uploads from starting.
-        if let Some(remote_client) = timeline.remote_client.as_ref() {
-            let res = remote_client.stop();
+        while let Some(res) = js.join_next().await {
             match res {
                 Ok(()) => {}
-                Err(e) => match e {
-                    remote_timeline_client::StopError::QueueUninitialized => {
-                        // This case shouldn't happen currently because the
-                        // load and attach code bails out if _any_ of the timeline fails to fetch its IndexPart.
-                        // That is, before we declare the Tenant as Active.
-                        // But we only allow calls to delete_timeline on Active tenants.
-                        return Err(DeleteTimelineError::Other(anyhow::anyhow!("upload queue is uninitialized, likely the timeline was in Broken state prior to this call because it failed to fetch IndexPart during load or attach, check the logs")));
-                    }
-                },
+                Err(je) if je.is_cancelled() => unreachable!("no cancelling used"),
+                Err(je) if je.is_panic() => { /* logged already */ }
+                Err(je) => warn!("unexpected JoinError: {je:?}"),
             }
         }
+    }
 
-        // Stop & wait for the remaining timeline tasks, including upload tasks.
-        // NB: This and other delete_timeline calls do not run as a task_mgr task,
-        //     so, they are not affected by this shutdown_tasks() call.
-        info!("waiting for timeline tasks to shutdown");
-        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
-
-        // Mark timeline as deleted in S3 so we won't pick it up next time
-        // during attach or pageserver restart.
-        // See comment in persist_index_part_with_deleted_flag.
-        if let Some(remote_client) = timeline.remote_client.as_ref() {
-            match remote_client.persist_index_part_with_deleted_flag().await {
-                // If we (now, or already) marked it successfully as deleted, we can proceed
-                Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
-                // Bail out otherwise
-                Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
-                | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
-                    return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
-                }
-            }
-        }
-
+    /// Shuts down a timeline's tasks, removes its in-memory structures, and deletes its
+    /// data from both disk and s3.
+    async fn delete_timeline(
+        &self,
+        timeline_id: TimelineId,
+        timeline: Arc<Timeline>,
+    ) -> anyhow::Result<()> {
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.
             //
-            // This lock prevents multiple concurrent delete_timeline calls from
-            // stepping on each other's toes, while deleting the files. It also
-            // prevents GC or compaction from running at the same time.
+            // This lock prevents prevents GC or compaction from running at the same time.
+            // The GC task doesn't register itself with the timeline it's operating on,
+            // so it might still be running even though we called `shutdown_tasks`.
             //
             // Note that there are still other race conditions between
-            // GC, compaction and timeline deletion. GC task doesn't
-            // register itself properly with the timeline it's
-            // operating on. See
+            // GC, compaction and timeline deletion. See
             // https://github.com/neondatabase/neon/issues/2671
             //
             // No timeout here, GC & Compaction should be responsive to the
@@ -1494,7 +1569,9 @@ impl Tenant {
             // NB: storage_sync upload tasks that reference these layers have been cancelled
             //     by the caller.
 
-            let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+            let local_timeline_directory = self
+                .conf
+                .timeline_path(&timeline.timeline_id, &self.tenant_id);
 
             fail::fail_point!("timeline-delete-before-rm", |_| {
                 Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
@@ -1543,40 +1620,195 @@ impl Tenant {
             Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
         });
 
-        // Remove the timeline from the map.
-        let mut timelines = self.timelines.lock().unwrap();
-        let children_exist = timelines
-            .iter()
-            .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
-        // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
-        // We already deleted the layer files, so it's probably best to panic.
-        // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
-        if children_exist {
-            panic!("Timeline grew children while we removed layer files");
+        {
+            // Remove the timeline from the map.
+            let mut timelines = self.timelines.lock().unwrap();
+            let children_exist = timelines
+                .iter()
+                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+            // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
+            // We already deleted the layer files, so it's probably best to panic.
+            // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
+            if children_exist {
+                panic!("Timeline grew children while we removed layer files");
+            }
+
+            timelines.remove(&timeline_id).expect(
+                "timeline that we were deleting was concurrently removed from 'timelines' map",
+            );
+
+            drop(timelines);
         }
-        let removed_timeline = timelines.remove(&timeline_id);
-        if removed_timeline.is_none() {
-            // This can legitimately happen if there's a concurrent call to this function.
-            //   T1                                             T2
-            //   lock
-            //   unlock
-            //                                                  lock
-            //                                                  unlock
-            //                                                  remove files
-            //                                                  lock
-            //                                                  remove from map
-            //                                                  unlock
-            //                                                  return
-            //   remove files
-            //   lock
-            //   remove from map observes empty map
-            //   unlock
-            //   return
-            debug!("concurrent call to this function won the race");
-        }
-        drop(timelines);
+
+        let remote_client = match &timeline.remote_client {
+            Some(remote_client) => remote_client,
+            None => return Ok(()),
+        };
+
+        remote_client.delete_all().await?;
 
         Ok(())
+    }
+
+    /// Removes timeline-related in-memory data and schedules removal from remote storage.
+    #[instrument(skip(self, _ctx))]
+    pub async fn prepare_and_schedule_delete_timeline(
+        self: Arc<Self>,
+        timeline_id: TimelineId,
+        _ctx: &RequestContext,
+    ) -> Result<(), DeleteTimelineError> {
+        timeline::debug_assert_current_span_has_tenant_and_timeline_id();
+
+        // Transition the timeline into TimelineState::Stopping.
+        // This should prevent new operations from starting.
+        //
+        // Also grab the Timeline's delete_lock to prevent another deletion from starting.
+        let timeline;
+        let delete_lock_guard;
+        {
+            let mut timelines = self.timelines.lock().unwrap();
+
+            // Ensure that there are no child timelines **attached to that pageserver**,
+            // because detach removes files, which will break child branches
+            let children: Vec<TimelineId> = timelines
+                .iter()
+                .filter_map(|(id, entry)| {
+                    if entry.get_ancestor_timeline_id() == Some(timeline_id) {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !children.is_empty() {
+                return Err(DeleteTimelineError::HasChildren(children));
+            }
+
+            let timeline_entry = match timelines.entry(timeline_id) {
+                Entry::Occupied(e) => e,
+                Entry::Vacant(_) => return Err(DeleteTimelineError::NotFound),
+            };
+
+            timeline = Arc::clone(timeline_entry.get());
+
+            // Prevent two tasks from trying to delete the timeline at the same time.
+            //
+            // XXX: We should perhaps return an HTTP "202 Accepted" to signal that the caller
+            // needs to poll until the operation has finished. But for now, we return an
+            // error, because the control plane knows to retry errors.
+
+            delete_lock_guard =
+                Arc::clone(&timeline.delete_lock)
+                    .try_lock_owned()
+                    .map_err(|_| {
+                        DeleteTimelineError::Other(anyhow::anyhow!(
+                            "timeline deletion is already in progress"
+                        ))
+                    })?;
+
+            // If another task finished the deletion just before we acquired the lock,
+            // return success.
+            if *delete_lock_guard {
+                return Ok(());
+            }
+
+            timeline.set_state(TimelineState::Stopping);
+
+            drop(timelines);
+        }
+
+        // Now that the Timeline is in Stopping state, request all the related tasks to
+        // shut down.
+        //
+        // NB: If this fails half-way through, and is retried, the retry will go through
+        // all the same steps again. Make sure the code here is idempotent, and don't
+        // error out if some of the shutdown tasks have already been completed!
+
+        // Stop the walreceiver first.
+        debug!("waiting for wal receiver to shutdown");
+        let maybe_started_walreceiver = { timeline.walreceiver.lock().unwrap().take() };
+        if let Some(walreceiver) = maybe_started_walreceiver {
+            walreceiver.stop().await;
+        }
+        debug!("wal receiver shutdown confirmed");
+
+        // Prevent new uploads from starting.
+        if let Some(remote_client) = timeline.remote_client.as_ref() {
+            let res = remote_client.stop();
+            match res {
+                Ok(()) => {}
+                Err(e) => match e {
+                    remote_timeline_client::StopError::QueueUninitialized => {
+                        // This case shouldn't happen currently because the
+                        // load and attach code bails out if _any_ of the timeline fails to fetch its IndexPart.
+                        // That is, before we declare the Tenant as Active.
+                        // But we only allow calls to delete_timeline on Active tenants.
+                        return Err(DeleteTimelineError::Other(anyhow::anyhow!("upload queue is uninitialized, likely the timeline was in Broken state prior to this call because it failed to fetch IndexPart during load or attach, check the logs")));
+                    }
+                },
+            }
+        }
+
+        // Stop & wait for the remaining timeline tasks, including upload tasks.
+        // NB: This and other delete_timeline calls do not run as a task_mgr task,
+        //     so, they are not affected by this shutdown_tasks() call.
+        info!("waiting for timeline tasks to shutdown");
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
+
+        // Mark timeline as deleted in S3 so we won't pick it up next time
+        // during attach or pageserver restart.
+        // See comment in persist_index_part_with_deleted_flag.
+        if let Some(remote_client) = timeline.remote_client.as_ref() {
+            match remote_client.persist_index_part_with_deleted_flag().await {
+                // If we (now, or already) marked it successfully as deleted, we can proceed
+                Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
+                // Bail out otherwise
+                //
+                // AlreadyInProgress shouldn't happen, because the 'delete_lock' prevents
+                // two tasks from performing the deletion at the same time. The first task
+                // that starts deletion should run it to completion.
+                Err(e @ PersistIndexPartWithDeletedFlagError::AlreadyInProgress(_))
+                | Err(e @ PersistIndexPartWithDeletedFlagError::Other(_)) => {
+                    return Err(DeleteTimelineError::Other(anyhow::anyhow!(e)));
+                }
+            }
+        }
+        self.schedule_delete_timeline(timeline_id, timeline, delete_lock_guard);
+
+        Ok(())
+    }
+
+    fn schedule_delete_timeline(
+        self: Arc<Self>,
+        timeline_id: TimelineId,
+        timeline: Arc<Timeline>,
+        _guard: OwnedMutexGuard<bool>,
+    ) {
+        let tenant_id = self.tenant_id;
+        let timeline_clone = Arc::clone(&timeline);
+
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            TaskKind::TimelineDeletionWorker,
+            Some(self.tenant_id),
+            Some(timeline_id),
+            "timeline_delete",
+            false,
+            async move {
+                if let Err(err) = self.delete_timeline(timeline_id, timeline).await {
+                    error!("Error: {err:#}");
+                    timeline_clone.set_broken(err.to_string())
+                };
+                Ok(())
+            }
+            .instrument({
+                let span =
+                    tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_id, timeline_id=%timeline_id);
+                span.follows_from(Span::current());
+                span
+            }),
+        );
     }
 
     pub fn current_state(&self) -> TenantState {
@@ -1588,147 +1820,257 @@ impl Tenant {
     }
 
     /// Changes tenant status to active, unless shutdown was already requested.
-    fn activate(&self, ctx: &RequestContext) -> anyhow::Result<()> {
+    ///
+    /// `background_jobs_can_start` is an optional barrier set to a value during pageserver startup
+    /// to delay background jobs. Background jobs can be started right away when None is given.
+    fn activate(
+        self: &Arc<Self>,
+        broker_client: BrokerClientChannel,
+        background_jobs_can_start: Option<&completion::Barrier>,
+        ctx: &RequestContext,
+    ) {
         debug_assert_current_span_has_tenant_id();
 
-        let mut result = Ok(());
+        let mut activating = false;
         self.state.send_modify(|current_state| {
+            use pageserver_api::models::ActivatingFrom;
             match &*current_state {
-                TenantState::Active => {
-                    // activate() was called on an already Active tenant. Shouldn't happen.
-                    result = Err(anyhow::anyhow!("Tenant is already active"));
+                TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping => {
+                    panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
                 }
-                TenantState::Broken { reason, .. } => {
-                    // This shouldn't happen either
-                    result = Err(anyhow::anyhow!(
-                        "Could not activate tenant because it is in broken state due to: {reason}",
-                    ));
+                TenantState::Loading => {
+                    *current_state = TenantState::Activating(ActivatingFrom::Loading);
                 }
-                TenantState::Stopping => {
-                    // The tenant was detached, or system shutdown was requested, while we were
-                    // loading or attaching the tenant.
-                    info!("Tenant is already in Stopping state, skipping activation");
-                }
-                TenantState::Loading | TenantState::Attaching => {
-                    *current_state = TenantState::Active;
-
-                    debug!(tenant_id = %self.tenant_id, "Activating tenant");
-
-                    let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
-
-                    // Spawn gc and compaction loops. The loops will shut themselves
-                    // down when they notice that the tenant is inactive.
-                    tasks::start_background_loops(self.tenant_id);
-
-                    let mut activated_timelines = 0;
-                    let mut timelines_broken_during_activation = 0;
-
-                    for timeline in not_broken_timelines {
-                        match timeline
-                            .activate(ctx)
-                            .context("timeline activation for activating tenant")
-                        {
-                            Ok(()) => {
-                                activated_timelines += 1;
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to activate timeline {}: {:#}",
-                                    timeline.timeline_id, e
-                                );
-                                timeline.set_state(TimelineState::Broken);
-                                *current_state = TenantState::broken_from_reason(format!(
-                                    "failed to activate timeline {}: {}",
-                                    timeline.timeline_id, e
-                                ));
-
-                                timelines_broken_during_activation += 1;
-                            }
-                        }
-                    }
-
-                    let elapsed = self.loading_started_at.elapsed();
-                    let total_timelines = timelines_accessor.len();
-
-                    // log a lot of stuff, because some tenants sometimes suffer from user-visible
-                    // times to activate. see https://github.com/neondatabase/neon/issues/4025
-                    info!(
-                        since_creation_millis = elapsed.as_millis(),
-                        tenant_id = %self.tenant_id,
-                        activated_timelines,
-                        timelines_broken_during_activation,
-                        total_timelines,
-                        post_state = <&'static str>::from(&*current_state),
-                        "activation attempt finished"
-                    );
+                TenantState::Attaching => {
+                    *current_state = TenantState::Activating(ActivatingFrom::Attaching);
                 }
             }
+            debug!(tenant_id = %self.tenant_id, "Activating tenant");
+            activating = true;
+            // Continue outside the closure. We need to grab timelines.lock()
+            // and we plan to turn it into a tokio::sync::Mutex in a future patch.
         });
-        result
+
+        if activating {
+            let timelines_accessor = self.timelines.lock().unwrap();
+            let timelines_to_activate = timelines_accessor
+                .values()
+                .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
+
+            // Spawn gc and compaction loops. The loops will shut themselves
+            // down when they notice that the tenant is inactive.
+            tasks::start_background_loops(self, background_jobs_can_start);
+
+            let mut activated_timelines = 0;
+
+            for timeline in timelines_to_activate {
+                timeline.activate(broker_client.clone(), background_jobs_can_start, ctx);
+                activated_timelines += 1;
+            }
+
+            self.state.send_modify(move |current_state| {
+                assert!(
+                    matches!(current_state, TenantState::Activating(_)),
+                    "set_stopping and set_broken wait for us to leave Activating state",
+                );
+                *current_state = TenantState::Active;
+
+                let elapsed = self.loading_started_at.elapsed();
+                let total_timelines = timelines_accessor.len();
+
+                // log a lot of stuff, because some tenants sometimes suffer from user-visible
+                // times to activate. see https://github.com/neondatabase/neon/issues/4025
+                info!(
+                    since_creation_millis = elapsed.as_millis(),
+                    tenant_id = %self.tenant_id,
+                    activated_timelines,
+                    total_timelines,
+                    post_state = <&'static str>::from(&*current_state),
+                    "activation attempt finished"
+                );
+            });
+        }
     }
 
-    /// Change tenant status to Stopping, to mark that it is being shut down
-    pub fn set_stopping(&self) {
-        self.state.send_modify(|current_state| {
-            match current_state {
-                TenantState::Active | TenantState::Loading | TenantState::Attaching => {
-                    *current_state = TenantState::Stopping;
+    /// Shutdown the tenant and join all of the spawned tasks.
+    ///
+    /// The method caters for all use-cases:
+    /// - pageserver shutdown (freeze_and_flush == true)
+    /// - detach + ignore (freeze_and_flush == false)
+    ///
+    /// This will attempt to shutdown even if tenant is broken.
+    pub(crate) async fn shutdown(&self, freeze_and_flush: bool) -> Result<(), ShutdownError> {
+        debug_assert_current_span_has_tenant_id();
+        // Set tenant (and its timlines) to Stoppping state.
+        //
+        // Since we can only transition into Stopping state after activation is complete,
+        // run it in a JoinSet so all tenants have a chance to stop before we get SIGKILLed.
+        //
+        // Transitioning tenants to Stopping state has a couple of non-obvious side effects:
+        // 1. Lock out any new requests to the tenants.
+        // 2. Signal cancellation to WAL receivers (we wait on it below).
+        // 3. Signal cancellation for other tenant background loops.
+        // 4. ???
+        //
+        // The waiting for the cancellation is not done uniformly.
+        // We certainly wait for WAL receivers to shut down.
+        // That is necessary so that no new data comes in before the freeze_and_flush.
+        // But the tenant background loops are joined-on in our caller.
+        // It's mesed up.
+        // we just ignore the failure to stop
+        match self.set_stopping().await {
+            Ok(()) => {}
+            Err(SetStoppingError::Broken) => {
+                // assume that this is acceptable
+            }
+            Err(SetStoppingError::AlreadyStopping) => return Err(ShutdownError::AlreadyStopping),
+        };
 
-                    // FIXME: If the tenant is still Loading or Attaching, new timelines
-                    // might be created after this. That's harmless, as the Timelines
-                    // won't be accessible to anyone, when the Tenant is in Stopping
-                    // state.
-                    let timelines_accessor = self.timelines.lock().unwrap();
-                    let not_broken_timelines = timelines_accessor
-                        .values()
-                        .filter(|timeline| timeline.current_state() != TimelineState::Broken);
-                    for timeline in not_broken_timelines {
-                        timeline.set_state(TimelineState::Stopping);
-                    }
-                }
-                TenantState::Broken { reason, .. } => {
-                    info!("Cannot set tenant to Stopping state, it is in Broken state due to: {reason}");
-                }
-                TenantState::Stopping => {
-                    // The tenant was detached, or system shutdown was requested, while we were
-                    // loading or attaching the tenant.
-                    info!("Tenant is already in Stopping state");
-                }
+        if freeze_and_flush {
+            // walreceiver has already began to shutdown with TenantState::Stopping, but we need to
+            // await for them to stop.
+            task_mgr::shutdown_tasks(
+                Some(TaskKind::WalReceiverManager),
+                Some(self.tenant_id),
+                None,
+            )
+            .await;
+
+            // this will wait for uploads to complete; in the past, it was done outside tenant
+            // shutdown in pageserver::shutdown_pageserver.
+            self.freeze_and_flush_on_shutdown().await;
+        }
+
+        // shutdown all tenant and timeline tasks: gc, compaction, page service
+        // No new tasks will be started for this tenant because it's in `Stopping` state.
+        //
+        // this will additionally shutdown and await all timeline tasks.
+        task_mgr::shutdown_tasks(None, Some(self.tenant_id), None).await;
+
+        Ok(())
+    }
+
+    /// Change tenant status to Stopping, to mark that it is being shut down.
+    ///
+    /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
+    ///
+    /// This function is not cancel-safe!
+    async fn set_stopping(&self) -> Result<(), SetStoppingError> {
+        let mut rx = self.state.subscribe();
+
+        // cannot stop before we're done activating, so wait out until we're done activating
+        rx.wait_for(|state| match state {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                info!(
+                    "waiting for {} to turn Active|Broken|Stopping",
+                    <&'static str>::from(state)
+                );
+                false
+            }
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
+        })
+        .await
+        .expect("cannot drop self.state while on a &self method");
+
+        // we now know we're done activating, let's see whether this task is the winner to transition into Stopping
+        let mut err = None;
+        let stopping = self.state.send_if_modified(|current_state| match current_state {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+            }
+            TenantState::Active => {
+                // FIXME: due to time-of-check vs time-of-use issues, it can happen that new timelines
+                // are created after the transition to Stopping. That's harmless, as the Timelines
+                // won't be accessible to anyone afterwards, because the Tenant is in Stopping state.
+                *current_state = TenantState::Stopping;
+                // Continue stopping outside the closure. We need to grab timelines.lock()
+                // and we plan to turn it into a tokio::sync::Mutex in a future patch.
+                true
+            }
+            TenantState::Broken { reason, .. } => {
+                info!(
+                    "Cannot set tenant to Stopping state, it is in Broken state due to: {reason}"
+                );
+                err = Some(SetStoppingError::Broken);
+                false
+            }
+            TenantState::Stopping => {
+                info!("Tenant is already in Stopping state");
+                err = Some(SetStoppingError::AlreadyStopping);
+                false
             }
         });
+        match (stopping, err) {
+            (true, None) => {} // continue
+            (false, Some(err)) => return Err(err),
+            (true, Some(_)) => unreachable!(
+                "send_if_modified closure must error out if not transitioning to Stopping"
+            ),
+            (false, None) => unreachable!(
+                "send_if_modified closure must return true if transitioning to Stopping"
+            ),
+        }
+
+        let timelines_accessor = self.timelines.lock().unwrap();
+        let not_broken_timelines = timelines_accessor
+            .values()
+            .filter(|timeline| !timeline.is_broken());
+        for timeline in not_broken_timelines {
+            timeline.set_state(TimelineState::Stopping);
+        }
+        Ok(())
     }
 
-    pub fn set_broken(&self, reason: String) {
+    /// Method for tenant::mgr to transition us into Broken state in case of a late failure in
+    /// `remove_tenant_from_memory`
+    ///
+    /// This function waits for the tenant to become active if it isn't already, before transitioning it into Stopping state.
+    ///
+    /// In tests, we also use this to set tenants to Broken state on purpose.
+    pub(crate) async fn set_broken(&self, reason: String) {
+        let mut rx = self.state.subscribe();
+
+        // The load & attach routines own the tenant state until it has reached `Active`.
+        // So, wait until it's done.
+        rx.wait_for(|state| match state {
+            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                info!(
+                    "waiting for {} to turn Active|Broken|Stopping",
+                    <&'static str>::from(state)
+                );
+                false
+            }
+            TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping {} => true,
+        })
+        .await
+        .expect("cannot drop self.state while on a &self method");
+
+        // we now know we're done activating, let's see whether this task is the winner to transition into Broken
         self.state.send_modify(|current_state| {
             match *current_state {
+                TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                    unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
+                }
                 TenantState::Active => {
-                    // Broken tenants can currently only used for fatal errors that happen
-                    // while loading or attaching a tenant. A tenant that has already been
-                    // activated should never be marked as broken. We cope with it the best
-                    // we can, but it shouldn't happen.
-                    warn!("Changing Active tenant to Broken state, reason: {}", reason);
-                    *current_state = TenantState::broken_from_reason(reason);
+                    if cfg!(feature = "testing") {
+                        warn!("Changing Active tenant to Broken state, reason: {}", reason);
+                        *current_state = TenantState::broken_from_reason(reason);
+                    } else {
+                        unreachable!("not allowed to call set_broken on Active tenants in non-testing builds")
+                    }
                 }
                 TenantState::Broken { .. } => {
-                    // This shouldn't happen either
                     warn!("Tenant is already in Broken state");
                 }
+                // This is the only "expected" path, any other path is a bug.
                 TenantState::Stopping => {
-                    // This shouldn't happen either
                     warn!(
                         "Marking Stopping tenant as Broken state, reason: {}",
                         reason
                     );
                     *current_state = TenantState::broken_from_reason(reason);
                 }
-                TenantState::Loading | TenantState::Attaching => {
-                    info!("Setting tenant as Broken state, reason: {}", reason);
-                    *current_state = TenantState::broken_from_reason(reason);
-                }
-            }
+           }
         });
     }
 
@@ -1736,25 +2078,30 @@ impl Tenant {
         self.state.subscribe()
     }
 
-    pub async fn wait_to_become_active(&self) -> anyhow::Result<()> {
+    pub(crate) async fn wait_to_become_active(&self) -> Result<(), WaitToBecomeActiveError> {
         let mut receiver = self.state.subscribe();
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
-                TenantState::Loading | TenantState::Attaching => {
+                TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
-                    receiver.changed().await?;
+                    receiver.changed().await.map_err(
+                        |_e: tokio::sync::watch::error::RecvError| {
+                            WaitToBecomeActiveError::TenantDropped {
+                                tenant_id: self.tenant_id,
+                            }
+                        },
+                    )?;
                 }
                 TenantState::Active { .. } => {
                     return Ok(());
                 }
                 TenantState::Broken { .. } | TenantState::Stopping => {
                     // There's no chance the tenant can transition back into ::Active
-                    anyhow::bail!(
-                        "Tenant {} will not become active. Current state: {:?}",
-                        self.tenant_id,
-                        &current_state,
-                    );
+                    return Err(WaitToBecomeActiveError::WillNotBecomeActive {
+                        tenant_id: self.tenant_id,
+                        state: current_state,
+                    });
                 }
             }
         }
@@ -1908,6 +2255,7 @@ impl Tenant {
         new_metadata: &TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         remote_client: Option<RemoteTimelineClient>,
+        init_order: Option<&InitializationOrder>,
     ) -> anyhow::Result<Arc<Timeline>> {
         if let Some(ancestor_timeline_id) = new_metadata.ancestor_timeline() {
             anyhow::ensure!(
@@ -1915,6 +2263,9 @@ impl Tenant {
                 "Timeline's {new_timeline_id} ancestor {ancestor_timeline_id} was not found"
             )
         }
+
+        let initial_logical_size_can_start = init_order.map(|x| &x.initial_logical_size_can_start);
+        let initial_logical_size_attempt = init_order.map(|x| &x.initial_logical_size_attempt);
 
         let pg_version = new_metadata.pg_version();
         Ok(Timeline::new(
@@ -1927,6 +2278,8 @@ impl Tenant {
             Arc::clone(&self.walredo_mgr),
             remote_client,
             pg_version,
+            initial_logical_size_can_start.cloned(),
+            initial_logical_size_attempt.cloned(),
         ))
     }
 
@@ -2278,8 +2631,40 @@ impl Tenant {
         Ok(gc_timelines)
     }
 
-    /// Branch an existing timeline
+    /// A substitute for `branch_timeline` for use in unit tests.
+    /// The returned timeline will have state value `Active` to make various `anyhow::ensure!()`
+    /// calls pass, but, we do not actually call `.activate()` under the hood. So, none of the
+    /// timeline background tasks are launched, except the flush loop.
+    #[cfg(test)]
+    async fn branch_timeline_test(
+        &self,
+        src_timeline: &Arc<Timeline>,
+        dst_id: TimelineId,
+        start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let tl = self
+            .branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
+            .await?;
+        tl.set_state(TimelineState::Active);
+        Ok(tl)
+    }
+
+    /// Branch an existing timeline.
+    ///
+    /// The caller is responsible for activating the returned timeline.
     async fn branch_timeline(
+        &self,
+        src_timeline: &Arc<Timeline>,
+        dst_id: TimelineId,
+        start_lsn: Option<Lsn>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
+            .await
+    }
+
+    async fn branch_timeline_impl(
         &self,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
@@ -2378,7 +2763,7 @@ impl Tenant {
                 false,
                 Some(Arc::clone(src_timeline)),
             )?
-            .initialize_with_lock(ctx, &mut timelines, true, true)?
+            .initialize_with_lock(ctx, &mut timelines, true)?
         };
 
         // Root timeline gets its layers during creation and uploads them along with the metadata.
@@ -2399,6 +2784,8 @@ impl Tenant {
 
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization complete, remove the temp dir.
+    ///
+    /// The caller is responsible for activating the returned timeline.
     async fn bootstrap_timeline(
         &self,
         timeline_id: TimelineId,
@@ -2493,7 +2880,7 @@ impl Tenant {
         // map above, when we imported the datadir.
         let timeline = {
             let mut timelines = self.timelines.lock().unwrap();
-            raw_timeline.initialize_with_lock(ctx, &mut timelines, false, true)?
+            raw_timeline.initialize_with_lock(ctx, &mut timelines, false)?
         };
 
         info!(
@@ -2568,7 +2955,7 @@ impl Tenant {
         remote_client: Option<RemoteTimelineClient>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let timeline_data = self
-            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client)
+            .create_timeline_data(new_timeline_id, new_metadata, ancestor, remote_client, None)
             .context("Failed to create timeline data structure")?;
         crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
 
@@ -3027,6 +3414,7 @@ pub mod harness {
                 evictions_low_residence_duration_metric_threshold: Some(
                     tenant_conf.evictions_low_residence_duration_metric_threshold,
                 ),
+                gc_feedback: Some(tenant_conf.gc_feedback),
             }
         }
     }
@@ -3134,8 +3522,14 @@ pub mod harness {
                 let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
                 timelines_to_load.insert(timeline_id, timeline_metadata);
             }
-            // FIXME starts background jobs
-            tenant.load(ctx).await?;
+            tenant
+                .load(None, ctx)
+                .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
+                .await?;
+            tenant.state.send_replace(TenantState::Active);
+            for timeline in tenant.timelines.lock().unwrap().values() {
+                timeline.set_state(TimelineState::Active);
+            }
             Ok(tenant)
         }
 
@@ -3193,8 +3587,7 @@ mod tests {
     #[tokio::test]
     async fn test_basic() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_basic")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let tline = tline.initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -3227,9 +3620,7 @@ mod tests {
         let (tenant, ctx) = TenantHarness::create("no_duplicate_timelines")?
             .load()
             .await;
-        let timeline =
-            tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let _ = timeline.initialize(&ctx)?;
+        let _ = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
 
         match tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx) {
             Ok(_) => panic!("duplicate timeline creation should fail"),
@@ -3260,8 +3651,7 @@ mod tests {
         use std::str::from_utf8;
 
         let (tenant, ctx) = TenantHarness::create("test_branch")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let tline = tline.initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
         let writer = tline.writer();
 
         #[allow(non_snake_case)]
@@ -3283,7 +3673,7 @@ mod tests {
 
         // Branch the history, modify relation differently on the new timeline
         tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x30)), &ctx)
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x30)), &ctx)
             .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
@@ -3358,8 +3748,7 @@ mod tests {
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")?
                 .load()
                 .await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let tline = tline.initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         // this removes layers before lsn 40 (50 minus 10), so there are two remaining layers, image and delta for 31-50
@@ -3372,7 +3761,7 @@ mod tests {
 
         // try to branch at lsn 25, should fail because we already garbage collected the data
         match tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), &ctx)
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), &ctx)
             .await
         {
             Ok(_) => panic!("branching should have failed"),
@@ -3396,12 +3785,11 @@ mod tests {
                 .load()
                 .await;
 
-        let tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0x50), DEFAULT_PG_VERSION, &ctx)?
-            .initialize(&ctx)?;
+        let tline =
+            tenant.create_test_timeline(TIMELINE_ID, Lsn(0x50), DEFAULT_PG_VERSION, &ctx)?;
         // try to branch at lsn 0x25, should fail because initdb lsn is 0x50
         match tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), &ctx)
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x25)), &ctx)
             .await
         {
             Ok(_) => panic!("branching should have failed"),
@@ -3447,13 +3835,11 @@ mod tests {
             TenantHarness::create("test_get_branchpoints_from_an_inactive_timeline")?
                 .load()
                 .await;
-        let tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?
-            .initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
             .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
@@ -3461,7 +3847,7 @@ mod tests {
 
         make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
 
-        tline.set_state(TimelineState::Broken);
+        tline.set_broken("test".to_owned());
 
         tenant
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
@@ -3497,12 +3883,11 @@ mod tests {
             TenantHarness::create("test_retain_data_in_parent_which_is_needed_for_child")?
                 .load()
                 .await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let tline = tline.initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
             .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
@@ -3521,12 +3906,11 @@ mod tests {
             TenantHarness::create("test_parent_keeps_data_forever_after_branching")?
                 .load()
                 .await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let tline = tline.initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
         tenant
-            .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
+            .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
             .await?;
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
@@ -3555,8 +3939,7 @@ mod tests {
         {
             let (tenant, ctx) = harness.load().await;
             let tline =
-                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION, &ctx)?;
-            let tline = tline.initialize(&ctx)?;
+                tenant.create_test_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION, &ctx)?;
             make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
         }
 
@@ -3576,14 +3959,14 @@ mod tests {
         {
             let (tenant, ctx) = harness.load().await;
             let tline =
-                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-            let tline = tline.initialize(&ctx)?;
+                tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
-            tenant
-                .branch_timeline(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
+            let child_tline = tenant
+                .branch_timeline_test(&tline, NEW_TIMELINE_ID, Some(Lsn(0x40)), &ctx)
                 .await?;
+            child_tline.set_state(TimelineState::Active);
 
             let newtline = tenant
                 .get_timeline(NEW_TIMELINE_ID, true)
@@ -3613,9 +3996,8 @@ mod tests {
         let harness = TenantHarness::create(TEST_NAME)?;
         let (tenant, ctx) = harness.load().await;
 
-        tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?
-            .initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+        drop(tline);
         drop(tenant);
 
         let metadata_path = harness.timeline_path(&TIMELINE_ID).join(METADATA_FILE_NAME);
@@ -3652,8 +4034,7 @@ mod tests {
     #[tokio::test]
     async fn test_images() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_images")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let tline = tline.initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
 
         let writer = tline.writer();
         writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
@@ -3718,8 +4099,7 @@ mod tests {
     #[tokio::test]
     async fn test_bulk_insert() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let tline = tline.initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
 
         let mut lsn = Lsn(0x10);
 
@@ -3761,8 +4141,7 @@ mod tests {
     #[tokio::test]
     async fn test_random_updates() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_random_updates")?.load().await;
-        let tline = tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
-        let tline = tline.initialize(&ctx)?;
+        let tline = tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -3835,9 +4214,8 @@ mod tests {
         let (tenant, ctx) = TenantHarness::create("test_traverse_branches")?
             .load()
             .await;
-        let mut tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?
-            .initialize(&ctx)?;
+        let mut tline =
+            tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
 
         const NUM_KEYS: usize = 1000;
 
@@ -3870,7 +4248,7 @@ mod tests {
         for _ in 0..50 {
             let new_tline_id = TimelineId::generate();
             tenant
-                .branch_timeline(&tline, new_tline_id, Some(lsn), &ctx)
+                .branch_timeline_test(&tline, new_tline_id, Some(lsn), &ctx)
                 .await?;
             tline = tenant
                 .get_timeline(new_tline_id, true)
@@ -3919,9 +4297,8 @@ mod tests {
         let (tenant, ctx) = TenantHarness::create("test_traverse_ancestors")?
             .load()
             .await;
-        let mut tline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?
-            .initialize(&ctx)?;
+        let mut tline =
+            tenant.create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
 
         const NUM_KEYS: usize = 100;
         const NUM_TLINES: usize = 50;
@@ -3936,7 +4313,7 @@ mod tests {
         for idx in 0..NUM_TLINES {
             let new_tline_id = TimelineId::generate();
             tenant
-                .branch_timeline(&tline, new_tline_id, Some(lsn), &ctx)
+                .branch_timeline_test(&tline, new_tline_id, Some(lsn), &ctx)
                 .await?;
             tline = tenant
                 .get_timeline(new_tline_id, true)

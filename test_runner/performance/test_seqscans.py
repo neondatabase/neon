@@ -6,7 +6,7 @@ import pytest
 from fixtures.benchmark_fixture import MetricReport
 from fixtures.compare_fixtures import PgCompare
 from fixtures.log_helper import log
-from pytest_lazyfixture import lazy_fixture  # type: ignore
+from pytest_lazyfixture import lazy_fixture
 
 
 @pytest.mark.parametrize(

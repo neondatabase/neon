@@ -62,7 +62,7 @@ fn do_control_plane_request(
     }
 }
 
-/// Request spec from the control-plane by compute_id. If `NEON_CONSOLE_JWT`
+/// Request spec from the control-plane by compute_id. If `NEON_CONTROL_PLANE_TOKEN`
 /// env variable is set, it will be used for authorization.
 pub fn get_spec_from_control_plane(
     base_uri: &str,

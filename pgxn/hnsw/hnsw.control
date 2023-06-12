@@ -1,0 +1,5 @@
+comment = 'hNsw index'
+default_version = '0.1.0'
+module_pathname = '$libdir/hnsw'
+relocatable = true
+trusted = true

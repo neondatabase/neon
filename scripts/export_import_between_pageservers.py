@@ -162,7 +162,7 @@ class PgProtocol:
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
-        conn = psycopg2.connect(**self.conn_options(**kwargs))
+        conn: PgConnection = psycopg2.connect(**self.conn_options(**kwargs))
 
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
@@ -535,8 +535,8 @@ def export_timeline(
 
 
 def main(args: argparse.Namespace):
-    # any psql version will do here. use current DEFAULT_PG_VERSION = 14
-    psql_path = str(Path(args.pg_distrib_dir) / "v14" / "bin" / "psql")
+    # any psql version will do here. use current DEFAULT_PG_VERSION = 15
+    psql_path = str(Path(args.pg_distrib_dir) / "v15" / "bin" / "psql")
 
     old_pageserver_host = args.old_pageserver_host
     new_pageserver_host = args.new_pageserver_host

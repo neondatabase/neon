@@ -215,7 +215,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
         "412":
-          description: Tenant is missing
+          description: Tenant is missing, or timeline has children
           content:
             application/json:
               schema:
@@ -363,11 +363,30 @@ paths:
         * MUST NOT ASSUME that the request has been lost, based on the observation
           that a subsequent tenant status request returns 404. The request may
           still be in flight. It must be retried.
+
+        The client SHOULD supply a `TenantConfig` for the tenant in the request body.
+        Settings specified in the config override the pageserver's defaults.
+        It is guaranteed that the config settings are applied before the pageserver
+        starts operating on the tenant. E.g., if the config specifies a specific
+        PITR interval for a tenant, then that setting will be in effect before the
+        pageserver starts the garbage collection loop. This enables a client to
+        guarantee a specific PITR setting across detach/attach cycles.
+        The pageserver will reject the request if it cannot parse the config, or
+        if there are any unknown fields in it.
+
+        If the client does not supply a config, the pageserver will use its defaults.
+        This behavior is deprecated: https://github.com/neondatabase/neon/issues/4282
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantAttachRequest"
       responses:
         "202":
           description: Tenant attaching scheduled
         "400":
-          description: Error when no tenant id found in path parameters
+          description: Bad Request
           content:
             application/json:
               schema:
@@ -660,6 +679,8 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+                - new_timeline_id
               properties:
                 new_timeline_id:
                   type: string
@@ -908,12 +929,28 @@ components:
               writing to the tenant's S3 state, so, DO NOT ATTACH the
               tenant to any other pageserver, or we risk split-brain.
             - `attached` means that the attach operation has completed,
-              maybe successfully, maybe not. Perform a health check at
-              the Postgres level to determine healthiness of the tenant.
+              successfully
+            - `failed` means that attach has failed. For reason check corresponding `reason` failed.
+              `failed` is the terminal state, retrying attach call wont resolve the issue.
+              For example this can be caused by s3 being unreachable. The retry may be implemented
+              with call to detach, though it would be better to not automate it and inspec failed state
+              manually before proceeding with a retry.
 
             See the tenant `/attach` endpoint for more information.
-          type: string
-          enum: [ "maybe", "attached" ]
+          type: object
+          required:
+            - slug
+            - data
+          properties:
+            slug:
+              type: string
+              enum: [ "maybe", "attached", "failed" ]
+            data:
+              type: object
+              properties:
+                reason:
+                  type: string
+
     TenantCreateRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
@@ -924,6 +961,13 @@ components:
             new_tenant_id:
               type: string
               format: hex
+    TenantAttachRequest:
+      type: object
+      required:
+        - config
+      properties:
+        config:
+          $ref: '#/components/schemas/TenantConfig'
     TenantConfigRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'

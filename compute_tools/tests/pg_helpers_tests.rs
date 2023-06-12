@@ -16,7 +16,7 @@ mod pg_helpers_tests {
         );
         assert_eq!(
             spec.cluster.roles.first().unwrap().to_pg_options(),
-            "LOGIN PASSWORD 'md56b1d16b78004bbd51fa06af9eda75972'"
+            " LOGIN PASSWORD 'md56b1d16b78004bbd51fa06af9eda75972'"
         );
     }
 

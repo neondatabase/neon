@@ -17,7 +17,7 @@ use tokio::{
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 use tracing::*;
-use utils::crashsafe::path_with_suffix_extension;
+use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
 
 use crate::{Download, DownloadError, RemotePath};
 
@@ -101,19 +101,35 @@ impl RemoteStorage for LocalFs {
             Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
             None => Cow::Borrowed(&self.storage_root),
         };
-        Ok(get_all_files(path.as_ref(), false)
+
+        let prefixes_to_filter = get_all_files(path.as_ref(), false)
             .await
-            .map_err(DownloadError::Other)?
-            .into_iter()
-            .map(|path| {
-                path.strip_prefix(&self.storage_root)
-                    .context("Failed to strip preifix")
+            .map_err(DownloadError::Other)?;
+
+        let mut prefixes = Vec::with_capacity(prefixes_to_filter.len());
+
+        // filter out empty directories to mirror s3 behavior.
+        for prefix in prefixes_to_filter {
+            if prefix.is_dir()
+                && is_directory_empty(&prefix)
+                    .await
+                    .map_err(DownloadError::Other)?
+            {
+                continue;
+            }
+
+            prefixes.push(
+                prefix
+                    .strip_prefix(&self.storage_root)
+                    .context("Failed to strip prefix")
                     .and_then(RemotePath::new)
                     .expect(
                         "We list files for storage root, hence should be able to remote the prefix",
-                    )
-            })
-            .collect())
+                    ),
+            )
+        }
+
+        Ok(prefixes)
     }
 
     async fn upload(
@@ -291,11 +307,25 @@ impl RemoteStorage for LocalFs {
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
         let file_path = path.with_base(&self.storage_root);
-        if file_path.exists() && file_path.is_file() {
-            Ok(fs::remove_file(file_path).await?)
-        } else {
-            bail!("File {file_path:?} either does not exist or is not a file")
+        if !file_path.exists() {
+            // See https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html
+            // > If there isn't a null version, Amazon S3 does not remove any objects but will still respond that the command was successful.
+            return Ok(());
         }
+
+        if !file_path.is_file() {
+            anyhow::bail!("{file_path:?} is not a file");
+        }
+        Ok(fs::remove_file(file_path)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?)
+    }
+
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        for path in paths {
+            self.delete(path).await?
+        }
+        Ok(())
     }
 }
 
@@ -320,7 +350,7 @@ where
                     let file_type = dir_entry.file_type().await?;
                     let entry_path = dir_entry.path();
                     if file_type.is_symlink() {
-                        debug!("{entry_path:?} us a symlink, skipping")
+                        debug!("{entry_path:?} is a symlink, skipping")
                     } else if file_type.is_dir() {
                         if recursive {
                             paths.extend(get_all_files(&entry_path, true).await?.into_iter())
@@ -595,15 +625,11 @@ mod fs_tests {
         storage.delete(&upload_target).await?;
         assert!(storage.list().await?.is_empty());
 
-        match storage.delete(&upload_target).await {
-            Ok(()) => panic!("Should not allow deleting non-existing storage files"),
-            Err(e) => {
-                let error_string = e.to_string();
-                assert!(error_string.contains("does not exist"));
-                let expected_path = upload_target.with_base(&storage.storage_root);
-                assert!(error_string.contains(expected_path.to_str().unwrap()));
-            }
-        }
+        storage
+            .delete(&upload_target)
+            .await
+            .expect("Should allow deleting non-existing storage files");
+
         Ok(())
     }
 
