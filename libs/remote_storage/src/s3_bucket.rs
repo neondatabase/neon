@@ -427,7 +427,7 @@ impl RemoteStorage for S3Bucket {
         }
 
         for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
-            metrics::inc_delete_objects(paths.len() as u64);
+            metrics::inc_delete_objects(chunk.len() as u64);
 
             self.client
                 .delete_objects()
@@ -436,7 +436,7 @@ impl RemoteStorage for S3Bucket {
                 .send()
                 .await
                 .map_err(|e| {
-                    metrics::inc_delete_objects_fail(paths.len() as u64);
+                    metrics::inc_delete_objects_fail(chunk.len() as u64);
                     e
                 })?;
         }
