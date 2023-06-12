@@ -150,7 +150,6 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         .map(|db| db.name.pg_quote())
         .collect::<Vec<_>>();
 
-
     // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on all databases
     // (see https://www.postgresql.org/docs/current/ddl-priv.html)
     let query = format!(
