@@ -535,8 +535,13 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
             last_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
             for sk in env.safekeepers:
-                # require WAL to be trimmed, so no more than one segment is left on disk
-                target_size_mb = 16 * 1.5
+                # require WAL to be trimmed, so no more than one segment is left
+                # on disk
+                # TODO: WAL removal uses persistent values and control
+                # file is fsynced roughly once in a segment, so there is a small
+                # chance that two segments are left on disk, not one. We can
+                # force persist cf and have 16 instead of 32 here.
+                target_size_mb = 32 * 1.5
                 wait(
                     partial(is_wal_trimmed, sk, tenant_id, timeline_id, target_size_mb),
                     f"sk_id={sk.id} to trim WAL to {target_size_mb:.2f}MB",
