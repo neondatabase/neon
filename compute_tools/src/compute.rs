@@ -151,18 +151,18 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         .collect::<Vec<_>>();
 
     let grant_superuser_subquery = if roles.is_empty() {
-        format!("GRANT neon_superuser TO {};", roles.join(", "))
-    } else {
         String::new()
+    } else {
+        format!("GRANT neon_superuser TO {};", roles.join(", "))
     };
 
     let grant_on_database_subquery = if dbs.is_empty() {
+        String::new()
+    } else {
         format!(
             "GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser;",
             dbs.join(", ")
         )
-    } else {
-        String::new()
     };
 
     // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on all databases
@@ -179,7 +179,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                         {}
                     END IF;
                 END
-            $$"#,
+            $$;"#,
         grant_superuser_subquery, grant_on_database_subquery,
     );
     info!("Neon superuser created:\n{}", &query);
