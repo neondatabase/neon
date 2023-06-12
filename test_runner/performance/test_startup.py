@@ -6,6 +6,26 @@ from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
+@pytest.mark.xfail  # We currently pass a 16MB pg_wal dir instead of creating it client-side
+def test_basebackup_size(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
+    neon_env_builder.num_safekeepers = 3
+    env = neon_env_builder.init_start()
+
+    # Start
+    env.neon_cli.create_branch("test_startup")
+    endpoint = env.endpoints.create_start("test_startup")
+
+    # Get metrics
+    metrics = requests.get(f"http://localhost:{endpoint.http_port}/metrics.json").json()
+    basebackup_bytes = metrics["basebackup_bytes"]
+    zenbenchmark.record(
+        "basebackup_size", basebackup_bytes, "bytes", report=MetricReport.LOWER_IS_BETTER
+    )
+
+    # Seems like a reasonable limit, but increase it if it becomes impossible to meet
+    assert basebackup_bytes < 70 * 1024
+
+
 # Just start and measure duration.
 #
 # This test runs pretty quickly and can be informative when used in combination

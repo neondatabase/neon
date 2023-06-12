@@ -71,6 +71,7 @@ pub struct ComputeMetrics {
     pub wait_for_spec_ms: u64,
     pub sync_safekeepers_ms: u64,
     pub basebackup_ms: u64,
+    pub basebackup_bytes: u64,
     pub config_ms: u64,
     pub total_startup_ms: u64,
 }
