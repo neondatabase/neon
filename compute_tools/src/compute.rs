@@ -135,18 +135,29 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
 
 /// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
 /// that we give to customers
-fn create_neon_superuser(client: &mut Client) -> Result<()> {
-    client.simple_query(r#"
+fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+    let roles = spec
+        .cluster
+        .roles
+        .iter()
+        .map(|r| r.name.pg_quote())
+        .collect::<Vec<_>>();
+
+    let query = format!(
+        r#"
             DO $$
                 BEGIN
                     IF NOT EXISTS (
                         SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
                     THEN
                         CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
+                        GRANT neon_superuser TO {};
                     END IF;
                 END
-            $$"#
-        )?;
+            $$"#,
+        roles.join(", ")
+    );
+    client.simple_query(&query)?;
     Ok(())
 }
 
@@ -380,8 +391,8 @@ impl ComputeNode {
         client.simple_query("SET neon.forward_ddl = false")?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
-        create_neon_superuser(&mut client)?;
         let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
+        create_neon_superuser(spec, &mut client)?;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
