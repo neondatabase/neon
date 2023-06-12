@@ -1,6 +1,7 @@
-/* **WIP**
+/* 
+**WIP**
  * This is a MWE of using our RemoteStorage API to call the aws stuff and download multiple files
- * /
+*/
 
 use remote_storage::*;
 use std::path::Path;

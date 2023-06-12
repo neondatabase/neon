@@ -1,6 +1,6 @@
 /* This is a MWE of using our RemoteStorage API to call the aws stuff and download a file
  * 
- * /
+ */
 
 use remote_storage::*;
 use std::path::Path;
