@@ -150,6 +150,21 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         .map(|db| db.name.pg_quote())
         .collect::<Vec<_>>();
 
+    let grant_superuser_subquery = if roles.is_empty() {
+        format!("GRANT neon_superuser TO {};", roles.join(", "))
+    } else {
+        String::new()
+    };
+
+    let grant_on_database_subquery = if dbs.is_empty() {
+        format!(
+            "GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser;",
+            dbs.join(", ")
+        )
+    } else {
+        String::new()
+    };
+
     // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on all databases
     // (see https://www.postgresql.org/docs/current/ddl-priv.html)
     let query = format!(
@@ -160,14 +175,14 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                         SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
                     THEN
                         CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
-                        GRANT neon_superuser TO {};
-                        GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser;
+                        {}
+                        {}
                     END IF;
                 END
             $$"#,
-        roles.join(", "),
-        dbs.join(", "),
+        grant_superuser_subquery, grant_on_database_subquery,
     );
+    info!("Neon superuser created:\n{}", &query);
     client.simple_query(&query)?;
     Ok(())
 }
