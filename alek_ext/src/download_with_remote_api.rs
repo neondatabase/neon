@@ -1,6 +1,6 @@
-/*
- * This is a MWE of "downloading" a local file from a fake local bucket
- * */
+/* This is a MWE of using our RemoteStorage API to call the aws stuff and download a file
+ * 
+ * /
 
 use remote_storage::*;
 use std::path::Path;
@@ -10,7 +10,12 @@ use toml_edit;
 use anyhow;
 use tokio::io::AsyncReadExt;                                  
 
-async fn download_file() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let from_path = "fuzzystrmatch.control";
+    let remote_from_path = RemotePath::new(Path::new(from_path))?;
+    println!("{:?}", remote_from_path.clone());
+
     // read configurations from `pageserver.toml`
     let cfg_file_path = Path::new("./../.neon/pageserver.toml");
     let cfg_file_contents = std::fs::read_to_string(cfg_file_path).unwrap();
@@ -25,15 +30,15 @@ async fn download_file() -> anyhow::Result<()> {
 
     // query S3 bucket
     let remote_storage = GenericRemoteStorage::from_config(&remote_storage_config)?;
-    let from_path = "neon-dev-extensions/fuzzystrmatch.control";
+    let from_path = "fuzzystrmatch.control";
     let remote_from_path = RemotePath::new(Path::new(from_path))?;
         
-    println!("im fine");
-    println!("{:?}",remote_storage_config);
-
+    println!("{:?}", remote_from_path.clone());
+    // if let GenericRemoteStorage::AwsS3(mybucket) = remote_storage {
+    //     println!("{:?}",mybucket.relative_path_to_s3_object(&remote_from_path));
+    // }
     let mut data = remote_storage.download(&remote_from_path).await.expect("data yay");
     let mut write_data_buffer = Vec::new(); 
-
     data.download_stream.read_to_end(&mut write_data_buffer).await?;
 
     // write `data` to a file locally
@@ -41,13 +46,9 @@ async fn download_file() -> anyhow::Result<()> {
     let mut f = BufWriter::new(f);
     f.write_all(&mut write_data_buffer).expect("error writing data");
 
-    Ok(())
-}
+    // let stuff = response.body;
+    // let data = stuff.collect().await.expect("error reading data").to_vec();
+    // println!("data: {:?}", std::str::from_utf8(&data));
 
-#[tokio::main]
-async fn main() {
-    match download_file().await {
-        Err(_)=>println!("Err"),
-        _ => println!("SUCEECESS")
-    }
+    Ok(())
 }

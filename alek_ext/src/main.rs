@@ -1,3 +1,7 @@
+/* **WIP**
+ * This is a MWE of using our RemoteStorage API to call the aws stuff and download multiple files
+ * /
+
 use remote_storage::*;
 use std::path::Path;
 use std::fs::File;
@@ -5,22 +9,6 @@ use std::io::{BufWriter, Write};
 use toml_edit;
 use anyhow;
 use tokio::io::AsyncReadExt;                                  
-
-// let region_provider = RegionProviderChain::first_try(Region::new("eu-central-1"))
-//     .or_default_provider()
-//     .or_else(Region::new("eu-central-1"));
-
-// let shared_config = aws_config::from_env().region(region_provider).load().await;
-// let client = aws_sdk_s3::Client::new(&shared_config);
-
-// let bucket_name = "neon-dev-extensions";
-// let object_key = "fuzzystrmatch.control";
-// let response = client
-//     .get_object()
-//     .bucket(bucket_name)
-//     .key(object_key)
-//     .send()
-//     .await?;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

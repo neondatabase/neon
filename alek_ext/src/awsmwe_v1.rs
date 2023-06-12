@@ -1,3 +1,7 @@
+/*
+ * This is a MWE of using the aws-sdk-s3 to download a file from an S3 bucket 
+ * */
+
 use aws_sdk_s3::{self, config::Region, Error};
 use aws_config::{self, meta::region::RegionProviderChain};
 
