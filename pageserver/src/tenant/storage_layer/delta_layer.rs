@@ -205,7 +205,7 @@ pub struct DeltaLayerInner {
     index_start_blk: u32,
     index_root_blk: u32,
 
-    /// Reader object for reading blocks from the file. (None if not loaded yet)
+    /// Reader object for reading blocks from the file.
     file: FileBlockReader<VirtualFile>,
 }
 
