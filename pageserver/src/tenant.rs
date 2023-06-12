@@ -1277,7 +1277,7 @@ impl Tenant {
     /// Once the caller is done setting up the timeline, they should call
     /// `UninitializedTimeline::initialize_with_lock` to remove the uninit mark.
     ///
-    /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
+    /// For tests, use `DatadirModification::init_empty` + `commit` to setup the
     /// minimum amount of keys required to get a writable timeline.
     /// (Without it, `put` might fail due to `repartition` failing.)
     pub fn create_empty_timeline(
