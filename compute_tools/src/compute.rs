@@ -442,7 +442,7 @@ impl ComputeNode {
 
         let pg = self.start_postgres(spec.storage_auth_token.clone())?;
 
-        if spec.spec.mode == ComputeMode::Primary && !spec.spec.already_configured {
+        if spec.spec.mode == ComputeMode::Primary && !spec.spec.skip_pg_catalog_updates {
             self.apply_config(&compute_state)?;
         }
 

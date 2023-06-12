@@ -28,10 +28,10 @@ pub struct ComputeSpec {
     pub delta_operations: Option<Vec<DeltaOp>>,
 
     /// An optinal hint that can be passed to speed up startup time if we know
-    /// that no mutations (like role creation, database creation) need to be
-    /// done on the actual database to start.
+    /// that no pg catalog mutations (like role creation, database creation,
+    /// extension creation) need to be done on the actual database to start.
     #[serde(default)] // Default false
-    pub already_configured: bool,
+    pub skip_pg_catalog_updates: bool,
 
     // Information needed to connect to the storage layer.
     //
