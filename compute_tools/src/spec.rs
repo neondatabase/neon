@@ -161,10 +161,6 @@ pub fn add_standby_signal(pgdata_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn spec_has_webaccess(spec: &ComputeSpec) -> bool {
-    return spec.cluster.roles.iter().any(|r| r.name == "web_access");
-}
-
 /// Given a cluster spec json and open transaction it handles roles creation,
 /// deletion and update.
 #[instrument(skip_all)]
@@ -278,16 +274,6 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 info!("role create query: '{}'", &query);
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
-
-                // Remove this when we get rid of web_access
-                if spec_has_webaccess(spec) {
-                    let grant_query = format!(
-                        "GRANT pg_read_all_data, pg_write_all_data TO {}",
-                        name.pg_quote()
-                    );
-                    xact.execute(grant_query.as_str(), &[])?;
-                    info!("role grant query: '{}'", &grant_query);
-                }
             }
         }
 
@@ -508,36 +494,8 @@ pub fn handle_databases(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
 /// Grant CREATE ON DATABASE to the database owner and do some other alters and grants
 /// to allow users creating trusted extensions and re-creating `public` schema, for example.
 #[instrument(skip_all)]
-pub fn handle_grants(spec: &ComputeSpec, connstr: &str, client: &mut Client) -> Result<()> {
+pub fn handle_grants(spec: &ComputeSpec, connstr: &str) -> Result<()> {
     info!("cluster spec grants:");
-
-    // We now have a separate `web_access` role to connect to the database
-    // via the web interface and proxy link auth. And also we grant a
-    // read / write all data privilege to every role. So also grant
-    // create to everyone.
-    // XXX: later we should stop messing with Postgres ACL in such horrible
-    // ways.
-    let roles = spec
-        .cluster
-        .roles
-        .iter()
-        .map(|r| r.name.pg_quote())
-        .collect::<Vec<_>>();
-
-    if spec_has_webaccess(spec) {
-        for db in &spec.cluster.databases {
-            let dbname = &db.name;
-
-            let query: String = format!(
-                "GRANT CREATE ON DATABASE {} TO {}",
-                dbname.pg_quote(),
-                roles.join(", ")
-            );
-            info!("grant query {}", &query);
-
-            client.execute(query.as_str(), &[])?;
-        }
-    }
 
     // Do some per-database access adjustments. We'd better do this at db creation time,
     // but CREATE DATABASE isn't transactional. So we cannot create db + do some grants

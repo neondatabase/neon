@@ -143,6 +143,13 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         .map(|r| r.name.pg_quote())
         .collect::<Vec<_>>();
 
+    let dbs = spec
+        .cluster
+        .databases
+        .iter()
+        .map(|db| db.name.pg_quote())
+        .collect::<Vec<_>>();
+
     let query = format!(
         r#"
             DO $$
@@ -152,10 +159,12 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                     THEN
                         CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
                         GRANT neon_superuser TO {};
+                        GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser;
                     END IF;
                 END
             $$"#,
-        roles.join(", ")
+        roles.join(", "),
+        dbs.join(", "),
     );
     client.simple_query(&query)?;
     Ok(())
@@ -396,7 +405,7 @@ impl ComputeNode {
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(spec, self.connstr.as_str(), &mut client)?;
+        handle_grants(spec, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
 
         // 'Close' connection
@@ -434,7 +443,7 @@ impl ComputeNode {
             handle_roles(&spec, &mut client)?;
             handle_databases(&spec, &mut client)?;
             handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-            handle_grants(&spec, self.connstr.as_str(), &mut client)?;
+            handle_grants(&spec, self.connstr.as_str())?;
             handle_extensions(&spec, &mut client)?;
         }
 
