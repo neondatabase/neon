@@ -1461,7 +1461,13 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             let timelines_to_compact = timelines
                 .iter()
-                .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
+                .filter_map(|(timeline_id, timeline)| {
+                    if timeline.is_active() {
+                        Some((*timeline_id, timeline.clone()))
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>();
             drop(timelines);
             timelines_to_compact
