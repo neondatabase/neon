@@ -28,7 +28,7 @@ use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::context::{DownloadBehavior, RequestContext};
@@ -185,7 +185,7 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
-    write_lock: Mutex<()>,
+    write_lock: tokio::sync::Mutex<()>,
 
     /// Used to avoid multiple `flush_loop` tasks running
     pub(super) flush_loop_state: Mutex<FlushLoopState>,
@@ -689,7 +689,7 @@ impl Timeline {
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
     pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
-        self.freeze_inmem_layer(false);
+        self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait().await
     }
 
@@ -868,10 +868,10 @@ impl Timeline {
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
-    pub fn writer(&self) -> TimelineWriter<'_> {
+    pub async fn writer(&self) -> TimelineWriter<'_> {
         TimelineWriter {
             tl: self,
-            _write_guard: self.write_lock.lock().unwrap(),
+            _write_guard: self.write_lock.lock().await,
         }
     }
 
@@ -905,7 +905,7 @@ impl Timeline {
     ///
     /// Also flush after a period of time without new data -- it helps
     /// safekeepers to regard pageserver as caught up and suspend activity.
-    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
+    pub async fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
         let last_lsn = self.get_last_record_lsn();
         let open_layer_size = {
             let layers = self.layers.read().unwrap();
@@ -932,7 +932,7 @@ impl Timeline {
                 last_freeze_ts.elapsed()
             );
 
-            self.freeze_inmem_layer(true);
+            self.freeze_inmem_layer(true).await;
             self.last_freeze_at.store(last_lsn);
             *(self.last_freeze_ts.write().unwrap()) = Instant::now();
 
@@ -1452,7 +1452,7 @@ impl Timeline {
                 layer_flush_start_tx,
                 layer_flush_done_tx,
 
-                write_lock: Mutex::new(()),
+                write_lock: tokio::sync::Mutex::new(()),
                 layer_removal_cs: Default::default(),
 
                 gc_info: std::sync::RwLock::new(GcInfo {
@@ -2732,13 +2732,13 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
-    fn freeze_inmem_layer(&self, write_lock_held: bool) {
+    async fn freeze_inmem_layer(&self, write_lock_held: bool) {
         // Freeze the current open in-memory layer. It will be written to disk on next
         // iteration.
         let _write_guard = if write_lock_held {
             None
         } else {
-            Some(self.write_lock.lock().unwrap())
+            Some(self.write_lock.lock().await)
         };
         let mut layers = self.layers.write().unwrap();
         if let Some(open_layer) = &layers.open_layer {
@@ -4595,7 +4595,7 @@ fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageRecon
 // but will cause large code changes.
 pub struct TimelineWriter<'a> {
     tl: &'a Timeline,
-    _write_guard: MutexGuard<'a, ()>,
+    _write_guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl Deref for TimelineWriter<'_> {
@@ -4634,6 +4634,14 @@ impl<'a> TimelineWriter<'a> {
     pub fn update_current_logical_size(&self, delta: i64) {
         self.tl.update_current_logical_size(delta)
     }
+}
+
+// We need TimelineWriter to be send in upcoming conversion of
+// Timeline::layers to tokio::sync::RwLock.
+#[test]
+fn is_send() {
+    fn _assert_send<T: Send>() {}
+    _assert_send::<TimelineWriter<'_>>();
 }
 
 /// Add a suffix to a layer file's name: .{num}.old
