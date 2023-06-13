@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import logging
 import os
 import re
 import sys
@@ -25,15 +26,23 @@ def err(msg):
     sys.exit(1)
 
 
-@backoff.on_exception(backoff.expo, psycopg2.OperationalError, max_time=15)
 @contextmanager
 def get_connection_cursor():
     connstr = os.getenv("DATABASE_URL")
     if not connstr:
         err("DATABASE_URL environment variable is not set")
-    with psycopg2.connect(connstr, connect_timeout=30) as conn:
+
+    @backoff.on_exception(backoff.expo, psycopg2.OperationalError, max_time=150)
+    def connect(connstr):
+        return psycopg2.connect(connstr, connect_timeout=30)
+
+    conn = connect(connstr)
+    try:
         with conn.cursor() as cur:
             yield cur
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def create_table(cur):
@@ -103,4 +112,5 @@ def main():
 
 
 if __name__ == "__main__":
+    logging.getLogger("backoff").addHandler(logging.StreamHandler())
     main()
