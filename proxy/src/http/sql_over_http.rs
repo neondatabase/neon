@@ -1,5 +1,6 @@
 use futures::pin_mut;
 use futures::StreamExt;
+use futures::TryFutureExt;
 use hyper::body::HttpBody;
 use hyper::http::HeaderName;
 use hyper::http::HeaderValue;
@@ -11,8 +12,13 @@ use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::Row;
+use tracing::error;
+use tracing::info;
+use tracing::instrument;
 use url::Url;
 
+use crate::proxy::invalidate_cache;
+use crate::proxy::NUM_RETRIES_WAKE_COMPUTE;
 use crate::{auth, config::ProxyConfig, console};
 
 #[derive(serde::Deserialize)]
@@ -90,10 +96,17 @@ fn json_array_to_pg_array(value: &Value) -> Result<Option<String>, serde_json::E
     }
 }
 
+struct ConnInfo {
+    username: String,
+    dbname: String,
+    hostname: String,
+    password: String,
+}
+
 fn get_conn_info(
     headers: &HeaderMap,
     sni_hostname: Option<String>,
-) -> Result<(String, String, String, String), anyhow::Error> {
+) -> Result<ConnInfo, anyhow::Error> {
     let connection_string = headers
         .get("Neon-Connection-String")
         .ok_or(anyhow::anyhow!("missing connection string"))?
@@ -146,12 +159,12 @@ fn get_conn_info(
         }
     }
 
-    Ok((
-        username.to_owned(),
-        dbname.to_owned(),
-        hostname.to_owned(),
-        password.to_owned(),
-    ))
+    Ok(ConnInfo {
+        username: username.to_owned(),
+        dbname: dbname.to_owned(),
+        hostname: hostname.to_owned(),
+        password: password.to_owned(),
+    })
 }
 
 // TODO: return different http error codes
@@ -164,10 +177,10 @@ pub async fn handle(
     // Determine the destination and connection params
     //
     let headers = request.headers();
-    let (username, dbname, hostname, password) = get_conn_info(headers, sni_hostname)?;
+    let conn_info = get_conn_info(headers, sni_hostname)?;
     let credential_params = StartupMessageParams::new([
-        ("user", &username),
-        ("database", &dbname),
+        ("user", &conn_info.username),
+        ("database", &conn_info.dbname),
         ("application_name", APP_NAME),
     ]);
 
@@ -186,21 +199,20 @@ pub async fn handle(
     let creds = config
         .auth_backend
         .as_ref()
-        .map(|_| auth::ClientCredentials::parse(&credential_params, Some(&hostname), common_names))
+        .map(|_| {
+            auth::ClientCredentials::parse(
+                &credential_params,
+                Some(&conn_info.hostname),
+                common_names,
+            )
+        })
         .transpose()?;
     let extra = console::ConsoleReqExtra {
         session_id: uuid::Uuid::new_v4(),
         application_name: Some(APP_NAME),
     };
-    let node = creds.wake_compute(&extra).await?.expect("msg");
-    let conf = node.value.config;
-    let port = *conf.get_ports().first().expect("no port");
-    let host = match conf.get_hosts().first().expect("no host") {
-        tokio_postgres::config::Host::Tcp(host) => host,
-        tokio_postgres::config::Host::Unix(_) => {
-            return Err(anyhow::anyhow!("unix socket is not supported"));
-        }
-    };
+
+    let mut node_info = creds.wake_compute(&extra).await?.expect("msg");
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
@@ -221,27 +233,9 @@ pub async fn handle(
     let query_params = json_to_pg_text(params)?;
 
     //
-    // Connenct to the destination
-    //
-    let (client, connection) = tokio_postgres::Config::new()
-        .host(host)
-        .port(port)
-        .user(&username)
-        .password(&password)
-        .dbname(&dbname)
-        .max_backend_message_size(MAX_RESPONSE_SIZE)
-        .connect(tokio_postgres::NoTls)
-        .await?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
-        }
-    });
-
-    //
     // Now execute the query and return the result
     //
+    let client = connect_to_compute(&mut node_info, &extra, &creds, &conn_info).await?;
     let row_stream = client.query_raw_txt(query, query_params).await?;
 
     // Manually drain the stream into a vector to leave row_stream hanging
@@ -301,6 +295,62 @@ pub async fn handle(
         "fields": fields,
         "rowAsArray": array_mode,
     }))
+}
+
+/// This function is a copy of `connect_to_compute` from `src/proxy.rs` with
+/// the difference that it uses `tokio_postgres` for the connection.
+#[instrument(skip_all)]
+async fn connect_to_compute(
+    node_info: &mut console::CachedNodeInfo,
+    extra: &console::ConsoleReqExtra<'_>,
+    creds: &auth::BackendType<'_, auth::ClientCredentials<'_>>,
+    conn_info: &ConnInfo,
+) -> anyhow::Result<tokio_postgres::Client> {
+    let mut num_retries: usize = NUM_RETRIES_WAKE_COMPUTE;
+
+    loop {
+        match connect_to_compute_once(node_info, conn_info).await {
+            Err(e) if num_retries > 0 => {
+                info!("compute node's state has changed; requesting a wake-up");
+                match creds.wake_compute(extra).await? {
+                    // Update `node_info` and try one more time.
+                    Some(new) => {
+                        *node_info = new;
+                    }
+                    // Link auth doesn't work that way, so we just exit.
+                    None => return Err(e),
+                }
+            }
+            other => return other,
+        }
+
+        num_retries -= 1;
+        info!("retrying after wake-up ({num_retries} attempts left)");
+    }
+}
+
+async fn connect_to_compute_once(
+    node_info: &console::CachedNodeInfo,
+    conn_info: &ConnInfo,
+) -> anyhow::Result<tokio_postgres::Client> {
+    let mut config = (*node_info.config).clone();
+
+    let (client, connection) = config
+        .user(&conn_info.username)
+        .password(&conn_info.password)
+        .dbname(&conn_info.dbname)
+        .max_backend_message_size(MAX_RESPONSE_SIZE)
+        .connect(tokio_postgres::NoTls)
+        .inspect_err(|_: &tokio_postgres::Error| invalidate_cache(node_info))
+        .await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            error!("connection error: {}", e);
+        }
+    });
+
+    Ok(client)
 }
 
 //
