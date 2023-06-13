@@ -826,6 +826,7 @@ impl TimelineMetrics {
         // TODO(chi): remove this once we remove Lazy for all metrics. Otherwise this will not appear in the exporter
         // and integration test will error.
         MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
+        MATERIALIZED_PAGE_CACHE_HIT.get();
 
         TimelineMetrics {
             tenant_id,
