@@ -86,8 +86,8 @@ pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
-pub mod manifest;
 pub mod layer_map_mgr;
+pub mod manifest;
 
 pub mod metadata;
 mod par_fsync;
