@@ -3033,6 +3033,8 @@ impl Timeline {
         par_fsync::par_fsync(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
             .context("fsync of timeline dir")?;
 
+        let sz = new_delta.desc.file_size;
+
         // Add it to the layer map
         let l = Arc::new(new_delta);
         let mut layers = self.layers.write().unwrap();
@@ -3044,9 +3046,6 @@ impl Timeline {
         );
         batch_updates.insert_historic(l.layer_desc().clone(), l);
         batch_updates.flush();
-
-        // update the timeline's physical size
-        let sz = new_delta_path.metadata()?.len();
 
         self.metrics.resident_physical_size_gauge.add(sz);
         // update metrics
