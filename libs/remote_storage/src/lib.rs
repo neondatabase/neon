@@ -90,6 +90,12 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
     ) -> Result<Vec<RemotePath>, DownloadError>;
 
+    /// Lists all files in a subdirectories
+    async fn list_files(
+        &self,
+        prefix: Option<&RemotePath>,
+    ) -> anyhow::Result<Vec<RemotePath>>;
+
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
         &self,
@@ -165,6 +171,23 @@ pub enum GenericRemoteStorage {
 }
 
 impl GenericRemoteStorage {
+    // A function for listing all the files in a "directory"
+    // Example:
+    // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
+    pub async fn list_files(
+        &self,
+        folder: Option<&RemotePath>
+    ) -> anyhow::Result<Vec<RemotePath>>{
+        match self {
+            Self::LocalFs(s) => s.list_files(folder).await,
+            Self::AwsS3(s) => s.list_files(folder).await,
+            Self::Unreliable(s) => s.list_files(folder).await,
+        }
+    }
+
+    // lists common *prefixes*, if any of files
+    // Example:
+    // list_prefixes("foo123","foo567","bar123","bar432") = ["foo", "bar"]
     pub async fn list_prefixes(
         &self,
         prefix: Option<&RemotePath>,

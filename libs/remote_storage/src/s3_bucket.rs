@@ -5,6 +5,7 @@
 //! their bucket prefixes are both specified and different.
 
 use std::sync::Arc;
+use std::path::Path;
 
 use anyhow::Context;
 use aws_config::{
@@ -330,6 +331,38 @@ impl RemoteStorage for S3Bucket {
         }
 
         Ok(document_keys)
+    }
+
+    async fn list_files(
+        &self,
+        folder: Option<&RemotePath>
+    ) -> anyhow::Result<Vec<RemotePath>>{
+
+        // THIS IS A somewhat messed up prototype
+
+        let folder_name = folder.map(|x| 
+            String::from(
+                x.object_name().expect("something went wrong computing folder name")
+            )
+        );
+
+        // TODO: worry about continuation character and limits and permit and stuff 
+        let resp = self
+            .client
+            .list_objects_v2()
+            .bucket("neon-dev-extensions")
+            .set_prefix(folder_name)
+            .send().await
+            .unwrap();
+
+        let mut all_files = vec![];
+        for object in resp.contents().unwrap() {
+            let x = object.key().unwrap();
+            let y = RemotePath::new(Path::new(x)).unwrap();
+            all_files.push(y);
+        }
+
+        Ok(all_files)
     }
 
     async fn upload(

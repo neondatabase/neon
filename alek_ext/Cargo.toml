@@ -7,12 +7,15 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.71"
-aws-credential-types = "0.55.3"
-aws-sdk-s3 = "0.28.0"
-aws-smithy-http = "0.55.3"
+aws-config = { version = "0.55", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "0.27"
+aws-smithy-http = "0.55"
+aws-credential-types = "0.55"
+aws-types = "0.55"
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
 tokio = "1.28.2"
 toml_edit = "0.19.10"
 tracing = "0.1.37"
+tracing-subscriber = "0.3.17"
 
 [workspace]

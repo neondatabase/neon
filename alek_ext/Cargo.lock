@@ -31,13 +31,16 @@ name = "alek_ext"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-config",
  "aws-credential-types",
- "aws-sdk-s3 0.28.0",
+ "aws-sdk-s3",
  "aws-smithy-http",
+ "aws-types",
  "remote_storage",
  "tokio",
  "toml_edit",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -228,39 +231,6 @@ name = "aws-sdk-s3"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37c77060408d653d3efa6ea7b66c1389bc35a0342352984c8bf8bcb814a8fc27"
-dependencies = [
- "aws-credential-types",
- "aws-endpoint",
- "aws-http",
- "aws-sig-auth",
- "aws-sigv4",
- "aws-smithy-async",
- "aws-smithy-checksums",
- "aws-smithy-client",
- "aws-smithy-eventstream",
- "aws-smithy-http",
- "aws-smithy-http-tower",
- "aws-smithy-json",
- "aws-smithy-types",
- "aws-smithy-xml",
- "aws-types",
- "bytes",
- "http",
- "http-body",
- "once_cell",
- "percent-encoding",
- "regex",
- "tokio-stream",
- "tower",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "aws-sdk-s3"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fba197193cbb4bcb6aad8d99796b2291f36fa89562ded5d4501363055b0de89f"
 dependencies = [
  "aws-credential-types",
  "aws-endpoint",
@@ -1828,7 +1798,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-credential-types",
- "aws-sdk-s3 0.27.0",
+ "aws-sdk-s3",
  "aws-smithy-http",
  "aws-types",
  "hyper",
