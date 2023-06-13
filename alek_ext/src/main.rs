@@ -2,6 +2,7 @@
 **WIP**
  * This is a MWE of using our RemoteStorage API to call the aws stuff and download multiple files
  * TODO: s3_bucket some work; for example to make sure the pagination thing goes fine.
+macro_rules! alek { ($expression:expr) => { println!("{:?}", $expression); }; }
 */
 
 use remote_storage::*;
@@ -36,7 +37,6 @@ async fn main() -> anyhow::Result<()> {
     let from_paths = remote_storage.list_files(Some(&folder)).await?;
 
     for remote_from_path in from_paths {
-        // TODO: is it giving the right name?
         // TODO: where should we actually save the files to?
         if remote_from_path.extension() == Some("control") {
             let file_name = remote_from_path.object_name().expect("it must exist");
