@@ -215,7 +215,7 @@ async fn build_timeline_info(
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
 
-    let mut info = build_timeline_info_common(timeline, ctx)?;
+    let mut info = build_timeline_info_common(timeline, ctx).await?;
     if include_non_incremental_logical_size {
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
         // Otherwise, if someone deletes the timeline / detaches the tenant while
@@ -233,7 +233,7 @@ async fn build_timeline_info(
     Ok(info)
 }
 
-fn build_timeline_info_common(
+async fn build_timeline_info_common(
     timeline: &Arc<Timeline>,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
@@ -264,7 +264,7 @@ fn build_timeline_info_common(
             None
         }
     };
-    let current_physical_size = Some(timeline.layer_size_sum());
+    let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
@@ -330,6 +330,7 @@ async fn timeline_create_handler(
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
                 let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
+                    .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
@@ -591,7 +592,7 @@ async fn tenant_status(
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
         for timeline in tenant.list_timelines().iter() {
-            current_physical_size += timeline.layer_size_sum();
+            current_physical_size += timeline.layer_size_sum().await;
         }
 
         let state = tenant.current_state();
@@ -701,7 +702,7 @@ async fn layer_map_info_handler(
     check_permission(&request, Some(tenant_id))?;
 
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
-    let layer_map_info = timeline.layer_map_info(reset);
+    let layer_map_info = timeline.layer_map_info(reset).await;
 
     json_response(StatusCode::OK, layer_map_info)
 }
