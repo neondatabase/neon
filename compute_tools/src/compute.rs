@@ -153,14 +153,25 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
     let grant_superuser_subquery = if roles.is_empty() {
         String::new()
     } else {
-        format!("GRANT neon_superuser TO {};", roles.join(", "))
+        format!(
+            r#"EXECUTE
+                   format('GRANT neon_superuser TO %s',
+                       (SELECT string_agg(rolname, ', ')
+                        FROM pg_catalog.pg_authid
+                         WHERE rolname IN ({})));"#,
+            roles.join(", ")
+        )
     };
 
     let grant_on_database_subquery = if dbs.is_empty() {
         String::new()
     } else {
         format!(
-            "GRANT ALL PRIVILEGES ON DATABASE {} TO neon_superuser;",
+            r#"EXECUTE
+                   format('GRANT ALL PRIVILEGES ON DATABASE %s TO neon_superuser',
+                          (SELECT string_agg(datname, ', ')
+                           FROM pg_catalog.pg_database
+                           WHERE datname IN ({})));"#,
             dbs.join(", ")
         )
     };
