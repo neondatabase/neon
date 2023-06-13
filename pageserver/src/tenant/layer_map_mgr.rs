@@ -134,6 +134,9 @@ impl LayerMgrWatermark {
         match version.cmp(&core.lowest_version_in_use) {
             std::cmp::Ordering::Less => {
                 if cfg!(debug_assertions) {
+                    // TODO(chi): this panic might not be correctly handled by the panic handler
+                    // given this function is called in a drop handler. We can move it to a separate
+                    // thread if necessary.
                     panic!("release a version lower than the lowest version in use.")
                 }
             }
@@ -256,8 +259,11 @@ mod tests {
         watermark.release(3);
         watermark.release(4);
         watermark.release(5);
+        watermark.release(7);
         assert_eq!(watermark.lowest_version_in_use(), 2);
         watermark.release(2);
         assert_eq!(watermark.lowest_version_in_use(), 6);
+        watermark.release(6);
+        assert_eq!(watermark.lowest_version_in_use(), 8);
     }
 }
