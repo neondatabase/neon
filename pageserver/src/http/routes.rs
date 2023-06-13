@@ -330,7 +330,7 @@ async fn timeline_create_handler(
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
                 let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
-                .await
+                    .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
