@@ -32,9 +32,9 @@ def test_basebackup_size(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBen
     # Even though we don't insert any data, this nuber could be larger than basebackup
     # size because there could theoretically be compression, or postgres could create
     # or download data during startup. Currently if we don't send any pg_wal in the
-    # basebackup, postgres will start up just fine but it will create it's own basebackup
-    # and cause the same amount of network IO as if the pg_wal was sent via basebackup.
-    # TODO Investigate why this happens.
+    # basebackup, postgres will start up just fine, but during sync-safekeepers,
+    # walproposer will try to recover the missing wal from safekeepers and cause the
+    # same amount of network IO. We want to notice that if it happens.
     datadir_bytes = get_dir_size(datadir)
     zenbenchmark.record(
         "datadir_size", datadir_bytes / 1024, "KB", report=MetricReport.LOWER_IS_BETTER
