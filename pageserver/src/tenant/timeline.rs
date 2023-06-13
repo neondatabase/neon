@@ -3029,7 +3029,7 @@ impl Timeline {
         // 2. fsync them
         // 3. rename to the final name
         // 4. fsync the parent directory
-        par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
+        par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
         par_fsync::par_fsync(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
             .context("fsync of timeline dir")?;
 
