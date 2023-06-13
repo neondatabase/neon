@@ -419,23 +419,27 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
 
 
-def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
-    neon_env_builder: NeonEnvBuilder,
+@pytest.mark.parametrize(
+    "stuck_failpoint",
+    ["persist_index_part_with_deleted_flag_after_set_before_upload_pause", "in_progress_delete"],
+)
+def test_concurrent_timeline_delete_if_first_stuck_on(
+    neon_env_builder: NeonEnvBuilder, stuck_failpoint: str
 ):
     """
-    If we're stuck uploading the index file with the is_delete flag,
-    eventually console will hand up and retry.
-    If we're still stuck at the retry time, ensure that the retry
-    fails with status 500, signalling to console that it should retry
-    later.
-    Ideally, timeline_delete should return 202 Accepted and require
-    console to poll for completion, but, that would require changing
-    the API contract.
+    If delete is stuck console will eventually retry deletion.
+    So we need to be sure that these requests wont interleave with each other.
+    In this tests we check two places where we can spend a lot of time.
+    This is a regression test because there was a bug when DeletionGuard wasnt propagated
+    to the background task.
+
+    Ensure that when retry comes if we're still stuck request will get an immediate error response,
+    signalling to console that it should retry later.
     """
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_concurrent_timeline_delete_if_first_stuck_at_index_upload",
+        test_name=f"test_concurrent_timeline_delete_if_first_stuck_on_{stuck_failpoint}",
     )
 
     env = neon_env_builder.init_start()
@@ -445,8 +449,7 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
     ps_http = env.pageserver.http_client()
 
     # make the first call sleep practically forever
-    failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-    ps_http.configure_failpoints((failpoint_name, "pause"))
+    ps_http.configure_failpoints((stuck_failpoint, "pause"))
 
     def first_call(result_queue):
         try:
@@ -466,7 +469,7 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
 
         def first_call_hit_failpoint():
             assert env.pageserver.log_contains(
-                f".*{child_timeline_id}.*at failpoint {failpoint_name}"
+                f".*{child_timeline_id}.*at failpoint {stuck_failpoint}"
             )
 
         wait_until(50, 0.1, first_call_hit_failpoint)
@@ -484,8 +487,12 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
         )
         log.info("second call failed as expected")
 
+        # ensure it is not 404 and stopping
+        detail = ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
+        assert detail["state"] == "Stopping"
+
         # by now we know that the second call failed, let's ensure the first call will finish
-        ps_http.configure_failpoints((failpoint_name, "off"))
+        ps_http.configure_failpoints((stuck_failpoint, "off"))
 
         result = first_call_result.get()
         assert result == "success"
