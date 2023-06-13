@@ -10,6 +10,7 @@
 //
 
 use anyhow::Context;
+use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
@@ -773,8 +774,9 @@ impl PageServerHandler {
         // Send a tarball of the latest layer on the timeline
         {
             let mut writer = pgb.copyout_writer();
+            let mut encoder = GzipEncoder::new(&mut writer);
             basebackup::send_basebackup_tarball(
-                &mut writer,
+                &mut encoder,
                 &timeline,
                 lsn,
                 prev_lsn,

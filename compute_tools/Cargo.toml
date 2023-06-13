@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+flate2.workspace = true
 chrono.workspace = true
 clap.workspace = true
 futures.workspace = true
