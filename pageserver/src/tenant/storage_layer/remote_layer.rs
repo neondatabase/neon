@@ -6,7 +6,7 @@ use crate::context::RequestContext;
 use crate::repository::Key;
 use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
-use crate::tenant::storage_layer::{Layer, ValueReconstructState};
+use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
 use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
@@ -21,7 +21,7 @@ use utils::{
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
     DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc, ValueReconstructResult,
+    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
@@ -66,12 +66,12 @@ impl std::fmt::Debug for RemoteLayer {
 #[async_trait::async_trait]
 impl Layer for RemoteLayer {
     async fn get_value_reconstruct_data(
-        self: Arc<Self>,
+        &self,
         _key: Key,
         _lsn_range: Range<Lsn>,
-        _reconstruct_state: ValueReconstructState,
-        _ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+        _reconstruct_state: &mut ValueReconstructState,
+        _ctx: &RequestContext,
+    ) -> Result<ValueReconstructResult> {
         bail!(
             "layer {} needs to be downloaded",
             self.filename().file_name()

@@ -375,12 +375,12 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
     async fn get_value_reconstruct_data(
-        self: Arc<Self>,
+        &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_data: ValueReconstructState,
-        ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)>;
+        reconstruct_data: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<ValueReconstructResult>;
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
     fn short_id(&self) -> String;
@@ -515,12 +515,12 @@ impl Layer for LayerDescriptor {
     }
 
     async fn get_value_reconstruct_data(
-        self: Arc<Self>,
+        &self,
         _key: Key,
         _lsn_range: Range<Lsn>,
-        _reconstruct_data: ValueReconstructState,
-        _ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+        _reconstruct_data: &mut ValueReconstructState,
+        _ctx: &RequestContext,
+    ) -> Result<ValueReconstructResult> {
         todo!("This method shouldn't be part of the Layer trait")
     }
 

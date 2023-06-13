@@ -27,7 +27,7 @@ use utils::{
 // while being able to use std::fmt::Write's methods
 use std::fmt::Write as _;
 use std::ops::Range;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use super::{DeltaLayer, DeltaLayerWriter, Layer};
 
@@ -192,12 +192,12 @@ impl Layer for InMemoryLayer {
 
     /// Look up given value in the layer.
     async fn get_value_reconstruct_data(
-        self: Arc<Self>,
+        &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        mut reconstruct_state: ValueReconstructState,
-        _ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+        reconstruct_state: &mut ValueReconstructState,
+        _ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
@@ -214,7 +214,7 @@ impl Layer for InMemoryLayer {
                 match value {
                     Value::Image(img) => {
                         reconstruct_state.img = Some((*entry_lsn, img));
-                        return Ok((reconstruct_state, ValueReconstructResult::Complete));
+                        return Ok(ValueReconstructResult::Complete);
                     }
                     Value::WalRecord(rec) => {
                         let will_init = rec.will_init();
@@ -234,9 +234,9 @@ impl Layer for InMemoryLayer {
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
         if need_image {
-            Ok((reconstruct_state, ValueReconstructResult::Continue))
+            Ok(ValueReconstructResult::Continue)
         } else {
-            Ok((reconstruct_state, ValueReconstructResult::Complete))
+            Ok(ValueReconstructResult::Complete)
         }
     }
 }
