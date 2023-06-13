@@ -1133,18 +1133,17 @@ impl<'a> DatadirModification<'a> {
         let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        // NB: this is asyncified `HashMap::retain()`.
-        let mut retain = HashSet::new();
-        let mut result: anyhow::Result<()> = Ok(());
-        for (key, value) in &self.pending_updates {
-            if result.is_ok() && (is_rel_block_key(*key) || is_slru_block_key(*key)) {
-                result = writer.put(*key, self.lsn, value).await;
+        let mut retained_pending_updates = HashMap::new();
+        for (key, value) in self.pending_updates.drain() {
+            if is_rel_block_key(key) || is_slru_block_key(key) {
+                // This bails out on first error without modifying pending_updates.
+                // That's Ok, cf this function's doc comment.
+                writer.put(key, self.lsn, &value).await?;
             } else {
-                retain.insert(*key);
+                retained_pending_updates.insert(key, value);
             }
         }
-        self.pending_updates.retain(|key, _| retain.contains(key));
-        result?;
+        self.pending_updates.extend(retained_pending_updates);
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
