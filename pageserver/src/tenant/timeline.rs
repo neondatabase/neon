@@ -1598,7 +1598,9 @@ impl Timeline {
     /// Initialize with an empty layer map. Used when creating a new timeline.
     ///
     pub(super) fn init_empty_layer_map(&self, start_lsn: Lsn) {
-        let mut layers = self.layers.write().unwrap();
+        let mut layers = self.layers.try_write().expect(
+            "in the context where we call this function, no other task has access to the object",
+        );
         layers.next_open_layer_at = Some(Lsn(start_lsn.0));
     }
 
