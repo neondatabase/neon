@@ -4,6 +4,7 @@ import pytest
 import requests
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.utils import get_dir_size
 
 
 @pytest.mark.xfail  # We currently pass a 16MB pg_wal dir instead of creating it client-side
@@ -19,11 +20,33 @@ def test_basebackup_size(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBen
     metrics = requests.get(f"http://localhost:{endpoint.http_port}/metrics.json").json()
     basebackup_bytes = metrics["basebackup_bytes"]
     zenbenchmark.record(
-        "basebackup_size", basebackup_bytes, "bytes", report=MetricReport.LOWER_IS_BETTER
+        "basebackup_size", basebackup_bytes / 1024, "KB", report=MetricReport.LOWER_IS_BETTER
     )
+
+    # Stop so we force flush of any files and we can measure datadir sizes
+    # NOTE the order of this line is important in relation to get_dir_size
+    datadir = endpoint.pgdata_dir
+    assert datadir is not None  # for mypy
+    endpoint.stop()
+
+    # Even though we don't insert any data, this nuber could be larger than basebackup
+    # size because there could theoretically be compression, or postgres could create
+    # or download data during startup. Currently if we don't send any pg_wal in the
+    # basebackup, postgres will start up just fine but it will create it's own basebackup
+    # and cause the same amount of network IO as if the pg_wal was sent via basebackup.
+    # TODO Investigate why this happens.
+    datadir_bytes = get_dir_size(datadir)
+    zenbenchmark.record(
+        "datadir_size", datadir_bytes / 1024, "KB", report=MetricReport.LOWER_IS_BETTER
+    )
+
+    wal_bytes = get_dir_size(datadir + "/pg_wal")
+    zenbenchmark.record("wal_size", wal_bytes / 1024, "KB", report=MetricReport.LOWER_IS_BETTER)
 
     # Seems like a reasonable limit, but increase it if it becomes impossible to meet
     assert basebackup_bytes < 70 * 1024
+    assert datadir_bytes < 70 * 1024
+    assert wal_bytes < 1 * 1024
 
 
 # Just start and measure duration.
