@@ -519,6 +519,7 @@ impl Tenant {
         );
         timeline
             .load_layer_map(new_disk_consistent_lsn)
+            .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
@@ -560,7 +561,7 @@ impl Tenant {
                 || timeline
                     .layers
                     .read()
-                    .unwrap()
+                    .await
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -3582,12 +3583,16 @@ mod tests {
             .await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -3656,13 +3661,21 @@ mod tests {
         let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
-        writer.put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))?;
-        writer.put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))
+            .await?;
+        writer
+            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))
+            .await?;
         writer.finish_write(Lsn(0x20));
 
-        writer.put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))
+            .await?;
         writer.finish_write(Lsn(0x30));
-        writer.put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))
+            .await?;
         writer.finish_write(Lsn(0x40));
 
         //assert_current_logical_size(&tline, Lsn(0x40));
@@ -3675,7 +3688,9 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
         let new_writer = newtline.writer().await;
-        new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
+        new_writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))
+            .await?;
         new_writer.finish_write(Lsn(0x40));
 
         // Check page contents on both branches
@@ -3703,36 +3718,44 @@ mod tests {
         {
             let writer = tline.writer().await;
             // Create a relation on the timeline
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
         }
         tline.freeze_and_flush().await?;
         {
             let writer = tline.writer().await;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
         }
         tline.freeze_and_flush().await
@@ -4048,7 +4071,9 @@ mod tests {
             .await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
@@ -4056,7 +4081,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -4064,7 +4091,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))
+            .await?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
@@ -4072,7 +4101,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))
+            .await?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
@@ -4124,11 +4155,13 @@ mod tests {
             for _ in 0..10000 {
                 test_key.field6 = blknum;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
 
@@ -4174,11 +4207,13 @@ mod tests {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
             let writer = tline.writer().await;
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -4192,11 +4227,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -4249,11 +4286,13 @@ mod tests {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
             let writer = tline.writer().await;
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -4275,11 +4314,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
@@ -4341,11 +4382,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
