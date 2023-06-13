@@ -47,6 +47,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+
 use tracing::*;
 
 use utils::{
@@ -299,17 +300,16 @@ impl Layer for DeltaLayer {
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
+        mut reconstruct_state: ValueReconstructState,
+        ctx: RequestContext,
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
         ensure!(lsn_range.start >= self.desc.lsn_range.start);
         let mut need_image = true;
 
         ensure!(self.desc.key_range.contains(&key));
-
         {
             // Open the file and lock the metadata in memory
-            let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+            let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
 
             // Scan the page versions backwards, starting from `lsn`.
             let file = &inner.file;
@@ -375,9 +375,9 @@ impl Layer for DeltaLayer {
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
         if need_image {
-            Ok(ValueReconstructResult::Continue)
+            Ok((reconstruct_state, ValueReconstructResult::Continue))
         } else {
-            Ok(ValueReconstructResult::Complete)
+            Ok((reconstruct_state, ValueReconstructResult::Complete))
         }
     }
 

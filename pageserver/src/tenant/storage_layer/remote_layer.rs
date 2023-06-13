@@ -6,7 +6,7 @@ use crate::context::RequestContext;
 use crate::repository::Key;
 use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
-use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
+use crate::tenant::storage_layer::{Layer, ValueReconstructState};
 use anyhow::{bail, Result};
 use pageserver_api::models::HistoricLayerInfo;
 use std::ops::Range;
@@ -21,7 +21,7 @@ use utils::{
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
     DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
+    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc, ValueReconstructResult,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
@@ -69,9 +69,9 @@ impl Layer for RemoteLayer {
         &self,
         _key: Key,
         _lsn_range: Range<Lsn>,
-        _reconstruct_state: &mut ValueReconstructState,
-        _ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
+        _reconstruct_state: ValueReconstructState,
+        _ctx: RequestContext,
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
         bail!(
             "layer {} needs to be downloaded",
             self.filename().file_name()

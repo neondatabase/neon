@@ -12,7 +12,7 @@ use crate::context::RequestContext;
 use crate::repository::{Key, Value};
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
@@ -344,7 +344,7 @@ impl LayerAccessStats {
 /// timeline names, because those are known in the context of which the layers
 /// are used in (timeline).
 #[async_trait::async_trait]
-pub trait Layer: std::fmt::Debug + Send + Sync {
+pub trait Layer: std::fmt::Debug + Send + Sync + 'static {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -378,9 +378,9 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult>;
+        reconstruct_data: ValueReconstructState,
+        ctx: RequestContext,
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)>;
 
     /// CANCEL SAFETY: if the returned future is dropped,
     /// the wrapped closure still run to completion and the return value discarded.
@@ -396,15 +396,19 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     /// in logs outweighs the disadvantage of having a dangling span in a case that
     /// is not expected to happen because in pageserver we generally don't drop pending futures.
     async fn get_value_reconstruct_data(
-        &self,
+        self: Arc<Self>,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_data: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
-        tokio::task::block_in_place(move || {
+        reconstruct_data: ValueReconstructState,
+        ctx: RequestContext,
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+        let span = tracing::info_span!("get_value_reconstruct_data_spawn_blocking");
+        tokio::task::spawn_blocking(move || {
+            let _enter = span.enter();
             self.get_value_reconstruct_data_blocking(key, lsn_range, reconstruct_data, ctx)
         })
+        .await
+        .context("spawn_blocking")?
     }
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
@@ -543,9 +547,9 @@ impl Layer for LayerDescriptor {
         &self,
         _key: Key,
         _lsn_range: Range<Lsn>,
-        _reconstruct_data: &mut ValueReconstructState,
-        _ctx: &RequestContext,
-    ) -> Result<ValueReconstructResult> {
+        _reconstruct_data: ValueReconstructState,
+        _ctx: RequestContext,
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
         todo!("This method shouldn't be part of the Layer trait")
     }
 

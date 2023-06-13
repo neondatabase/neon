@@ -186,14 +186,14 @@ impl Layer for ImageLayer {
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
+        mut reconstruct_state: ValueReconstructState,
+        ctx: RequestContext,
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
         assert!(self.desc.key_range.contains(&key));
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+        let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
 
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -211,9 +211,9 @@ impl Layer for ImageLayer {
             let value = Bytes::from(blob);
 
             reconstruct_state.img = Some((self.lsn, value));
-            Ok(ValueReconstructResult::Complete)
+            Ok((reconstruct_state, ValueReconstructResult::Complete))
         } else {
-            Ok(ValueReconstructResult::Missing)
+            Ok((reconstruct_state, ValueReconstructResult::Missing))
         }
     }
 
