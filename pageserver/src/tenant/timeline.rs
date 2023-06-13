@@ -125,7 +125,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(crate) layers: Arc<tokio::sync::RwLock<LayerMap<dyn PersistentLayer>>>,
+    pub(crate) layers: tokio::sync::RwLock<LayerMap<dyn PersistentLayer>>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -1416,7 +1416,7 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: Arc::new(tokio::sync::RwLock::new(LayerMap::default())),
+                layers: tokio::sync::RwLock::new(LayerMap::default()),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
