@@ -28,7 +28,7 @@ use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::context::{DownloadBehavior, RequestContext};
@@ -181,13 +181,13 @@ impl LayerMapping {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: RwLockReadGuard<'_, T>) {
+fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<'_, T>) {
     drop(rlock)
 }
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_wlock<T>(rlock: RwLockWriteGuard<'_, T>) {
+fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
     drop(rlock)
 }
 
@@ -1677,7 +1677,7 @@ impl Timeline {
         let mut layers = self.layers.try_write().expect(
             "in the context where we call this function, no other task has access to the object",
         );
-        layers.next_open_layer_at = Some(Lsn(start_lsn.0));
+        layers.0.next_open_layer_at = Some(Lsn(start_lsn.0));
     }
 
     ///
@@ -2347,7 +2347,7 @@ impl Timeline {
         }
     }
 
-    fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
+    async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
         let guard = self.layers.read().await;
         let (layers, mapping) = &*guard;
         for historic_layer in layers.iter_historic_layers() {
