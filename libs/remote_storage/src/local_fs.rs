@@ -128,10 +128,8 @@ impl RemoteStorage for LocalFs {
             Some(folder) => folder.with_base(&self.storage_root),
             None => self.storage_root.clone(),
         };
-        println!("{:?}", full_path);
         let mut entries = fs::read_dir(full_path).await?;
         let mut files = vec![];
-
         while let Some(entry) = entries.next_entry().await? {
             let file_name: PathBuf = entry.file_name().into();
             let file_type = entry.file_type().await?;

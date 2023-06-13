@@ -1,13 +1,9 @@
 /* 
 **WIP**
  * This is a MWE of using our RemoteStorage API to call the aws stuff and download multiple files
- * 
  * TODO:
- * fix local_fs and s3_bucket list_files functions. specifically
- * 1. local_fs mostly just clean up the error handling or whatever
  * 2. s3_bucket needs a lot of work; for example to make sure the pagination thing goes fine.
- * 
- * 3. figure out how to write dirrectly from the buffer to a local file
+ * 3. figure out how to write directly from the buffer to a local file; and just generally clean up main.rs
 */
 
 use remote_storage::*;
