@@ -23,7 +23,6 @@ use pageserver_api::models::{
 };
 use std::ops::Range;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -338,19 +337,13 @@ impl LayerAccessStats {
     }
 }
 
-pub(crate) type GetValueReconstructFuture = Pin<
-    Box<
-        dyn Send
-            + std::future::Future<Output = Result<(ValueReconstructState, ValueReconstructResult)>>,
-    >,
->;
-
 /// Supertrait of the [`Layer`] trait that captures the bare minimum interface
 /// required by [`LayerMap`].
 ///
 /// All layers should implement a minimal `std::fmt::Debug` without tenant or
 /// timeline names, because those are known in the context of which the layers
 /// are used in (timeline).
+#[async_trait::async_trait]
 pub trait Layer: std::fmt::Debug + Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
@@ -381,13 +374,13 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     /// is available. If this returns ValueReconstructResult::Continue, look up
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         self: Arc<Self>,
         key: Key,
         lsn_range: Range<Lsn>,
         reconstruct_data: ValueReconstructState,
         ctx: RequestContext,
-    ) -> GetValueReconstructFuture;
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)>;
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
     fn short_id(&self) -> String;
@@ -507,6 +500,7 @@ impl LayerDescriptor {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for LayerDescriptor {
     fn get_key_range(&self) -> Range<Key> {
         self.key.clone()
@@ -520,13 +514,13 @@ impl Layer for LayerDescriptor {
         self.is_incremental
     }
 
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         self: Arc<Self>,
         _key: Key,
         _lsn_range: Range<Lsn>,
         _reconstruct_data: ValueReconstructState,
         _ctx: RequestContext,
-    ) -> GetValueReconstructFuture {
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
         todo!("This method shouldn't be part of the Layer trait")
     }
 

@@ -20,8 +20,8 @@ use utils::{
 
 use super::filename::{DeltaFileName, ImageFileName};
 use super::{
-    DeltaLayer, GetValueReconstructFuture, ImageLayer, LayerAccessStats, LayerAccessStatsReset,
-    LayerIter, LayerKeyIter, LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
+    DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
+    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc, ValueReconstructResult,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
@@ -63,20 +63,19 @@ impl std::fmt::Debug for RemoteLayer {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for RemoteLayer {
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         self: Arc<Self>,
         _key: Key,
         _lsn_range: Range<Lsn>,
         _reconstruct_state: ValueReconstructState,
         _ctx: RequestContext,
-    ) -> GetValueReconstructFuture {
-        Box::pin(async move {
-            bail!(
-                "layer {} needs to be downloaded",
-                self.filename().file_name()
-            );
-        })
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+        bail!(
+            "layer {} needs to be downloaded",
+            self.filename().file_name()
+        );
     }
 
     /// debugging function to print out the contents of the layer

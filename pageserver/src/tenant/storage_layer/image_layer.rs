@@ -53,10 +53,7 @@ use utils::{
 };
 
 use super::filename::ImageFileName;
-use super::{
-    GetValueReconstructFuture, Layer, LayerAccessStatsReset, LayerIter, PathOrConf,
-    PersistentLayerDesc,
-};
+use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc};
 
 ///
 /// Header stored in the beginning of the file
@@ -152,6 +149,7 @@ impl std::fmt::Debug for ImageLayerInner {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for ImageLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
@@ -184,42 +182,39 @@ impl Layer for ImageLayer {
     }
 
     /// Look up given page in the file
-    fn get_value_reconstruct_data(
+    async fn get_value_reconstruct_data(
         self: Arc<Self>,
         key: Key,
         lsn_range: Range<Lsn>,
         mut reconstruct_state: ValueReconstructState,
         ctx: RequestContext,
-    ) -> GetValueReconstructFuture {
-        Box::pin(async move {
-            assert!(self.desc.key_range.contains(&key));
-            assert!(lsn_range.start >= self.lsn);
-            assert!(lsn_range.end >= self.lsn);
+    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+        assert!(self.desc.key_range.contains(&key));
+        assert!(lsn_range.start >= self.lsn);
+        assert!(lsn_range.end >= self.lsn);
 
-            let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
+        let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
 
-            let file = inner.file.as_ref().unwrap();
-            let tree_reader =
-                DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
+        let file = inner.file.as_ref().unwrap();
+        let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
 
-            let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-            key.write_to_byte_slice(&mut keybuf);
-            if let Some(offset) = tree_reader.get(&keybuf)? {
-                let blob = file.block_cursor().read_blob(offset).with_context(|| {
-                    format!(
-                        "failed to read value from data file {} at offset {}",
-                        self.path().display(),
-                        offset
-                    )
-                })?;
-                let value = Bytes::from(blob);
+        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
+        key.write_to_byte_slice(&mut keybuf);
+        if let Some(offset) = tree_reader.get(&keybuf)? {
+            let blob = file.block_cursor().read_blob(offset).with_context(|| {
+                format!(
+                    "failed to read value from data file {} at offset {}",
+                    self.path().display(),
+                    offset
+                )
+            })?;
+            let value = Bytes::from(blob);
 
-                reconstruct_state.img = Some((self.lsn, value));
-                Ok((reconstruct_state, ValueReconstructResult::Complete))
-            } else {
-                Ok((reconstruct_state, ValueReconstructResult::Missing))
-            }
-        })
+            reconstruct_state.img = Some((self.lsn, value));
+            Ok((reconstruct_state, ValueReconstructResult::Complete))
+        } else {
+            Ok((reconstruct_state, ValueReconstructResult::Missing))
+        }
     }
 
     /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
