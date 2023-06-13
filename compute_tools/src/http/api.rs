@@ -164,7 +164,7 @@ async fn download_file(filename: &str) -> anyhow::Result<()> {
         info!("requested file is a shared object file {}", filename);
 
         let from_path = Path::new(from_prefix).join("lib").join(filename);
-        let to_path = Path::new(to_prefix).join("lib").join(filename);
+        let to_path = Path::new(to_prefix).join("lib/postgresql/").join(filename);
 
         info!(
             "copying file {} from {} to {}",

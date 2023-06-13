@@ -52,7 +52,6 @@ neon_download_extension_file_http(const char *filename)
 	curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
     curl_easy_setopt(curl, CURLOPT_URL, compute_ctl_url);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L /* seconds */ );
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postdata);
 
     if(curl)
     {
