@@ -3000,13 +3000,13 @@ impl Timeline {
     // Write out the given frozen in-memory layer as a new L0 delta file
     async fn create_delta_layer(
         self: &Arc<Self>,
-        frozen_layer: &InMemoryLayer,
+        frozen_layer: &Arc<InMemoryLayer>,
     ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
-        // TODO figure out how to use spawn_blocking. Can't use it because frozen_layer is not 'static
         let span = tracing::info_span!("blocking");
-        let (new_delta, sz): (DeltaLayer, _) = tokio::task::block_in_place({
+        let (new_delta, sz): (DeltaLayer, _) = tokio::task::spawn_blocking({
             let _g = span.entered();
             let self_clone = Arc::clone(self);
+            let frozen_layer = Arc::clone(frozen_layer);
             move || {
                 // Write it out
                 let new_delta = frozen_layer.write_to_disk()?;
@@ -3034,7 +3034,9 @@ impl Timeline {
 
                 anyhow::Ok((new_delta, sz))
             }
-        })?;
+        })
+        .await
+        .context("spawn_blocking")??;
         let new_delta_name = new_delta.filename();
 
         // Add it to the layer map
