@@ -1,4 +1,5 @@
 import pytest
+import time
 from fixtures.neon_fixtures import NeonEnv
 
 
@@ -10,9 +11,10 @@ def test_hot_standby(neon_simple_env: NeonEnv):
         branch_name="main",
         endpoint_id="primary",
     ) as primary:
+        time.sleep(1)
         with env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary") as secondary:
             primary_lsn = None
-            cought_up = False
+            caught_up = False
             queries = [
                 "SHOW neon.timeline_id",
                 "SHOW neon.tenant_id",
@@ -56,7 +58,7 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                     res = s_cur.fetchone()
                     assert res is not None
 
-                while not cought_up:
+                while not caught_up:
                     with s_con.cursor() as secondary_cursor:
                         secondary_cursor.execute("SELECT pg_last_wal_replay_lsn()")
                         res = secondary_cursor.fetchone()
@@ -66,7 +68,7 @@ def test_hot_standby(neon_simple_env: NeonEnv):
                         # due to e.g. autovacuum, but that shouldn't impact the content
                         # of the tables, so we check whether we've replayed up to at
                         # least after the commit of the `test` table.
-                        cought_up = secondary_lsn >= primary_lsn
+                        caught_up = secondary_lsn >= primary_lsn
 
                 # Explicit commit to flush any transient transaction-level state.
                 s_con.commit()
