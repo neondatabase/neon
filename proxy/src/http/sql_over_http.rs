@@ -341,7 +341,15 @@ async fn connect_to_compute_once(
         .dbname(&conn_info.dbname)
         .max_backend_message_size(MAX_RESPONSE_SIZE)
         .connect(tokio_postgres::NoTls)
-        .inspect_err(|_: &tokio_postgres::Error| invalidate_cache(node_info))
+        .inspect_err(|e: &tokio_postgres::Error| {
+            error!(
+                "failed to connect to compute node hosts={:?} ports={:?}: {}",
+                node_info.config.get_hosts(),
+                node_info.config.get_ports(),
+                e
+            );
+            invalidate_cache(node_info)
+        })
         .await?;
 
     tokio::spawn(async move {
