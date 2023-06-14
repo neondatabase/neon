@@ -63,6 +63,18 @@ impl LayerMapMgr {
         self.layer_map.store(Arc::new(new_state));
         Ok(())
     }
+
+    /// Update the layer map.
+    pub  fn update_sync<O>(&self, operation: O) -> Result<()>
+    where
+        O: FnOnce(LayerMap) -> Result<LayerMap>,
+    {
+        let state_lock = self.state_lock.blocking_lock();
+        let state = self.clone_for_write(&state_lock);
+        let new_state = operation(state)?;
+        self.layer_map.store(Arc::new(new_state));
+        Ok(())
+    }
 }
 
 #[cfg(test)]

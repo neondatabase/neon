@@ -87,8 +87,8 @@ pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_cache;
 pub mod layer_map;
-pub mod manifest;
 pub mod layer_map_mgr;
+pub mod manifest;
 
 pub mod metadata;
 mod par_fsync;
@@ -557,17 +557,10 @@ impl Tenant {
                 .context("failed to reconcile with remote")?
         }
 
+        let layers = timeline.layer_mgr.read();
         // Sanity check: a timeline should have some content.
         anyhow::ensure!(
-            ancestor.is_some()
-                || timeline
-                    .layers
-                    .read()
-                    .await
-                    .0
-                    .iter_historic_layers()
-                    .next()
-                    .is_some(),
+            ancestor.is_some() || layers.iter_historic_layers().next().is_some(),
             "Timeline has no ancestor and no layer files"
         );
 

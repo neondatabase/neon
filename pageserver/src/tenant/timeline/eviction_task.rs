@@ -197,8 +197,8 @@ impl Timeline {
         // We don't want to hold the layer map lock during eviction.
         // So, we just need to deal with this.
         let candidates: Vec<Arc<dyn PersistentLayer>> = {
-            let guard = self.layers.read().await;
-            let (layers, _) = &*guard;
+            let guard = self.lcache.layer_in_use_read().await;
+            let layers = self.layer_mgr.read();
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
                 let hist_layer = self.lcache.get_from_desc(&hist_layer);

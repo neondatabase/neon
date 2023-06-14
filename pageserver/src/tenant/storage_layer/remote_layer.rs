@@ -4,7 +4,6 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
-use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
@@ -220,7 +219,6 @@ impl RemoteLayer {
     /// Create a Layer struct representing this layer, after it has been downloaded.
     pub fn create_downloaded_layer(
         &self,
-        layer_map_lock_held_witness: &BatchedUpdates<'_>,
         conf: &'static PageServerConf,
         file_size: u64,
     ) -> Arc<dyn PersistentLayer> {
@@ -232,10 +230,8 @@ impl RemoteLayer {
                 self.desc.tenant_id,
                 &fname,
                 file_size,
-                self.access_stats.clone_for_residence_change(
-                    layer_map_lock_held_witness,
-                    LayerResidenceStatus::Resident,
-                ),
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::Resident),
             ))
         } else {
             let fname = self.desc.image_file_name();
@@ -245,10 +241,8 @@ impl RemoteLayer {
                 self.desc.tenant_id,
                 &fname,
                 file_size,
-                self.access_stats.clone_for_residence_change(
-                    layer_map_lock_held_witness,
-                    LayerResidenceStatus::Resident,
-                ),
+                self.access_stats
+                    .clone_for_residence_change(LayerResidenceStatus::Resident),
             ))
         }
     }
