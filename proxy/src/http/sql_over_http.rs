@@ -280,6 +280,11 @@ pub async fn handle(
                 json!({
                     "name": Value::String(c.name().to_owned()),
                     "dataTypeID": Value::Number(c.type_().oid().into()),
+                    "tableID": c.table_oid(),
+                    "columnID": c.column_id(),
+                    "dataTypeSize": c.type_size(),
+                    "dataTypeModifier": c.type_modifier(),
+                    "format": "text",
                 })
             })
             .collect::<Vec<_>>()

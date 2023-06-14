@@ -231,7 +231,7 @@ async fn pull_timeline(status: TimelineStatus, host: String) -> Result<Response>
     info!(
         "Loaded timeline {}, flush_lsn={}",
         ttid,
-        tli.get_flush_lsn()
+        tli.get_flush_lsn().await
     );
 
     Ok(Response {
