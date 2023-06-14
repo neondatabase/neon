@@ -40,8 +40,6 @@ async fn main() -> anyhow::Result<()> {
     let mut data = remote_storage.download(&remote_from_path).await.expect("data yay");
     let mut write_data_buffer = Vec::new(); 
     data.download_stream.read_to_end(&mut write_data_buffer).await?;
-
-    // write `data` to a file locally
     let f = File::create("alek.out").expect("problem creating file");
     let mut f = BufWriter::new(f);
     f.write_all(&mut write_data_buffer).expect("error writing data");
