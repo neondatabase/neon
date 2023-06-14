@@ -473,10 +473,11 @@ def dump_differs(first: Path, second: Path, output: Path) -> bool:
                 [
                     "diff",
                     "--unified",  # Make diff output more readable
-                    r"--ignore-matching-lines=^\-\-\-",  # Ignore diff headers
+                    r"--ignore-matching-lines=^---",  # Ignore diff headers
                     r"--ignore-matching-lines=^\+\+\+",  # Ignore diff headers
                     "--ignore-matching-lines=^@@",  # Ignore diff blocks location
                     "--ignore-matching-lines=^ *$",  # Ignore lines with only spaces
+                    "--ignore-blank-lines",
                     str(output),
                     str(tmp.name),
                 ],
