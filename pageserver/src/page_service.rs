@@ -10,7 +10,6 @@
 //
 
 use anyhow::Context;
-use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
@@ -25,14 +24,14 @@ use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, Qu
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
-use std::io;
+use std::io::{self, Write};
 use std::net::TcpListener;
 use std::pin::pin;
 use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::io::StreamReader;
 use tracing::*;
 use utils::id::ConnectionId;
@@ -774,9 +773,9 @@ impl PageServerHandler {
         // Send a tarball of the latest layer on the timeline
         {
             let mut writer = pgb.copyout_writer();
-            let mut encoder = GzipEncoder::new(&mut writer);
+            let mut raw_tar = Vec::new();
             basebackup::send_basebackup_tarball(
-                &mut encoder,
+                &mut raw_tar,
                 &timeline,
                 lsn,
                 prev_lsn,
@@ -784,6 +783,11 @@ impl PageServerHandler {
                 &ctx,
             )
             .await?;
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&raw_tar)?;
+            let compressed_tar = encoder.finish()?;
+            writer.write(&compressed_tar).await?;
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;

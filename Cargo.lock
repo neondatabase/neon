@@ -159,19 +159,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compression"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b0122885821398cc923ece939e24d1056a2384ee719432397fa9db87230ff11"
-dependencies = [
- "flate2",
- "futures-core",
- "memchr",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2575,7 +2562,6 @@ name = "pageserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
  "async-stream",
  "async-trait",
  "byteorder",
@@ -2592,6 +2578,7 @@ dependencies = [
  "enum-map",
  "enumset",
  "fail",
+ "flate2",
  "futures",
  "git-version",
  "hex",

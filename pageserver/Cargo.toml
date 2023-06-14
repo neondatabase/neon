@@ -12,7 +12,7 @@ testing = ["fail/failpoints"]
 
 [dependencies]
 anyhow.workspace = true
-async-compression.workspace = true
+flate2.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 byteorder.workspace = true
