@@ -333,7 +333,7 @@ def test_single_branch_get_tenant_size_grows(
     # inserts is larger than gc_horizon. for example 0x20000 here hid the fact
     # that there next_gc_cutoff could be smaller than initdb_lsn, which will
     # obviously lead to issues when calculating the size.
-    gc_horizon = 0x3B800
+    gc_horizon = 0x3BC00
 
     # it's a bit of a hack, but different versions of postgres have different
     # amount of WAL generated for the same amount of data. so we need to
