@@ -1,11 +1,5 @@
 /* 
  * This is a MWE of using our RemoteStorage API to call the aws stuff and download multiple files
- * 
- * STATUS: 
- * The s3bucket listing thing is, miracuously, working. 
- * However, it is not really robust; please fix it to have 
- * the features that the other functions have; pagination; permit; limit. 
- * 
 */
 macro_rules! alek { ($expression:expr) => { println!("{:?}", $expression); }; }
 
