@@ -7,23 +7,24 @@ use toml_edit;
 use remote_storage::*;
 
 fn get_pg_config(argument: &str) -> String {
-    // NOTE: this function panics if it runs into any issues;
-    // If this is not desired, should FIXME this
+    // FIXME: this function panics if it runs into any issues
     let config_output = std::process::Command::new("pg_config")
         .arg(argument)
         .output()
         .expect("pg_config should be installed");
     assert!(config_output.status.success());
-
     let stdout = std::str::from_utf8(&config_output.stdout).unwrap();
     stdout.trim().to_string()
 }
 
 fn download_helper(remote_storage: &GenericRemoteStorage, remote_from_path: &RemotePath, to_path: &str) -> anyhow::Result<()> {
-    let data = remote_storage.download(&remote_from_path);
-    // TODO: actually write "data" to "to_path"
-    let mut file = File::create(to_path)?;
-    file.write_all(b"recieved data, hopefully -alek")?;
+    let file_name = remote_from_path.object_name().expect("it must exist");
+    info!("Downloading {:?}",file_name);
+    let mut download = remote_storage.download(&remote_from_path).await?;
+    let mut write_data_buffer = Vec::new(); 
+    download.download_stream.read_to_end(&mut write_data_buffer).await?;
+    let mut output_file = BufWriter::new(File::create(file_name)?);
+    output_file.write_all(&mut write_data_buffer)?;
     Ok(())
 }
 
@@ -44,13 +45,13 @@ pub async fn download_extension(config: &RemoteStorageConfig, ext_type: Extensio
             // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
             // We can do this step even before we have spec,
             // because public extensions are common for all projects.
-            let public_dir = "neon-dev-extensions/public/";
-            let public_dir = Some(RemotePath::new(Path::new(public_dir))?);
-            let from_paths = remote_storage
-                .list_prefixes(public_dir.as_ref())
-                .await?;
+            let folder = RemotePath::new(Path::new("public_extensions"))?;
+            let from_paths = remote_storage.list_files(Some(&folder)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
+                    // FIXME: CAUTION: if you run this, it will actually write stuff to my postgress directory
+                    // but atm that stuff that it is going to write is not good. 
+                    // don't run atm without changing path
                     download_helper(&remote_storage, &remote_from_path, &sharedir)?;
                 }
             }
@@ -58,11 +59,8 @@ pub async fn download_extension(config: &RemoteStorageConfig, ext_type: Extensio
         ExtensionType::Tenant(tenant_id) => {
             // 2. After we have spec, before project start
             // Download control files from s3-bucket/[tenant-id]/*.control to SHAREDIR/extension
-            let tenant_dir = format!("neon-dev-extensions/{tenant_id}");
-            let tenant_dir = Some(RemotePath::new(Path::new(&tenant_dir))?);
-            let from_paths = remote_storage
-                .list_prefixes(tenant_dir.as_ref())
-                .await?;
+            let folder = RemotePath::new(Path::new(format!("{tenant_id}")))?;
+            let from_paths = remote_storage.list_files(Some(&folder)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
                     download_helper(&remote_storage, &remote_from_path, &sharedir)?;
@@ -81,33 +79,18 @@ pub async fn download_extension(config: &RemoteStorageConfig, ext_type: Extensio
 }
 
 pub fn get_s3_config(arg_matches: &ArgMatches) -> anyhow::Result<RemoteStorageConfig> {
-    println!("{:?}", arg_matches);
-    // let workdir = arg_matches
-    //     .get_one::<String>("workdir")
-    //     .map(Path::new)
-    //     .unwrap_or_else(|| Path::new(".neon"));
-    // let workdir = workdir.canonicalize()
-    //     .with_context(|| format!("Error opening workdir '{}'", workdir.display()))?;
-
-    // let cfg_file_path = workdir.join("pageserver.toml");
+    // TODO: Right now we are using the same config parameters as pageserver; but should we have our own configs?
+    // TODO: Should we read the s3_config from CLI arguments?
     let cfg_file_path = Path::new("./../.neon/pageserver.toml");
-
-    if cfg_file_path.is_file() {
-        // Supplement the CLI arguments with the config file
-        let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
-            .expect("should be able to read pageserver config");
-        let toml = cfg_file_contents
-            .parse::<toml_edit::Document>()
-            .expect("Error parsing toml");
-
-        let remote_storage_data = toml.get("remote_storage")
-            .expect("remote_storage field should be present");
-        let remote_storage_config = RemoteStorageConfig::from_toml(remote_storage_data)
-            .expect("error parsing remote storage config toml")
-            .expect("error parsing remote storage config toml");
-        return Ok(remote_storage_config);
-    } else {
-        anyhow::bail!("Couldn't find config file");
-    }
+    let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
+    .with_context(|| format!( "Failed to read pageserver config at '{}'", cfg_file_path.display()))?;
+    let toml = cfg_file_contents
+        .parse::<toml_edit::Document>()
+        .with_context(|| format!( "Failed to parse '{}' as pageserver config", cfg_file_path.display()))?;
+    let remote_storage_data = toml.get("remote_storage")
+        .context("field should be present")?;
+    let remote_storage_config = RemoteStorageConfig::from_toml(remote_storage_data)?
+        .context("error configuring remote storage")?;
+    Ok(remote_storage_config)
 }
 
