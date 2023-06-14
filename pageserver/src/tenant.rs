@@ -550,7 +550,7 @@ impl Tenant {
             // ensure!(new_disk_consistent_lsn.is_valid(),
             //     "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
             timeline
-                .load_layer_map(new_disk_consistent_lsn)
+                .load_layer_map(&cause, new_disk_consistent_lsn)
                 .await
                 .with_context(|| {
                     format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
@@ -1149,6 +1149,7 @@ impl Tenant {
                     init_order,
                     ctx,
                 )
+                .instrument(info_span!("load_local_timeline", timeline_id=%timeline_id))
                 .await
                 .with_context(|| format!("load local timeline {timeline_id}"))?;
             match timeline {
@@ -1295,6 +1296,8 @@ impl Tenant {
         pg_version: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<(CreatingTimelineGuard, Arc<Timeline>)> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         anyhow::ensure!(
             self.is_active(),
             "Cannot create empty timelines on inactive tenant"
@@ -1317,7 +1320,7 @@ impl Tenant {
             });
 
             let new_metadata = TimelineMetadata::new(
-                Lsn(0), // TODO should this be initdb_lsn as well, at least for the handle_import_basebackup use case?
+                Lsn(0),
                 None,
                 None,
                 Lsn(0),
@@ -1374,6 +1377,7 @@ impl Tenant {
                 None,
                 ctx,
             )
+            .instrument(info_span!("load_local_timeline", timeline_id=%new_timeline_id))
             .await
             .context("load newly created on-disk timeline state")?
             .expect("load_local_timeline should have created the timeline");
@@ -1424,7 +1428,7 @@ impl Tenant {
         let (guard, tline) = self
             .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
             // make the debug_assert_current_span_has_tenant_id() in create_empty_timeline() happy
-            .instrument(tracing::info_span!("create_test_timeline", tenant_id=%self.tenant_id))
+            .instrument(tracing::info_span!("create_test_timeline", tenant_id=%self.tenant_id, timeline_id=%new_timeline_id))
             .await
             .context("create empty timeline")?;
 
@@ -1631,6 +1635,7 @@ impl Tenant {
         };
         let real_timeline = self
             .load_local_timeline(new_timeline_id, metadata, ancestor, load_cause, None, ctx)
+            .instrument(info_span!("load_local_timeline", timeline_id=%new_timeline_id))
             .await
             .context("load newly created on-disk timeline state")?;
 
@@ -3988,6 +3993,7 @@ mod tests {
 
         match tenant
             .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .instrument(info_span!("create_empty_timeline", tenant_id=%tenant.tenant_id, timeline_id=%TIMELINE_ID))
             .await
         {
             Ok(_) => panic!("duplicate timeline creation should fail"),
@@ -4787,6 +4793,7 @@ mod tests {
         let initdb_lsn = Lsn(0x20);
         let (_guard, tline) = tenant
             .create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)
+            .instrument(tracing::info_span!("create_empty_timeline", tenant_id=%tenant.tenant_id, timeline_id = %TIMELINE_ID))
             .await?;
 
         // Spawn flush loop now so that we can set the `expect_initdb_optimization`

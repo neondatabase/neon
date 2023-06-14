@@ -82,6 +82,7 @@ use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset};
+use super::TimelineLoadCause;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -1672,7 +1673,11 @@ impl Timeline {
     ///
     /// Scan the timeline directory to populate the layer map.
     ///
-    pub(super) async fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+    pub(super) async fn load_layer_map(
+        &self,
+        cause: &TimelineLoadCause,
+        disk_consistent_lsn: Lsn,
+    ) -> anyhow::Result<()> {
         let mut layers = self.layers.write().await;
         let mut updates = layers.batch_update();
         let mut num_layers = 0;
@@ -1775,7 +1780,19 @@ impl Timeline {
         }
 
         updates.flush();
-        layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
+
+        if disk_consistent_lsn == Lsn(0) {
+            // If disk_consistent_lsn is 0, then we're still in bootstrap/basebackup_import/create_test_timeline.
+            // Set next_open_layer_at to initdb_lsn because to enable the put@initdb_lsn optimization in flush_frozen_layer.
+            assert!(matches!(cause, TimelineLoadCause::TimelineCreate { .. }));
+            assert_eq!(
+                num_layers, 0,
+                "if we crash, creating timelines get removed from disk"
+            );
+            layers.next_open_layer_at = Some(self.initdb_lsn);
+        } else {
+            layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
+        }
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
@@ -2932,6 +2949,7 @@ impl Timeline {
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
+        debug!("flushing frozen layer with LSN range {:?}", lsn_range);
         let layer_paths_to_upload =
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
                 #[cfg(test)]
