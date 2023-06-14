@@ -2954,6 +2954,7 @@ impl Timeline {
             *self.latest_gc_cutoff_lsn.read(),
             self.initdb_lsn,
             self.pg_version,
+            self.replica_lsn,
         );
 
         fail_point!("checkpoint-before-saving-metadata", |x| bail!(

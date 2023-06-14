@@ -342,10 +342,14 @@ impl Debug for S3Config {
 
 impl RemoteStorageConfig {
     pub fn in_region(&self, region: String) -> anyhow::Result<RemoteStorageConfig> {
-        if let AwsS3(config) = &self.storage {
-            let mut storage = config.clone();
-            storage.region = region;
-            Ok(RemoteStorageConfig { storage, ..self })
+        let self_clone = self.clone();
+        if let RemoteStorageKind::AwsS3(config) = self_clone.storage {
+            let mut storage = config;
+            storage.bucket_region = region;
+            Ok(RemoteStorageConfig {
+                storage: RemoteStorageKind::AwsS3(storage),
+                ..self_clone
+            })
         } else {
             bail!("Only AWS3 storage can be used in other region")
         }

@@ -25,9 +25,6 @@ use crate::virtual_file::VirtualFile;
 /// Use special format number to enable backward compatibility.
 const METADATA_FORMAT_VERSION: u16 = 5;
 
-/// Previous supported format versions.
-const METADATA_OLD_FORMAT_VERSION: u16 = 3;
-
 /// We assume that a write of up to METADATA_MAX_SIZE bytes is atomic.
 ///
 /// This is the same assumption that PostgreSQL makes with the control file,
@@ -263,6 +260,10 @@ impl TimelineMetadata {
     pub fn pg_version(&self) -> u32 {
         self.body.pg_version
     }
+
+    pub fn replica_lsn(&self) -> Option<Lsn> {
+        self.body.replica_lsn
+    }
 }
 
 /// Save timeline metadata to file
@@ -366,7 +367,7 @@ mod tests {
             hdr: TimelineMetadataHeader {
                 checksum: 0,
                 size: 0,
-                format_version: METADATA_OLD_FORMAT_VERSION,
+                format_version: 3,
             },
             body: TimelineMetadataBodyV1 {
                 disk_consistent_lsn: Lsn(0x200),

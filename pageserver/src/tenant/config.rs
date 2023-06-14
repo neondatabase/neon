@@ -45,7 +45,7 @@ pub mod defaults {
 }
 
 /// Per-tenant configuration options
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantConf {
     // Flush out an inmemory layer, if it's holding WAL older than this
     // This puts a backstop on how much WAL needs to be re-digested if the
@@ -106,7 +106,7 @@ pub struct TenantConf {
 
 /// Same as TenantConf, but this struct preserves the information about
 /// which parameters are set and which are not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -254,7 +254,7 @@ impl TenantConfOpt {
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
             gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
-            master_region: self.master_region,
+            master_region: self.master_region.clone(),
         }
     }
 }
@@ -388,7 +388,7 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
             );
         }
         tenant_conf.gc_feedback = request_data.gc_feedback;
-        tenant_conf.master_region = request_data.master_region;
+        tenant_conf.master_region = request_data.master_region.clone();
 
         Ok(tenant_conf)
     }
