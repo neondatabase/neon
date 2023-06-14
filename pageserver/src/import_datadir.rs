@@ -155,8 +155,10 @@ async fn import_rel(
         .await
     {
         match e {
-            RelationError::AlreadyExists => debug!("Relation {} already exist. We must be extending it.", rel),
-            _ => return Err(e.into())
+            RelationError::AlreadyExists => {
+                debug!("Relation {} already exist. We must be extending it.", rel)
+            }
+            _ => return Err(e.into()),
         }
     }
 

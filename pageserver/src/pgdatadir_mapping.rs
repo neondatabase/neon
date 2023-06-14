@@ -47,7 +47,7 @@ pub enum CalculateLogicalSizeError {
 pub enum RelationError {
     #[error("Relation Already Exists")]
     AlreadyExists,
-    #[error("invalid relnode")] 
+    #[error("invalid relnode")]
     InvalidRelnode,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -112,7 +112,7 @@ impl Timeline {
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
-                RelationError::InvalidRelnode.into()
+                RelationError::InvalidRelnode.into(),
             ));
         }
 
@@ -159,7 +159,7 @@ impl Timeline {
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
             return Err(PageReconstructError::Other(
-                RelationError::InvalidRelnode.into()
+                RelationError::InvalidRelnode.into(),
             ));
         }
 
@@ -203,7 +203,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(RelationError::InvalidRelnode.into()));
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
         }
 
         // first try to lookup relation in cache
@@ -889,30 +891,21 @@ impl<'a> DatadirModification<'a> {
         }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(
-            &self.get(DBDIR_KEY, ctx)
-                .await
-                .context("read db")?
-            )
+        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
             .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
             // Didn't exist. Update dbdir
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
-            let buf = DbDirectory::ser(&dbdir)
-                .context("serialize db")?;
+            let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // and create the RelDirectory
             RelDirectory::default()
         } else {
             // reldir already exists, fetch it
-            RelDirectory::des(
-                &self.get(rel_dir_key, ctx)
-                .await
-                .context("read db")?
-            )
-            .context("deserialize db")?
+            RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
+                .context("deserialize db")?
         };
 
         // Add the new relation to the rel directory entry, and write it back
@@ -921,11 +914,9 @@ impl<'a> DatadirModification<'a> {
         }
         self.put(
             rel_dir_key,
-            Value::Image(Bytes::from(RelDirectory::ser(
-                &rel_dir
-            )
-            .context("serialize") ?
-        )),
+            Value::Image(Bytes::from(
+                RelDirectory::ser(&rel_dir).context("serialize")?,
+            )),
         );
 
         // Put size
