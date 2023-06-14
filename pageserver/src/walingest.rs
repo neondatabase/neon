@@ -25,7 +25,7 @@ use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 
@@ -1082,7 +1082,8 @@ impl<'a> WalIngest<'a> {
             .await?
         {
             // create it with 0 size initially, the logic below will extend it
-            modification.put_rel_creation(rel, 0, ctx).await?;
+            modification.put_rel_creation(rel, 0, ctx).await
+            .context("Relation Error")?;
             0
         } else {
             self.timeline.get_rel_size(rel, last_lsn, true, ctx).await?
