@@ -79,6 +79,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     # Set up pageserver for import
     neon_env_builder.enable_local_fs_remote_storage()
     env = neon_env_builder.init_start()
+
     client = env.pageserver.http_client()
     client.tenant_create(tenant)
 
@@ -152,6 +153,11 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     )
 
     # NOTE: delete can easily come before upload operations are completed
+    # https://github.com/neondatabase/neon/issues/4326
+    env.pageserver.allowed_errors.append(
+        ".*files not bound to index_file.json, proceeding with their deletion.*"
+    )
+
     client.timeline_delete(tenant, timeline)
 
     # Importing correct backup works

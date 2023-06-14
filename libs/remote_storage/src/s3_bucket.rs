@@ -17,6 +17,7 @@ use aws_sdk_s3::{
     error::SdkError,
     operation::get_object::GetObjectError,
     primitives::ByteStream,
+    types::{Delete, ObjectIdentifier},
     Client,
 };
 use aws_smithy_http::body::SdkBody;
@@ -32,6 +33,8 @@ use super::StorageMetadata;
 use crate::{
     Download, DownloadError, RemotePath, RemoteStorage, S3Config, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
+
+const MAX_DELETE_OBJECTS_REQUEST_SIZE: usize = 1000;
 
 pub(super) mod metrics {
     use metrics::{register_int_counter_vec, IntCounterVec};
@@ -81,10 +84,22 @@ pub(super) mod metrics {
             .inc();
     }
 
+    pub fn inc_delete_objects(count: u64) {
+        S3_REQUESTS_COUNT
+            .with_label_values(&["delete_object"])
+            .inc_by(count);
+    }
+
     pub fn inc_delete_object_fail() {
         S3_REQUESTS_FAIL_COUNT
             .with_label_values(&["delete_object"])
             .inc();
+    }
+
+    pub fn inc_delete_objects_fail(count: u64) {
+        S3_REQUESTS_FAIL_COUNT
+            .with_label_values(&["delete_object"])
+            .inc_by(count);
     }
 
     pub fn inc_list_objects() {
@@ -395,6 +410,50 @@ impl RemoteStorage for S3Bucket {
             range,
         })
         .await
+    }
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        let _guard = self
+            .concurrency_limiter
+            .acquire()
+            .await
+            .context("Concurrency limiter semaphore got closed during S3 delete")?;
+
+        let mut delete_objects = Vec::with_capacity(paths.len());
+        for path in paths {
+            let obj_id = ObjectIdentifier::builder()
+                .set_key(Some(self.relative_path_to_s3_object(path)))
+                .build();
+            delete_objects.push(obj_id);
+        }
+
+        for chunk in delete_objects.chunks(MAX_DELETE_OBJECTS_REQUEST_SIZE) {
+            metrics::inc_delete_objects(chunk.len() as u64);
+
+            let resp = self
+                .client
+                .delete_objects()
+                .bucket(self.bucket_name.clone())
+                .delete(Delete::builder().set_objects(Some(chunk.to_vec())).build())
+                .send()
+                .await;
+
+            match resp {
+                Ok(resp) => {
+                    if let Some(errors) = resp.errors {
+                        metrics::inc_delete_objects_fail(errors.len() as u64);
+                        return Err(anyhow::format_err!(
+                            "Failed to delete {} objects",
+                            errors.len()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    metrics::inc_delete_objects_fail(chunk.len() as u64);
+                    return Err(e.into());
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {

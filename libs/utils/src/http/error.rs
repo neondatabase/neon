@@ -21,7 +21,7 @@ pub enum ApiError {
     Conflict(String),
 
     #[error("Precondition failed: {0}")]
-    PreconditionFailed(&'static str),
+    PreconditionFailed(Box<str>),
 
     #[error(transparent)]
     InternalServerError(anyhow::Error),

@@ -18,15 +18,14 @@ use postgres_backend::QueryError;
 use pq_proto::BeMessage;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::thread;
-use std::thread::JoinHandle;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
-use tokio::task::spawn_blocking;
+use tokio::task;
+use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tracing::*;
@@ -97,7 +96,7 @@ impl SafekeeperPostgresHandler {
                 Err(res.expect_err("no error with WalAcceptor not spawn"))
             }
             Some(handle) => {
-                let wal_acceptor_res = handle.join();
+                let wal_acceptor_res = handle.await;
 
                 // If there was any network error, return it.
                 res?;
@@ -107,7 +106,7 @@ impl SafekeeperPostgresHandler {
                     Ok(Ok(_)) => Ok(()), // can't happen currently; would be if we add graceful termination
                     Ok(Err(e)) => Err(CopyStreamHandlerEnd::Other(e.context("WAL acceptor"))),
                     Err(_) => Err(CopyStreamHandlerEnd::Other(anyhow!(
-                        "WalAcceptor thread panicked",
+                        "WalAcceptor task panicked",
                     ))),
                 }
             }
@@ -154,10 +153,12 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
             }
         };
 
-        *self.acceptor_handle = Some(
-            WalAcceptor::spawn(tli.clone(), msg_rx, reply_tx, self.conn_id)
-                .context("spawn WalAcceptor thread")?,
-        );
+        *self.acceptor_handle = Some(WalAcceptor::spawn(
+            tli.clone(),
+            msg_rx,
+            reply_tx,
+            self.conn_id,
+        ));
 
         // Forward all messages to WalAcceptor
         read_network_loop(self.pgb_reader, msg_tx, next_msg).await
@@ -226,28 +227,19 @@ impl WalAcceptor {
         msg_rx: Receiver<ProposerAcceptorMessage>,
         reply_tx: Sender<AcceptorProposerMessage>,
         conn_id: ConnectionId,
-    ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
-        let thread_name = format!("WAL acceptor {}", tli.ttid);
-        thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || -> anyhow::Result<()> {
-                let mut wa = WalAcceptor {
-                    tli,
-                    msg_rx,
-                    reply_tx,
-                };
+    ) -> JoinHandle<anyhow::Result<()>> {
+        task::spawn(async move {
+            let mut wa = WalAcceptor {
+                tli,
+                msg_rx,
+                reply_tx,
+            };
 
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
-
-                let span_ttid = wa.tli.ttid; // satisfy borrow checker
-                runtime.block_on(
-                    wa.run()
-                        .instrument(info_span!("WAL acceptor", cid = %conn_id, ttid = %span_ttid)),
-                )
-            })
-            .map_err(anyhow::Error::from)
+            let span_ttid = wa.tli.ttid; // satisfy borrow checker
+            wa.run()
+                .instrument(info_span!("WAL acceptor", cid = %conn_id, ttid = %span_ttid))
+                .await
+        })
     }
 
     /// The main loop. Returns Ok(()) if either msg_rx or reply_tx got closed;
@@ -281,7 +273,7 @@ impl WalAcceptor {
                 while let ProposerAcceptorMessage::AppendRequest(append_request) = next_msg {
                     let noflush_msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
 
-                    if let Some(reply) = self.tli.process_msg(&noflush_msg)? {
+                    if let Some(reply) = self.tli.process_msg(&noflush_msg).await? {
                         if self.reply_tx.send(reply).await.is_err() {
                             return Ok(()); // chan closed, streaming terminated
                         }
@@ -300,10 +292,12 @@ impl WalAcceptor {
                 }
 
                 // flush all written WAL to the disk
-                self.tli.process_msg(&ProposerAcceptorMessage::FlushWAL)?
+                self.tli
+                    .process_msg(&ProposerAcceptorMessage::FlushWAL)
+                    .await?
             } else {
                 // process message other than AppendRequest
-                self.tli.process_msg(&next_msg)?
+                self.tli.process_msg(&next_msg).await?
             };
 
             if let Some(reply) = reply_msg {
@@ -326,8 +320,8 @@ impl Drop for ComputeConnectionGuard {
         let tli = self.timeline.clone();
         // tokio forbids to call blocking_send inside the runtime, and see
         // comments in on_compute_disconnect why we call blocking_send.
-        spawn_blocking(move || {
-            if let Err(e) = tli.on_compute_disconnect() {
+        tokio::spawn(async move {
+            if let Err(e) = tli.on_compute_disconnect().await {
                 error!("failed to unregister compute connection: {}", e);
             }
         });

@@ -152,7 +152,7 @@ pub enum ActivatingFrom {
 }
 
 /// A state of a timeline in pageserver's memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TimelineState {
     Creating,
     /// The timeline is recognized by the pageserver but is not yet operational.
@@ -166,7 +166,10 @@ pub enum TimelineState {
     /// It cannot transition back into any other state.
     Stopping,
     /// The timeline is broken and not operational (previous states: Loading or Active).
-    Broken,
+    Broken {
+        reason: String,
+        backtrace: String,
+    },
 }
 
 #[serde_as]

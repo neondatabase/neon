@@ -18,6 +18,7 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::watch;
+use tokio::sync::OwnedMutexGuard;
 use tokio::task::JoinSet;
 use tracing::*;
 use utils::completion;
@@ -84,6 +85,7 @@ pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
 pub mod layer_map;
+pub mod manifest;
 
 pub mod metadata;
 mod par_fsync;
@@ -391,7 +393,7 @@ pub enum DeleteTimelineError {
     #[error("NotFound")]
     NotFound,
     #[error("HasChildren")]
-    HasChildren,
+    HasChildren(Vec<TimelineId>),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -536,7 +538,7 @@ impl Tenant {
         );
 
         let timeline = {
-            let timeline = self.create_timeline_data(
+            let timeline = self.create_timeline_struct(
                 timeline_id,
                 up_to_date_metadata,
                 ancestor.clone(),
@@ -549,6 +551,7 @@ impl Tenant {
             //     "Timeline {tenant_id}/{timeline_id} has invalid disk_consistent_lsn and cannot be initialized");
             timeline
                 .load_layer_map(new_disk_consistent_lsn)
+                .await
                 .with_context(|| {
                     format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
                 })?;
@@ -586,7 +589,7 @@ impl Tenant {
                         || timeline
                             .layers
                             .read()
-                            .unwrap()
+                            .await
                             .iter_historic_layers()
                             .next()
                             .is_some(),
@@ -600,7 +603,7 @@ impl Tenant {
                 let has_layers = timeline
                     .layers
                     .read()
-                    .unwrap()
+                    .await
                     .iter_historic_layers()
                     .next()
                     .is_some();
@@ -773,7 +776,7 @@ impl Tenant {
                     );
                     remote_index_and_client.insert(timeline_id, (index_part, client));
                 }
-                MaybeDeletedIndexPart::Deleted => {
+                MaybeDeletedIndexPart::Deleted(_) => {
                     info!("timeline {} is deleted, skipping", timeline_id);
                     continue;
                 }
@@ -1138,7 +1141,14 @@ impl Tenant {
                 AncestorArg::no_ancestor()
             };
             let timeline = self
-                .load_local_timeline(timeline_id, local_metadata, ancestor, cause.clone(), init_order, ctx)
+                .load_local_timeline(
+                    timeline_id,
+                    local_metadata,
+                    ancestor,
+                    cause.clone(),
+                    init_order,
+                    ctx,
+                )
                 .await
                 .with_context(|| format!("load local timeline {timeline_id}"))?;
             match timeline {
@@ -1167,7 +1177,7 @@ impl Tenant {
     /// Subroutine of `load_tenant`, to load an individual timeline
     ///
     /// NB: The parent is assumed to be already loaded!
-    #[instrument(skip_all, fields(timeline_id))]
+    #[instrument(skip_all)]
     async fn load_local_timeline(
         &self,
         timeline_id: TimelineId,
@@ -1188,45 +1198,32 @@ impl Tenant {
             ))
         });
 
-        let remote_startup_data = match &remote_client {
+        let (remote_startup_data, remote_client) = match remote_client {
             Some(remote_client) => match remote_client.download_index_file().await {
                 Ok(index_part) => {
                     let index_part = match index_part {
                         MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
-                        MaybeDeletedIndexPart::Deleted => {
-                            // TODO: we won't reach here if remote storage gets de-configured after start of the deletion operation.
-                            // Example:
-                            //  start deletion operation
-                            //  finishes upload of index part
-                            //  pageserver crashes
-                            //  remote storage gets de-configured
-                            //  pageserver starts
-                            //
-                            // We don't really anticipate remote storage to be de-configured, so, for now, this is fine.
-                            // Also, maybe we'll remove that option entirely in the future, see https://github.com/neondatabase/neon/issues/4099.
-                            info!("is_deleted is set on remote, resuming removal of local data originally done by timeline deletion handler");
-                            std::fs::remove_dir_all(
-                                self.conf.timeline_path(&timeline_id, &self.tenant_id),
-                            )
-                            .context("remove_dir_all")?;
-
-                            return Ok(None);
+                        MaybeDeletedIndexPart::Deleted(_index_part) => {
+                            todo!("return a distinguished error and make caller handle scheduling of deletion")
                         }
                     };
 
                     let remote_metadata = index_part.parse_metadata().context("parse_metadata")?;
-                    Some(RemoteStartupData {
-                        index_part,
-                        remote_metadata,
-                    })
+                    (
+                        Some(RemoteStartupData {
+                            index_part,
+                            remote_metadata,
+                        }),
+                        Some(remote_client),
+                    )
                 }
                 Err(DownloadError::NotFound) => {
                     info!("no index file was found on the remote");
-                    None
+                    (None, Some(remote_client))
                 }
                 Err(e) => return Err(anyhow::anyhow!(e)),
             },
-            None => None,
+            None => (None, remote_client),
         };
 
         let inserted_timeline = self
@@ -1424,12 +1421,27 @@ impl Tenant {
         pg_version: u32,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let (guard, real_timeline) = self
+        let (guard, tline) = self
             .create_empty_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
             // make the debug_assert_current_span_has_tenant_id() in create_empty_timeline() happy
             .instrument(tracing::info_span!("create_test_timeline", tenant_id=%self.tenant_id))
             .await
             .context("create empty timeline")?;
+
+        // Setup minimum keys required for the timeline to be usable.
+        let mut modification = tline.begin_modification(initdb_lsn);
+        modification
+            .init_empty_test_timeline()
+            .context("init_empty_test_timeline")?;
+        modification
+            .commit()
+            .await
+            .context("commit init_empty_test_timeline modification")?;
+
+        // Flush to disk so that uninit_tl's check for valid disk_consistent_lsn passes.
+        tline.maybe_spawn_flush_loop();
+        tline.freeze_and_flush().await.context("freeze_and_flush")?;
+
         // the tests don't need any content in the timeline, we're done here
         let placeholder_timeline = guard
             .creation_complete_remove_uninit_marker_and_get_placeholder_timeline()
@@ -1441,15 +1453,15 @@ impl Tenant {
                 info!("replacing placeholder timeline with the real one");
                 assert_eq!(placeholder_timeline.current_state(), TimelineState::Creating);
                 assert!(compare_arced_timeline(&placeholder_timeline, o.get()));
-                let replaced_placeholder = o.insert(Arc::clone(&real_timeline));
+                let replaced_placeholder = o.insert(Arc::clone(&tline));
                 assert!(compare_arced_timeline(&replaced_placeholder, &placeholder_timeline));
             },
         }
 
         // The non-test code would call tl.activate() here.
-        real_timeline.maybe_spawn_flush_loop();
-        real_timeline.set_state(TimelineState::Active);
-        Ok(real_timeline)
+        tline.maybe_spawn_flush_loop();
+        tline.set_state(TimelineState::Active);
+        Ok(tline)
     }
 
     /// Create a new timeline.
@@ -1500,7 +1512,7 @@ impl Tenant {
 
     /// This is not cancel-safe. Run inside a task_mgr task.
     async fn create_timeline_task(
-        self: &Tenant,
+        self: &Arc<Self>,
         new_timeline_id: TimelineId,
         ancestor_timeline_id: Option<TimelineId>,
         mut ancestor_start_lsn: Option<Lsn>,
@@ -1690,7 +1702,13 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             let timelines_to_compact = timelines
                 .iter()
-                .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
+                .filter_map(|(timeline_id, timeline)| {
+                    if timeline.is_active() {
+                        Some((*timeline_id, timeline.clone()))
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>();
             drop(timelines);
             timelines_to_compact
@@ -1768,12 +1786,117 @@ impl Tenant {
     }
 
     /// Shuts down a timeline's tasks, removes its in-memory structures, and deletes its
-    /// data from disk.
-    ///
-    /// This doesn't currently delete all data from S3, but sets a flag in its
-    /// index_part.json file to mark it as deleted.
-    pub async fn delete_timeline(
+    /// data from both disk and s3.
+    async fn delete_timeline(
         &self,
+        timeline_id: TimelineId,
+        timeline: Arc<Timeline>,
+    ) -> anyhow::Result<()> {
+        {
+            // Grab the layer_removal_cs lock, and actually perform the deletion.
+            //
+            // This lock prevents prevents GC or compaction from running at the same time.
+            // The GC task doesn't register itself with the timeline it's operating on,
+            // so it might still be running even though we called `shutdown_tasks`.
+            //
+            // Note that there are still other race conditions between
+            // GC, compaction and timeline deletion. See
+            // https://github.com/neondatabase/neon/issues/2671
+            //
+            // No timeout here, GC & Compaction should be responsive to the
+            // `TimelineState::Stopping` change.
+            info!("waiting for layer_removal_cs.lock()");
+            let layer_removal_guard = timeline.layer_removal_cs.lock().await;
+            info!("got layer_removal_cs.lock(), deleting layer files");
+
+            // NB: storage_sync upload tasks that reference these layers have been cancelled
+            //     by the caller.
+
+            let local_timeline_directory = self
+                .conf
+                .timeline_path(&timeline.timeline_id, &self.tenant_id);
+
+            fail::fail_point!("timeline-delete-before-rm", |_| {
+                Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
+            });
+
+            // NB: This need not be atomic because the deleted flag in the IndexPart
+            // will be observed during tenant/timeline load. The deletion will be resumed there.
+            //
+            // For configurations without remote storage, we tolerate that we're not crash-safe here.
+            // The timeline may come up Active but with missing layer files, in such setups.
+            // See https://github.com/neondatabase/neon/pull/3919#issuecomment-1531726720
+            match std::fs::remove_dir_all(&local_timeline_directory) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // This can happen if we're called a second time, e.g.,
+                    // because of a previous failure/cancellation at/after
+                    // failpoint timeline-delete-after-rm.
+                    //
+                    // It can also happen if we race with tenant detach, because,
+                    // it doesn't grab the layer_removal_cs lock.
+                    //
+                    // For now, log and continue.
+                    // warn! level is technically not appropriate for the
+                    // first case because we should expect retries to happen.
+                    // But the error is so rare, it seems better to get attention if it happens.
+                    let tenant_state = self.current_state();
+                    warn!(
+                        timeline_dir=?local_timeline_directory,
+                        ?tenant_state,
+                        "timeline directory not found, proceeding anyway"
+                    );
+                    // continue with the rest of the deletion
+                }
+                res => res.with_context(|| {
+                    format!(
+                        "Failed to remove local timeline directory '{}'",
+                        local_timeline_directory.display()
+                    )
+                })?,
+            }
+
+            info!("finished deleting layer files, releasing layer_removal_cs.lock()");
+            drop(layer_removal_guard);
+        }
+
+        fail::fail_point!("timeline-delete-after-rm", |_| {
+            Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
+        });
+
+        {
+            // Remove the timeline from the map.
+            let mut timelines = self.timelines.lock().unwrap();
+            let children_exist = timelines
+                .iter()
+                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+            // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
+            // We already deleted the layer files, so it's probably best to panic.
+            // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
+            if children_exist {
+                panic!("Timeline grew children while we removed layer files");
+            }
+
+            timelines.remove(&timeline_id).expect(
+                "timeline that we were deleting was concurrently removed from 'timelines' map",
+            );
+
+            drop(timelines);
+        }
+
+        let remote_client = match &timeline.remote_client {
+            Some(remote_client) => remote_client,
+            None => return Ok(()),
+        };
+
+        remote_client.delete_all().await?;
+
+        Ok(())
+    }
+
+    /// Removes timeline-related in-memory data and schedules removal from remote storage.
+    #[instrument(skip(self, _ctx))]
+    pub async fn prepare_and_schedule_delete_timeline(
+        self: Arc<Self>,
         timeline_id: TimelineId,
         _ctx: &RequestContext,
     ) -> Result<(), DeleteTimelineError> {
@@ -1784,18 +1907,25 @@ impl Tenant {
         //
         // Also grab the Timeline's delete_lock to prevent another deletion from starting.
         let timeline;
-        let mut delete_lock_guard;
+        let delete_lock_guard;
         {
             let mut timelines = self.timelines.lock().unwrap();
 
             // Ensure that there are no child timelines **attached to that pageserver**,
             // because detach removes files, which will break child branches
-            let children_exist = timelines
+            let children: Vec<TimelineId> = timelines
                 .iter()
-                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
+                .filter_map(|(id, entry)| {
+                    if entry.get_ancestor_timeline_id() == Some(timeline_id) {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-            if children_exist {
-                return Err(DeleteTimelineError::HasChildren);
+            if !children.is_empty() {
+                return Err(DeleteTimelineError::HasChildren(children));
             }
 
             let timeline_entry = match timelines.entry(timeline_id) {
@@ -1815,11 +1945,15 @@ impl Tenant {
             // XXX: We should perhaps return an HTTP "202 Accepted" to signal that the caller
             // needs to poll until the operation has finished. But for now, we return an
             // error, because the control plane knows to retry errors.
-            delete_lock_guard = timeline.delete_lock.try_lock().map_err(|_| {
-                DeleteTimelineError::Other(anyhow::anyhow!(
-                    "timeline deletion is already in progress"
-                ))
-            })?;
+
+            delete_lock_guard =
+                Arc::clone(&timeline.delete_lock)
+                    .try_lock_owned()
+                    .map_err(|_| {
+                        DeleteTimelineError::Other(anyhow::anyhow!(
+                            "timeline deletion is already in progress"
+                        ))
+                    })?;
 
             // If another task finished the deletion just before we acquired the lock,
             // return success.
@@ -1888,100 +2022,41 @@ impl Tenant {
                 }
             }
         }
-
-        {
-            // Grab the layer_removal_cs lock, and actually perform the deletion.
-            //
-            // This lock prevents prevents GC or compaction from running at the same time.
-            // The GC task doesn't register itself with the timeline it's operating on,
-            // so it might still be running even though we called `shutdown_tasks`.
-            //
-            // Note that there are still other race conditions between
-            // GC, compaction and timeline deletion. See
-            // https://github.com/neondatabase/neon/issues/2671
-            //
-            // No timeout here, GC & Compaction should be responsive to the
-            // `TimelineState::Stopping` change.
-            info!("waiting for layer_removal_cs.lock()");
-            let layer_removal_guard = timeline.layer_removal_cs.lock().await;
-            info!("got layer_removal_cs.lock(), deleting layer files");
-
-            // NB: storage_sync upload tasks that reference these layers have been cancelled
-            //     by the caller.
-
-            let local_timeline_directory = self.conf.timeline_path(&timeline_id, &self.tenant_id);
-
-            fail::fail_point!("timeline-delete-before-rm", |_| {
-                Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
-            });
-
-            // NB: This need not be atomic because the deleted flag in the IndexPart
-            // will be observed during tenant/timeline load. The deletion will be resumed there.
-            //
-            // For configurations without remote storage, we tolerate that we're not crash-safe here.
-            // The timeline may come up Active but with missing layer files, in such setups.
-            // See https://github.com/neondatabase/neon/pull/3919#issuecomment-1531726720
-            match std::fs::remove_dir_all(&local_timeline_directory) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // This can happen if we're called a second time, e.g.,
-                    // because of a previous failure/cancellation at/after
-                    // failpoint timeline-delete-after-rm.
-                    //
-                    // It can also happen if we race with tenant detach, because,
-                    // it doesn't grab the layer_removal_cs lock.
-                    //
-                    // For now, log and continue.
-                    // warn! level is technically not appropriate for the
-                    // first case because we should expect retries to happen.
-                    // But the error is so rare, it seems better to get attention if it happens.
-                    let tenant_state = self.current_state();
-                    warn!(
-                        timeline_dir=?local_timeline_directory,
-                        ?tenant_state,
-                        "timeline directory not found, proceeding anyway"
-                    );
-                    // continue with the rest of the deletion
-                }
-                res => res.with_context(|| {
-                    format!(
-                        "Failed to remove local timeline directory '{}'",
-                        local_timeline_directory.display()
-                    )
-                })?,
-            }
-
-            info!("finished deleting layer files, releasing layer_removal_cs.lock()");
-            drop(layer_removal_guard);
-        }
-
-        fail::fail_point!("timeline-delete-after-rm", |_| {
-            Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
-        });
-
-        // Remove the timeline from the map.
-        {
-            let mut timelines = self.timelines.lock().unwrap();
-
-            let children_exist = timelines
-                .iter()
-                .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline_id));
-            // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
-            // We already deleted the layer files, so it's probably best to panic.
-            // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
-            if children_exist {
-                panic!("Timeline grew children while we removed layer files");
-            }
-
-            timelines.remove(&timeline_id).expect(
-                "timeline that we were deleting was concurrently removed from 'timelines' map",
-            );
-        }
-
-        // All done! Mark the deletion as completed and release the delete_lock
-        *delete_lock_guard = true;
-        drop(delete_lock_guard);
+        self.schedule_delete_timeline(timeline_id, timeline, delete_lock_guard);
 
         Ok(())
+    }
+
+    fn schedule_delete_timeline(
+        self: Arc<Self>,
+        timeline_id: TimelineId,
+        timeline: Arc<Timeline>,
+        _guard: OwnedMutexGuard<bool>,
+    ) {
+        let tenant_id = self.tenant_id;
+        let timeline_clone = Arc::clone(&timeline);
+
+        task_mgr::spawn(
+            task_mgr::BACKGROUND_RUNTIME.handle(),
+            TaskKind::TimelineDeletionWorker,
+            Some(self.tenant_id),
+            Some(timeline_id),
+            "timeline_delete",
+            false,
+            async move {
+                if let Err(err) = self.delete_timeline(timeline_id, timeline).await {
+                    error!("Error: {err:#}");
+                    timeline_clone.set_broken(err.to_string())
+                };
+                Ok(())
+            }
+            .instrument({
+                let span =
+                    tracing::info_span!(parent: None, "delete_timeline", tenant_id=%tenant_id, timeline_id=%timeline_id);
+                span.follows_from(Span::current());
+                span
+            }),
+        );
     }
 
     pub fn current_state(&self) -> TenantState {
@@ -2026,9 +2101,9 @@ impl Tenant {
 
         if activating {
             let timelines_accessor = self.timelines.lock().unwrap();
-            let not_broken_timelines = timelines_accessor
+            let timelines_to_activate = timelines_accessor
                 .values()
-                .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+                .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -2036,7 +2111,7 @@ impl Tenant {
 
             let mut activated_timelines = 0;
 
-            for timeline in not_broken_timelines {
+            for timeline in timelines_to_activate {
                 timeline.activate(broker_client.clone(), background_jobs_can_start, ctx);
                 activated_timelines += 1;
             }
@@ -2187,7 +2262,7 @@ impl Tenant {
         let timelines_accessor = self.timelines.lock().unwrap();
         let not_broken_timelines = timelines_accessor
             .values()
-            .filter(|timeline| timeline.current_state() != TimelineState::Broken);
+            .filter(|timeline| !timeline.is_broken());
         for timeline in not_broken_timelines {
             timeline.set_state(TimelineState::Stopping);
         }
@@ -2422,7 +2497,13 @@ impl Tenant {
         }
     }
 
-    fn create_timeline_data(
+    /// Helper function to create a new Timeline struct.
+    ///
+    /// The returned Timeline is in Loading state. The caller is responsible for
+    /// initializing any on-disk state, and for inserting the Timeline to the 'timelines'
+    /// map.
+    /// TODO remove this function?
+    fn create_timeline_struct(
         &self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
@@ -3137,7 +3218,7 @@ impl Tenant {
     ///
     /// This method takes ownership of the remote_client and finishes uploads itself.
     async fn bootstrap_timeline(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         pg_version: u32,
         guard: &CreatingTimelineGuard<'_>,
@@ -3212,14 +3293,16 @@ impl Tenant {
         );
 
         let unfinished_timeline = self
-            .create_timeline_data(timeline_id, &new_metadata, None, remote_client.clone(), None)
+            .create_timeline_struct(
+                timeline_id,
+                &new_metadata,
+                None,
+                remote_client.clone(),
+                None,
+            )
             .context("Failed to create timeline data structure")?;
 
-        unfinished_timeline
-            .layers
-            .write()
-            .unwrap()
-            .next_open_layer_at = Some(pgdata_lsn); // pgdata_lsn == initdb_lsn
+        unfinished_timeline.layers.write().await.next_open_layer_at = Some(pgdata_lsn); // pgdata_lsn == initdb_lsn
 
         import_datadir::import_timeline_from_postgres_datadir(
             &unfinished_timeline,
@@ -3232,10 +3315,10 @@ impl Tenant {
             format!("Failed to import pgdatadir for timeline {tenant_id}/{timeline_id}")
         })?;
 
-        // Flush the new layer files to disk, before we mark the timeline as available to
+        // Flush the new layer files to disk, before we make the timeline as available to
         // the outside world.
         //
-        // Thus spawn flush loop manually and skip flush_loop setup in initialize_with_lock
+        // Flush loop needs to be spawned in order to be able to flush.
         unfinished_timeline.maybe_spawn_flush_loop();
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
@@ -3282,7 +3365,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
     ) -> anyhow::Result<()> {
-        crashsafe::create_dir_all(timeline_path).context("Failed to create timeline directory")?;
+        crashsafe::create_dir(timeline_path).context("Failed to create timeline directory")?;
 
         fail::fail_point!("after-timeline-uninit-mark-creation", |_| {
             error!("hitting failpoint after-timeline-uninit-mark-creation");
@@ -3861,16 +3944,20 @@ mod tests {
     async fn test_basic() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_basic")?.load().await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -3896,11 +3983,11 @@ mod tests {
             .load()
             .await;
         let _ = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
         match tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await
         {
             Ok(_) => panic!("duplicate timeline creation should fail"),
@@ -3932,9 +4019,9 @@ mod tests {
 
         let (tenant, ctx) = TenantHarness::create("test_branch")?.load().await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        let writer = tline.writer();
+        let writer = tline.writer().await;
 
         #[allow(non_snake_case)]
         let TEST_KEY_A: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
@@ -3942,13 +4029,21 @@ mod tests {
         let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
-        writer.put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))?;
-        writer.put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))
+            .await?;
+        writer
+            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))
+            .await?;
         writer.finish_write(Lsn(0x20));
 
-        writer.put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))
+            .await?;
         writer.finish_write(Lsn(0x30));
-        writer.put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))
+            .await?;
         writer.finish_write(Lsn(0x40));
 
         //assert_current_logical_size(&tline, Lsn(0x40));
@@ -3960,8 +4055,10 @@ mod tests {
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
-        let new_writer = newtline.writer();
-        new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
+        let new_writer = newtline.writer().await;
+        new_writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))
+            .await?;
         new_writer.finish_write(Lsn(0x40));
 
         // Check page contents on both branches
@@ -3987,38 +4084,46 @@ mod tests {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
-            let writer = tline.writer();
+            let writer = tline.writer().await;
             // Create a relation on the timeline
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
         }
         tline.freeze_and_flush().await?;
         {
-            let writer = tline.writer();
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            let writer = tline.writer().await;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
         }
         tline.freeze_and_flush().await
@@ -4031,7 +4136,7 @@ mod tests {
                 .load()
                 .await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
@@ -4117,7 +4222,7 @@ mod tests {
                 .load()
                 .await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
@@ -4130,7 +4235,7 @@ mod tests {
 
         make_some_layers(newtline.as_ref(), Lsn(0x60)).await?;
 
-        tline.set_state(TimelineState::Broken);
+        tline.set_broken("test".to_owned());
 
         tenant
             .gc_iteration(Some(TIMELINE_ID), 0x10, Duration::ZERO, &ctx)
@@ -4167,7 +4272,7 @@ mod tests {
                 .load()
                 .await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
@@ -4192,7 +4297,7 @@ mod tests {
                 .load()
                 .await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
 
@@ -4226,7 +4331,7 @@ mod tests {
         {
             let (tenant, ctx) = harness.load().await;
             let tline = tenant
-                .create_test_timeline(TIMELINE_ID, Lsn(0x8000), DEFAULT_PG_VERSION, &ctx)
+                .create_test_timeline(TIMELINE_ID, Lsn(0x7000), DEFAULT_PG_VERSION, &ctx)
                 .await?;
             make_some_layers(tline.as_ref(), Lsn(0x8000)).await?;
         }
@@ -4247,7 +4352,7 @@ mod tests {
         {
             let (tenant, ctx) = harness.load().await;
             let tline = tenant
-                .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+                .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
                 .await?;
 
             make_some_layers(tline.as_ref(), Lsn(0x20)).await?;
@@ -4286,7 +4391,7 @@ mod tests {
         let (tenant, ctx) = harness.load().await;
 
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
         drop(tline);
         drop(tenant);
@@ -4326,35 +4431,43 @@ mod tests {
     async fn test_images() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_images")?.load().await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         tline.freeze_and_flush().await?;
         tline.compact(&ctx).await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
         tline.freeze_and_flush().await?;
         tline.compact(&ctx).await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))
+            .await?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
         tline.freeze_and_flush().await?;
         tline.compact(&ctx).await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))
+            .await?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
@@ -4393,7 +4506,7 @@ mod tests {
     async fn test_bulk_insert() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_bulk_insert")?.load().await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
         let mut lsn = Lsn(0x10);
@@ -4405,12 +4518,14 @@ mod tests {
         for _ in 0..50 {
             for _ in 0..10000 {
                 test_key.field6 = blknum;
-                let writer = tline.writer();
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                let writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
 
@@ -4437,7 +4552,7 @@ mod tests {
     async fn test_random_updates() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_random_updates")?.load().await;
         let tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
         const NUM_KEYS: usize = 1000;
@@ -4450,17 +4565,19 @@ mod tests {
         // a read sees the latest page version.
         let mut updated = [Lsn(0); NUM_KEYS];
 
-        let mut lsn = Lsn(0);
+        let mut lsn = Lsn(0x10);
         #[allow(clippy::needless_range_loop)]
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer();
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            let writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -4473,12 +4590,14 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer();
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                let writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -4512,7 +4631,7 @@ mod tests {
             .load()
             .await;
         let mut tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
         const NUM_KEYS: usize = 1000;
@@ -4525,17 +4644,19 @@ mod tests {
         // a read sees the latest page version.
         let mut updated = [Lsn(0); NUM_KEYS];
 
-        let mut lsn = Lsn(0);
+        let mut lsn = Lsn(0x10);
         #[allow(clippy::needless_range_loop)]
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer();
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            let writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -4556,12 +4677,14 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer();
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                let writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
@@ -4596,7 +4719,7 @@ mod tests {
             .load()
             .await;
         let mut tline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
         const NUM_KEYS: usize = 100;
@@ -4606,7 +4729,7 @@ mod tests {
         // Track page mutation lsns across different timelines.
         let mut updated = [[Lsn(0); NUM_KEYS]; NUM_TLINES];
 
-        let mut lsn = Lsn(0);
+        let mut lsn = Lsn(0x10);
 
         #[allow(clippy::needless_range_loop)]
         for idx in 0..NUM_TLINES {
@@ -4622,12 +4745,14 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer();
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
-                )?;
+                let writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
@@ -4650,6 +4775,74 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_at_initdb_lsn_takes_optimization_code_path() -> anyhow::Result<()> {
+        let (tenant, ctx) = TenantHarness::create("test_empty_test_timeline_is_usable")?
+            .load()
+            .await;
+
+        let initdb_lsn = Lsn(0x20);
+        let (_guard, tline) = tenant
+            .create_empty_timeline(TIMELINE_ID, initdb_lsn, DEFAULT_PG_VERSION, &ctx)
+            .await?;
+
+        // Spawn flush loop now so that we can set the `expect_initdb_optimization`
+        tline.maybe_spawn_flush_loop();
+
+        // Make sure the timeline has the minimum set of required keys for operation.
+        // The only operation you can always do on an empty timeline is to `put` new data.
+        // Except if you `put` at `initdb_lsn`.
+        // In that case, there's an optimization to directly create image layers instead of delta layers.
+        // It uses `repartition()`, which assumes some keys to be present.
+        // Let's make sure the test timeline can handle that case.
+        {
+            let mut state = tline.flush_loop_state.lock().unwrap();
+            assert_eq!(
+                timeline::FlushLoopState::Running {
+                    expect_initdb_optimization: false,
+                    initdb_optimization_count: 0,
+                },
+                *state
+            );
+            *state = timeline::FlushLoopState::Running {
+                expect_initdb_optimization: true,
+                initdb_optimization_count: 0,
+            };
+        }
+
+        // Make writes at the initdb_lsn. When we flush it below, it should be handled by the optimization.
+        // As explained above, the optimization requires some keys to be present.
+        // As per `create_empty_timeline` documentation, use init_empty to set them.
+        // This is what `create_test_timeline` does, by the way.
+        let mut modification = tline.begin_modification(initdb_lsn);
+        modification
+            .init_empty_test_timeline()
+            .context("init_empty_test_timeline")?;
+        modification
+            .commit()
+            .await
+            .context("commit init_empty_test_timeline modification")?;
+
+        // Do the flush. The flush code will check the expectations that we set above.
+        tline.freeze_and_flush().await?;
+
+        // assert freeze_and_flush exercised the initdb optimization
+        {
+            let state = tline.flush_loop_state.lock().unwrap();
+            let
+                timeline::FlushLoopState::Running {
+                    expect_initdb_optimization,
+                    initdb_optimization_count,
+                } = *state else {
+                    panic!("unexpected state: {:?}", *state);
+                };
+            assert!(expect_initdb_optimization);
+            assert!(initdb_optimization_count > 0);
+        }
+
         Ok(())
     }
 }

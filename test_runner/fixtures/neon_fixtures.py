@@ -663,6 +663,8 @@ class NeonEnvBuilder:
         else:
             raise RuntimeError(f"Unknown storage type: {remote_storage_kind}")
 
+        self.remote_storage_kind = remote_storage_kind
+
     def enable_local_fs_remote_storage(self, force_enable: bool = True):
         """
         Sets up the pageserver to use the local fs at the `test_dir/local_fs_remote_storage` path.

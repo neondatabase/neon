@@ -28,7 +28,7 @@ use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::context::{DownloadBehavior, RequestContext};
@@ -84,9 +84,14 @@ use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum FlushLoopState {
+pub(super) enum FlushLoopState {
     NotStarted,
-    Running,
+    Running {
+        #[cfg(test)]
+        expect_initdb_optimization: bool,
+        #[cfg(test)]
+        initdb_optimization_count: usize,
+    },
     Exited,
 }
 
@@ -120,7 +125,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(super) layers: RwLock<LayerMap<dyn PersistentLayer>>,
+    pub(crate) layers: tokio::sync::RwLock<LayerMap<dyn PersistentLayer>>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -180,10 +185,10 @@ pub struct Timeline {
     /// Locked automatically by [`TimelineWriter`] and checkpointer.
     /// Must always be acquired before the layer map/individual layer lock
     /// to avoid deadlock.
-    write_lock: Mutex<()>,
+    write_lock: tokio::sync::Mutex<()>,
 
     /// Used to avoid multiple `flush_loop` tasks running
-    flush_loop_state: Mutex<FlushLoopState>,
+    pub(super) flush_loop_state: Mutex<FlushLoopState>,
 
     /// layer_flush_start_tx can be used to wake up the layer-flushing task.
     /// The value is a counter, incremented every time a new flush cycle is requested.
@@ -239,7 +244,7 @@ pub struct Timeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_lock: tokio::sync::Mutex<bool>,
+    pub delete_lock: Arc<tokio::sync::Mutex<bool>>,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -592,8 +597,8 @@ impl Timeline {
     /// The sum of the file size of all historic layers in the layer map.
     /// This method makes no distinction between local and remote layers.
     /// Hence, the result **does not represent local filesystem usage**.
-    pub fn layer_size_sum(&self) -> u64 {
-        let layer_map = self.layers.read().unwrap();
+    pub async fn layer_size_sum(&self) -> u64 {
+        let layer_map = self.layers.read().await;
         let mut size = 0;
         for l in layer_map.iter_historic_layers() {
             size += l.file_size();
@@ -687,12 +692,12 @@ impl Timeline {
         if self.current_state() == TimelineState::Creating {
             debug!("timelines in Creating state are never written to");
             assert!(
-                self.layers.read().unwrap().open_layer.is_none(),
+                self.layers.read().await.open_layer.is_none(),
                 "would have nothing to flush anyways"
             );
             return Ok(());
         }
-        self.freeze_inmem_layer(false);
+        self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait().await
     }
 
@@ -828,8 +833,7 @@ impl Timeline {
         // above. Rewrite it.
         let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
-        let state = *self.state.borrow();
-        if state == TimelineState::Stopping {
+        if self.is_stopping() {
             return Err(anyhow::anyhow!("timeline is Stopping").into());
         }
 
@@ -877,10 +881,10 @@ impl Timeline {
     }
 
     /// Mutate the timeline with a [`TimelineWriter`].
-    pub fn writer(&self) -> TimelineWriter<'_> {
+    pub async fn writer(&self) -> TimelineWriter<'_> {
         TimelineWriter {
             tl: self,
-            _write_guard: self.write_lock.lock().unwrap(),
+            _write_guard: self.write_lock.lock().await,
         }
     }
 
@@ -914,37 +918,39 @@ impl Timeline {
     ///
     /// Also flush after a period of time without new data -- it helps
     /// safekeepers to regard pageserver as caught up and suspend activity.
-    pub fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
+    pub async fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
         let last_lsn = self.get_last_record_lsn();
-        let layers = self.layers.read().unwrap();
-        if let Some(open_layer) = &layers.open_layer {
-            let open_layer_size = open_layer.size()?;
-            drop(layers);
-            let last_freeze_at = self.last_freeze_at.load();
-            let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
-            let distance = last_lsn.widening_sub(last_freeze_at);
-            // Checkpointing the open layer can be triggered by layer size or LSN range.
-            // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
-            // we want to stay below that with a big margin.  The LSN distance determines how
-            // much WAL the safekeepers need to store.
-            if distance >= self.get_checkpoint_distance().into()
-                || open_layer_size > self.get_checkpoint_distance()
-                || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
-            {
-                info!(
-                    "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
-                    distance,
-                    open_layer_size,
-                    last_freeze_ts.elapsed()
-                );
+        let open_layer_size = {
+            let layers = self.layers.read().await;
+            let Some(open_layer) = layers.open_layer.as_ref() else {
+                return Ok(());
+            };
+            open_layer.size()?
+        };
+        let last_freeze_at = self.last_freeze_at.load();
+        let last_freeze_ts = *(self.last_freeze_ts.read().unwrap());
+        let distance = last_lsn.widening_sub(last_freeze_at);
+        // Checkpointing the open layer can be triggered by layer size or LSN range.
+        // S3 has a 5 GB limit on the size of one upload (without multi-part upload), and
+        // we want to stay below that with a big margin.  The LSN distance determines how
+        // much WAL the safekeepers need to store.
+        if distance >= self.get_checkpoint_distance().into()
+            || open_layer_size > self.get_checkpoint_distance()
+            || (distance > 0 && last_freeze_ts.elapsed() >= self.get_checkpoint_timeout())
+        {
+            info!(
+                "check_checkpoint_distance {}, layer size {}, elapsed since last flush {:?}",
+                distance,
+                open_layer_size,
+                last_freeze_ts.elapsed()
+            );
 
-                self.freeze_inmem_layer(true);
-                self.last_freeze_at.store(last_lsn);
-                *(self.last_freeze_ts.write().unwrap()) = Instant::now();
+            self.freeze_inmem_layer(true).await;
+            self.last_freeze_at.store(last_lsn);
+            *(self.last_freeze_ts.write().unwrap()) = Instant::now();
 
-                // Wake up the layer flusher
-                self.flush_frozen_layers();
-            }
+            // Wake up the layer flusher
+            self.flush_frozen_layers();
         }
         Ok(())
     }
@@ -972,7 +978,11 @@ impl Timeline {
                 FlushLoopState::NotStarted
             );
             assert!(
-                self.layers.read().unwrap().open_layer.is_none(),
+                self.layers
+                    .try_read()
+                    .expect("we would never be modifying Timeline::layers in a Creating timeline")
+                    .open_layer
+                    .is_none(),
                 "would have nothing to flush anyways"
             );
             assert!(self.walreceiver.lock().unwrap().is_none());
@@ -986,14 +996,17 @@ impl Timeline {
             (st, TimelineState::Loading) => {
                 error!("ignoring transition from {st:?} into Loading state");
             }
-            (TimelineState::Broken, _) => {
-                error!("Ignoring state update {new_state:?} for broken tenant");
+            (TimelineState::Broken { .. }, new_state) => {
+                error!("Ignoring state update {new_state:?} for broken timeline");
             }
             (TimelineState::Stopping, TimelineState::Active) => {
                 error!("Not activating a Stopping timeline");
             }
             (_, new_state) => {
-                if matches!(new_state, TimelineState::Stopping | TimelineState::Broken) {
+                if matches!(
+                    new_state,
+                    TimelineState::Stopping | TimelineState::Broken { .. }
+                ) {
                     // drop the copmletion guard, if any; it might be holding off the completion
                     // forever needlessly
                     self.initial_logical_size_attempt
@@ -1006,12 +1019,29 @@ impl Timeline {
         }
     }
 
+    pub fn set_broken(&self, reason: String) {
+        let backtrace_str: String = format!("{}", std::backtrace::Backtrace::force_capture());
+        let broken_state = TimelineState::Broken {
+            reason,
+            backtrace: backtrace_str,
+        };
+        self.set_state(broken_state)
+    }
+
     pub fn current_state(&self) -> TimelineState {
-        *self.state.borrow()
+        self.state.borrow().clone()
+    }
+
+    pub fn is_broken(&self) -> bool {
+        matches!(&*self.state.borrow(), TimelineState::Broken { .. })
     }
 
     pub fn is_active(&self) -> bool {
         self.current_state() == TimelineState::Active
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.current_state() == TimelineState::Stopping
     }
 
     pub fn subscribe_for_state_updates(&self) -> watch::Receiver<TimelineState> {
@@ -1024,7 +1054,7 @@ impl Timeline {
     ) -> Result<(), TimelineState> {
         let mut receiver = self.state.subscribe();
         loop {
-            let current_state = *receiver.borrow_and_update();
+            let current_state = receiver.borrow().clone();
             match current_state {
                 TimelineState::Creating => {
                     // A timeline _object_ in state Creating never transitions out of it.
@@ -1051,8 +1081,8 @@ impl Timeline {
         }
     }
 
-    pub fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
-        let layer_map = self.layers.read().unwrap();
+    pub async fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
+        let layer_map = self.layers.read().await;
         let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
         if let Some(open_layer) = &layer_map.open_layer {
             in_memory_layers.push(open_layer.info());
@@ -1074,7 +1104,7 @@ impl Timeline {
 
     #[instrument(skip_all, fields(tenant = %self.tenant_id, timeline = %self.timeline_id))]
     pub async fn download_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
-        let Some(layer) = self.find_layer(layer_file_name) else { return Ok(None) };
+        let Some(layer) = self.find_layer(layer_file_name).await else { return Ok(None) };
         let Some(remote_layer) = layer.downcast_remote_layer() else { return  Ok(Some(false)) };
         if self.remote_client.is_none() {
             return Ok(Some(false));
@@ -1087,7 +1117,7 @@ impl Timeline {
     /// Like [`evict_layer_batch`], but for just one layer.
     /// Additional case `Ok(None)` covers the case where the layer could not be found by its `layer_file_name`.
     pub async fn evict_layer(&self, layer_file_name: &str) -> anyhow::Result<Option<bool>> {
-        let Some(local_layer) = self.find_layer(layer_file_name) else { return Ok(None) };
+        let Some(local_layer) = self.find_layer(layer_file_name).await else { return Ok(None) };
         let remote_client = self
             .remote_client
             .as_ref()
@@ -1172,7 +1202,7 @@ impl Timeline {
         }
 
         // start the batch update
-        let mut layer_map = self.layers.write().unwrap();
+        let mut layer_map = self.layers.write().await;
         let mut batch_updates = layer_map.batch_update();
 
         let mut results = Vec::with_capacity(layers_to_evict.len());
@@ -1434,7 +1464,7 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: RwLock::new(LayerMap::default()),
+                layers: tokio::sync::RwLock::new(LayerMap::default()),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
@@ -1470,7 +1500,7 @@ impl Timeline {
                 layer_flush_start_tx,
                 layer_flush_done_tx,
 
-                write_lock: Mutex::new(()),
+                write_lock: tokio::sync::Mutex::new(()),
                 layer_removal_cs: Default::default(),
 
                 gc_info: std::sync::RwLock::new(GcInfo {
@@ -1504,7 +1534,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_lock: tokio::sync::Mutex::new(false),
+                delete_lock: Arc::new(tokio::sync::Mutex::new(false)),
 
                 initial_logical_size_can_start,
                 initial_logical_size_attempt: Mutex::new(initial_logical_size_attempt),
@@ -1522,7 +1552,7 @@ impl Timeline {
         let mut flush_loop_state = self.flush_loop_state.lock().unwrap();
         match *flush_loop_state {
             FlushLoopState::NotStarted => (),
-            FlushLoopState::Running => {
+            FlushLoopState::Running { .. } => {
                 info!(
                     "skipping attempt to start flush_loop twice {}/{}",
                     self.tenant_id, self.timeline_id
@@ -1542,6 +1572,12 @@ impl Timeline {
         let self_clone = Arc::clone(self);
 
         info!("spawning flush loop");
+        *flush_loop_state = FlushLoopState::Running {
+            #[cfg(test)]
+            expect_initdb_optimization: false,
+            #[cfg(test)]
+            initdb_optimization_count: 0,
+        };
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             task_mgr::TaskKind::LayerFlushTask,
@@ -1553,14 +1589,12 @@ impl Timeline {
                 let background_ctx = RequestContext::todo_child(TaskKind::LayerFlushTask, DownloadBehavior::Error);
                 self_clone.flush_loop(layer_flush_start_rx, &background_ctx).await;
                 let mut flush_loop_state = self_clone.flush_loop_state.lock().unwrap();
-                assert_eq!(*flush_loop_state, FlushLoopState::Running);
+                assert!(matches!(*flush_loop_state, FlushLoopState::Running{ ..}));
                 *flush_loop_state  = FlushLoopState::Exited;
                 Ok(())
             }
             .instrument(info_span!(parent: None, "layer flush task", tenant = %self.tenant_id, timeline = %self.timeline_id))
         );
-
-        *flush_loop_state = FlushLoopState::Running;
     }
 
     /// Creates and starts the wal receiver.
@@ -1637,10 +1671,9 @@ impl Timeline {
 
     ///
     /// Scan the timeline directory to populate the layer map.
-    /// Returns all timeline-related files that were found and loaded.
     ///
-    pub(super) fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
-        let mut layers = self.layers.write().unwrap();
+    pub(super) async fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+        let mut layers = self.layers.write().await;
         let mut updates = layers.batch_update();
         let mut num_layers = 0;
 
@@ -1769,7 +1802,7 @@ impl Timeline {
 
         // We're holding a layer map lock for a while but this
         // method is only called during init so it's fine.
-        let mut layer_map = self.layers.write().unwrap();
+        let mut layer_map = self.layers.write().await;
         let mut updates = layer_map.batch_update();
         for remote_layer_name in &index_part.timeline_layers {
             let local_layer = local_only_layers.remove(remote_layer_name);
@@ -1922,7 +1955,7 @@ impl Timeline {
         let local_layers = self
             .layers
             .read()
-            .unwrap()
+            .await
             .iter_historic_layers()
             .map(|l| (l.filename(), l))
             .collect::<HashMap<_, _>>();
@@ -2178,11 +2211,11 @@ impl Timeline {
             loop {
                 match timeline_state_updates.changed().await {
                     Ok(()) => {
-                        let new_state = *timeline_state_updates.borrow();
+                        let new_state = timeline_state_updates.borrow().clone();
                         match new_state {
                             // we're running this job for active timelines only
                             TimelineState::Active => continue,
-                            TimelineState::Broken
+                            TimelineState::Broken { .. }
                             | TimelineState::Stopping
                             | TimelineState::Loading
                             | TimelineState::Creating  => {
@@ -2302,8 +2335,8 @@ impl Timeline {
         }
     }
 
-    fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
-        for historic_layer in self.layers.read().unwrap().iter_historic_layers() {
+    async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
+        for historic_layer in self.layers.read().await.iter_historic_layers() {
             let historic_layer_name = historic_layer.filename().file_name();
             if layer_file_name == historic_layer_name {
                 return Some(historic_layer);
@@ -2444,10 +2477,17 @@ impl Timeline {
                 }
                 ValueReconstructResult::Missing => {
                     return Err(layer_traversal_error(
-                        format!(
-                            "could not find data for key {} at LSN {}, for request at LSN {}",
-                            key, cont_lsn, request_lsn
-                        ),
+                        if cfg!(test) {
+                            format!(
+                                "could not find data for key {} at LSN {}, for request at LSN {}\n{}",
+                                key, cont_lsn, request_lsn, std::backtrace::Backtrace::force_capture(),
+                            )
+                        } else {
+                            format!(
+                                "could not find data for key {} at LSN {}, for request at LSN {}",
+                                key, cont_lsn, request_lsn
+                            )
+                        },
                         traversal_path,
                     ));
                 }
@@ -2513,7 +2553,7 @@ impl Timeline {
             #[allow(clippy::never_loop)] // see comment at bottom of this loop
             'layer_map_search: loop {
                 let remote_layer = {
-                    let layers = timeline.layers.read().unwrap();
+                    let layers = timeline.layers.read().await;
 
                     // Check the open and frozen in-memory layers first, in order from newest
                     // to oldest.
@@ -2695,24 +2735,29 @@ impl Timeline {
     ///
     /// Get a handle to the latest layer for appending.
     ///
-    fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
-        let mut layers = self.layers.write().unwrap();
+    async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
+        let mut layers = self.layers.write().await;
 
         ensure!(lsn.is_aligned());
 
         let last_record_lsn = self.get_last_record_lsn();
         ensure!(
             lsn > last_record_lsn,
-            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})",
+            "cannot modify relation after advancing last_record_lsn (incoming_lsn={}, last_record_lsn={})\n{}",
             lsn,
             last_record_lsn,
+            std::backtrace::Backtrace::force_capture(),
         );
 
         // Do we have a layer open for writing already?
         let layer;
         if let Some(open_layer) = &layers.open_layer {
             if open_layer.get_lsn_range().start > lsn {
-                bail!("unexpected open layer in the future");
+                bail!(
+                    "unexpected open layer in the future: open layers starts at {}, write lsn {}",
+                    open_layer.get_lsn_range().start,
+                    lsn
+                );
             }
 
             layer = Arc::clone(open_layer);
@@ -2740,17 +2785,16 @@ impl Timeline {
         Ok(layer)
     }
 
-    fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> anyhow::Result<()> {
+    async fn put_value(&self, key: Key, lsn: Lsn, val: &Value) -> anyhow::Result<()> {
         //info!("PUT: key {} at {}", key, lsn);
-        let layer = self.get_layer_for_write(lsn)?;
+        let layer = self.get_layer_for_write(lsn).await?;
         layer.put_value(key, lsn, val)?;
         Ok(())
     }
 
-    fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
-        let layer = self.get_layer_for_write(lsn)?;
-        layer.put_tombstone(key_range, lsn)?;
-
+    async fn put_tombstone(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
+        let layer = self.get_layer_for_write(lsn).await?;
+        layer.put_tombstone(key_range, lsn).await?;
         Ok(())
     }
 
@@ -2761,15 +2805,15 @@ impl Timeline {
         self.last_record_lsn.advance(new_lsn);
     }
 
-    fn freeze_inmem_layer(&self, write_lock_held: bool) {
+    async fn freeze_inmem_layer(&self, write_lock_held: bool) {
         // Freeze the current open in-memory layer. It will be written to disk on next
         // iteration.
         let _write_guard = if write_lock_held {
             None
         } else {
-            Some(self.write_lock.lock().unwrap())
+            Some(self.write_lock.lock().await)
         };
-        let mut layers = self.layers.write().unwrap();
+        let mut layers = self.layers.write().await;
         if let Some(open_layer) = &layers.open_layer {
             let open_layer_rc = Arc::clone(open_layer);
             // Does this layer need freezing?
@@ -2807,7 +2851,7 @@ impl Timeline {
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
                 let layer_to_flush = {
-                    let layers = self.layers.read().unwrap();
+                    let layers = self.layers.read().await;
                     layers.frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
@@ -2840,7 +2884,7 @@ impl Timeline {
         let mut my_flush_request = 0;
 
         let flush_loop_state = { *self.flush_loop_state.lock().unwrap() };
-        if flush_loop_state != FlushLoopState::Running {
+        if !matches!(flush_loop_state, FlushLoopState::Running { .. }) {
             anyhow::bail!("cannot flush frozen layers when flush_loop is not running, state is {flush_loop_state:?}")
         }
 
@@ -2890,6 +2934,18 @@ impl Timeline {
         let lsn_range = frozen_layer.get_lsn_range();
         let layer_paths_to_upload =
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
+                #[cfg(test)]
+                match &mut *self.flush_loop_state.lock().unwrap() {
+                    FlushLoopState::NotStarted | FlushLoopState::Exited => {
+                        panic!("flush loop not running")
+                    }
+                    FlushLoopState::Running {
+                        initdb_optimization_count,
+                        ..
+                    } => {
+                        *initdb_optimization_count += 1;
+                    }
+                }
                 // Note: The 'ctx' in use here has DownloadBehavior::Error. We should not
                 // require downloading anything during initial import.
                 let (partitioning, _lsn) = self
@@ -2898,17 +2954,20 @@ impl Timeline {
                 self.create_image_layers(&partitioning, self.initdb_lsn, true, ctx)
                     .await?
             } else {
+                #[cfg(test)]
+                match &mut *self.flush_loop_state.lock().unwrap() {
+                    FlushLoopState::NotStarted | FlushLoopState::Exited => {
+                        panic!("flush loop not running")
+                    }
+                    FlushLoopState::Running {
+                        expect_initdb_optimization,
+                        ..
+                    } => {
+                        assert!(!*expect_initdb_optimization, "expected initdb optimization");
+                    }
+                }
                 // normal case, write out a L0 delta layer file.
-                let this = self.clone();
-                let frozen_layer = frozen_layer.clone();
-                let span = tracing::info_span!("blocking");
-                let (delta_path, metadata) = tokio::task::spawn_blocking(move || {
-                    let _g = span.entered();
-                    this.create_delta_layer(&frozen_layer)
-                })
-                .await
-                .context("create_delta_layer spawn_blocking")
-                .and_then(|res| res)?;
+                let (delta_path, metadata) = self.create_delta_layer(&frozen_layer).await?;
                 HashMap::from([(delta_path, metadata)])
             };
 
@@ -2917,7 +2976,7 @@ impl Timeline {
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now.
         {
-            let mut layers = self.layers.write().unwrap();
+            let mut layers = self.layers.write().await;
             let l = layers.frozen_layers.pop_front();
 
             // Only one thread may call this function at a time (for this
@@ -3011,34 +3070,50 @@ impl Timeline {
     }
 
     // Write out the given frozen in-memory layer as a new L0 delta file
-    fn create_delta_layer(
+    async fn create_delta_layer(
         self: &Arc<Self>,
-        frozen_layer: &InMemoryLayer,
+        frozen_layer: &Arc<InMemoryLayer>,
     ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
-        // Write it out
-        let new_delta = frozen_layer.write_to_disk()?;
-        let new_delta_path = new_delta.path();
-        let new_delta_filename = new_delta.filename();
+        let span = tracing::info_span!("blocking");
+        let (new_delta, sz): (DeltaLayer, _) = tokio::task::spawn_blocking({
+            let _g = span.entered();
+            let self_clone = Arc::clone(self);
+            let frozen_layer = Arc::clone(frozen_layer);
+            move || {
+                // Write it out
+                let new_delta = frozen_layer.write_to_disk()?;
+                let new_delta_path = new_delta.path();
 
-        // Sync it to disk.
-        //
-        // We must also fsync the timeline dir to ensure the directory entries for
-        // new layer files are durable
-        //
-        // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
-        // files to flush, it might be better to first write them all, and then fsync
-        // them all in parallel.
+                // Sync it to disk.
+                //
+                // We must also fsync the timeline dir to ensure the directory entries for
+                // new layer files are durable
+                //
+                // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
+                // files to flush, it might be better to first write them all, and then fsync
+                // them all in parallel.
 
-        // First sync the delta layer. We still use par_fsync here to keep everything consistent. Feel free to replace
-        // this with a single fsync in future refactors.
-        par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
-        // Then sync the parent directory.
-        par_fsync::par_fsync(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
-            .context("fsync of timeline dir")?;
+                // First sync the delta layer. We still use par_fsync here to keep everything consistent. Feel free to replace
+                // this with a single fsync in future refactors.
+                par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
+                // Then sync the parent directory.
+                par_fsync::par_fsync(&[self_clone
+                    .conf
+                    .timeline_path(&self_clone.timeline_id, &self_clone.tenant_id)])
+                .context("fsync of timeline dir")?;
+
+                let sz = new_delta_path.metadata()?.len();
+
+                anyhow::Ok((new_delta, sz))
+            }
+        })
+        .await
+        .context("spawn_blocking")??;
+        let new_delta_name = new_delta.filename();
 
         // Add it to the layer map
         let l = Arc::new(new_delta);
-        let mut layers = self.layers.write().unwrap();
+        let mut layers = self.layers.write().await;
         let mut batch_updates = layers.batch_update();
         l.access_stats().record_residence_event(
             &batch_updates,
@@ -3049,14 +3124,12 @@ impl Timeline {
         batch_updates.flush();
 
         // update the timeline's physical size
-        let sz = new_delta_path.metadata()?.len();
-
         self.metrics.resident_physical_size_gauge.add(sz);
         // update metrics
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
-        Ok((new_delta_filename, LayerFileMetadata::new(sz)))
+        Ok((new_delta_name, LayerFileMetadata::new(sz)))
     }
 
     async fn repartition(
@@ -3090,10 +3163,14 @@ impl Timeline {
     }
 
     // Is it time to create a new image layer for the given partition?
-    fn time_for_new_image_layer(&self, partition: &KeySpace, lsn: Lsn) -> anyhow::Result<bool> {
+    async fn time_for_new_image_layer(
+        &self,
+        partition: &KeySpace,
+        lsn: Lsn,
+    ) -> anyhow::Result<bool> {
         let threshold = self.get_image_creation_threshold();
 
-        let layers = self.layers.read().unwrap();
+        let layers = self.layers.read().await;
 
         let mut max_deltas = 0;
         {
@@ -3188,7 +3265,7 @@ impl Timeline {
         for partition in partitioning.parts.iter() {
             let img_range = start..partition.ranges.last().unwrap().end;
             start = img_range.end;
-            if force || self.time_for_new_image_layer(partition, lsn)? {
+            if force || self.time_for_new_image_layer(partition, lsn).await? {
                 let mut image_layer_writer = ImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
@@ -3271,7 +3348,7 @@ impl Timeline {
 
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
-        let mut layers = self.layers.write().unwrap();
+        let mut layers = self.layers.write().await;
         let mut updates = layers.batch_update();
         let timeline_path = self.conf.timeline_path(&self.timeline_id, &self.tenant_id);
 
@@ -3333,13 +3410,13 @@ impl Timeline {
     /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
     /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
     /// start of level0 files compaction, the on-demand download should be revisited as well.
-    fn compact_level0_phase1(
+    async fn compact_level0_phase1(
         &self,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
-        let layers = self.layers.read().unwrap();
+        let layers = self.layers.read().await;
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
 
@@ -3462,7 +3539,7 @@ impl Timeline {
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
-        let layers = self.layers.read().unwrap(); // Is'n it better to hold original layers lock till here?
+        let layers = self.layers.read().await; // Is'n it better to hold original layers lock till here?
         let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
 
@@ -3676,21 +3753,12 @@ impl Timeline {
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
-        let this = self.clone();
-        let ctx_inner = ctx.clone();
-        let layer_removal_cs_inner = layer_removal_cs.clone();
-        let span = tracing::info_span!("blocking");
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = tokio::task::spawn_blocking(move || {
-            let _g = span.entered();
-            this.compact_level0_phase1(layer_removal_cs_inner, target_file_size, &ctx_inner)
-        })
-        .await
-        .context("compact_level0_phase1 spawn_blocking")
-        .map_err(CompactionError::Other)
-        .and_then(|res| res)?;
+        } = self
+            .compact_level0_phase1(layer_removal_cs.clone(), target_file_size, ctx)
+            .await?;
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
@@ -3708,7 +3776,7 @@ impl Timeline {
                 .context("wait for layer upload ops to complete")?;
         }
 
-        let mut layers = self.layers.write().unwrap();
+        let mut layers = self.layers.write().await;
         let mut updates = layers.batch_update();
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
         for l in new_layers {
@@ -3870,9 +3938,7 @@ impl Timeline {
 
         let layer_removal_cs = Arc::new(self.layer_removal_cs.clone().lock_owned().await);
         // Is the timeline being deleted?
-        let state = *self.state.borrow();
-        if state == TimelineState::Stopping {
-            // there's a global allowed_error for this
+        if self.is_stopping() {
             anyhow::bail!("timeline is Stopping");
         }
 
@@ -3974,7 +4040,7 @@ impl Timeline {
         // 4. newer on-disk image layers cover the layer's whole key range
         //
         // TODO holding a write lock is too agressive and avoidable
-        let mut layers = self.layers.write().unwrap();
+        let mut layers = self.layers.write().await;
         'outer: for l in layers.iter_historic_layers() {
             result.layers_total += 1;
 
@@ -4274,7 +4340,7 @@ impl Timeline {
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let mut layers = self_clone.layers.write().unwrap();
+                    let mut layers = self_clone.layers.write().await;
                     let mut updates = layers.batch_update();
                     let new_layer = remote_layer.create_downloaded_layer(&updates, self_clone.conf, *size);
                     {
@@ -4432,7 +4498,7 @@ impl Timeline {
     ) {
         let mut downloads = Vec::new();
         {
-            let layers = self.layers.read().unwrap();
+            let layers = self.layers.read().await;
             layers
                 .iter_historic_layers()
                 .filter_map(|l| l.downcast_remote_layer())
@@ -4534,8 +4600,8 @@ impl LocalLayerInfoForDiskUsageEviction {
 }
 
 impl Timeline {
-    pub(crate) fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
-        let layers = self.layers.read().unwrap();
+    pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
+        let layers = self.layers.read().await;
 
         let mut max_layer_size: Option<u64> = None;
         let mut resident_layers = Vec::new();
@@ -4607,7 +4673,7 @@ fn layer_traversal_error(msg: String, path: Vec<TraversalPathItem>) -> PageRecon
 // but will cause large code changes.
 pub struct TimelineWriter<'a> {
     tl: &'a Timeline,
-    _write_guard: MutexGuard<'a, ()>,
+    _write_guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl Deref for TimelineWriter<'_> {
@@ -4623,12 +4689,12 @@ impl<'a> TimelineWriter<'a> {
     ///
     /// This will implicitly extend the relation, if the page is beyond the
     /// current end-of-file.
-    pub fn put(&self, key: Key, lsn: Lsn, value: &Value) -> anyhow::Result<()> {
-        self.tl.put_value(key, lsn, value)
+    pub async fn put(&self, key: Key, lsn: Lsn, value: &Value) -> anyhow::Result<()> {
+        self.tl.put_value(key, lsn, value).await
     }
 
-    pub fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
-        self.tl.put_tombstone(key_range, lsn)
+    pub async fn delete(&self, key_range: Range<Key>, lsn: Lsn) -> anyhow::Result<()> {
+        self.tl.put_tombstone(key_range, lsn).await
     }
 
     /// Track the end of the latest digested WAL record.
@@ -4646,6 +4712,14 @@ impl<'a> TimelineWriter<'a> {
     pub fn update_current_logical_size(&self, delta: i64) {
         self.tl.update_current_logical_size(delta)
     }
+}
+
+// We need TimelineWriter to be send in upcoming conversion of
+// Timeline::layers to tokio::sync::RwLock.
+#[test]
+fn is_send() {
+    fn _assert_send<T: Send>() {}
+    _assert_send::<TimelineWriter<'_>>();
 }
 
 /// Add a suffix to a layer file's name: .{num}.old

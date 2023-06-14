@@ -76,6 +76,12 @@ pub(crate) struct UploadQueueInitialized {
     pub(crate) queued_operations: VecDeque<UploadOp>,
 }
 
+impl UploadQueueInitialized {
+    pub(super) fn no_pending_work(&self) -> bool {
+        self.inprogress_tasks.is_empty() && self.queued_operations.is_empty()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum SetDeletedFlagProgress {
     NotRunning,
@@ -84,9 +90,7 @@ pub(super) enum SetDeletedFlagProgress {
 }
 
 pub(super) struct UploadQueueStopped {
-    pub(super) latest_files: HashMap<LayerFileName, LayerFileMetadata>,
-    pub(super) last_uploaded_consistent_lsn: Lsn,
-    pub(super) latest_metadata: TimelineMetadata,
+    pub(super) upload_queue_for_deletion: UploadQueueInitialized,
     pub(super) deleted_at: SetDeletedFlagProgress,
 }
 
@@ -187,6 +191,15 @@ impl UploadQueue {
             UploadQueue::Initialized(x) => Ok(x),
         }
     }
+
+    pub(crate) fn stopped_mut(&mut self) -> anyhow::Result<&mut UploadQueueStopped> {
+        match self {
+            UploadQueue::Initialized(_) | UploadQueue::Uninitialized => {
+                anyhow::bail!("queue is in state {}", self.as_str())
+            }
+            UploadQueue::Stopped(stopped) => Ok(stopped),
+        }
+    }
 }
 
 /// An in-progress upload or delete task.
@@ -200,6 +213,13 @@ pub(crate) struct UploadTask {
 }
 
 #[derive(Debug)]
+pub(crate) struct Delete {
+    pub(crate) file_kind: RemoteOpFileKind,
+    pub(crate) layer_file_name: LayerFileName,
+    pub(crate) scheduled_from_timeline_delete: bool,
+}
+
+#[derive(Debug)]
 pub(crate) enum UploadOp {
     /// Upload a layer file
     UploadLayer(LayerFileName, LayerFileMetadata),
@@ -207,8 +227,8 @@ pub(crate) enum UploadOp {
     /// Upload the metadata file
     UploadMetadata(IndexPart, Lsn),
 
-    /// Delete a file.
-    Delete(RemoteOpFileKind, LayerFileName),
+    /// Delete a layer file
+    Delete(Delete),
 
     /// Barrier. When the barrier operation is reached,
     Barrier(tokio::sync::watch::Sender<()>),
@@ -226,7 +246,12 @@ impl std::fmt::Display for UploadOp {
                 )
             }
             UploadOp::UploadMetadata(_, lsn) => write!(f, "UploadMetadata(lsn: {})", lsn),
-            UploadOp::Delete(_, path) => write!(f, "Delete({})", path.file_name()),
+            UploadOp::Delete(delete) => write!(
+                f,
+                "Delete(path: {}, scheduled_from_timeline_delete: {})",
+                delete.layer_file_name.file_name(),
+                delete.scheduled_from_timeline_delete
+            ),
             UploadOp::Barrier(_) => write!(f, "Barrier"),
         }
     }

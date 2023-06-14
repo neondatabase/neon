@@ -27,6 +27,12 @@ pub struct ComputeSpec {
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
 
+    /// An optinal hint that can be passed to speed up startup time if we know
+    /// that no pg catalog mutations (like role creation, database creation,
+    /// extension creation) need to be done on the actual database to start.
+    #[serde(default)] // Default false
+    pub skip_pg_catalog_updates: bool,
+
     // Information needed to connect to the storage layer.
     //
     // `tenant_id`, `timeline_id` and `pageserver_connstring` are always needed.
@@ -141,5 +147,15 @@ mod tests {
     fn parse_spec_file() {
         let file = File::open("tests/cluster_spec.json").unwrap();
         let _spec: ComputeSpec = serde_json::from_reader(file).unwrap();
+    }
+
+    #[test]
+    fn parse_unknown_fields() {
+        // Forward compatibility test
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let mut json: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let ob = json.as_object_mut().unwrap();
+        ob.insert("unknown_field_123123123".into(), "hello".into());
+        let _spec: ComputeSpec = serde_json::from_value(json).unwrap();
     }
 }

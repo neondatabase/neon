@@ -699,6 +699,20 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn init_empty_test_timeline(&mut self) -> anyhow::Result<()> {
+        self.init_empty()?;
+        self.put_control_file(bytes::Bytes::from_static(
+            b"control_file contents do not matter",
+        ))
+        .context("put_control_file")?;
+        self.put_checkpoint(bytes::Bytes::from_static(
+            b"checkpoint_file contents do not matter",
+        ))
+        .context("put_checkpoint_file")?;
+        Ok(())
+    }
+
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// NOTE: this will *not* implicitly extend the relation, if the page is beyond the
@@ -1108,7 +1122,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self) -> anyhow::Result<()> {
+    pub async fn flush(&mut self) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1116,19 +1130,20 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let writer = self.tline.writer();
+        let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let mut result: anyhow::Result<()> = Ok(());
-        self.pending_updates.retain(|&key, value| {
-            if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, self.lsn, value);
-                false
+        let mut retained_pending_updates = HashMap::new();
+        for (key, value) in self.pending_updates.drain() {
+            if is_rel_block_key(key) || is_slru_block_key(key) {
+                // This bails out on first error without modifying pending_updates.
+                // That's Ok, cf this function's doc comment.
+                writer.put(key, self.lsn, &value).await?;
             } else {
-                true
+                retained_pending_updates.insert(key, value);
             }
-        });
-        result?;
+        }
+        self.pending_updates.extend(retained_pending_updates);
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
@@ -1143,17 +1158,17 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> anyhow::Result<()> {
-        let writer = self.tline.writer();
+    pub async fn commit(&mut self) -> anyhow::Result<()> {
+        let writer = self.tline.writer().await;
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         for (key, value) in self.pending_updates.drain() {
-            writer.put(key, lsn, &value)?;
+            writer.put(key, lsn, &value).await?;
         }
         for key_range in self.pending_deletions.drain(..) {
-            writer.delete(key_range, lsn)?;
+            writer.delete(key_range, lsn).await?;
         }
 
         writer.finish_write(lsn);
@@ -1591,22 +1606,6 @@ fn is_slru_block_key(key: Key) -> bool {
     key.field1 == 0x01                // SLRU-related
         && key.field3 == 0x00000001   // but not SlruDir
         && key.field6 != 0xffffffff // and not SlruSegSize
-}
-
-#[cfg(test)]
-pub async fn create_test_timeline(
-    tenant: &crate::tenant::Tenant,
-    timeline_id: utils::id::TimelineId,
-    pg_version: u32,
-    ctx: &RequestContext,
-) -> anyhow::Result<std::sync::Arc<Timeline>> {
-    let tline = tenant
-        .create_test_timeline(timeline_id, Lsn(8), pg_version, ctx)
-        .await?;
-    let mut m = tline.begin_modification(Lsn(8));
-    m.init_empty()?;
-    m.commit()?;
-    Ok(tline)
 }
 
 #[allow(clippy::bool_assert_comparison)]
