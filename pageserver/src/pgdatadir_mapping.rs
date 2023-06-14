@@ -48,8 +48,6 @@ pub enum RelationError {
     #[error("Relation Already Exists")]
     AlreadyExists,
     #[error("invalid relnode")] 
-    // TODO: there are quite a few locations where this is used as text; change
-    // them all to be this custom error type
     InvalidRelnode,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
