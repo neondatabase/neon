@@ -148,18 +148,18 @@ async fn import_rel(
     // because there is no guarantee about the order in which we are processing segments.
     // ignore "relation already exists" error
     //
-    // FIXME: Keep track of which relations we've already created
+    // FIXME: Keep track of which relations we've already created?
     // https://github.com/neondatabase/neon/issues/3309
     if let Err(err) = modification
         .put_rel_creation(rel, nblocks as u32, ctx)
         .await
     {
-        match err.downcast_ref::<RelationError>() {
+        match err {
             Some(RelationError::AlreadyExists) => {
-                debug!("relation {} already exists. we must be extending it", rel);
+                debug!("Relation {} already exists. We must be extending it.", rel);
             }
             _ => {
-                return Err(err);
+                Err(err)
             }
         }
     }

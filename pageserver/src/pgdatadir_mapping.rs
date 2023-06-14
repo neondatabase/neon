@@ -885,9 +885,9 @@ impl<'a> DatadirModification<'a> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), RelationError> {
         if rel.relnode == 0 {
-            return Err(RelationError::InvalidRelnode.into());
+            Err(RelationError::InvalidRelnode)
         }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
@@ -908,7 +908,7 @@ impl<'a> DatadirModification<'a> {
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            return Err(RelationError::AlreadyExists.into());
+            Err(RelationError::AlreadyExists)
         }
         self.put(
             rel_dir_key,
