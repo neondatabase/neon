@@ -100,6 +100,8 @@ pub struct TenantConf {
     #[serde(with = "humantime_serde")]
     pub evictions_low_residence_duration_metric_threshold: Duration,
     pub gc_feedback: bool,
+    // Region for master S3 bucket
+    pub master_region: Option<String>,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -180,6 +182,10 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub gc_feedback: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub master_region: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +254,7 @@ impl TenantConfOpt {
                 .evictions_low_residence_duration_metric_threshold
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
             gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
+            master_region: self.master_region,
         }
     }
 }
@@ -285,6 +292,7 @@ impl Default for TenantConf {
             )
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
             gc_feedback: false,
+            master_region: None,
         }
     }
 }
@@ -380,6 +388,7 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
             );
         }
         tenant_conf.gc_feedback = request_data.gc_feedback;
+        tenant_conf.master_region = request_data.master_region;
 
         Ok(tenant_conf)
     }

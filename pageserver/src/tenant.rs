@@ -153,6 +153,9 @@ pub struct Tenant {
     // provides access to timeline data sitting in the remote storage
     remote_storage: Option<GenericRemoteStorage>,
 
+    // for cross-region replication: provide access to master S3 bucket
+    master_storage: Option<GenericRemoteStorage>,
+
     /// Cached logical sizes updated updated on each [`Tenant::gather_size_inputs`].
     cached_logical_sizes: tokio::sync::Mutex<HashMap<(TimelineId, Lsn), u64>>,
     cached_synthetic_tenant_size: Arc<AtomicU64>,
@@ -1322,6 +1325,184 @@ impl Tenant {
         Ok(tl)
     }
 
+    pub async fn create_timeline_replica(
+        &self,
+        timeline_id: TimelineId,
+        master_borker_endpoint: String,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let broker_client =
+            storage_broker::connect(master_broker_endpoint, conf.broker_keepalive_interval).await?;
+        let master_storage = self
+            .master_storage
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("remote storage not specigied"))?;
+        let master_client = RemoteTimelineClient::new(
+            master_storage.clone(),
+            self.conf,
+            self.tenant_id,
+            timeline_id,
+        );
+        let remote_storage = self
+            .master_storage
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("remote storage not specigied"))?;
+        let remote_client = RemoteTimelineClient::new(
+            remote_storage.clone(),
+            self.conf,
+            self.tenant_id,
+            timeline_id,
+        );
+
+        let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
+            master_storage,
+            self.conf,
+            self.tenant_id,
+        )
+        .await?;
+
+        // Download & parse index parts
+        let mut part_downloads = JoinSet::new();
+        let mut remote_index_and_client = HashMap::new();
+
+        for timeline_id in remote_timeline_ids {
+            let client = RemoteTimelineClient::new(
+                master_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                timeline_id,
+            );
+            part_downloads.spawn(
+                async move {
+                    debug!("starting index part download");
+
+                    let index_part = client
+                        .download_index_file()
+                        .await
+                        .context("download index file")?;
+
+                    debug!("finished index part download");
+
+                    Result::<_, anyhow::Error>::Ok((timeline_id, client, index_part))
+                }
+                .map(move |res| {
+                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
+                })
+                .instrument(info_span!("download_index_part", timeline=%timeline_id)),
+            );
+        }
+        // Wait for all the download tasks to complete & collect results.
+        let mut remote_index_and_client = HashMap::new();
+        while let Some(result) = part_downloads.join_next().await {
+            // NB: we already added timeline_id as context to the error
+            let result: Result<_, anyhow::Error> = result.context("joinset task join")?;
+            let (timeline_id, client, index_part) = result?;
+            debug!("successfully downloaded index part for timeline {timeline_id}");
+            match index_part {
+                MaybeDeletedIndexPart::IndexPart(index_part) => {
+                    remote_index_and_client.insert(timeline_id, (index_part, client));
+                }
+                MaybeDeletedIndexPart::Deleted(_) => {
+                    info!("timeline {} is deleted, skipping", timeline_id);
+                    continue;
+                }
+            }
+        }
+
+        let (index_part, client) = remote_index_and_client
+            .get(timeline_id)
+            .expect("timeline found at master")?;
+        let mut timeline_metadata = index_part.parse_metadata().context("parse_metadata")?;
+        let layers: Vec<(LayerFileName, IndexLayerMetadata)> = index_part
+            .layer_metadata
+            .iter()
+            .filter(|(fname, meta)| range_eq(&fname.get_key_range(), &(Key::MIN..Key::MAX)))
+            .sort_by(|(fname, meta)| fname.get_lsn_range().start)
+            .collect();
+        let replica_lsn = layers
+            .last()
+            .map_or(Lsn(0), |(fname, meta)| fname.get_lsn_range().last);
+        let mut layer_metadata: HashMap<LayerFileName, LayerFileMetadata> = layers.iter().collect();
+        let old_metadata = timeline_metadata.clone();
+        while let Some(ancestor_id) = timeline_metadata.ancestor_timeline() {
+            let (index_part, client) = remote_index_and_client
+                .get(ancestor_id)
+                .expect("timeline found at master")?;
+            for (fname, meta) in &index_part.layer_metadata {
+                if fname.get_lasn_range().start < replica_lsn {
+                    layer_metadata.insert(fname, meta);
+                }
+            }
+            timeline_metadata = index_part.parse_metadata().context("parse_metadata")?;
+        }
+        let new_metadata = TimelineMetadata::new(
+            old_metadata.disk_consistent_lsn,
+            old_metadata.prev_record_lsn,
+            None,
+            Lsn::INVALID,
+            old_metadata.latest_gc_cutoff_lsn,
+            old_metadata.initdb_lsn,
+            old_metadata.pg_version,
+            replica_lsn,
+        );
+
+        // Initialize data directories for new timeline
+        tokio::fs::create_dir_all(self.conf.timeline_path(&timeline_id, &self.tenant_id))
+            .await
+            .context("Failed to create new timeline directory")?;
+
+        // Save timeline metadata
+        save_metadata(self.conf, timeline_id, self.tenant_id, new_metadata, true)
+            .context("Failed to create timeline metadata")?;
+
+        let timeline = Timeline::new(
+            self.conf,
+            Arc::clone(&self.tenant_conf),
+            new_metadata,
+            None, // we do not need to restore branches hierarhy at replica
+            timeline_id,
+            self.tenant_id,
+            Arc::clone(&self.walredo_mgr),
+            remote_client,
+            master_client,
+            Some(replica_lsn),
+            old_metadata.pg_version,
+            None, // no need to calcuate logical size at replica
+            None,
+        );
+        // construct new index_part.json with combined list of layers
+        let index_part = IndexPart::new(
+            layer_metadata,
+            old_metadata.disk_consistent_lsn,
+            new_metadata.to_bytes()?,
+        );
+        // Upload this index_part.json to S3 bucket
+        remote_client.upload_index_part(
+            self.conf,
+            &self.remote_storage,
+            self.telnant_id,
+            timeline_id,
+            &index_part,
+        )?;
+
+        // Start background works for this timelinw
+        timeline.activate(broker_client, true);
+
+        // Wait for uploads to complete, so that when we return Ok, the timeline
+        // is known to be durable on remote storage. Just like we do at the end of
+        // this function, after we have created the timeline ourselves.
+        //
+        // We only really care that the initial version of `index_part.json` has
+        // been uploaded. That's enough to remember that the timeline
+        // exists. However, there is no function to wait specifically for that so
+        // we just wait for all in-progress uploads to finish.
+        remote_client
+            .wait_completion()
+            .await
+            .context("wait for timeline uploads to complete")?;
+        Ok(())
+    }
+
     /// Create a new timeline.
     ///
     /// Returns the new timeline ID and reference to its Timeline object.
@@ -2266,6 +2447,16 @@ impl Tenant {
         let initial_logical_size_can_start = init_order.map(|x| &x.initial_logical_size_can_start);
         let initial_logical_size_attempt = init_order.map(|x| &x.initial_logical_size_attempt);
 
+        let master_client = if let Some(master_storage) = &self.master_storage {
+            Some(RemoteTimelineClient::new(
+                master_storage.clone(),
+                self.conf,
+                self.tenant_id,
+                new_timeline_id,
+            ))
+        } else {
+            None
+        };
         let pg_version = new_metadata.pg_version();
         Ok(Timeline::new(
             self.conf,
@@ -2276,8 +2467,8 @@ impl Tenant {
             self.tenant_id,
             Arc::clone(&self.walredo_mgr),
             remote_client,
-            None,
-            None,
+            master_client,
+            new_metadata.replica_lsn,
             pg_version,
             initial_logical_size_can_start.cloned(),
             initial_logical_size_attempt.cloned(),
@@ -2293,6 +2484,17 @@ impl Tenant {
         remote_storage: Option<GenericRemoteStorage>,
     ) -> Tenant {
         let (state, mut rx) = watch::channel(state);
+
+        let master_storage = if let Some(remote_storage_config) = conf.remote_storage_config {
+            if let Some(region) = &tenant_conf.master_region {
+                let master_storage_config = remote_storage_config.in_region(region.clone());
+                Some(GenericRemoteStorage::from_config(master_storage_config)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         tokio::spawn(async move {
             let mut current_state: &'static str = From::from(&*rx.borrow_and_update());
@@ -2332,6 +2534,7 @@ impl Tenant {
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
+            master_storage,
             state,
             cached_logical_sizes: tokio::sync::Mutex::new(HashMap::new()),
             cached_synthetic_tenant_size: Arc::new(AtomicU64::new(0)),

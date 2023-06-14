@@ -341,6 +341,16 @@ impl Debug for S3Config {
 }
 
 impl RemoteStorageConfig {
+    pub fn in_region(&self, region: String) -> anyhow::Result<RemoteStorageConfig> {
+        if let AwsS3(config) = &self.storage {
+            let mut storage = config.clone();
+            storage.region = region;
+            Ok(RemoteStorageConfig { storage, ..self })
+        } else {
+            bail!("Only AWS3 storage can be used in other region")
+        }
+    }
+
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
         let local_path = toml.get("local_path");
         let bucket_name = toml.get("bucket_name");

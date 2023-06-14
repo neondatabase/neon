@@ -215,6 +215,18 @@ impl LayerFileName {
             Self::Delta(fname) => fname.to_string(),
         }
     }
+    pub fn lsn_range(&self) -> Range<Lsn> {
+        match self {
+            Self::Image(fname) => fname.lsn..fname.lsn + 1,
+            Self::Delta(fname) => fname.lsn_range,
+        }
+    }
+    pub fn key_range(&self) -> Range<Key> {
+        match self {
+            Self::Image(fname) => fname.key_range,
+            Self::Delta(fname) => fname.key_range,
+        }
+    }
 }
 
 impl From<ImageFileName> for LayerFileName {
