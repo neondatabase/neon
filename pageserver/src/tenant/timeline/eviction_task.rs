@@ -34,6 +34,8 @@ use crate::{
     },
 };
 
+use utils::completion;
+
 use super::Timeline;
 
 #[derive(Default)]
@@ -47,8 +49,12 @@ pub struct EvictionTaskTenantState {
 }
 
 impl Timeline {
-    pub(super) fn launch_eviction_task(self: &Arc<Self>) {
+    pub(super) fn launch_eviction_task(
+        self: &Arc<Self>,
+        background_tasks_can_start: Option<&completion::Barrier>,
+    ) {
         let self_clone = Arc::clone(self);
+        let background_tasks_can_start = background_tasks_can_start.cloned();
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
@@ -57,7 +63,13 @@ impl Timeline {
             &format!("layer eviction for {}/{}", self.tenant_id, self.timeline_id),
             false,
             async move {
-                self_clone.eviction_task(task_mgr::shutdown_token()).await;
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); }
+                    _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
+                };
+
+                self_clone.eviction_task(cancel).await;
                 info!("eviction task finishing");
                 Ok(())
             },
@@ -185,7 +197,7 @@ impl Timeline {
         // We don't want to hold the layer map lock during eviction.
         // So, we just need to deal with this.
         let candidates: Vec<Arc<dyn PersistentLayer>> = {
-            let layers = self.layers.read().unwrap();
+            let layers = self.layers.read().await;
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
                 if hist_layer.is_remote_layer() {

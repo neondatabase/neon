@@ -1,3 +1,9 @@
+//! Code to manage pageservers
+//!
+//! In the local test environment, the pageserver stores its data directly in
+//!
+//!   .neon/
+//!
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
@@ -369,7 +375,16 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
+            gc_feedback: settings
+                .remove("gc_feedback")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_feedback' as bool")?,
         };
+
+        // If tenant ID was not specified, generate one
+        let new_tenant_id = new_tenant_id.unwrap_or(TenantId::generate());
+
         let request = models::TenantCreateRequest {
             new_tenant_id,
             config,
@@ -459,6 +474,11 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
+                gc_feedback: settings
+                    .remove("gc_feedback")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'gc_feedback' as bool")?,
             }
         };
 
@@ -495,6 +515,9 @@ impl PageServerNode {
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
     ) -> anyhow::Result<TimelineInfo> {
+        // If timeline ID was not specified, generate one
+        let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
+
         self.http_request(
             Method::POST,
             format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),

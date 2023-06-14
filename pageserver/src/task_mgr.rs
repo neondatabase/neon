@@ -257,6 +257,9 @@ pub enum TaskKind {
     // task that handles attaching a tenant
     Attach,
 
+    // Used mostly for background deletion from s3
+    TimelineDeletionWorker,
+
     // task that handhes metrics collection
     MetricsCollection,
 
@@ -476,18 +479,35 @@ pub async fn shutdown_tasks(
                 && (timeline_id.is_none() || task_mut.timeline_id == timeline_id)
             {
                 task.cancel.cancel();
-                victim_tasks.push(Arc::clone(task));
+                victim_tasks.push((
+                    Arc::clone(task),
+                    task.kind,
+                    task_mut.tenant_id,
+                    task_mut.timeline_id,
+                ));
             }
         }
     }
 
-    for task in victim_tasks {
+    let log_all = kind.is_none() && tenant_id.is_none() && timeline_id.is_none();
+
+    for (task, task_kind, tenant_id, timeline_id) in victim_tasks {
         let join_handle = {
             let mut task_mut = task.mutable.lock().unwrap();
             task_mut.join_handle.take()
         };
         if let Some(mut join_handle) = join_handle {
+            if log_all {
+                if tenant_id.is_none() {
+                    // there are quite few of these
+                    info!(name = task.name, kind = ?task_kind, "stopping global task");
+                } else {
+                    // warn to catch these in tests; there shouldn't be any
+                    warn!(name = task.name, tenant_id = ?tenant_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
+                }
+            }
             let completed = tokio::select! {
+                biased;
                 _ = &mut join_handle => { true },
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
                     // allow some time to elapse before logging to cut down the number of log

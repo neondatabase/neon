@@ -215,7 +215,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
         "412":
-          description: Tenant is missing
+          description: Tenant is missing, or timeline has children
           content:
             application/json:
               schema:
@@ -386,6 +386,7 @@ paths:
         "202":
           description: Tenant attaching scheduled
         "400":
+          description: Bad Request
           content:
             application/json:
               schema:
@@ -678,6 +679,8 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+                - new_timeline_id
               properties:
                 new_timeline_id:
                   type: string
@@ -926,16 +929,34 @@ components:
               writing to the tenant's S3 state, so, DO NOT ATTACH the
               tenant to any other pageserver, or we risk split-brain.
             - `attached` means that the attach operation has completed,
-              maybe successfully, maybe not. Perform a health check at
-              the Postgres level to determine healthiness of the tenant.
+              successfully
+            - `failed` means that attach has failed. For reason check corresponding `reason` failed.
+              `failed` is the terminal state, retrying attach call wont resolve the issue.
+              For example this can be caused by s3 being unreachable. The retry may be implemented
+              with call to detach, though it would be better to not automate it and inspec failed state
+              manually before proceeding with a retry.
 
             See the tenant `/attach` endpoint for more information.
-          type: string
-          enum: [ "maybe", "attached" ]
+          type: object
+          required:
+            - slug
+            - data
+          properties:
+            slug:
+              type: string
+              enum: [ "maybe", "attached", "failed" ]
+            data:
+              type: object
+              properties:
+                reason:
+                  type: string
+
     TenantCreateRequest:
       allOf:
         - $ref: '#/components/schemas/TenantConfig'
         - type: object
+          required:
+            - new_tenant_id
           properties:
             new_tenant_id:
               type: string
