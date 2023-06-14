@@ -188,7 +188,7 @@ impl Layer for ImageLayer {
         lsn_range: Range<Lsn>,
         mut reconstruct_state: ValueReconstructState,
         ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+    ) -> anyhow::Result<(ValueReconstructState, ValueReconstructResult)> {
         assert!(self.desc.key_range.contains(&key));
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);

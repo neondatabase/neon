@@ -197,7 +197,7 @@ impl Layer for InMemoryLayer {
         lsn_range: Range<Lsn>,
         mut reconstruct_state: ValueReconstructState,
         _ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+    ) -> anyhow::Result<(ValueReconstructState, ValueReconstructResult)> {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
