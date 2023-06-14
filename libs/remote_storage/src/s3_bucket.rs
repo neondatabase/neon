@@ -337,9 +337,7 @@ impl RemoteStorage for S3Bucket {
         &self,
         folder: Option<&RemotePath>
     ) -> anyhow::Result<Vec<RemotePath>>{
-
-        // THIS IS A somewhat messed up prototype
-
+        // THIS IS A PROTOTYPE; WIP
         let folder_name = folder.map(|x| 
             String::from(
                 x.object_name().expect("something went wrong computing folder name")
@@ -357,11 +355,16 @@ impl RemoteStorage for S3Bucket {
 
         let mut all_files = vec![];
         for object in resp.contents().unwrap() {
-            let x = object.key().unwrap();
-            let y = RemotePath::new(Path::new(x)).unwrap();
-            all_files.push(y);
+            let mut object_path = Path::new(object.key().unwrap());
+            if let Some(prefix_in_bucket) = &self.prefix_in_bucket {
+                object_path = object_path.strip_prefix(prefix_in_bucket)?;
+                if object_path == Path::new("") {
+                    continue;
+                }
+            }
+            let remote_path = RemotePath::new(object_path)?;
+            all_files.push(remote_path);
         }
-
         Ok(all_files)
     }
 
