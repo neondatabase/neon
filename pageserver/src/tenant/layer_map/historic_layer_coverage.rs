@@ -72,6 +72,7 @@ impl From<&PersistentLayerDesc> for LayerKey {
 /// Allows answering layer map queries very efficiently,
 /// but doesn't allow retroactive insertion, which is
 /// sometimes necessary. See BufferedHistoricLayerCoverage.
+#[derive(Clone)]
 pub struct HistoricLayerCoverage<Value> {
     /// The latest state
     head: LayerCoverageTuple<Value>,
@@ -425,6 +426,7 @@ fn test_persistent_overlapping() {
 ///
 /// See this for more on persistent and retroactive techniques:
 /// https://www.youtube.com/watch?v=WqCWghETNDc&t=581s
+#[derive(Clone)]
 pub struct BufferedHistoricLayerCoverage<Value> {
     /// A persistent layer map that we rebuild when we need to retroactively update
     historic_coverage: HistoricLayerCoverage<Value>,

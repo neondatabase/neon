@@ -12,6 +12,7 @@ testing = ["fail/failpoints"]
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 byteorder.workspace = true

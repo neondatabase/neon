@@ -66,7 +66,7 @@ use super::storage_layer::PersistentLayerDesc;
 ///
 /// LayerMap tracks what layers exist on a timeline.
 ///
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LayerMap {
     //
     // 'open_layer' holds the current InMemoryLayer that is accepting new
