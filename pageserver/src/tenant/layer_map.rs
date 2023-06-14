@@ -686,10 +686,7 @@ mod tests {
 
     mod l0_delta_layers_updated {
 
-        use crate::tenant::{
-            storage_layer::{PersistentLayer, PersistentLayerDesc},
-            timeline::LayerMapping,
-        };
+        use crate::tenant::storage_layer::{PersistentLayer, PersistentLayerDesc};
 
         use super::*;
 
@@ -722,31 +719,6 @@ mod tests {
              )
         }
 
-        #[test]
-        fn replacing_missing_l0_is_notfound() {
-            // original impl had an oversight, and L0 was an anyhow::Error. anyhow::Error should
-            // however only happen for precondition failures.
-
-            let layer = "000000000000000000000000000000000000-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF__0000000053423C21-0000000053424D69";
-            let layer = LayerFileName::from_str(layer).unwrap();
-            let layer = LayerDescriptor::from(layer);
-
-            // same skeletan construction; see scenario below
-            let not_found = Arc::new(layer.clone());
-            let new_version = Arc::new(layer);
-
-            // after the immutable storage state refactor, the replace operation
-            // will not use layer map any more. We keep it here for consistency in test cases
-            // and can remove it in the future.
-            let _map = LayerMap::default();
-
-            let mut mapping = LayerMapping::new();
-
-            mapping
-                .replace_and_verify(not_found, new_version)
-                .unwrap_err();
-        }
-
         fn l0_delta_layers_updated_scenario(layer_name: &str, expected_l0: bool) {
             let name = LayerFileName::from_str(layer_name).unwrap();
             let skeleton = LayerDescriptor::from(name);
@@ -755,7 +727,6 @@ mod tests {
             let downloaded = Arc::new(skeleton);
 
             let mut map = LayerMap::default();
-            let mut mapping = LayerMapping::new();
 
             // two disjoint Arcs in different lifecycle phases. even if it seems they must be the
             // same layer, we use LayerMap::compare_arced_layers as the identity of layers.
@@ -765,17 +736,8 @@ mod tests {
 
             map.batch_update()
                 .insert_historic(remote.layer_desc().clone());
-            mapping.insert(remote.clone());
             assert_eq!(
                 count_layer_in(&map, remote.layer_desc()),
-                expected_in_counts
-            );
-
-            mapping
-                .replace_and_verify(remote, downloaded.clone())
-                .expect("name derived attributes are the same");
-            assert_eq!(
-                count_layer_in(&map, downloaded.layer_desc()),
                 expected_in_counts
             );
 

@@ -85,6 +85,7 @@ pub mod blob_io;
 pub mod block_io;
 pub mod disk_btree;
 pub(crate) mod ephemeral_file;
+pub mod layer_cache;
 pub mod layer_map;
 pub mod manifest;
 
@@ -1559,7 +1560,7 @@ impl Tenant {
             // No timeout here, GC & Compaction should be responsive to the
             // `TimelineState::Stopping` change.
             info!("waiting for layer_removal_cs.lock()");
-            let layer_removal_guard = timeline.layer_removal_cs.lock().await;
+            let layer_removal_guard = timeline.lcache.delete_guard().await;
             info!("got layer_removal_cs.lock(), deleting layer files");
 
             // NB: storage_sync upload tasks that reference these layers have been cancelled
