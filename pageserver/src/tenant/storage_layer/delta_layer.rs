@@ -47,7 +47,6 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-
 use tracing::*;
 
 use utils::{
@@ -307,6 +306,7 @@ impl Layer for DeltaLayer {
         let mut need_image = true;
 
         ensure!(self.desc.key_range.contains(&key));
+
         {
             // Open the file and lock the metadata in memory
             let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
@@ -366,7 +366,7 @@ impl Layer for DeltaLayer {
                             need_image = false;
                             break;
                         }
-                    } // release metadata lock and close the file
+                    }
                 }
             }
             // release metadata lock and close the file
