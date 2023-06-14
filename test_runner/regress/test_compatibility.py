@@ -477,7 +477,7 @@ def dump_differs(first: Path, second: Path, output: Path) -> bool:
                     r"--ignore-matching-lines=^\+\+\+",  # Ignore diff headers
                     "--ignore-matching-lines=^@@",  # Ignore diff blocks location
                     "--ignore-matching-lines=^ *$",  # Ignore lines with only spaces
-                    "--ignore-matching-lines=^ --.*", # Ignore the " --" lines for compatibility with PG14
+                    "--ignore-matching-lines=^ --.*",  # Ignore the " --" lines for compatibility with PG14
                     "--ignore-blank-lines",
                     str(output),
                     str(tmp.name),
