@@ -421,9 +421,9 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
 
 @pytest.mark.parametrize(
     "stuck_failpoint",
-    ["persist_index_part_with_deleted_flag_after_set_before_upload_pause", "in_progress_delete"],
+    ["persist_deleted_index_part", "in_progress_delete"],
 )
-def test_concurrent_timeline_delete_if_first_stuck_on(
+def test_concurrent_timeline_delete_stuck_on(
     neon_env_builder: NeonEnvBuilder, stuck_failpoint: str
 ):
     """
@@ -439,7 +439,7 @@ def test_concurrent_timeline_delete_if_first_stuck_on(
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name=f"test_concurrent_timeline_delete_if_first_stuck_on_{stuck_failpoint}",
+        test_name=f"concurrent_timeline_delete_stuck_on_{stuck_failpoint}",
     )
 
     env = neon_env_builder.init_start()

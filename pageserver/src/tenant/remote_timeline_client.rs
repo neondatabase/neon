@@ -758,12 +758,8 @@ impl RemoteTimelineClient {
                 let current = tracing::Span::current();
                 move || {
                     let _entered = current.entered();
-                    tracing::info!(
-                        "at failpoint persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-                    );
-                    fail::fail_point!(
-                        "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-                    );
+                    tracing::info!("at failpoint persist_deleted_index_part");
+                    fail::fail_point!("persist_deleted_index_part");
                 }
             })
             .await
