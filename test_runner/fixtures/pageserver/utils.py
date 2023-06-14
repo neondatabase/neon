@@ -193,19 +193,21 @@ def wait_for_upload_queue_empty(
         time.sleep(0.2)
 
 
-def assert_timeline_detail_404(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
+def timeline_delete_wait_completed(
+    pageserver_http: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
-    """Asserts that timeline_detail returns 404, or dumps the detail."""
-    try:
-        data = pageserver_http.timeline_detail(tenant_id, timeline_id)
-        log.error(f"detail {data}")
-    except PageserverApiException as e:
-        log.error(e)
-        if e.status_code == 404:
-            return
-        else:
-            raise
-    raise Exception("detail succeeded (it should return 404)")
+    pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
+    last_exc = None
+    for _ in range(2):
+        time.sleep(0.250)
+        try:
+            data = pageserver_http.timeline_detail(tenant_id, timeline_id)
+            log.error(f"detail {data}")
+        except PageserverApiException as e:
+            log.debug(e)
+            if e.status_code == 404:
+                return
+
+            last_exc = e
+
+    raise last_exc or RuntimeError(f"Timeline wasnt deleted in time, state: {data['state']}")

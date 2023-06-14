@@ -1625,12 +1625,9 @@ impl Tenant {
             Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
         });
 
-        let remote_client = match &timeline.remote_client {
-            Some(remote_client) => remote_client,
-            None => return Ok(()),
+        if let Some(remote_client) = &timeline.remote_client {
+            remote_client.delete_all().await.context("delete_all")?
         };
-
-        remote_client.delete_all().await?;
 
         // Have a failpoint that can use the `pause` failpoint action.
         // We don't want to block the executor thread, hence, spawn_blocking + await.

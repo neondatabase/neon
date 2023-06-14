@@ -17,7 +17,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
-    assert_timeline_detail_404,
+    timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
@@ -247,13 +247,7 @@ def test_timeline_resurrection_on_attach(
         pass
 
     # delete new timeline
-    ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=branch_timeline_id)
-
-    env.pageserver.allowed_errors.append(
-        f".*Timeline {tenant_id}/{branch_timeline_id} was not found.*"
-    )
-
-    wait_until(2, 0.5, lambda: assert_timeline_detail_404(ps_http, tenant_id, branch_timeline_id))
+    timeline_delete_wait_completed(ps_http, tenant_id=tenant_id, timeline_id=branch_timeline_id)
 
     ##### Stop the pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -357,12 +351,15 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     # Wait for tenant to finish loading.
     wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=1)
 
-    env.pageserver.allowed_errors.append(
-        f".*Timeline {env.initial_tenant}/{leaf_timeline_id} was not found.*"
-    )
-    wait_until(
-        2, 0.5, lambda: assert_timeline_detail_404(ps_http, env.initial_tenant, leaf_timeline_id)
-    )
+    try:
+        data = ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
+        log.debug(f"detail {data}")
+    except PageserverApiException as e:
+        log.debug(e)
+        if e.status_code != 404:
+            raise
+    else:
+        raise Exception("detail succeeded (it should return 404)")
 
     assert (
         not leaf_timeline_path.exists()
@@ -389,13 +386,8 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     assert env.initial_timeline is not None
 
     for timeline_id in (intermediate_timeline_id, env.initial_timeline):
-        ps_http.timeline_delete(env.initial_tenant, timeline_id)
-
-        env.pageserver.allowed_errors.append(
-            f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
-        )
-        wait_until(
-            2, 0.5, lambda: assert_timeline_detail_404(ps_http, env.initial_tenant, timeline_id)
+        timeline_delete_wait_completed(
+            ps_http, tenant_id=env.initial_tenant, timeline_id=timeline_id
         )
 
         assert_prefix_empty(
@@ -623,12 +615,7 @@ def test_timeline_delete_works_for_remote_smoke(
     for timeline_id in reversed(timeline_ids):
         # note that we need to finish previous deletion before scheduling next one
         # otherwise we can get an "HasChildren" error if deletion is not fast enough (real_s3)
-        ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
-
-        env.pageserver.allowed_errors.append(
-            f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
-        )
-        wait_until(2, 0.5, lambda: assert_timeline_detail_404(ps_http, tenant_id, timeline_id))
+        timeline_delete_wait_completed(ps_http, tenant_id=tenant_id, timeline_id=timeline_id)
 
         assert_prefix_empty(
             neon_env_builder,
