@@ -193,10 +193,9 @@ def wait_for_upload_queue_empty(
         time.sleep(0.2)
 
 
-def timeline_delete_wait_completed(
+def wait_timeline_detail_404(
     pageserver_http: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
-    pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
     last_exc = None
     for _ in range(2):
         time.sleep(0.250)
@@ -211,3 +210,10 @@ def timeline_delete_wait_completed(
             last_exc = e
 
     raise last_exc or RuntimeError(f"Timeline wasnt deleted in time, state: {data['state']}")
+
+
+def timeline_delete_wait_completed(
+    pageserver_http: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
+):
+    pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
+    wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id)

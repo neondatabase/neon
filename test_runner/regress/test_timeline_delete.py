@@ -20,6 +20,7 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_timeline_detail_404,
     wait_until_tenant_active,
     wait_until_timeline_state,
 )
@@ -165,13 +166,7 @@ def test_delete_timeline_post_rm_failure(
 
     # this should succeed
     # this also checks that delete can be retried even when timeline is in Broken state
-    ps_http.timeline_delete(env.initial_tenant, env.initial_timeline, timeout=2)
-    with pytest.raises(PageserverApiException) as e:
-        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
-
-    assert e.value.status_code == 404
-
-    env.pageserver.allowed_errors.append(f".*NotFound: Timeline.*{env.initial_timeline}.*")
+    timeline_delete_wait_completed(ps_http, env.initial_tenant, env.initial_timeline)
     env.pageserver.allowed_errors.append(
         f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*"
     )
@@ -497,8 +492,10 @@ def test_concurrent_timeline_delete_stuck_on(
 
 def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     """
-    If the client hangs up before we start the index part upload but after we mark it
+    If the client hangs up before we start the index part upload but after deletion is scheduled
+    we mark it
     deleted in local memory, a subsequent delete_timeline call should be able to do
+
     another delete timeline operation.
 
     This tests cancel safety up to the given failpoint.
@@ -514,10 +511,16 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     ps_http = env.pageserver.http_client()
 
-    failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+    failpoint_name = "persist_deleted_index_part"
     ps_http.configure_failpoints((failpoint_name, "pause"))
 
     with pytest.raises(requests.exceptions.Timeout):
+        ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
+
+    env.pageserver.allowed_errors.append(
+        f".*{child_timeline_id}.*timeline deletion is already in progress.*"
+    )
+    with pytest.raises(PageserverApiException, match="timeline deletion is already in progress"):
         ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
 
     # make sure the timeout was due to the failpoint
@@ -551,12 +554,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    notfound_message = f"Timeline {env.initial_tenant}/{child_timeline_id} was not found"
-    env.pageserver.allowed_errors.append(".*" + notfound_message)
-    with pytest.raises(PageserverApiException, match=notfound_message) as exc:
-        ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
-
-    assert exc.value.status_code == 404
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id)
 
 
 @pytest.mark.parametrize(
