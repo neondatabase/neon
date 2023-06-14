@@ -148,4 +148,14 @@ mod tests {
         let file = File::open("tests/cluster_spec.json").unwrap();
         let _spec: ComputeSpec = serde_json::from_reader(file).unwrap();
     }
+
+    #[test]
+    fn parse_unknown_fields() {
+        // Forward compatibility test
+        let file = File::open("tests/cluster_spec.json").unwrap();
+        let mut json: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let ob = json.as_object_mut().unwrap();
+        ob.insert("unknown_field_123123123".into(), "hello".into());
+        let _spec: ComputeSpec = serde_json::from_value(json).unwrap();
+    }
 }
