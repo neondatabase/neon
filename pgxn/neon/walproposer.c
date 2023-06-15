@@ -257,7 +257,7 @@ nwp_register_gucs(void)
 							"Walproposer reconnects to offline safekeepers once in this interval.",
 							NULL,
 							&wal_acceptor_reconnect_timeout,
-							5000, 0, INT_MAX,	/* default, min, max */
+							1000, 0, INT_MAX,	/* default, min, max */
 							PGC_SIGHUP, /* context */
 							GUC_UNIT_MS,	/* flags */
 							NULL, NULL, NULL);
