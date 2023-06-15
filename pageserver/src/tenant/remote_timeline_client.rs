@@ -753,22 +753,18 @@ impl RemoteTimelineClient {
 
         // Have a failpoint that can use the `pause` failpoint action.
         // We don't want to block the executor thread, hence, spawn_blocking + await.
-        #[cfg(feature = "testing")]
-        tokio::task::spawn_blocking({
-            let current = tracing::Span::current();
-            move || {
-                let _entered = current.entered();
-                tracing::info!(
-                    "at failpoint persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-                );
-                fail::fail_point!(
-                    "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-                );
-            }
-        })
-        .await
-        .expect("spawn_blocking");
-
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint persist_deleted_index_part");
+                    fail::fail_point!("persist_deleted_index_part");
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
         upload::upload_index_part(
             self.conf,
             &self.storage_impl,

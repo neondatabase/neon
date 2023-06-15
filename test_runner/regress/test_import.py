@@ -14,7 +14,11 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
 )
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import subprocess_capture
 
@@ -151,7 +155,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         ".*files not bound to index_file.json, proceeding with their deletion.*"
     )
 
-    client.timeline_delete(tenant, timeline)
+    timeline_delete_wait_completed(client, tenant, timeline)
 
     # Importing correct backup works
     import_tar(base_tar, wal_tar)
