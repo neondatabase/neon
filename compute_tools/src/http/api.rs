@@ -17,6 +17,8 @@ use tokio::task;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
+use crate::extension_server;
+
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
         start_time: state.start_time,
@@ -133,7 +135,8 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 filename
             );
 
-            match download_file(&filename).await {
+            // TODO : left off here...
+            match extension_server::download_file(&filename).await {
                 Ok(_) => Response::new(Body::from("OK")),
                 Err(e) => {
                     error!("download_file failed: {}", e);

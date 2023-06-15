@@ -44,6 +44,8 @@ def test_file_download(
     env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
     endpoint = env.endpoints.create_start("test_file_download", tenant_id=tenant)
 
+    # download the control file from MockS3
+
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION test_load");

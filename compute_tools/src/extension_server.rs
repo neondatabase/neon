@@ -1,16 +1,20 @@
+use remote_storage::*;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::str;
 use std::{fs, thread};
 use toml_edit;
-use remote_storage::*;
+use BuffWriter;
 
 use anyhow::Context;
 use tracing::info;
 
 pub fn download_file(mut stream: TcpStream) -> anyhow::Result<()> {
     let mut buf = [0; 512];
+
+    println!("ALEK: calling download file");
+    // fs.write("world.txt", "hello")?;
 
     stream.read(&mut buf).expect("Error reading from stream");
 
@@ -20,7 +24,7 @@ pub fn download_file(mut stream: TcpStream) -> anyhow::Result<()> {
 
     println!("requested file {}", filename);
 
-    download_extension(get_s3_config(), ExtensionType::Shared);
+    // download_extension(get_s3_config(), ExtensionType::Shared);
     let from_prefix = "/tmp/from_prefix";
     let to_prefix = "/tmp/to_prefix";
 
@@ -48,24 +52,41 @@ fn get_pg_config(argument: &str) -> String {
     stdout.trim().to_string()
 }
 
-fn download_helper(remote_storage: &GenericRemoteStorage, remote_from_path: &RemotePath, to_path: &str) -> anyhow::Result<()> {
+async fn download_helper(
+    remote_storage: &GenericRemoteStorage,
+    remote_from_path: &RemotePath,
+    to_path: &str,
+) -> anyhow::Result<()> {
     let file_name = remote_from_path.object_name().expect("it must exist");
-    info!("Downloading {:?}",file_name);
+    info!("Downloading {:?}", file_name);
     let mut download = remote_storage.download(&remote_from_path).await?;
-    let mut write_data_buffer = Vec::new(); 
-    download.download_stream.read_to_end(&mut write_data_buffer).await?;
+    let mut write_data_buffer = Vec::new();
+    download
+        .download_stream
+        .read_to_end(&mut write_data_buffer)
+        .await?;
     let mut output_file = BufWriter::new(File::create(file_name)?);
     output_file.write_all(&mut write_data_buffer)?;
     Ok(())
 }
 
 pub enum ExtensionType {
-    Shared, // we just use the public folder here
-    Tenant(String), // String is tenant_id
-    Library(String) // String is name of the extension
+    Shared,          // we just use the public folder here
+    Tenant(String),  // String is tenant_id
+    Library(String), // String is name of the extension
 }
 
-pub async fn download_extension(config: &RemoteStorageConfig, ext_type: ExtensionType) -> anyhow::Result<()>{
+/*
+separate stroage and compute
+storage: pageserver stores pages, accepts WAL. communicates with S3.
+compute: postgres, runs in kubernetes/ VM, started by compute_ctl. rust service. accepts some spec. 
+
+pass config to compute_ctl
+ */
+pub async fn download_extension(
+    config: &RemoteStorageConfig,
+    ext_type: ExtensionType,
+) -> anyhow::Result<()> {
     let sharedir = get_pg_config("--sharedir");
     let sharedir = format!("{}/extension", sharedir);
     let libdir = get_pg_config("--libdir");
@@ -80,8 +101,8 @@ pub async fn download_extension(config: &RemoteStorageConfig, ext_type: Extensio
             let from_paths = remote_storage.list_files(Some(&folder)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
-                    // FIXME: CAUTION: if you run this, it will actually write stuff to your postgress directory
-                    // only run if you are ok with that
+                    // NOTE: if you run this, it will actually write stuff to your postgress directory
+                    // only run if you are ok with that. TODO: delete this comment
                     download_helper(&remote_storage, &remote_from_path, &sharedir)?;
                 }
             }
@@ -112,15 +133,24 @@ pub fn get_s3_config() -> anyhow::Result<RemoteStorageConfig> {
     // TODO: Right now we are using the same config parameters as pageserver; but should we have our own configs?
     // TODO: Should we read the s3_config from CLI arguments?
     let cfg_file_path = Path::new("./../.neon/pageserver.toml");
-    let cfg_file_contents = std::fs::read_to_string(cfg_file_path)
-    .with_context(|| format!( "Failed to read pageserver config at '{}'", cfg_file_path.display()))?;
+    let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
+        format!(
+            "Failed to read pageserver config at '{}'",
+            cfg_file_path.display()
+        )
+    })?;
     let toml = cfg_file_contents
         .parse::<toml_edit::Document>()
-        .with_context(|| format!( "Failed to parse '{}' as pageserver config", cfg_file_path.display()))?;
-    let remote_storage_data = toml.get("remote_storage")
+        .with_context(|| {
+            format!(
+                "Failed to parse '{}' as pageserver config",
+                cfg_file_path.display()
+            )
+        })?;
+    let remote_storage_data = toml
+        .get("remote_storage")
         .context("field should be present")?;
     let remote_storage_config = RemoteStorageConfig::from_toml(remote_storage_data)?
         .context("error configuring remote storage")?;
     Ok(remote_storage_config)
 }
-

@@ -90,10 +90,10 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
     ) -> Result<Vec<RemotePath>, DownloadError>;
 
-    /// Lists all files in a subdirectories
+    /// Lists all files in a folder
     async fn list_files(
         &self,
-        prefix: Option<&RemotePath>,
+        folder: Option<&RemotePath>,
     ) -> anyhow::Result<Vec<RemotePath>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
