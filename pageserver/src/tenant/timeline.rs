@@ -3025,7 +3025,8 @@ impl Timeline {
                 // 1. write them all to temporary file names
                 // 2. fsync them
                 // 3. rename to the final name
-                // 4. fsync the parent directory
+                // 4. fsync the parent directory.
+                // Note that (1),(2),(3) today happen inside write_to_disk().
                 par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
                 par_fsync::par_fsync(&[self_clone
                     .conf
