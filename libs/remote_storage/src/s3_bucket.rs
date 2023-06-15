@@ -336,7 +336,6 @@ impl RemoteStorage for S3Bucket {
         &self,
         folder: Option<&RemotePath>
     ) -> anyhow::Result<Vec<RemotePath>>{
-        // TODO: should we use DownloadError error type instead of anyhow::Error?
         let folder_name = folder.map(|x| 
             String::from(x.object_name().expect("invalid folder name"))
         );
@@ -367,7 +366,6 @@ impl RemoteStorage for S3Bucket {
         
             for object in response.contents().unwrap_or_default() {
                 let object_path = object.key().unwrap();
-                println!("{:?}", object_path);
                 let remote_path = self.s3_object_to_relative_path(object_path);
                 all_files.push(remote_path);
             }

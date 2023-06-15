@@ -1,0 +1,5 @@
+comment = 'Job scheduler for PostgreSQL'
+default_version = '1.5'
+module_pathname = '$libdir/pg_cron'
+relocatable = false
+schema = pg_catalog
