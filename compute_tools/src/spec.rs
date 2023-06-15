@@ -269,8 +269,10 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 xact.execute(query.as_str(), &[])?;
             }
             RoleAction::Create => {
-                let mut query: String =
-                    format!("CREATE ROLE {} IN ROLE neon_superuser", name.pg_quote());
+                let mut query: String = format!(
+                    "CREATE ROLE {} CREATEROLE CREATEDB IN ROLE neon_superuser",
+                    name.pg_quote()
+                );
                 info!("role create query: '{}'", &query);
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;

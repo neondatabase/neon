@@ -180,6 +180,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         r#"
             DO $$
                 DECLARE
+                    r text;
                     {}
                     {}
                 BEGIN
@@ -190,6 +191,9 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                         IF roles IS NOT NULL THEN
                             EXECUTE format('GRANT neon_superuser TO %s',
                                            (SELECT string_agg(roles, ', ')));
+                            FOR r IN (SELECT roles) LOOP
+                                EXECUTE format('ALTER ROLE %s CREATEROLE CREATEDB', r);
+                            END LOOP;
                         END IF;
                         IF dbs IS NOT NULL THEN
                             EXECUTE format('GRANT ALL PRIVELEGES ON DATABASE %s TO neon_superuser',
