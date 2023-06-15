@@ -47,7 +47,10 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
-use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
+use crate::metrics::{
+    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
+    RECONSTRUCT_TIME, UNEXPECTED_ONDEMAND_DOWNLOADS,
+};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
@@ -539,9 +542,7 @@ impl Timeline {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
                     Ordering::Equal => {
-                        self.metrics
-                            .materialized_page_cache_hit_upon_request_counter
-                            .inc();
+                        MATERIALIZED_PAGE_CACHE_HIT_DIRECT.inc();
                         return Ok(cached_img); // exact LSN match, return the image
                     }
                     Ordering::Greater => {
@@ -564,8 +565,7 @@ impl Timeline {
             .await?;
         timer.stop_and_record();
 
-        self.metrics
-            .reconstruct_time_histo
+        RECONSTRUCT_TIME
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
     }
 
@@ -2388,7 +2388,7 @@ impl Timeline {
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
-                        self.metrics.materialized_page_cache_hit_counter.inc_by(1);
+                        MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
                         return Ok(reconstruct_state);
                     }
                     if prev_lsn <= cont_lsn {
