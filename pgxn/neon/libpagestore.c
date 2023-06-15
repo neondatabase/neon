@@ -55,7 +55,7 @@ char	   *page_server_connstring;
 char	   *neon_auth_token;
 
 int			readahead_buffer_size = 128;
-int			max_reconnect_attempts = 100;
+int			max_reconnect_attempts = 60;
 int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
 int			max_flush_delay = 1;
@@ -465,6 +465,14 @@ pg_init_libpagestore(void)
 							1, 0, INT_MAX,
 							PGC_USERSET,
 							GUC_UNIT_S,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("neon.max_reconnect_attempts",
+							"Maximal attempts to reconnect to pages server (with 1 second timeout)",
+							NULL,
+							&max_reconnect_attempts,
+							60, 0, INT_MAX,
+							PGC_USERSET,
+							0,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.readahead_buffer_size",
 							"number of prefetches to buffer",
