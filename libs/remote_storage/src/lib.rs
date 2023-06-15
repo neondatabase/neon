@@ -98,6 +98,8 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// "foo/bar/cat567.txt", "foo/bar/dog123", "foo/bar/dog456"]
     /// whereas,
     /// list_prefixes("foo/bar/") = ["cat", "dog"]
+    ///
+    /// Also note that this does not filter out "folders"
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>>;
 
     /// Streams the local file contents into remote into the remote storage entry.

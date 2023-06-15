@@ -133,7 +133,7 @@ impl RemoteStorage for LocalFs {
     }
 
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let full_path = match folder.clone() {
+        let full_path = match folder {
             Some(folder) => folder.with_base(&self.storage_root),
             None => self.storage_root.clone(),
         };

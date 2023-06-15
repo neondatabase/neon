@@ -88,6 +88,50 @@ async fn s3_pagination_should_work(ctx: &mut MaybeEnabledS3WithTestBlobs) -> any
     Ok(())
 }
 
+/// Tests that S3 client can list all files in a folder, even if the response comes paginated and requirees multiple S3 queries.
+/// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified. Test will skip real code and pass if env vars not set.
+/// See `s3_pagination_should_work` for more information.
+///
+/// First, create a set of S3 objects with keys `random_prefix/folder/blob_{i}.txt` in [`upload_s3_data`]
+/// Then performs the following queries:
+///    1. `list_files(None)`. This should return `random_prefix/folder`
+///    2. `list_files("folder")`.  This  should return `random_prefix/folder/blob_{i}.txt`
+#[test_context(MaybeEnabledS3WithSimpleTestBlobs)]
+#[tokio::test]
+async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> anyhow::Result<()> {
+    let ctx = match ctx {
+        MaybeEnabledS3WithSimpleTestBlobs::Enabled(ctx) => ctx,
+        MaybeEnabledS3WithSimpleTestBlobs::Disabled => return Ok(()),
+        MaybeEnabledS3WithSimpleTestBlobs::UploadsFailed(e, _) => {
+            anyhow::bail!("S3 init failed: {e:?}")
+        }
+    };
+
+    let test_client = Arc::clone(&ctx.enabled.client);
+    let base_prefix = RemotePath::new(Path::new("folder")).context("common_prefix construction")?;
+    let root_files = test_client
+        .list_files(None)
+        .await
+        .context("client list root files failure")?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        root_files, HashSet::from([base_prefix.clone()]),
+        "remote storage root files list mismatches with the uploads. Returned files: {root_files:?}"
+    );
+
+    let nested_remote_files = test_client
+        .list_prefixes(Some(&base_prefix))
+        .await
+        .context("client list nested files failure")?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        nested_remote_files, ctx.remote_blobs,
+        "remote storage root files list mismatches with the uploads. Returned files: {root_files:?}"
+    );
+    Ok(())
+}
 #[test_context(MaybeEnabledS3)]
 #[tokio::test]
 async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
@@ -248,6 +292,63 @@ impl AsyncTestContext for MaybeEnabledS3WithTestBlobs {
     }
 }
 
+enum MaybeEnabledS3WithSimpleTestBlobs {
+    Enabled(S3WithSimpleTestBlobs),
+    Disabled,
+    UploadsFailed(anyhow::Error, S3WithSimpleTestBlobs),
+}
+
+struct S3WithSimpleTestBlobs {
+    enabled: EnabledS3,
+    remote_blobs: HashSet<RemotePath>,
+}
+
+#[async_trait::async_trait]
+impl AsyncTestContext for MaybeEnabledS3WithSimpleTestBlobs {
+    async fn setup() -> Self {
+        ensure_logging_ready();
+        if env::var(ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME).is_err() {
+            info!(
+                "`{}` env variable is not set, skipping the test",
+                ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME
+            );
+            return Self::Disabled;
+        }
+
+        let max_keys_in_list_response = 10;
+        let upload_tasks_count = 1 + (2 * usize::try_from(max_keys_in_list_response).unwrap());
+
+        let enabled = EnabledS3::setup(Some(max_keys_in_list_response)).await;
+
+        match upload_simple_s3_data(&enabled.client, upload_tasks_count).await {
+            ControlFlow::Continue(uploads) => {
+                info!("Remote objects created successfully");
+
+                Self::Enabled(S3WithSimpleTestBlobs {
+                    enabled,
+                    remote_blobs: uploads,
+                })
+            }
+            ControlFlow::Break(uploads) => Self::UploadsFailed(
+                anyhow::anyhow!("One or multiple blobs failed to upload to S3"),
+                S3WithSimpleTestBlobs {
+                    enabled,
+                    remote_blobs: uploads,
+                },
+            ),
+        }
+    }
+
+    async fn teardown(self) {
+        match self {
+            Self::Disabled => {}
+            Self::Enabled(ctx) | Self::UploadsFailed(_, ctx) => {
+                cleanup(&ctx.enabled.client, ctx.remote_blobs).await;
+            }
+        }
+    }
+}
+
 fn create_s3_client(
     max_keys_per_list_response: Option<i32>,
 ) -> anyhow::Result<Arc<GenericRemoteStorage>> {
@@ -362,5 +463,53 @@ async fn cleanup(client: &Arc<GenericRemoteStorage>, objects_to_delete: HashSet<
             },
             Err(join_err) => error!("Delete task did not finish correctly: {join_err}"),
         }
+    }
+}
+
+async fn upload_simple_s3_data(
+    client: &Arc<GenericRemoteStorage>,
+    upload_tasks_count: usize,
+) -> ControlFlow<HashSet<RemotePath>, HashSet<RemotePath>> {
+    info!("Creating {upload_tasks_count} S3 files");
+    let mut upload_tasks = JoinSet::new();
+    for i in 1..upload_tasks_count + 1 {
+        let task_client = Arc::clone(client);
+        upload_tasks.spawn(async move {
+            let blob_path = PathBuf::from(format!("folder/blob_{i}.txt"));
+            let blob_path = RemotePath::new(&blob_path)
+                .with_context(|| format!("{blob_path:?} to RemotePath conversion"))?;
+            debug!("Creating remote item {i} at path {blob_path:?}");
+
+            let data = format!("remote blob data {i}").into_bytes();
+            let data_len = data.len();
+            task_client
+                .upload(std::io::Cursor::new(data), data_len, &blob_path, None)
+                .await?;
+
+            Ok::<_, anyhow::Error>(blob_path)
+        });
+    }
+
+    let mut upload_tasks_failed = false;
+    let mut uploaded_blobs = HashSet::with_capacity(upload_tasks_count);
+    while let Some(task_run_result) = upload_tasks.join_next().await {
+        match task_run_result
+            .context("task join failed")
+            .and_then(|task_result| task_result.context("upload task failed"))
+        {
+            Ok(upload_path) => {
+                uploaded_blobs.insert(upload_path);
+            }
+            Err(e) => {
+                error!("Upload task failed: {e:?}");
+                upload_tasks_failed = true;
+            }
+        }
+    }
+
+    if upload_tasks_failed {
+        ControlFlow::Break(uploaded_blobs)
+    } else {
+        ControlFlow::Continue(uploaded_blobs)
     }
 }
