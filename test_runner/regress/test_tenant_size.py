@@ -44,12 +44,12 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
         # we've disabled the autovacuum and checkpoint
         # so background processes should not change the size.
         # If this test will flake we should probably loosen the check
-        assert size == initial_size, "starting idle compute should not change the tenant size"
+        assert size == initial_size, f"starting idle compute should not change the tenant size (Currently {size}, expected {initial_size})"
 
     # the size should be the same, until we increase the size over the
     # gc_horizon
     size, inputs = http_client.tenant_size_and_modelinputs(tenant_id)
-    assert size == initial_size, "tenant_size should not be affected by shutdown of compute"
+    assert size == initial_size, f"tenant_size should not be affected by shutdown of compute (Currently {size}, expected {initial_size})"
 
     expected_inputs = {
         "segments": [

@@ -194,7 +194,9 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         grant_superuser_subquery, grant_on_database_subquery,
     );
     info!("Neon superuser created:\n{}", &query);
-    client.simple_query(&query)?;
+    client
+        .simple_query(&query)
+        .map_err(|e| anyhow::anyhow!(e).context(query))?;
     Ok(())
 }
 
