@@ -11,6 +11,7 @@ use once_cell::sync::OnceCell;
 use remote_storage::{
     GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
+use test_context::futures::future::Remote;
 use test_context::{test_context, AsyncTestContext};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info};
@@ -107,6 +108,8 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
         }
     };
 
+    dbg!(ctx.remote_blobs.clone());
+
     let test_client = Arc::clone(&ctx.enabled.client);
     let base_prefix = RemotePath::new(Path::new("folder")).context("common_prefix construction")?;
     let root_files = test_client
@@ -116,7 +119,7 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
         .into_iter()
         .collect::<HashSet<_>>();
     assert_eq!(
-        root_files, HashSet::from([base_prefix.clone()]),
+        root_files, ctx.remote_blobs.clone(),
         "remote storage root files list mismatches with the uploads. Returned files: {root_files:?}"
     );
 
@@ -126,8 +129,24 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
         .context("client list nested files failure")?
         .into_iter()
         .collect::<HashSet<_>>();
+
+    // TODO: gettinng an error in this function
+    let trim_remote_blobs = ctx
+        .remote_blobs
+        .iter()
+        .map(|x| {
+            RemotePath::new(Path::new(
+                x.object_name()
+                    .expect("object name will be valid")
+                    .strip_prefix("folder/")
+                    .expect("file names must be folder/blob_i.txt"),
+            ))
+            .expect("file name must be valid")
+        })
+        .collect();
+
     assert_eq!(
-        nested_remote_files, ctx.remote_blobs,
+        nested_remote_files, trim_remote_blobs,
         "remote storage root files list mismatches with the uploads. Returned files: {root_files:?}"
     );
     Ok(())
