@@ -95,8 +95,13 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
     ) as exc:
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
-
     assert exc.value.status_code == 404
+
+    wait_until(
+        number_of_iterations=3,
+        interval=0.2,
+        func=lambda: ps_http.timeline_delete(env.initial_tenant, parent_timeline_id),
+    )
 
     # Check that we didn't pick up the timeline again after restart.
     # See https://github.com/neondatabase/neon/issues/3560
