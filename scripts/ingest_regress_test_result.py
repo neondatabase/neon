@@ -34,7 +34,9 @@ def get_connection_cursor():
 
     @backoff.on_exception(backoff.expo, psycopg2.OperationalError, max_time=150)
     def connect(connstr):
-        return psycopg2.connect(connstr, connect_timeout=30)
+        conn = psycopg2.connect(connstr, connect_timeout=30)
+        conn.autocommit = True
+        return conn
 
     conn = connect(connstr)
     try:
