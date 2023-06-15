@@ -379,7 +379,10 @@ pub async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         debug!(%timeline_id, "evicting batch for timeline");
 
         async {
-            let results = timeline.evict_layers(storage, &batch, cancel.clone()).await;
+            let results = timeline
+                .lcache
+                .evict_layers(storage, &batch, cancel.clone())
+                .await;
 
             match results {
                 Err(e) => {

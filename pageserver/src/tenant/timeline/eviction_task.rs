@@ -254,6 +254,7 @@ impl Timeline {
         };
 
         let results = match self
+            .lcache
             .evict_layer_batch(remote_client, &candidates[..], cancel.clone())
             .await
         {

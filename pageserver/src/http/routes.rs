@@ -719,6 +719,7 @@ async fn layer_download_handler(
 
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let downloaded = timeline
+        .lcache
         .download_layer(layer_file_name)
         .await
         .map_err(ApiError::InternalServerError)?;
@@ -744,6 +745,7 @@ async fn evict_timeline_layer_handler(
 
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
     let evicted = timeline
+        .lcache
         .evict_layer(layer_file_name)
         .await
         .map_err(ApiError::InternalServerError)?;
