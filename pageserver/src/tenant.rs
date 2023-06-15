@@ -1495,6 +1495,15 @@ impl Tenant {
             None,
         );
 
+        // Wait completion of index part upload */
+        timeline
+            .remote_client
+            .as_ref()
+            .unwrap()
+            .wait_completion()
+            .await
+            .context("wait for index part upload to complete")?;
+
         /* Do we need to perform explicit upload?
         // Upload this index_part.json to S3 bucket
         upload_index_part(
