@@ -140,14 +140,14 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         .cluster
         .roles
         .iter()
-        .map(|r| r.name.pg_quote())
+        .map(|r| format!("'{}'", escape_literal(&r.name)))
         .collect::<Vec<_>>();
 
     let dbs = spec
         .cluster
         .databases
         .iter()
-        .map(|db| db.name.pg_quote())
+        .map(|db| format!("'{}'", escape_literal(&db.name)))
         .collect::<Vec<_>>();
 
     let grant_superuser_subquery = if roles.is_empty() {
