@@ -810,6 +810,14 @@ pub struct DeltaLayerWriter {
 }
 
 impl DeltaLayerWriter {
+    pub fn key_start(&self) -> Key {
+        self.inner.as_ref().unwrap().key_start
+    }
+
+    pub fn lsn_range(&self) -> Range<Lsn> {
+        self.inner.as_ref().unwrap().lsn_range.clone()
+    }
+
     ///
     /// Start building a new delta layer.
     ///

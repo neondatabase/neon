@@ -3608,7 +3608,54 @@ impl Timeline {
                         || contains_hole
                     {
                         // ... if so, flush previous layer and prepare to write new one
-                        new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
+
+                        let end_key = prev_key.unwrap().next();
+
+                        let w = writer.take().unwrap();
+
+                        // If an identical L1 layer already exists, no need to create a new one.
+                        //
+                        // This can happen if compaction is interrupted after it has already
+                        // created some or all of the L1 layers, but has not deleted the L0 layers
+                        // yet, so that on next compaction, we do the same work again.
+                        //
+                        // NOTE: this is racy, if there can be any other task that concurrently
+                        // creates L1 layers. Currently, there can be only one compaction task
+                        // running at any time, so this is fine.
+                        //
+                        // Also we hold `layer_removal_cs` guard which should prevent race condition
+                        // even if there are two or more concurrent compaction tasks.
+                        //
+                        // But there is an opposite issue: we check presence of duplicates under
+                        // `layers` shared lock, but then it is released. So there is a gap between
+                        // this check and adding new layer to layer map. In principle in this gap some
+                        // some other task (i.e. GC) can drop this layer and we already abandon insertion
+                        // of duplicate layer. As a result there will be no such layer at all.
+                        // In other words: we have some state S1 of pageserver where layer L1 can be removed by GC.
+                        // Then we run compaction and it switch pageserver to the state S2 which writes duplicate of
+                        // layer L1 and where it can not be removed. With this patch it is possible that
+                        // we switch pageserver to state S2 but... with L1 lost.
+                        // It is just hypothetical situation and there is no such concrete scenario which
+                        // reproduces this problem. So let's take this risk.
+                        //
+                        if self.layers.read().unwrap().contains(
+                            &(w.key_start()..end_key),
+                            &w.lsn_range(),
+                            false, // not an image layer
+                        ) {
+                            info!(
+                                "Skip generation of duplicate layer {}_{}__{}_{}",
+                                w.key_start(),
+                                end_key,
+                                w.lsn_range().start,
+                                w.lsn_range().end
+                            );
+                            drop(w);
+                        } else {
+                            let new_layer = w.finish(end_key)?;
+
+                            new_layers.push(new_layer);
+                        }
                         writer = None;
 
                         if contains_hole {
@@ -3664,6 +3711,10 @@ impl Timeline {
         }
 
         drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
+
+        fail_point!("compact-level0-phase1-finish", |_| {
+            Err(anyhow::anyhow!("failpoint compact-level0-phase1-finish").into())
+        });
 
         Ok(CompactLevel0Phase1Result {
             new_layers,
