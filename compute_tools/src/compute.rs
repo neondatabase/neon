@@ -155,9 +155,9 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
     } else {
         format!(
             r#"
-               roles pg_catalog.pg_authid.rolname%type := SELECT rolname
-                                                          FROM pg_catalog.pg_authid
-                                                          WHERE rolname IN ({});"#,
+               roles pg_catalog.pg_authid.rolname%type := (SELECT rolname
+                                                           FROM pg_catalog.pg_authid
+                                                           WHERE rolname IN ({}));"#,
             roles.join(", ")
         )
     };
@@ -167,9 +167,9 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
     } else {
         format!(
             r#"
-               dbs pg_catalog.pg_database.datname%type := SELECT datname
-                                                          FROM pg_catalog.pg_database
-                                                          WHERE datname IN ({});"#,
+               dbs pg_catalog.pg_database.datname%type := (SELECT datname
+                                                           FROM pg_catalog.pg_database
+                                                           WHERE datname IN ({}));"#,
             dbs.join(", ")
         )
     };
@@ -188,12 +188,12 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                     THEN
                         CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
                         IF roles IS NOT NULL THEN
-                          EXECUTE format('GRANT neon_superuser TO %s',
-                                         (SELECT string_agg(roles, ', ')));
+                            EXECUTE format('GRANT neon_superuser TO %s',
+                                           (SELECT string_agg(roles, ', ')));
                         END IF;
                         IF dbs IS NOT NULL THEN
-                          EXECUTE format('GRANT ALL PRIVELEGES ON DATABASE %s TO neon_superuser',
-                                         (SELECT string_agg(dbs, ', ')));
+                            EXECUTE format('GRANT ALL PRIVELEGES ON DATABASE %s TO neon_superuser',
+                                           (SELECT string_agg(dbs, ', ')));
                         END IF;
                     END IF;
                 END
