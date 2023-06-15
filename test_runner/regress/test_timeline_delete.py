@@ -100,7 +100,9 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     wait_until(
         number_of_iterations=3,
         interval=0.2,
-        func=lambda: ps_http.timeline_delete(env.initial_tenant, parent_timeline_id),
+        func=lambda: timeline_delete_wait_completed(
+            ps_http, env.initial_tenant, parent_timeline_id
+        ),
     )
 
     # Check that we didn't pick up the timeline again after restart.
