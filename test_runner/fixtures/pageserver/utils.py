@@ -213,7 +213,10 @@ def wait_timeline_detail_404(
 
 
 def timeline_delete_wait_completed(
-    pageserver_http: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
+    pageserver_http: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    **delete_args,
 ):
-    pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
+    pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
     wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id)
