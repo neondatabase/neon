@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import logging
 import os
 import sys
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+import backoff
 import psycopg2
 import psycopg2.extras
 
@@ -35,9 +37,20 @@ def get_connection_cursor():
     connstr = os.getenv("DATABASE_URL")
     if not connstr:
         err("DATABASE_URL environment variable is not set")
-    with psycopg2.connect(connstr, connect_timeout=30) as conn:
+
+    @backoff.on_exception(backoff.expo, psycopg2.OperationalError, max_time=150)
+    def connect(connstr):
+        conn = psycopg2.connect(connstr, connect_timeout=30)
+        conn.autocommit = True
+        return conn
+
+    conn = connect(connstr)
+    try:
         with conn.cursor() as cur:
             yield cur
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def create_table(cur):
@@ -115,6 +128,7 @@ def main():
     parser.add_argument(
         "--ingest",
         type=Path,
+        required=True,
         help="Path to perf test result file, or directory with perf test result files",
     )
     parser.add_argument("--initdb", action="store_true", help="Initialuze database")
@@ -140,4 +154,5 @@ def main():
 
 
 if __name__ == "__main__":
+    logging.getLogger("backoff").addHandler(logging.StreamHandler())
     main()

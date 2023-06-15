@@ -22,7 +22,7 @@ use tracing::{error, info, warn};
 use utils::measured_stream::MeasuredStream;
 
 /// Number of times we should retry the `/proxy_wake_compute` http request.
-const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
+pub const NUM_RETRIES_WAKE_COMPUTE: usize = 1;
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 const ERR_PROTO_VIOLATION: &str = "protocol violation";
@@ -283,34 +283,35 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+/// If we couldn't connect, a cached connection info might be to blame
+/// (e.g. the compute node's address might've changed at the wrong time).
+/// Invalidate the cache entry (if any) to prevent subsequent errors.
+#[tracing::instrument(name = "invalidate_cache", skip_all)]
+pub fn invalidate_cache(node_info: &console::CachedNodeInfo) {
+    let is_cached = node_info.cached();
+    if is_cached {
+        warn!("invalidating stalled compute node info cache entry");
+        node_info.invalidate();
+    }
+
+    let label = match is_cached {
+        true => "compute_cached",
+        false => "compute_uncached",
+    };
+    NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+}
+
 /// Try to connect to the compute node once.
 #[tracing::instrument(name = "connect_once", skip_all)]
 async fn connect_to_compute_once(
     node_info: &console::CachedNodeInfo,
 ) -> Result<PostgresConnection, compute::ConnectionError> {
-    // If we couldn't connect, a cached connection info might be to blame
-    // (e.g. the compute node's address might've changed at the wrong time).
-    // Invalidate the cache entry (if any) to prevent subsequent errors.
-    let invalidate_cache = |_: &compute::ConnectionError| {
-        let is_cached = node_info.cached();
-        if is_cached {
-            warn!("invalidating stalled compute node info cache entry");
-            node_info.invalidate();
-        }
-
-        let label = match is_cached {
-            true => "compute_cached",
-            false => "compute_uncached",
-        };
-        NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
-    };
-
     let allow_self_signed_compute = node_info.allow_self_signed_compute;
 
     node_info
         .config
         .connect(allow_self_signed_compute)
-        .inspect_err(invalidate_cache)
+        .inspect_err(|_: &compute::ConnectionError| invalidate_cache(node_info))
         .await
 }
 

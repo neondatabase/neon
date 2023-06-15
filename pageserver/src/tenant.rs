@@ -473,6 +473,14 @@ pub(crate) enum ShutdownError {
     AlreadyStopping,
 }
 
+struct DeletionGuard(OwnedMutexGuard<bool>);
+
+impl DeletionGuard {
+    fn is_deleted(&self) -> bool {
+        *self.0
+    }
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -519,6 +527,7 @@ impl Tenant {
         );
         timeline
             .load_layer_map(new_disk_consistent_lsn)
+            .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
@@ -560,7 +569,7 @@ impl Tenant {
                 || timeline
                     .layers
                     .read()
-                    .unwrap()
+                    .await
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -1137,7 +1146,11 @@ impl Tenant {
                                 )
                                 .context("create_timeline_struct")?;
 
-                            let guard = Arc::clone(&timeline.delete_lock).lock_owned().await;
+                            let guard = DeletionGuard(
+                                Arc::clone(&timeline.delete_lock)
+                                    .try_lock_owned()
+                                    .expect("cannot happen because we're the only owner"),
+                            );
 
                             // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
                             // RemoteTimelineClient is the only functioning part.
@@ -1461,7 +1474,13 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             let timelines_to_compact = timelines
                 .iter()
-                .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
+                .filter_map(|(timeline_id, timeline)| {
+                    if timeline.is_active() {
+                        Some((*timeline_id, timeline.clone()))
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>();
             drop(timelines);
             timelines_to_compact
@@ -1542,6 +1561,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         timeline: Arc<Timeline>,
+        guard: DeletionGuard,
     ) -> anyhow::Result<()> {
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.
@@ -1614,6 +1634,25 @@ impl Tenant {
             Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
         });
 
+        if let Some(remote_client) = &timeline.remote_client {
+            remote_client.delete_all().await.context("delete_all")?
+        };
+
+        // Have a failpoint that can use the `pause` failpoint action.
+        // We don't want to block the executor thread, hence, spawn_blocking + await.
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint in_progress_delete");
+                    fail::fail_point!("in_progress_delete");
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
+
         {
             // Remove the timeline from the map.
             let mut timelines = self.timelines.lock().unwrap();
@@ -1634,12 +1673,7 @@ impl Tenant {
             drop(timelines);
         }
 
-        let remote_client = match &timeline.remote_client {
-            Some(remote_client) => remote_client,
-            None => return Ok(()),
-        };
-
-        remote_client.delete_all().await?;
+        drop(guard);
 
         Ok(())
     }
@@ -1687,23 +1721,18 @@ impl Tenant {
             timeline = Arc::clone(timeline_entry.get());
 
             // Prevent two tasks from trying to delete the timeline at the same time.
-            //
-            // XXX: We should perhaps return an HTTP "202 Accepted" to signal that the caller
-            // needs to poll until the operation has finished. But for now, we return an
-            // error, because the control plane knows to retry errors.
-
             delete_lock_guard =
-                Arc::clone(&timeline.delete_lock)
-                    .try_lock_owned()
-                    .map_err(|_| {
+                DeletionGuard(Arc::clone(&timeline.delete_lock).try_lock_owned().map_err(
+                    |_| {
                         DeleteTimelineError::Other(anyhow::anyhow!(
                             "timeline deletion is already in progress"
                         ))
-                    })?;
+                    },
+                )?);
 
             // If another task finished the deletion just before we acquired the lock,
             // return success.
-            if *delete_lock_guard {
+            if delete_lock_guard.is_deleted() {
                 return Ok(());
             }
 
@@ -1777,7 +1806,7 @@ impl Tenant {
         self: Arc<Self>,
         timeline_id: TimelineId,
         timeline: Arc<Timeline>,
-        _guard: OwnedMutexGuard<bool>,
+        guard: DeletionGuard,
     ) {
         let tenant_id = self.tenant_id;
         let timeline_clone = Arc::clone(&timeline);
@@ -1790,7 +1819,7 @@ impl Tenant {
             "timeline_delete",
             false,
             async move {
-                if let Err(err) = self.delete_timeline(timeline_id, timeline).await {
+                if let Err(err) = self.delete_timeline(timeline_id, timeline, guard).await {
                     error!("Error: {err:#}");
                     timeline_clone.set_broken(err.to_string())
                 };
@@ -3582,12 +3611,16 @@ mod tests {
             .await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -3656,13 +3689,21 @@ mod tests {
         let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
-        writer.put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))?;
-        writer.put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))
+            .await?;
+        writer
+            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))
+            .await?;
         writer.finish_write(Lsn(0x20));
 
-        writer.put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))
+            .await?;
         writer.finish_write(Lsn(0x30));
-        writer.put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))
+            .await?;
         writer.finish_write(Lsn(0x40));
 
         //assert_current_logical_size(&tline, Lsn(0x40));
@@ -3675,7 +3716,9 @@ mod tests {
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
         let new_writer = newtline.writer().await;
-        new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
+        new_writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))
+            .await?;
         new_writer.finish_write(Lsn(0x40));
 
         // Check page contents on both branches
@@ -3703,36 +3746,44 @@ mod tests {
         {
             let writer = tline.writer().await;
             // Create a relation on the timeline
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
         }
         tline.freeze_and_flush().await?;
         {
             let writer = tline.writer().await;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
         }
         tline.freeze_and_flush().await
@@ -4048,7 +4099,9 @@ mod tests {
             .await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
@@ -4056,7 +4109,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -4064,7 +4119,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))
+            .await?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
@@ -4072,7 +4129,9 @@ mod tests {
         tline.compact(&ctx).await?;
 
         let writer = tline.writer().await;
-        writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
+        writer
+            .put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))
+            .await?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
@@ -4124,11 +4183,13 @@ mod tests {
             for _ in 0..10000 {
                 test_key.field6 = blknum;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
 
@@ -4174,11 +4235,13 @@ mod tests {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
             let writer = tline.writer().await;
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -4192,11 +4255,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -4249,11 +4314,13 @@ mod tests {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
             let writer = tline.writer().await;
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -4275,11 +4342,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
@@ -4341,11 +4410,13 @@ mod tests {
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
                 let writer = tline.writer().await;
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
-                )?;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
