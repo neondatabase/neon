@@ -476,7 +476,7 @@ pub(crate) enum ShutdownError {
 struct DeletionGuard(OwnedMutexGuard<bool>);
 
 impl DeletionGuard {
-    fn get(&self) -> bool {
+    fn is_deleted(&self) -> bool {
         *self.0
     }
 }
@@ -1146,8 +1146,11 @@ impl Tenant {
                                 )
                                 .context("create_timeline_struct")?;
 
-                            let guard =
-                                DeletionGuard(Arc::clone(&timeline.delete_lock).lock_owned().await);
+                            let guard = DeletionGuard(
+                                Arc::clone(&timeline.delete_lock)
+                                    .try_lock_owned()
+                                    .expect("cannot happen because we're the only owner"),
+                            );
 
                             // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
                             // RemoteTimelineClient is the only functioning part.
@@ -1723,7 +1726,7 @@ impl Tenant {
 
             // If another task finished the deletion just before we acquired the lock,
             // return success.
-            if delete_lock_guard.get() {
+            if delete_lock_guard.is_deleted() {
                 return Ok(());
             }
 
