@@ -102,6 +102,7 @@ pub struct TenantConf {
     pub gc_feedback: bool,
     // Region for master S3 bucket
     pub master_region: Option<String>,
+    pub master_broker_endpoint: Option<String>,
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -186,6 +187,10 @@ pub struct TenantConfOpt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub master_region: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub master_broker_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +260,7 @@ impl TenantConfOpt {
                 .unwrap_or(global_conf.evictions_low_residence_duration_metric_threshold),
             gc_feedback: self.gc_feedback.unwrap_or(global_conf.gc_feedback),
             master_region: self.master_region.clone(),
+            master_broker_endpoint: self.master_broker_endpoint.clone(),
         }
     }
 }
@@ -293,6 +299,7 @@ impl Default for TenantConf {
             .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
             gc_feedback: false,
             master_region: None,
+            master_broker_endpoint: None,
         }
     }
 }
@@ -389,6 +396,7 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
         }
         tenant_conf.gc_feedback = request_data.gc_feedback;
         tenant_conf.master_region = request_data.master_region.clone();
+        tenant_conf.master_broker_endpoint = request_data.master_broker_endpoint.clone();
 
         Ok(tenant_conf)
     }

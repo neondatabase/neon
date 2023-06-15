@@ -381,6 +381,9 @@ impl PageServerNode {
                 .transpose()
                 .context("Failed to parse 'gc_feedback' as bool")?,
             master_region: settings.remove("master_region").map(|x| x.to_string()),
+            master_broker_endpoint: settings
+                .remove("master_broker_endpoint")
+                .map(|x| x.to_string()),
         };
 
         // If tenant ID was not specified, generate one
@@ -481,6 +484,9 @@ impl PageServerNode {
                     .transpose()
                     .context("Failed to parse 'gc_feedback' as bool")?,
                 master_region: settings.remove("master_region").map(|x| x.to_string()),
+                master_broker_endpoint: settings
+                    .remove("master_broker_endpoint")
+                    .map(|x| x.to_string()),
             }
         };
 
