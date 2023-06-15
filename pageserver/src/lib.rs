@@ -123,13 +123,24 @@ pub fn is_temporary(path: &Path) -> bool {
     }
 }
 
-pub fn is_uninit_mark(path: &Path) -> bool {
-    match path.file_name() {
+pub fn is_uninit_mark(path: &Path) -> anyhow::Result<Option<TimelineId>> {
+    let file_name = match path.file_name() {
         Some(name) => name
-            .to_string_lossy()
+            .to_str()
+            .context("file name is not valid utf8")
             .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
-        None => false,
-    }
+        None => return Ok(None),
+    };
+    let stem = timeline_uninit_mark_file
+        .file_stem()
+        .context("uninit mark file has no file stem");
+    let stem = stem
+        .to_str()
+        .context("uninit mark file stem is not valid utf8");
+    let timeline_id = stem
+        .parse::<TimelineId>()
+        .context("uninit mark file stem is not a valid timeline id")?;
+    Ok(Some(timeline_id))
 }
 
 /// During pageserver startup, we need to order operations not to exhaust tokio worker threads by
