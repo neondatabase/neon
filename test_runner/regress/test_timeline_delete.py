@@ -84,7 +84,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     wait_until(
         number_of_iterations=3,
         interval=0.2,
-        func=lambda: ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id),
+        func=lambda: timeline_delete_wait_completed(ps_http, env.initial_tenant, leaf_timeline_id),
     )
 
     assert not timeline_path.exists()
@@ -95,13 +95,6 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
     ) as exc:
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
-
-        # FIXME leaves tenant without timelines, should we prevent deletion of root timeline?
-        wait_until(
-            number_of_iterations=3,
-            interval=0.2,
-            func=lambda: ps_http.timeline_delete(env.initial_tenant, parent_timeline_id),
-        )
 
     assert exc.value.status_code == 404
 
@@ -144,7 +137,6 @@ def test_delete_timeline_post_rm_failure(
     ps_http.configure_failpoints((failpoint_name, "return"))
 
     ps_http.timeline_delete(env.initial_tenant, env.initial_timeline)
-
     timeline_info = wait_until_timeline_state(
         pageserver_http=ps_http,
         tenant_id=env.initial_tenant,
@@ -327,7 +319,6 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
 
     ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
-
     timeline_info = wait_until_timeline_state(
         pageserver_http=ps_http,
         tenant_id=env.initial_tenant,
@@ -441,7 +432,9 @@ def test_concurrent_timeline_delete_stuck_on(
     def first_call(result_queue):
         try:
             log.info("first call start")
-            ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=10)
+            timeline_delete_wait_completed(
+                ps_http, env.initial_tenant, child_timeline_id, timeout=10
+            )
             log.info("first call success")
             result_queue.put("success")
         except Exception:
