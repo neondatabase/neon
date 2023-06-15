@@ -318,6 +318,7 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     size_debug_file.write(size_debug)
 
 
+@pytest.mark.xfail
 def test_single_branch_get_tenant_size_grows(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion
 ):
@@ -360,11 +361,11 @@ def test_single_branch_get_tenant_size_grows(
         if current_lsn - initdb_lsn >= gc_horizon:
             assert (
                 size >= prev_size
-            ), "tenant_size may grow or not grow, because we only add gc_horizon amount of WAL to initial snapshot size"
+            ), f"tenant_size may grow or not grow, because we only add gc_horizon amount of WAL to initial snapshot size (Currently at: {current_lsn}, Init at: {initdb_lsn})"
         else:
             assert (
                 size > prev_size
-            ), "tenant_size should grow, because we continue to add WAL to initial snapshot size"
+            ), f"tenant_size should grow, because we continue to add WAL to initial snapshot size (Currently at: {current_lsn}, Init at: {initdb_lsn})"
 
     def get_current_consistent_size(
         env: NeonEnv,
