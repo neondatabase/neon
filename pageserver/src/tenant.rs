@@ -1000,18 +1000,21 @@ impl Tenant {
                         }
                         continue 'read_dir_invalidated;
                     } else if let Some(timeline_id) =
-                        is_uninit_mark(&timeline_dir).with_context(format!(
-                            "check if dir entry is an uninit mark file: {:?}",
-                            timeline_dir
-                        ))?
+                        is_uninit_mark(&timeline_dir).with_context(|| {
+                            format!(
+                                "check if dir entry is an uninit mark file: {:?}",
+                                timeline_dir
+                            )
+                        })?
                     {
+                        let uninit_mark = timeline_dir;
                         info!(
-                            %timeline_id
+                            timeline_id=%timeline_id,
                             "Found an uninit mark file removing the timeline and its uninit mark",
                         );
                         let timeline_dir =
                             myself.conf.timeline_path(&timeline_id, &myself.tenant_id);
-                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)?;
+                        remove_timeline_and_uninit_mark(&timeline_dir, &uninit_mark)?;
                         continue 'read_dir_invalidated;
                     } else {
                         entries.push(entry);
@@ -1025,7 +1028,7 @@ impl Tenant {
             for entry in entries {
                 let timeline_dir = entry.path();
                 assert!(!crate::is_temporary(&timeline_dir), "removed above");
-                assert!(!is_uninit_mark(&timeline_dir), "removed above");
+                assert!(is_uninit_mark(&timeline_dir)?.is_none(), "removed above");
                 let timeline_id = timeline_dir
                     .file_name()
                     .and_then(OsStr::to_str)

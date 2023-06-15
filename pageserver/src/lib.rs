@@ -24,7 +24,9 @@ pub mod walredo;
 use std::path::Path;
 
 use crate::task_mgr::TaskKind;
+use anyhow::Context;
 use tracing::info;
+use utils::id::TimelineId;
 
 /// Current storage format version
 ///
@@ -124,19 +126,26 @@ pub fn is_temporary(path: &Path) -> bool {
 }
 
 pub fn is_uninit_mark(path: &Path) -> anyhow::Result<Option<TimelineId>> {
-    let file_name = match path.file_name() {
-        Some(name) => name
-            .to_str()
-            .context("file name is not valid utf8")
-            .ends_with(TIMELINE_UNINIT_MARK_SUFFIX),
+    match path.file_name() {
+        Some(name) => {
+            if !name
+                .to_str()
+                .context("file name is not valid utf8")?
+                .ends_with(TIMELINE_UNINIT_MARK_SUFFIX)
+            {
+                return Ok(None);
+            } else {
+                // fallthrough
+            }
+        }
         None => return Ok(None),
-    };
-    let stem = timeline_uninit_mark_file
+    }
+    let stem = path
         .file_stem()
-        .context("uninit mark file has no file stem");
+        .context("uninit mark file has no file stem")?;
     let stem = stem
         .to_str()
-        .context("uninit mark file stem is not valid utf8");
+        .context("uninit mark file stem is not valid utf8")?;
     let timeline_id = stem
         .parse::<TimelineId>()
         .context("uninit mark file stem is not a valid timeline id")?;
