@@ -34,7 +34,6 @@
 
 #define PageStoreTrace DEBUG5
 
-#define MAX_RECONNECT_ATTEMPTS 5
 #define RECONNECT_INTERVAL_USEC 1000000
 
 bool		connected = false;
@@ -55,9 +54,12 @@ int32		max_cluster_size;
 char	   *page_server_connstring;
 char	   *neon_auth_token;
 
+int			readahead_buffer_size = 128;
+int			max_reconnect_attempts = 100;
 int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
-int			readahead_buffer_size = 128;
+int			max_flush_delay = 1;
+TimestampTz last_flush_time = 0;
 
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
@@ -237,6 +239,7 @@ pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
 	int n_reconnect_attempts = 0;
+	TimestampTz now;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
@@ -256,7 +259,7 @@ pageserver_send(NeonRequest * request)
 	{
 		if (!connected)
 		{
-			if (!pageserver_connect(n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS ? LOG : ERROR))
+			if (!pageserver_connect(n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 			{
 				n_reconnect_attempts += 1;
 				pg_usleep(RECONNECT_INTERVAL_USEC);
@@ -275,29 +278,42 @@ pageserver_send(NeonRequest * request)
 		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-			if (n_reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
+			pageserver_disconnect();
+			neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
+			pfree(msg);
+			continue;
+		}
+		n_unflushed_requests++;
+
+		now = GetCurrentTimestamp();
+		if (now - last_flush_time > max_flush_delay
+			|| (flush_every_n_requests > 0 && n_unflushed_requests >= flush_every_n_requests))
+		{
+			if (PQflush(pageserver_conn))
 			{
-				neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
-				if (n_reconnect_attempts != 0) /* do not sleep before first reconnect attempt, assuming that pageserver is already restarted */
-					pg_usleep(RECONNECT_INTERVAL_USEC);
-				n_reconnect_attempts += 1;
-				continue;
-			}
-			else
-			{
+				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 				pageserver_disconnect();
-				neon_log(ERROR, "failed to send page request: %s", msg);
+				if (n_unflushed_requests == 1)
+				{
+					/* only current request is unflushed: we can try to resend it */
+					neon_log(LOG, "failed to flush page requests (try to reconnect): %s", msg);
+					n_unflushed_requests = 0;
+					pfree(msg);
+					continue;
+				}
+				else
+				{
+					n_unflushed_requests = 0;
+					neon_log(ERROR, "failed to flush page requests: %s", msg);
+				}
 			}
+			n_unflushed_requests = 0;
+			last_flush_time = now;
 		}
 		break;
 	}
 
 	pfree(req_buff.data);
-
-	n_unflushed_requests++;
-
-	if (flush_every_n_requests > 0 && n_unflushed_requests >= flush_every_n_requests)
-		pageserver_flush();
 
 	if (message_level_is_interesting(PageStoreTrace))
 	{
@@ -366,14 +382,17 @@ pageserver_flush(void)
 	{
 		neon_log(WARNING, "Tried to flush while disconnected");
 	}
-	else if (PQflush(pageserver_conn))
+	else if (n_unflushed_requests != 0)
 	{
-		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-
-		pageserver_disconnect();
-		neon_log(ERROR, "failed to flush page requests: %s", msg);
+		if (PQflush(pageserver_conn))
+		{
+			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+			pageserver_disconnect();
+			neon_log(ERROR, "failed to flush page requests: %s", msg);
+		}
+		n_unflushed_requests = 0;
+		last_flush_time = GetCurrentTimestamp();
 	}
-	n_unflushed_requests = 0;
 }
 
 page_server_api api = {
@@ -438,6 +457,14 @@ pg_init_libpagestore(void)
 							8, -1, INT_MAX,
 							PGC_USERSET,
 							0,	/* no flags required */
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("neon.max_flush_delay",
+							"Maximal delay of flushing requests",
+							NULL,
+							&max_flush_delay,
+							1, 0, INT_MAX,
+							PGC_USERSET,
+							GUC_UNIT_S,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.readahead_buffer_size",
 							"number of prefetches to buffer",
