@@ -21,6 +21,7 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
     available_remote_storages,
 )
+from fixtures.pageserver.utils import timeline_delete_wait_completed
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
@@ -318,9 +319,10 @@ def test_pageserver_with_empty_tenants(
     client.tenant_create(tenant_with_empty_timelines)
     temp_timelines = client.timeline_list(tenant_with_empty_timelines)
     for temp_timeline in temp_timelines:
-        client.timeline_delete(
-            tenant_with_empty_timelines, TimelineId(temp_timeline["timeline_id"])
+        timeline_delete_wait_completed(
+            client, tenant_with_empty_timelines, TimelineId(temp_timeline["timeline_id"])
         )
+
     files_in_timelines_dir = sum(
         1
         for _p in Path.iterdir(

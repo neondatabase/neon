@@ -1,6 +1,10 @@
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.pageserver.utils import assert_tenant_state, wait_until_tenant_active
+from fixtures.pageserver.utils import (
+    assert_tenant_state,
+    timeline_delete_wait_completed,
+    wait_until_tenant_active,
+)
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 
@@ -24,7 +28,7 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
     def delete_all_timelines(tenant: TenantId):
         timelines = [TimelineId(t["timeline_id"]) for t in client.timeline_list(tenant)]
         for t in timelines:
-            client.timeline_delete(tenant, t)
+            timeline_delete_wait_completed(client, tenant, t)
 
     # Create tenant, start compute
     tenant, _ = env.neon_cli.create_tenant()
