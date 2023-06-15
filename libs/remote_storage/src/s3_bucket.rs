@@ -347,6 +347,48 @@ impl RemoteStorage for S3Bucket {
         Ok(document_keys)
     }
 
+    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        let folder_name =
+            folder.map(|x| String::from(x.object_name().expect("invalid folder name")));
+        let mut continuation_token = None;
+        let mut all_files = vec![];
+        loop {
+            let _guard = self
+                .concurrency_limiter
+                .acquire()
+                .await
+                .context("Concurrency limiter semaphore got closed during S3 list_files")?;
+            metrics::inc_list_objects();
+
+            let response = self
+                .client
+                .list_objects_v2()
+                .bucket(self.bucket_name.clone())
+                .set_prefix(folder_name.clone())
+                .set_continuation_token(continuation_token)
+                .set_max_keys(self.max_keys_per_list_response)
+                .send()
+                .await
+                .map_err(|e| {
+                    metrics::inc_list_objects_fail();
+                    e
+                })
+                .context("Failed to list files in S3 bucket")?;
+
+            for object in response.contents().unwrap_or_default() {
+                let object_path = object.key().expect("response does not contain a key");
+                println!("{:?}", object_path);
+                let remote_path = self.s3_object_to_relative_path(object_path);
+                all_files.push(remote_path);
+            }
+            match response.next_continuation_token {
+                Some(new_token) => continuation_token = Some(new_token),
+                None => break,
+            }
+        }
+        Ok(all_files)
+    }
+
     async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,

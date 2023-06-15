@@ -132,6 +132,27 @@ impl RemoteStorage for LocalFs {
         Ok(prefixes)
     }
 
+    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        let full_path = match folder.clone() {
+            Some(folder) => folder.with_base(&self.storage_root),
+            None => self.storage_root.clone(),
+        };
+        let mut entries = fs::read_dir(full_path).await?;
+        let mut files = vec![];
+        while let Some(entry) = entries.next_entry().await? {
+            let file_name: PathBuf = entry.file_name().into();
+            let file_type = entry.file_type().await?;
+            if file_type.is_file() {
+                let mut file_remote_path = RemotePath::new(&file_name)?;
+                if let Some(folder) = folder {
+                    file_remote_path = folder.join(&file_name);
+                }
+                files.push(file_remote_path);
+            }
+        }
+        Ok(files)
+    }
+
     async fn upload(
         &self,
         data: impl io::AsyncRead + Unpin + Send + Sync + 'static,
