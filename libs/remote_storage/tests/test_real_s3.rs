@@ -11,7 +11,6 @@ use once_cell::sync::OnceCell;
 use remote_storage::{
     GenericRemoteStorage, RemotePath, RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
-use test_context::futures::future::Remote;
 use test_context::{test_context, AsyncTestContext};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info};
@@ -93,10 +92,10 @@ async fn s3_pagination_should_work(ctx: &mut MaybeEnabledS3WithTestBlobs) -> any
 /// Uses real S3 and requires [`ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME`] and related S3 cred env vars specified. Test will skip real code and pass if env vars not set.
 /// See `s3_pagination_should_work` for more information.
 ///
-/// First, create a set of S3 objects with keys `random_prefix/folder/blob_{i}.txt` in [`upload_s3_data`]
+/// First, create a set of S3 objects with keys `random_prefix/folder{j}/blob_{i}.txt` in [`upload_s3_data`]
 /// Then performs the following queries:
-///    1. `list_files(None)`. This should return `random_prefix/folder`
-///    2. `list_files("folder")`.  This  should return `random_prefix/folder/blob_{i}.txt`
+///    1. `list_files(None)`. This should return all files `random_prefix/folder{j}/blob_{i}.txt`
+///    2. `list_files("folder1")`.  This  should return all files `random_prefix/folder1/blob_{i}.txt`
 #[test_context(MaybeEnabledS3WithSimpleTestBlobs)]
 #[tokio::test]
 async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> anyhow::Result<()> {
@@ -107,11 +106,9 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
             anyhow::bail!("S3 init failed: {e:?}")
         }
     };
-
-    dbg!(ctx.remote_blobs.clone());
-
     let test_client = Arc::clone(&ctx.enabled.client);
-    let base_prefix = RemotePath::new(Path::new("folder")).context("common_prefix construction")?;
+    let base_prefix =
+        RemotePath::new(Path::new("folder1")).context("common_prefix construction")?;
     let root_files = test_client
         .list_files(None)
         .await
@@ -119,38 +116,31 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
         .into_iter()
         .collect::<HashSet<_>>();
     assert_eq!(
-        root_files, ctx.remote_blobs.clone(),
-        "remote storage root files list mismatches with the uploads. Returned files: {root_files:?}"
+        root_files,
+        ctx.remote_blobs.clone(),
+        "remote storage list_files on root mismatches with the uploads."
     );
-
     let nested_remote_files = test_client
-        .list_prefixes(Some(&base_prefix))
+        .list_files(Some(&base_prefix))
         .await
         .context("client list nested files failure")?
         .into_iter()
         .collect::<HashSet<_>>();
-
-    // TODO: gettinng an error in this function
-    let trim_remote_blobs = ctx
+    let trim_remote_blobs: HashSet<_> = ctx
         .remote_blobs
         .iter()
-        .map(|x| {
-            RemotePath::new(Path::new(
-                x.object_name()
-                    .expect("object name will be valid")
-                    .strip_prefix("folder/")
-                    .expect("file names must be folder/blob_i.txt"),
-            ))
-            .expect("file name must be valid")
-        })
+        .map(|x| x.get_path().to_str().expect("must be valid name"))
+        .filter(|x| x.starts_with("folder1"))
+        .map(|x| RemotePath::new(Path::new(x)).expect("must be valid name"))
         .collect();
-
     assert_eq!(
-        nested_remote_files, trim_remote_blobs,
-        "remote storage root files list mismatches with the uploads. Returned files: {root_files:?}"
+        nested_remote_files.clone(),
+        trim_remote_blobs,
+        "remote storage list_files on subdirrectory mismatches with the uploads."
     );
     Ok(())
 }
+
 #[test_context(MaybeEnabledS3)]
 #[tokio::test]
 async fn s3_delete_non_exising_works(ctx: &mut MaybeEnabledS3) -> anyhow::Result<()> {
@@ -494,7 +484,7 @@ async fn upload_simple_s3_data(
     for i in 1..upload_tasks_count + 1 {
         let task_client = Arc::clone(client);
         upload_tasks.spawn(async move {
-            let blob_path = PathBuf::from(format!("folder/blob_{i}.txt"));
+            let blob_path = PathBuf::from(format!("folder{}/blob_{}.txt", i / 7, i));
             let blob_path = RemotePath::new(&blob_path)
                 .with_context(|| format!("{blob_path:?} to RemotePath conversion"))?;
             debug!("Creating remote item {i} at path {blob_path:?}");

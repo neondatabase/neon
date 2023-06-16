@@ -70,6 +70,11 @@ impl RemotePath {
     pub fn join(&self, segment: &Path) -> Self {
         Self(self.0.join(segment))
     }
+
+    pub fn get_path(&self) -> &PathBuf {
+        &self.0
+    }
+
     pub fn extension(&self) -> Option<&str> {
         self.0.extension()?.to_str()
     }
