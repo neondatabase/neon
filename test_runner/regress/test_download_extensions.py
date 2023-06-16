@@ -67,13 +67,19 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     endpoint = env.endpoints.create_start("test_file_download", tenant_id=tenant)
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            # cur.execute("CREATE EXTENSION test_load");
+            cur.execute("CREATE TABLE t(key int primary key, value text)")
+            for i in range(100):
+                cur.execute(f"insert into t values({i}, {2*i})")
+            cur.execute("select * from t")
+            x = cur.fetchall()
+            log.info(x)
+
             # TODO: we should see the test_ext extension here
-            other = cur.execute("SELECT * FROM pg_catalog.pg_tables;")
-            whatsup = cur.execute("select * from pg_available_extensions;")
-            with open("alek/output.txt", "w") as f:
-                f.write(str(whatsup) + str(other))
-                # this is returning None????
+            cur.execute("SELECT * FROM pg_available_extensions")
+            x = cur.fetchall()
+            with open("alek/win.txt", "w") as f:
+                f.write(str(x))
+            log.info(x)
 
     endpoint.stop()
     env.pageserver.http_client().tenant_detach(tenant)
