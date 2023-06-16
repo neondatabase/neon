@@ -2,7 +2,7 @@ EXTENSION = hnsw
 EXTVERSION = 0.1.0
 
 MODULE_big = hnsw
-DATA = hnsw--0.1.0.sql
+DATA = $(wildcard *--*.sql)
 OBJS = hnsw.o hnswalg.o
 
 TESTS = $(wildcard test/sql/*.sql)
