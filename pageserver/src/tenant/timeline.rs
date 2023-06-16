@@ -1417,6 +1417,7 @@ impl Timeline {
                 .change_threshold(&tenant_id_str, &timeline_id_str, new_threshold);
         }
     }
+
     /// Open a Timeline handle.
     ///
     /// Loads the metadata for the timeline into memory, but not the layer map.
