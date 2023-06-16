@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, MutableMapping, cast
 
 import pytest
 from _pytest.config import Config
@@ -64,9 +64,7 @@ def pytest_collection_modifyitems(config: Config, items: List[pytest.Item]):
             #
             # - [1] https://github.com/pytest-dev/pytest-rerunfailures/issues/99
             # - [2] https://github.com/pytest-dev/pytest-timeout/issues/142
-
-            # Slap Any to avoid mypy error: Unsupported target for indexed assignment ("Mapping[str, Any]"),
-            #   which is, strictly speaking correct, but we need to modify marker kwargs in place
-            timeout_marker: Any = item.get_closest_marker("timeout")
+            timeout_marker = item.get_closest_marker("timeout")
             if timeout_marker is not None:
-                timeout_marker.kwargs["func_only"] = True
+                kwargs = cast(MutableMapping[str, Any], timeout_marker.kwargs)
+                kwargs["func_only"] = True
