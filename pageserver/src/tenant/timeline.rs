@@ -3015,16 +3015,19 @@ impl Timeline {
                 // Sync it to disk.
                 //
                 // We must also fsync the timeline dir to ensure the directory entries for
-                // new layer files are durable
+                // new layer files are durable.
+                //
+                // NB: timeline dir must be synced _after_ the file contents are durable.
+                // So, two separate fsyncs are required, they mustn't be batched.
                 //
                 // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
-                // files to flush, it might be better to first write them all, and then fsync
-                // them all in parallel.
-
-                // First sync the delta layer. We still use par_fsync here to keep everything consistent. Feel free to replace
-                // this with a single fsync in future refactors.
+                // files to flush, the fsync overhead can be reduces as follows:
+                // 1. write them all to temporary file names
+                // 2. fsync them
+                // 3. rename to the final name
+                // 4. fsync the parent directory.
+                // Note that (1),(2),(3) today happen inside write_to_disk().
                 par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
-                // Then sync the parent directory.
                 par_fsync::par_fsync(&[self_clone
                     .conf
                     .timeline_path(&self_clone.timeline_id, &self_clone.tenant_id)])
