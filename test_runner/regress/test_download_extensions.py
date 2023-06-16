@@ -25,34 +25,54 @@ from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
-@pytest.mark.parametrize(
-    "remote_storage_kind",
-    # exercise both the code paths where remote_storage=None and remote_storage=Some(...)
-    [RemoteStorageKind.MOCK_S3],
-)
-def test_file_download(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
-):
+
+def test_file_download(neon_env_builder: NeonEnvBuilder):
     """Tests we can download a file"""
     neon_env_builder.enable_remote_storage(
-        remote_storage_kind=remote_storage_kind,
+        remote_storage_kind=RemoteStorageKind.MOCK_S3,
         test_name="test_file_download",
     )
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
+
+    with open("loggg", "w") as f:
+        f.write(str(env.__dict__))
+
+    TEST_EXT_PATH = "v15/share/extension/test_ext.control"
+
+    # TODO: we shouldn't be using neon_env_builder.remote_storage_client,
+    # we should pass the remote_storage_client to env in the builder.
+
+    # 4. Upload test_ext.control file to the bucket
+    # Later this will be done by CI/CD
+    with open("test_ext.control", "rb") as data:
+        neon_env_builder.remote_storage_client.upload_fileobj(
+            data, neon_env_builder.remote_storage.bucket_name, TEST_EXT_PATH
+        )
+
+    # 5. Download file from the bucket to correct local location
+    # Later this will be replaced by our rust code
+    resp = neon_env_builder.remote_storage_client.get_object(
+        Bucket=neon_env_builder.remote_storage.bucket_name, Key=TEST_EXT_PATH
+    )
+    content_length = resp["ResponseMetadata"]["HTTPHeaders"]["content-length"]
+    # TODO: this is not the correct path, nor the correct data to write
+    with open("alek.txt", "w") as f:
+        f.write(str(resp))
+
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
+    # 6. Start endpoint and ensure that test_ext is present in select * from pg_available_extensions
     endpoint = env.endpoints.create_start("test_file_download", tenant_id=tenant)
-
-    # download the control file from MockS3
-
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE EXTENSION test_load");
-            # E psycopg2.errors.UndefinedFile: could not open extension control
-            # file
-            # "/home/alek/Desktop/neonX/pg_install/v14/share/postgresql/extension/test_load.control":
-            # No such file or directory
+            # cur.execute("CREATE EXTENSION test_load");
+            # TODO: we should see the test_ext extension here
+            other = cur.execute("SELECT * FROM pg_catalog.pg_tables;")
+            whatsup = cur.execute("select * from pg_available_extensions;")
+            with open("output.txt", "w") as f:
+                f.write(str(whatsup) + str(other))
+                # this is returning None????
 
     endpoint.stop()
     env.pageserver.http_client().tenant_detach(tenant)

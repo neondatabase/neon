@@ -671,6 +671,8 @@ class NeonEnvBuilder:
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
         self.remote_storage = LocalFsStorage(Path(self.repo_dir / "local_fs_remote_storage"))
 
+    # TODO: presumably we need a new method...
+    # because we are not the pageserver...
     def enable_mock_s3_remote_storage(self, bucket_name: str, force_enable: bool = True):
         """
         Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
