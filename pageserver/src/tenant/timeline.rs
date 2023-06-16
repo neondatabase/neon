@@ -3340,14 +3340,11 @@ impl From<anyhow::Error> for CompactionError {
 #[derive(serde::Serialize)]
 struct RecordedDuration(#[serde_as(as = "serde_with::DurationMicroSeconds")] Duration);
 
-#[serde_as]
-#[derive(Default, serde::Serialize)]
-#[serde(untagged)]
+#[derive(Default)]
 enum DurationRecorder {
     #[default]
-    #[serde(skip)]
     NotStarted,
-    Recorded(RecordedDuration, #[serde(skip)] tokio::time::Instant),
+    Recorded(RecordedDuration, tokio::time::Instant),
 }
 
 impl DurationRecorder {
@@ -3387,10 +3384,13 @@ struct CompactLevel0Phase1StatsBuilder {
     new_deltas_size: Option<u64>,
 }
 
+#[serde_as]
 #[derive(serde::Serialize)]
 struct CompactLevel0Phase1Stats {
     version: u64,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     tenant_id: TenantId,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
     timeline_id: TimelineId,
     first_read_lock_acquisition_micros: RecordedDuration,
     get_level0_deltas_plus_drop_lock_micros: RecordedDuration,
