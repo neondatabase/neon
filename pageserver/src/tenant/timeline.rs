@@ -691,12 +691,9 @@ impl Timeline {
     #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
     pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
         if self.current_state() == TimelineState::Creating {
-            debug!("timelines in Creating state are never written to");
-            assert!(
-                self.layers.read().await.open_layer.is_none(),
-                "would have nothing to flush anyways"
-            );
-            return Ok(());
+            // make a few additional sanity checks before panicking
+            assert!(self.layers.read().await.open_layer.is_none());
+            panic!("caller must prevent calls for timelines in Creating state")
         }
         self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait().await
@@ -704,10 +701,10 @@ impl Timeline {
 
     /// Outermost timeline compaction operation; downloads needed layers.
     pub async fn compact(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
-        if self.current_state() == TimelineState::Creating {
-            debug!("timelines is in Creating state");
-            return Ok(());
-        }
+        assert!(
+            !matches!(self.current_state(), TimelineState::Creating),
+            "caller must prevent calls for timelines in Creating state"
+        );
 
         const ROUNDS: usize = 2;
 

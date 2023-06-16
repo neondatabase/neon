@@ -1757,6 +1757,11 @@ impl Tenant {
         // execute on each timeline on the JoinSet, join after.
         let per_timeline = |timeline: Arc<Timeline>| {
             async move {
+                if let TimelineState::Creating = timeline.current_state() {
+                    debug!("timeline is Creating, no need to flush it");
+                    // TODO cancel creation? Or is that done by higher level shutdown code?
+                    return;
+                }
                 match timeline.freeze_and_flush().await {
                     Ok(()) => {}
                     Err(err) => {
@@ -2284,10 +2289,10 @@ impl Tenant {
         }
 
         let timelines_accessor = self.timelines.lock().unwrap();
-        let not_broken_timelines = timelines_accessor
-            .values()
-            .filter(|timeline| !timeline.is_broken());
-        for timeline in not_broken_timelines {
+        let timelines_to_stop = timelines_accessor.values().filter(|timeline| {
+            !timeline.is_broken() && !matches!(timeline.current_state(), TimelineState::Creating)
+        });
+        for timeline in timelines_to_stop {
             timeline.set_state(TimelineState::Stopping);
         }
         Ok(())
