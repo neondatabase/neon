@@ -223,8 +223,6 @@ pageserver_disconnect(void)
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 		connected = false;
-
-		prefetch_on_ps_disconnect();
 	}
 	if (pageserver_conn_wes != NULL)
 	{
@@ -240,8 +238,11 @@ pageserver_send(NeonRequest * request)
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
+	{
+		neon_log(LOG, "pageserver_send disconnect bad connection");
 		pageserver_disconnect();
-
+		prefetch_on_ps_disconnect();
+	}
 
 	req_buff = nm_pack_request(request);
 
@@ -274,7 +275,7 @@ pageserver_send(NeonRequest * request)
 	{
 		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 		pageserver_disconnect();
-		neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
+		neon_log(LOG, "pageserver_send disconnect because failed to send page request (try to reconnect): %s", msg);
 		pfree(msg);
 		pfree(req_buff.data);
 		return false;
@@ -324,17 +325,27 @@ pageserver_receive(void)
 		}
 		else if (rc == -1)
 		{
+			neon_log(ERROR, "pageserver_receive disconnect because call_PQgetCopyData returns -1: %s", pchomp(PQerrorMessage(pageserver_conn)));
 			pageserver_disconnect();
 			resp = NULL;
 		}
 		else if (rc == -2)
-			neon_log(ERROR, "could not read COPY data: %s", pchomp(PQerrorMessage(pageserver_conn)));
+		{
+			char* msg = pchomp(PQerrorMessage(pageserver_conn));
+			pageserver_disconnect();
+			neon_log(ERROR, "pageserver_receive disconnect because could not read COPY data: %s", msg);
+		}
 		else
-			neon_log(ERROR, "unexpected PQgetCopyData return value: %d", rc);
+		{
+			pageserver_disconnect();
+			neon_log(ERROR, "pageserver_receive disconnect because unexpected PQgetCopyData return value: %d", rc);
+		}
 	}
 	PG_CATCH();
 	{
+		neon_log(LOG, "pageserver_receive disconnect due to caught exception");
 		pageserver_disconnect();
+		prefetch_on_ps_disconnect();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -356,7 +367,7 @@ pageserver_flush(void)
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 			pageserver_disconnect();
-			neon_log(LOG, "failed to flush page requests: %s", msg);
+			neon_log(LOG, "pageserver_flush disconnect because failed to flush page requests: %s", msg);
 			pfree(msg);
 			return false;
 		}

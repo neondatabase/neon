@@ -498,6 +498,7 @@ resend_requests:
 			.forknum = slot->buftag.forkNum,
 			.blkno = slot->buftag.blockNum,
 		};
+		Assert(slot->status == PRFS_REQUESTED);
 		if (!page_server->send((NeonRequest *) &request))
 			goto resend_requests;
 	}
@@ -718,11 +719,12 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	MyPState->n_unused -= 1;
 	MyPState->ring_unused += 1;
 
-	if (!page_server->send((NeonRequest *) &request))
-		resend_prefetch_requests();
-
 	/* update slot state */
 	slot->status = PRFS_REQUESTED;
+
+
+	if (!page_server->send((NeonRequest *) &request))
+		resend_prefetch_requests();
 
 	prfh_insert(MyPState->prf_hash, slot, &found);
 	Assert(!found);
