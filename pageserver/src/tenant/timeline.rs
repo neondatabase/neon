@@ -15,6 +15,7 @@ use pageserver_api::models::{
     TimelineState,
 };
 use remote_storage::GenericRemoteStorage;
+use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
@@ -3335,6 +3336,130 @@ impl From<anyhow::Error> for CompactionError {
     }
 }
 
+#[serde_as]
+#[derive(serde::Serialize)]
+struct RecordedDuration(#[serde_as(as = "serde_with::DurationMicroSeconds")] Duration);
+
+#[serde_as]
+#[derive(Default, serde::Serialize)]
+#[serde(untagged)]
+enum DurationRecorder {
+    #[default]
+    #[serde(skip)]
+    NotStarted,
+    Recorded(RecordedDuration, #[serde(skip)] tokio::time::Instant),
+}
+
+impl DurationRecorder {
+    pub fn till_now(&self) -> DurationRecorder {
+        match self {
+            DurationRecorder::NotStarted => {
+                panic!("must only call on recorded measurements")
+            }
+            DurationRecorder::Recorded(_, ended) => {
+                let now = tokio::time::Instant::now();
+                DurationRecorder::Recorded(RecordedDuration(now - *ended), now)
+            }
+        }
+    }
+    pub fn into_recorded(self) -> Option<RecordedDuration> {
+        match self {
+            DurationRecorder::NotStarted => None,
+            DurationRecorder::Recorded(recorded, _) => Some(recorded),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CompactLevel0Phase1StatsBuilder {
+    version: Option<u64>,
+    tenant_id: Option<TenantId>,
+    timeline_id: Option<TimelineId>,
+    first_read_lock_acquisition_micros: DurationRecorder,
+    get_level0_deltas_plus_drop_lock_micros: DurationRecorder,
+    level0_deltas_count: Option<usize>,
+    time_spent_between_locks: DurationRecorder,
+    second_read_lock_acquisition_micros: DurationRecorder,
+    second_read_lock_held_micros: DurationRecorder,
+    sort_holes_micros: DurationRecorder,
+    write_layer_files_micros: DurationRecorder,
+    new_deltas_count: Option<usize>,
+    new_deltas_size: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct CompactLevel0Phase1Stats {
+    version: u64,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    first_read_lock_acquisition_micros: RecordedDuration,
+    get_level0_deltas_plus_drop_lock_micros: RecordedDuration,
+    level0_deltas_count: usize,
+    time_spent_between_locks: RecordedDuration,
+    second_read_lock_acquisition_micros: RecordedDuration,
+    second_read_lock_held_micros: RecordedDuration,
+    sort_holes_micros: RecordedDuration,
+    write_layer_files_micros: RecordedDuration,
+    new_deltas_count: usize,
+    new_deltas_size: u64,
+}
+
+impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
+    type Error = anyhow::Error;
+
+    fn try_from(value: CompactLevel0Phase1StatsBuilder) -> Result<Self, Self::Error> {
+        let CompactLevel0Phase1StatsBuilder {
+            version,
+            tenant_id,
+            timeline_id,
+            first_read_lock_acquisition_micros,
+            get_level0_deltas_plus_drop_lock_micros,
+            level0_deltas_count,
+            time_spent_between_locks,
+            second_read_lock_acquisition_micros,
+            second_read_lock_held_micros,
+            sort_holes_micros,
+            write_layer_files_micros,
+            new_deltas_count,
+            new_deltas_size,
+        } = value;
+        Ok(CompactLevel0Phase1Stats {
+            version: version.ok_or_else(|| anyhow::anyhow!("version not set"))?,
+            tenant_id: tenant_id.ok_or_else(|| anyhow::anyhow!("tenant_id not set"))?,
+            timeline_id: timeline_id.ok_or_else(|| anyhow::anyhow!("timeline_id not set"))?,
+            first_read_lock_acquisition_micros: first_read_lock_acquisition_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow::anyhow!("first_read_lock_acquisition_micros not set"))?,
+            get_level0_deltas_plus_drop_lock_micros: get_level0_deltas_plus_drop_lock_micros
+                .into_recorded()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("get_level0_deltas_plus_drop_lock_micros not set")
+                })?,
+            level0_deltas_count: level0_deltas_count
+                .ok_or_else(|| anyhow::anyhow!("level0_deltas_count not set"))?,
+            time_spent_between_locks: time_spent_between_locks
+                .into_recorded()
+                .ok_or_else(|| anyhow::anyhow!("time_spent_between_locks not set"))?,
+            second_read_lock_acquisition_micros: second_read_lock_acquisition_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow::anyhow!("second_read_lock_acquisition_micros not set"))?,
+            second_read_lock_held_micros: second_read_lock_held_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow::anyhow!("second_read_lock_held_micros not set"))?,
+            sort_holes_micros: sort_holes_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow::anyhow!("sort_holes_micros not set"))?,
+            write_layer_files_micros: write_layer_files_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow::anyhow!("write_layer_files_micros not set"))?,
+            new_deltas_count: new_deltas_count
+                .ok_or_else(|| anyhow::anyhow!("new_deltas_count not set"))?,
+            new_deltas_size: new_deltas_size
+                .ok_or_else(|| anyhow::anyhow!("new_deltas_size not set"))?,
+        })
+    }
+}
+
 impl Timeline {
     /// Level0 files first phase of compaction, explained in the [`compact_inner`] comment.
     ///
@@ -3347,9 +3472,23 @@ impl Timeline {
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
+        let mut stats = CompactLevel0Phase1StatsBuilder {
+            version: Some(1),
+            tenant_id: Some(self.tenant_id),
+            timeline_id: Some(self.timeline_id),
+            ..Default::default()
+        };
+
+        let begin = tokio::time::Instant::now();
         let layers = self.layers.read().await;
+        let now = tokio::time::Instant::now();
+        stats.first_read_lock_acquisition_micros =
+            DurationRecorder::Recorded(RecordedDuration(now - begin), now);
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
+        stats.level0_deltas_count = Some(level0_deltas.len());
+        stats.get_level0_deltas_plus_drop_lock_micros =
+            stats.first_read_lock_acquisition_micros.till_now();
 
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
@@ -3470,7 +3609,9 @@ impl Timeline {
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
+        stats.time_spent_between_locks = stats.get_level0_deltas_plus_drop_lock_micros.till_now();
         let layers = self.layers.read().await; // Is'n it better to hold original layers lock till here?
+        stats.second_read_lock_acquisition_micros = stats.time_spent_between_locks.till_now();
         let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
 
@@ -3504,9 +3645,11 @@ impl Timeline {
             prev = Some(next_key.next());
         }
         drop(layers);
+        stats.second_read_lock_held_micros = stats.second_read_lock_acquisition_micros.till_now();
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
         let mut next_hole = 0; // index of next hole in holes vector
+        stats.sort_holes_micros = stats.second_read_lock_held_micros.till_now();
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -3666,7 +3809,25 @@ impl Timeline {
             layer_paths.pop().unwrap();
         }
 
+        stats.write_layer_files_micros = stats.sort_holes_micros.till_now();
+        stats.new_deltas_count = Some(new_layers.len());
+        stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
+
         drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
+
+        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
+            .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
+        {
+            Ok(stats_json) => {
+                info!(
+                    stats_json = stats_json.as_str(),
+                    "compact_level0_phase1 stats available"
+                )
+            }
+            Err(e) => {
+                warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
+            }
+        }
 
         Ok(CompactLevel0Phase1Result {
             new_layers,
