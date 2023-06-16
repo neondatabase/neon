@@ -360,7 +360,7 @@ impl RemoteStorage for S3Bucket {
                 .context("Failed to list files in S3 bucket")?;
         
             for object in response.contents().unwrap_or_default() {
-                let object_path = object.key().unwrap();
+                let object_path = object.key().expect("response does not contain a key");
                 let remote_path = self.s3_object_to_relative_path(object_path);
                 all_files.push(remote_path);
             }
