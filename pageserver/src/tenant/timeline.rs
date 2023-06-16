@@ -3022,7 +3022,7 @@ impl Timeline {
         frozen_layer: &Arc<InMemoryLayer>,
     ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
         let span = tracing::info_span!("blocking");
-        let (new_delta, sz): (DeltaLayer, _) = tokio::task::spawn_blocking({
+        let new_delta: DeltaLayer = tokio::task::spawn_blocking({
             let _g = span.entered();
             let self_clone = Arc::clone(self);
             let frozen_layer = Arc::clone(frozen_layer);
@@ -3034,29 +3034,31 @@ impl Timeline {
                 // Sync it to disk.
                 //
                 // We must also fsync the timeline dir to ensure the directory entries for
-                // new layer files are durable
+                // new layer files are durable.
+                //
+                // NB: timeline dir must be synced _after_ the file contents are durable.
+                // So, two separate fsyncs are required, they mustn't be batched.
                 //
                 // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
-                // files to flush, it might be better to first write them all, and then fsync
-                // them all in parallel.
-
-                // First sync the delta layer. We still use par_fsync here to keep everything consistent. Feel free to replace
-                // this with a single fsync in future refactors.
-                par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
-                // Then sync the parent directory.
+                // files to flush, the fsync overhead can be reduces as follows:
+                // 1. write them all to temporary file names
+                // 2. fsync them
+                // 3. rename to the final name
+                // 4. fsync the parent directory.
+                // Note that (1),(2),(3) today happen inside write_to_disk().
+                par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
                 par_fsync::par_fsync(&[self_clone
                     .conf
                     .timeline_path(&self_clone.timeline_id, &self_clone.tenant_id)])
                 .context("fsync of timeline dir")?;
 
-                let sz = new_delta_path.metadata()?.len();
-
-                anyhow::Ok((new_delta, sz))
+                anyhow::Ok(new_delta)
             }
         })
         .await
         .context("spawn_blocking")??;
         let new_delta_name = new_delta.filename();
+        let sz = new_delta.desc.file_size;
 
         // Add it to the layer map
         let l = Arc::new(new_delta);
@@ -3070,9 +3072,8 @@ impl Timeline {
         batch_updates.insert_historic(l.layer_desc().clone(), l);
         batch_updates.flush();
 
-        // update the timeline's physical size
-        self.metrics.resident_physical_size_gauge.add(sz);
         // update metrics
+        self.metrics.resident_physical_size_gauge.add(sz);
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
@@ -3810,6 +3811,7 @@ impl Timeline {
     /// for example. The caller should hold `Tenant::gc_cs` lock to ensure
     /// that.
     ///
+    #[instrument(skip_all, fields(timline_id=%self.timeline_id))]
     pub(super) async fn update_gc_info(
         &self,
         retain_lsns: Vec<Lsn>,
