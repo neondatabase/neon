@@ -55,15 +55,14 @@ char	   *page_server_connstring;
 char	   *neon_auth_token;
 
 int			readahead_buffer_size = 128;
-int			max_reconnect_attempts = 60;
-int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
-int			max_flush_delay = 1;
-TimestampTz last_flush_time = 0;
+
+int			n_reconnect_attempts = 0;
+int			max_reconnect_attempts = 60;
 
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
-static void pageserver_flush(void);
+static bool pageserver_flush(void);
 
 static bool
 pageserver_connect(int elevel)
@@ -234,12 +233,10 @@ pageserver_disconnect(void)
 	}
 }
 
-static void
+static bool
 pageserver_send(NeonRequest * request)
 {
 	StringInfoData req_buff;
-	int n_reconnect_attempts = 0;
-	TimestampTz now;
 
 	/* If the connection was lost for some reason, reconnect */
 	if (connected && PQstatus(pageserver_conn) == CONNECTION_BAD)
@@ -255,62 +252,32 @@ pageserver_send(NeonRequest * request)
 	 * See https://github.com/neondatabase/neon/issues/1138
 	 * So try to reestablish connection in case of failure.
 	 */
-	while (true)
+	if (!connected)
 	{
-		if (!connected)
+		while (!pageserver_connect(n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
 		{
-			if (!pageserver_connect(n_reconnect_attempts < max_reconnect_attempts ? LOG : ERROR))
-			{
-				n_reconnect_attempts += 1;
-				pg_usleep(RECONNECT_INTERVAL_USEC);
-				continue;
-			}
+			n_reconnect_attempts += 1;
+			pg_usleep(RECONNECT_INTERVAL_USEC);
 		}
+		n_reconnect_attempts = 0;
+	}
 
-		/*
-		 * Send request.
-		 *
-		 * In principle, this could block if the output buffer is full, and we
-		 * should use async mode and check for interrupts while waiting. In
-		 * practice, our requests are small enough to always fit in the output and
-		 * TCP buffer.
-		 */
-		if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
-		{
-			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-			pageserver_disconnect();
-			neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
-			pfree(msg);
-			continue;
-		}
-		n_unflushed_requests++;
-
-		now = GetCurrentTimestamp();
-		if (now - last_flush_time > max_flush_delay
-			|| (flush_every_n_requests > 0 && n_unflushed_requests >= flush_every_n_requests))
-		{
-			if (PQflush(pageserver_conn))
-			{
-				char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
-				pageserver_disconnect();
-				if (n_unflushed_requests == 1)
-				{
-					/* only current request is unflushed: we can try to resend it */
-					neon_log(LOG, "failed to flush page requests (try to reconnect): %s", msg);
-					n_unflushed_requests = 0;
-					pfree(msg);
-					continue;
-				}
-				else
-				{
-					n_unflushed_requests = 0;
-					neon_log(ERROR, "failed to flush page requests: %s", msg);
-				}
-			}
-			n_unflushed_requests = 0;
-			last_flush_time = now;
-		}
-		break;
+	/*
+	 * Send request.
+	 *
+	 * In principle, this could block if the output buffer is full, and we
+	 * should use async mode and check for interrupts while waiting. In
+	 * practice, our requests are small enough to always fit in the output and
+	 * TCP buffer.
+	 */
+	if (PQputCopyData(pageserver_conn, req_buff.data, req_buff.len) <= 0)
+	{
+		char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
+		pageserver_disconnect();
+		neon_log(LOG, "failed to send page request (try to reconnect): %s", msg);
+		pfree(msg);
+		pfree(req_buff.data);
+		return false;
 	}
 
 	pfree(req_buff.data);
@@ -322,6 +289,7 @@ pageserver_send(NeonRequest * request)
 		neon_log(PageStoreTrace, "sent request: %s", msg);
 		pfree(msg);
 	}
+	return true;
 }
 
 static NeonResponse *
@@ -375,24 +343,26 @@ pageserver_receive(void)
 }
 
 
-static void
+static bool
 pageserver_flush(void)
 {
 	if (!connected)
 	{
 		neon_log(WARNING, "Tried to flush while disconnected");
+		return false;
 	}
-	else if (n_unflushed_requests != 0)
+	else
 	{
 		if (PQflush(pageserver_conn))
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
 			pageserver_disconnect();
-			neon_log(ERROR, "failed to flush page requests: %s", msg);
+			neon_log(LOG, "failed to flush page requests: %s", msg);
+			pfree(msg);
+			return false;
 		}
-		n_unflushed_requests = 0;
-		last_flush_time = GetCurrentTimestamp();
 	}
+	return true;
 }
 
 page_server_api api = {
@@ -457,14 +427,6 @@ pg_init_libpagestore(void)
 							8, -1, INT_MAX,
 							PGC_USERSET,
 							0,	/* no flags required */
-							NULL, NULL, NULL);
-	DefineCustomIntVariable("neon.max_flush_delay",
-							"Maximal delay of flushing requests",
-							NULL,
-							&max_flush_delay,
-							1, 0, INT_MAX,
-							PGC_USERSET,
-							GUC_UNIT_S,
 							NULL, NULL, NULL);
 	DefineCustomIntVariable("neon.max_reconnect_attempts",
 							"Maximal attempts to reconnect to pages server (with 1 second timeout)",
