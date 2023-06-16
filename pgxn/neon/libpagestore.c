@@ -325,7 +325,7 @@ pageserver_receive(void)
 		}
 		else if (rc == -1)
 		{
-			neon_log(ERROR, "pageserver_receive disconnect because call_PQgetCopyData returns -1: %s", pchomp(PQerrorMessage(pageserver_conn)));
+			neon_log(LOG, "pageserver_receive disconnect because call_PQgetCopyData returns -1: %s", pchomp(PQerrorMessage(pageserver_conn)));
 			pageserver_disconnect();
 			resp = NULL;
 		}
