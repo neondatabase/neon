@@ -347,11 +347,13 @@ impl RemoteStorage for S3Bucket {
         Ok(document_keys)
     }
 
+    /// See the doc for `RemoteStorage::list_files`
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         let folder_name = folder
             .map(|p| self.relative_path_to_s3_object(p))
             .or_else(|| self.prefix_in_bucket.clone());
 
+        // AWS may need to break the response into several parts
         let mut continuation_token = None;
         let mut all_files = vec![];
         loop {

@@ -132,6 +132,7 @@ impl RemoteStorage for LocalFs {
         Ok(prefixes)
     }
 
+    // TODO: this has slightly different behavior than the aws function because aws has flat namespace
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         let full_path = match folder {
             Some(folder) => folder.with_base(&self.storage_root),

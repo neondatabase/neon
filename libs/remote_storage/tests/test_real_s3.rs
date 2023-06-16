@@ -301,12 +301,15 @@ impl AsyncTestContext for MaybeEnabledS3WithTestBlobs {
     }
 }
 
+// NOTE: the setups for the list_prefixes test and the list_files test are very similar
+// However, they are not idential. The list_prefixes function is concerned with listing prefixes,
+// whereas the list_files function is concerned with listing files.
+// See `RemoteStorage::list_files` documentation for more details
 enum MaybeEnabledS3WithSimpleTestBlobs {
     Enabled(S3WithSimpleTestBlobs),
     Disabled,
     UploadsFailed(anyhow::Error, S3WithSimpleTestBlobs),
 }
-
 struct S3WithSimpleTestBlobs {
     enabled: EnabledS3,
     remote_blobs: HashSet<RemotePath>,
@@ -475,6 +478,7 @@ async fn cleanup(client: &Arc<GenericRemoteStorage>, objects_to_delete: HashSet<
     }
 }
 
+// Uploads files `folder{j}/blob{i}.txt`. See test description for more details.
 async fn upload_simple_s3_data(
     client: &Arc<GenericRemoteStorage>,
     upload_tasks_count: usize,
