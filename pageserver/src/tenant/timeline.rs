@@ -2947,7 +2947,6 @@ impl Timeline {
         // files instead. This is possible as long as *all* the data imported into the
         // repository have the same LSN.
         let lsn_range = frozen_layer.get_lsn_range();
-        debug!("flushing frozen layer with LSN range {:?}", lsn_range);
         let layer_paths_to_upload =
             if lsn_range.start == self.initdb_lsn && lsn_range.end == Lsn(self.initdb_lsn.0 + 1) {
                 #[cfg(test)]
