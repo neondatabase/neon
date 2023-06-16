@@ -15,7 +15,11 @@ from fixtures.neon_fixtures import (
     PortDistributor,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
+    wait_for_last_record_lsn,
+    wait_for_upload,
+)
 from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn
 from pytest import FixtureRequest
@@ -417,7 +421,7 @@ def check_neon_works(
     )
 
     shutil.rmtree(repo_dir / "local_fs_remote_storage")
-    pageserver_http.timeline_delete(tenant_id, timeline_id)
+    timeline_delete_wait_completed(pageserver_http, tenant_id, timeline_id)
     pageserver_http.timeline_create(pg_version, tenant_id, timeline_id)
     pg_bin.run(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]

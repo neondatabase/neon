@@ -20,7 +20,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
-    assert_timeline_detail_404,
+    timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
@@ -597,14 +597,11 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     env.pageserver.allowed_errors.append(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
     )
-    client.timeline_delete(tenant_id, timeline_id)
 
-    env.pageserver.allowed_errors.append(f".*Timeline {tenant_id}/{timeline_id} was not found.*")
     env.pageserver.allowed_errors.append(
         ".*files not bound to index_file.json, proceeding with their deletion.*"
     )
-
-    wait_until(2, 0.5, lambda: assert_timeline_detail_404(client, tenant_id, timeline_id))
+    timeline_delete_wait_completed(client, tenant_id, timeline_id)
 
     assert not timeline_path.exists()
 
