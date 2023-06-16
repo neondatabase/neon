@@ -94,17 +94,17 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
     ) -> Result<Vec<RemotePath>, DownloadError>;
 
-    /// Lists all files in directory
-    /// Note: this is slightly different than list_prefixes,
-    /// because it is for listing files instead of for listing
-    /// names sharing common prefixes.
+    /// Lists all files in directory "recursively" 
+    /// (not really recursively, because AWS has a flat namespace)
+    /// Note: This is subtely different than list_prefixes,
+    /// because it is for listing files instead of listing
+    /// names sharing common prefixes. 
     /// For example,
     /// list_files("foo/bar") = ["foo/bar/cat123.txt",
-    /// "foo/bar/cat567.txt", "foo/bar/dog123", "foo/bar/dog456"]
+    /// "foo/bar/cat567.txt", "foo/bar/dog123.txt", "foo/bar/dog456.txt"]
     /// whereas,
     /// list_prefixes("foo/bar/") = ["cat", "dog"]
-    ///
-    /// Also note that this does not filter out "folders"
+    /// See `test_real_s3.rs` for more details.
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
