@@ -481,7 +481,7 @@ prefetch_cleanup_trailing_unused(void)
  * In case of pageserver reconnection we need to resend all in-flight prefetch requests
  */
 static void
-resend_refetch_requests(void)
+resend_prefetch_requests(void)
 {
 resend_requests:
 	for (int n_requests_inflight = MyPState->n_requests_inflight; n_requests_inflight != 0; n_requests_inflight--)
