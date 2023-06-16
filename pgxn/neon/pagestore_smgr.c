@@ -160,6 +160,7 @@ typedef enum PrefetchStatus {
 typedef struct PrefetchRequest {
 	BufferTag	buftag; /* must be first entry in the struct */
 	XLogRecPtr	effective_request_lsn;
+	XLogRecPtr  request_lsn;
 	NeonResponse *response; /* may be null */
 	PrefetchStatus status;
 	bool        latest;
@@ -315,6 +316,7 @@ compact_prefetch_buffers(void)
 		target_slot->status = source_slot->status;
 		target_slot->response = source_slot->response;
 		target_slot->effective_request_lsn = source_slot->effective_request_lsn;
+		target_slot->request_lsn = source_slot->request_lsn;
 		target_slot->latest = source_slot->latest;
 		target_slot->my_ring_index = empty_ring_index;
 
@@ -332,6 +334,7 @@ compact_prefetch_buffers(void)
 		source_slot->response = NULL;
 		source_slot->my_ring_index = 0;
 		source_slot->effective_request_lsn = 0;
+		source_slot->request_lsn = 0;
 		source_slot->latest = 0;
 
 		/* update bookkeeping */
@@ -490,7 +493,7 @@ resend_requests:
 		NeonGetPageRequest request = {
 			.req.tag = T_NeonGetPageRequest,
 			.req.latest = slot->latest,
-			.req.lsn = slot->effective_request_lsn,
+			.req.lsn = slot->request_lsn,
 			.rnode = slot->buftag.rnode,
 			.forknum = slot->buftag.forkNum,
 			.blkno = slot->buftag.blockNum,
@@ -671,6 +674,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		request.req.lsn = *force_lsn;
 		request.req.latest = *force_latest;
 		slot->effective_request_lsn = *force_lsn;
+		slot->request_lsn = *force_lsn;
 		slot->latest =  *force_latest;
 	}
 	else
@@ -702,6 +706,7 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		request.req.lsn = lsn;
 		prefetch_lsn = Max(prefetch_lsn, lsn);
 		slot->effective_request_lsn = prefetch_lsn;
+		slot->request_lsn = lsn;
 		slot->latest = false;
 	}
 
@@ -892,9 +897,7 @@ page_server_request(void const *req)
 {
 	NeonResponse* resp;
 	do {
-		do {
-			while (!page_server->send((NeonRequest *) req));
-		} while (!page_server->flush());
+		while (!page_server->send((NeonRequest *) req) || !page_server->flush());
 		MyPState->ring_flush = MyPState->ring_unused;
 		consume_prefetch_responses();
 		resp = page_server->receive();

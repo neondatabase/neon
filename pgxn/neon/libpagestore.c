@@ -349,7 +349,6 @@ pageserver_flush(void)
 	if (!connected)
 	{
 		neon_log(WARNING, "Tried to flush while disconnected");
-		return false;
 	}
 	else
 	{
