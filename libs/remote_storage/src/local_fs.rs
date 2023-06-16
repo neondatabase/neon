@@ -158,8 +158,7 @@ impl RemoteStorage for LocalFs {
             while let Some(entry) = entries.next_entry().await? {
                 let file_name: PathBuf = entry.file_name().into();
                 let full_file_name = cur_folder.clone().join(&file_name);
-                let file_remote_path =
-                    self.local_file_to_relative_path(full_file_name.clone().into());
+                let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
                 files.push(file_remote_path.clone());
                 if full_file_name.is_dir() {
                     directory_queue.push(full_file_name);

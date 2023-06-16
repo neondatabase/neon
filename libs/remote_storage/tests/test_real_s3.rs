@@ -134,8 +134,7 @@ async fn s3_list_files_works(ctx: &mut MaybeEnabledS3WithSimpleTestBlobs) -> any
         .map(|x| RemotePath::new(Path::new(x)).expect("must be valid name"))
         .collect();
     assert_eq!(
-        nested_remote_files.clone(),
-        trim_remote_blobs,
+        nested_remote_files, trim_remote_blobs,
         "remote storage list_files on subdirrectory mismatches with the uploads."
     );
     Ok(())
