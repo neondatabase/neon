@@ -59,6 +59,13 @@ fn main() -> Result<()> {
 
     let matches = cli().get_matches();
 
+    let remote_ext_bucket = *matches
+        .get_one::<String>("remote-extension-bucket")
+        .expect("remote-extension bucket is required");
+    let remote_ext_region = *matches
+        .get_one::<String>("remote-extension-region")
+        .expect("remote-extension region is required");
+
     let http_port = *matches
         .get_one::<u16>("http-port")
         .expect("http-port is required");
@@ -346,10 +353,16 @@ fn cli() -> clap::Command {
                 .value_name("CONTROL_PLANE_API_BASE_URI"),
         )
         .arg(
-            Arg::new("remote-ext-config")
-                .short('r')
-                .long("remote-ext-config")
-                .value_name("REMOTE_EXT_CONFIG"),
+            Arg::new("remote-ext-bucket")
+                .short("u")
+                .long("remote-ext-bucket")
+                .value_name("REMOTE_EXT_BUCKET"),
+        )
+        .arg(
+            Arg::new("remote-ext-region")
+                .short("r")
+                .long("remote-ext-region")
+                .value_name("REMOTE_EXT_REGION"),
         )
 }
 
