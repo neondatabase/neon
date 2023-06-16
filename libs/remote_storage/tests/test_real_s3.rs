@@ -371,7 +371,7 @@ fn create_s3_client(
     let random_prefix_part = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("random s3 test prefix part calculation")?
-        .as_millis();
+        .as_nanos();
     let remote_storage_config = RemoteStorageConfig {
         max_concurrent_syncs: NonZeroUsize::new(100).unwrap(),
         max_sync_errors: NonZeroU32::new(5).unwrap(),
