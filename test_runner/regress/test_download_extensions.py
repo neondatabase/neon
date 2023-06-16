@@ -35,7 +35,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    with open("loggg", "w") as f:
+    with open("alek/env.txt", "w") as f:
         f.write(str(env.__dict__))
 
     TEST_EXT_PATH = "v15/share/extension/test_ext.control"
@@ -45,7 +45,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
 
     # 4. Upload test_ext.control file to the bucket
     # Later this will be done by CI/CD
-    with open("test_ext.control", "rb") as data:
+    with open("alek/test_ext.control", "rb") as data:
         neon_env_builder.remote_storage_client.upload_fileobj(
             data, neon_env_builder.remote_storage.bucket_name, TEST_EXT_PATH
         )
@@ -55,10 +55,9 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     resp = neon_env_builder.remote_storage_client.get_object(
         Bucket=neon_env_builder.remote_storage.bucket_name, Key=TEST_EXT_PATH
     )
-    content_length = resp["ResponseMetadata"]["HTTPHeaders"]["content-length"]
-    # TODO: this is not the correct path, nor the correct data to write
-    with open("pg_install/v15/lib/test_ext.control", "w") as f:
-        f.write(str(resp))
+    response = resp["Body"]
+    with open("pg_install/v15/lib/test_ext.control", "wb") as f:
+        f.write(response.read())
 
     # env.neon_cli
 
@@ -72,7 +71,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
             # TODO: we should see the test_ext extension here
             other = cur.execute("SELECT * FROM pg_catalog.pg_tables;")
             whatsup = cur.execute("select * from pg_available_extensions;")
-            with open("output.txt", "w") as f:
+            with open("alek/output.txt", "w") as f:
                 f.write(str(whatsup) + str(other))
                 # this is returning None????
 
