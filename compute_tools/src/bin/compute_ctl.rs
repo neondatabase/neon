@@ -345,6 +345,12 @@ fn cli() -> clap::Command {
                 .long("control-plane-uri")
                 .value_name("CONTROL_PLANE_API_BASE_URI"),
         )
+        .arg(
+            Arg::new("remote-ext-config")
+                .short('r')
+                .long("remote-ext-config")
+                .value_name("REMOTE_EXT_CONFIG"),
+        )
 }
 
 #[test]
