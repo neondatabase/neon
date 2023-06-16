@@ -160,10 +160,8 @@ typedef enum PrefetchStatus {
 typedef struct PrefetchRequest {
 	BufferTag	buftag; /* must be first entry in the struct */
 	XLogRecPtr	effective_request_lsn;
-	XLogRecPtr  request_lsn;
 	NeonResponse *response; /* may be null */
 	PrefetchStatus status;
-	bool        latest;
 	uint64		my_ring_index;
 } PrefetchRequest;
 
@@ -316,8 +314,6 @@ compact_prefetch_buffers(void)
 		target_slot->status = source_slot->status;
 		target_slot->response = source_slot->response;
 		target_slot->effective_request_lsn = source_slot->effective_request_lsn;
-		target_slot->request_lsn = source_slot->request_lsn;
-		target_slot->latest = source_slot->latest;
 		target_slot->my_ring_index = empty_ring_index;
 
 		prfh_delete(MyPState->prf_hash, source_slot);
@@ -334,8 +330,6 @@ compact_prefetch_buffers(void)
 		source_slot->response = NULL;
 		source_slot->my_ring_index = 0;
 		source_slot->effective_request_lsn = 0;
-		source_slot->request_lsn = 0;
-		source_slot->latest = 0;
 
 		/* update bookkeeping */
 		n_moved++;
@@ -481,31 +475,6 @@ prefetch_cleanup_trailing_unused(void)
 }
 
 /*
- * In case of pageserver reconnection we need to resend all in-flight prefetch requests
- */
-static void
-resend_prefetch_requests(void)
-{
-resend_requests:
-	for (int n_requests_inflight = MyPState->n_requests_inflight; n_requests_inflight != 0; n_requests_inflight--)
-	{
-		PrefetchRequest *slot = &MyPState->prf_buffer[((MyPState->ring_unused - n_requests_inflight) % readahead_buffer_size)];
-		NeonGetPageRequest request = {
-			.req.tag = T_NeonGetPageRequest,
-			.req.latest = slot->latest,
-			.req.lsn = slot->request_lsn,
-			.rnode = slot->buftag.rnode,
-			.forknum = slot->buftag.forkNum,
-			.blkno = slot->buftag.blockNum,
-		};
-		Assert(slot->status == PRFS_REQUESTED);
-		if (!page_server->send((NeonRequest *) &request))
-			goto resend_requests;
-	}
-}
-
-
-/*
  * Wait for slot of ring_index to have received its response.
  * The caller is responsible for making sure the request buffer is flushed.
  * 
@@ -520,8 +489,8 @@ prefetch_wait_for(uint64 ring_index)
 	if (MyPState->ring_flush <= ring_index &&
 		MyPState->ring_unused > MyPState->ring_flush)
 	{
-		while (!page_server->flush())
-			resend_prefetch_requests();
+		if (!page_server->flush())
+			return false;
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 
@@ -675,8 +644,6 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		request.req.lsn = *force_lsn;
 		request.req.latest = *force_latest;
 		slot->effective_request_lsn = *force_lsn;
-		slot->request_lsn = *force_lsn;
-		slot->latest =  *force_latest;
 	}
 	else
 	{
@@ -700,19 +667,19 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 		 * smaller than the current WAL insert/redo pointer, which is already
 		 * larger than this prefetch_lsn. So in any case, that would
 		 * invalidate this cache.
-		 * 
+		 *
 		 * The best LSN to use for effective_request_lsn would be
 		 * XLogCtl->Insert.RedoRecPtr, but that's expensive to access.
 		 */
 		request.req.lsn = lsn;
 		prefetch_lsn = Max(prefetch_lsn, lsn);
 		slot->effective_request_lsn = prefetch_lsn;
-		slot->request_lsn = lsn;
-		slot->latest = false;
 	}
 
 	Assert(slot->response == NULL);
 	Assert(slot->my_ring_index == MyPState->ring_unused);
+
+	while (!page_server->send((NeonRequest *) &request));
 
 	/* update prefetch state */
 	MyPState->n_requests_inflight += 1;
@@ -722,9 +689,6 @@ prefetch_do_request(PrefetchRequest *slot, bool *force_latest, XLogRecPtr *force
 	/* update slot state */
 	slot->status = PRFS_REQUESTED;
 
-
-	if (!page_server->send((NeonRequest *) &request))
-		resend_prefetch_requests();
 
 	prfh_insert(MyPState->prf_hash, slot, &found);
 	Assert(!found);
@@ -782,6 +746,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 				}
+
 			}
 			/* if we don't want the latest version, only accept requests with the exact same LSN */
 			else
@@ -795,20 +760,23 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 			}
 		}
 
-		/*
-		 * We received a prefetch for a page that was recently read and
-		 * removed from the buffers. Remove that request from the buffers.
-		 */
-		else if (slot->status == PRFS_TAG_REMAINS)
+		if (entry != NULL)
 		{
-			prefetch_set_unused(ring_index);
-			entry = NULL;
-		}
-		else
-		{
-			/* The buffered request is good enough, return that index */
-			pgBufferUsage.prefetch.duplicates++;
-			return ring_index;
+			/*
+			 * We received a prefetch for a page that was recently read and
+			 * removed from the buffers. Remove that request from the buffers.
+			 */
+			if (slot->status == PRFS_TAG_REMAINS)
+			{
+				prefetch_set_unused(ring_index);
+				entry = NULL;
+			}
+			else
+			{
+				/* The buffered request is good enough, return that index */
+				pgBufferUsage.prefetch.duplicates++;
+				return ring_index;
+			}
 		}
 	}
 
@@ -886,8 +854,7 @@ prefetch_register_buffer(BufferTag tag, bool *force_latest, XLogRecPtr *force_ls
 	if (flush_every_n_requests > 0 &&
 		MyPState->ring_unused - MyPState->ring_flush >= flush_every_n_requests)
 	{
-		while (!page_server->flush())
-			resend_prefetch_requests();
+		page_server->flush();
 		MyPState->ring_flush = MyPState->ring_unused;
 	}
 

@@ -223,6 +223,8 @@ pageserver_disconnect(void)
 		PQfinish(pageserver_conn);
 		pageserver_conn = NULL;
 		connected = false;
+
+		prefetch_on_ps_disconnect();
 	}
 	if (pageserver_conn_wes != NULL)
 	{
@@ -241,7 +243,6 @@ pageserver_send(NeonRequest * request)
 	{
 		neon_log(LOG, "pageserver_send disconnect bad connection");
 		pageserver_disconnect();
-		prefetch_on_ps_disconnect();
 	}
 
 	req_buff = nm_pack_request(request);
@@ -345,7 +346,6 @@ pageserver_receive(void)
 	{
 		neon_log(LOG, "pageserver_receive disconnect due to caught exception");
 		pageserver_disconnect();
-		prefetch_on_ps_disconnect();
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -442,7 +442,7 @@ pg_init_libpagestore(void)
 							"Maximal attempts to reconnect to pages server (with 1 second timeout)",
 							NULL,
 							&max_reconnect_attempts,
-							60, 0, INT_MAX,
+							10, 0, INT_MAX,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
