@@ -1,19 +1,19 @@
+use anyhow::{self, Context};
 use remote_storage::*;
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::str;
 use std::{fs, thread};
+use tokio::io::AsyncReadExt;
 use toml_edit;
-use BuffWriter;
-
-use anyhow::Context;
 use tracing::info;
 
 pub fn download_file(mut stream: TcpStream) -> anyhow::Result<()> {
     let mut buf = [0; 512];
 
-    println!("ALEK: calling download file");
+    dbg!("ALEK: calling download file");
     // fs.write("world.txt", "hello")?;
 
     stream.read(&mut buf).expect("Error reading from stream");
@@ -79,7 +79,7 @@ pub enum ExtensionType {
 /*
 separate stroage and compute
 storage: pageserver stores pages, accepts WAL. communicates with S3.
-compute: postgres, runs in kubernetes/ VM, started by compute_ctl. rust service. accepts some spec. 
+compute: postgres, runs in kubernetes/ VM, started by compute_ctl. rust service. accepts some spec.
 
 pass config to compute_ctl
  */
@@ -103,18 +103,18 @@ pub async fn download_extension(
                 if remote_from_path.extension() == Some("control") {
                     // NOTE: if you run this, it will actually write stuff to your postgress directory
                     // only run if you are ok with that. TODO: delete this comment
-                    download_helper(&remote_storage, &remote_from_path, &sharedir)?;
+                    download_helper(&remote_storage, &remote_from_path, &sharedir).await?;
                 }
             }
         }
         ExtensionType::Tenant(tenant_id) => {
             // 2. After we have spec, before project start
             // Download control files from s3-bucket/[tenant-id]/*.control to SHAREDIR/extension
-            let folder = RemotePath::new(Path::new(format!("{tenant_id}")))?;
+            let folder = RemotePath::new(Path::new(&format!("{tenant_id}")))?;
             let from_paths = remote_storage.list_files(Some(&folder)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
-                    download_helper(&remote_storage, &remote_from_path, &sharedir)?;
+                    download_helper(&remote_storage, &remote_from_path, &sharedir).await?;
                 }
             }
         }
@@ -123,7 +123,7 @@ pub async fn download_extension(
             // Download preload_shared_libraries from s3-bucket/public/[library-name].control into LIBDIR/
             let from_path = format!("neon-dev-extensions/public/{library_name}.control");
             let remote_from_path = RemotePath::new(Path::new(&from_path))?;
-            download_helper(&remote_storage, &remote_from_path, &libdir)?;
+            download_helper(&remote_storage, &remote_from_path, &libdir).await?;
         }
     }
     Ok(())

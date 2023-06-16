@@ -57,8 +57,10 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     )
     content_length = resp["ResponseMetadata"]["HTTPHeaders"]["content-length"]
     # TODO: this is not the correct path, nor the correct data to write
-    with open("alek.txt", "w") as f:
+    with open("pg_install/v15/lib/test_ext.control", "w") as f:
         f.write(str(resp))
+
+    # env.neon_cli
 
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
