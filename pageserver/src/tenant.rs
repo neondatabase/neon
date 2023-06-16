@@ -28,7 +28,6 @@ use std::cmp::min;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -53,12 +52,13 @@ use self::timeline::EvictionTaskTenantState;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::import_datadir;
-use crate::is_uninit_mark;
 use crate::metrics::{remove_tenant_metrics, TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC};
 use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::TenantConfOpt;
+use crate::tenant::init_dir::Decision;
+use crate::tenant::init_dir::TimelinesToLoad;
 use crate::tenant::metadata::load_metadata;
 use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
@@ -94,6 +94,7 @@ mod remote_timeline_client;
 pub mod storage_layer;
 
 pub mod config;
+mod init_dir;
 pub mod mgr;
 pub mod tasks;
 pub mod upload_queue;
@@ -962,8 +963,6 @@ impl Tenant {
 
         utils::failpoint_sleep_millis_async!("before-loading-tenant");
 
-        // TODO split this into two functions, scan and actual load
-
         // Load in-memory state to reflect the local files on disk
         //
         // Scan the directory, peek into the metadata file of each timeline, and
@@ -974,91 +973,42 @@ impl Tenant {
 
         let sorted_timelines: Vec<(_, _)> = tokio::task::spawn_blocking(move || {
             let _g = span.entered();
-            let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
             let timelines_dir = conf.timelines_path(&tenant_id);
 
-            for entry in
-                std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
+            let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
+            for (timeline_id, decision) in
+                TimelinesToLoad::try_from(&*timelines_dir)?.into_entries()
             {
-                let entry = entry.context("read timeline dir entry")?;
-                let timeline_dir = entry.path();
-
-                if crate::is_temporary(&timeline_dir) {
-                    info!(
-                        "Found temporary timeline directory, removing: {}",
-                        timeline_dir.display()
-                    );
-                    if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
-                        error!(
-                            "Failed to remove temporary directory '{}': {:?}",
-                            timeline_dir.display(),
-                            e
-                        );
-                    }
-                } else if is_uninit_mark(&timeline_dir) {
-                    let timeline_uninit_mark_file = &timeline_dir;
-                    info!(
-                        "Found an uninit mark file {}, removing the timeline and its uninit mark",
-                        timeline_uninit_mark_file.display()
-                    );
-                    let timeline_id = timeline_uninit_mark_file
-                        .file_stem()
-                        .and_then(OsStr::to_str)
-                        .unwrap_or_default()
-                        .parse::<TimelineId>()
-                        .with_context(|| {
-                            format!(
-                            "Could not parse timeline id out of the timeline uninit mark name {}",
-                            timeline_uninit_mark_file.display()
-                        )
-                        })?;
-                    let timeline_dir = conf.timeline_path(&timeline_id, &tenant_id);
-                    if let Err(e) =
-                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
-                    {
-                        error!("Failed to clean up uninit marked timeline: {e:?}");
-                    }
-                } else {
-                    let timeline_id = timeline_dir
-                        .file_name()
-                        .and_then(OsStr::to_str)
-                        .unwrap_or_default()
-                        .parse::<TimelineId>()
-                        .with_context(|| {
-                            format!(
-                                "Could not parse timeline id out of the timeline dir name {}",
-                                timeline_dir.display()
-                            )
-                        })?;
-                    let timeline_uninit_mark_file =
-                        conf.timeline_uninit_mark_file_path(tenant_id, timeline_id);
-                    if timeline_uninit_mark_file.exists() {
-                        info!(
-                            %timeline_id,
-                            "Found an uninit mark file, removing the timeline and its uninit mark",
-                        );
-                        if let Err(e) = remove_timeline_and_uninit_mark(
-                            &timeline_dir,
-                            &timeline_uninit_mark_file,
-                        ) {
-                            error!("Failed to clean up uninit marked timeline: {e:?}");
-                        }
-                        continue;
-                    }
-
-                    let file_name = entry.file_name();
-                    if let Ok(timeline_id) =
-                        file_name.to_str().unwrap_or_default().parse::<TimelineId>()
-                    {
+                match decision {
+                    Decision::Load => {
                         let metadata = load_metadata(conf, timeline_id, tenant_id)
                             .context("failed to load metadata")?;
                         timelines_to_load.insert(timeline_id, metadata);
-                    } else {
-                        // A file or directory that doesn't look like a timeline ID
-                        warn!(
-                            "unexpected file or directory in timelines directory: {}",
-                            file_name.to_string_lossy()
+                    }
+                    Decision::RemoveTemporary(temporary) => {
+                        info!(
+                            "Found temporary timeline directory, removing: {}",
+                            temporary.display()
                         );
+                        if let Err(e) = std::fs::remove_dir_all(&temporary) {
+                            error!(
+                                "Failed to remove temporary directory '{}': {:?}",
+                                temporary.display(),
+                                e
+                            );
+                        }
+                    }
+                    Decision::RemoveUninitMark(uninit_mark_path) => {
+                        info!(
+                            "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                            uninit_mark_path.display()
+                        );
+                        let timeline_dir = conf.timeline_path(&timeline_id, &tenant_id);
+                        if let Err(e) =
+                            remove_timeline_and_uninit_mark(&timeline_dir, &uninit_mark_path)
+                        {
+                            error!("Failed to clean up uninit marked timeline: {e:?}");
+                        }
                     }
                 }
             }
