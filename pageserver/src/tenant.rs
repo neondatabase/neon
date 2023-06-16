@@ -30,7 +30,6 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::fs::DirEntry;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -1031,89 +1030,95 @@ impl Tenant {
         let conf = self.conf;
         let span = info_span!("blocking");
 
-        let myself = Arc::clone(self);
         let sorted_timelines: Vec<(_, _)> = tokio::task::spawn_blocking(move || {
             let _g = span.entered();
+            let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
             let timelines_dir = conf.timelines_path(&tenant_id);
 
-            let entries: Vec<DirEntry> = loop {
-                let mut entries = Vec::new();
-                for entry in std::fs::read_dir(&timelines_dir).with_context(|| {
-                    format!(
-                        "Failed to list timelines directory for tenant {}",
-                        myself.tenant_id
-                    )
-                })? {
-                    let entry = entry.with_context(|| {
-                        format!("cannot read timeline dir entry for {}", myself.tenant_id)
-                    })?;
-                    entries.push(entry);
-                }
+            for entry in
+                std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
+            {
+                let entry = entry.context("read timeline dir entry")?;
+                let timeline_dir = entry.path();
 
-                let mut removed_unint_timeline = false;
-                for entry in &entries {
-                    let timeline_dir = entry.path();
-                    if crate::is_temporary(&timeline_dir) {
-                        info!(
-                            "Found temporary timeline directory, removing: {}",
-                            timeline_dir.display()
+                if crate::is_temporary(&timeline_dir) {
+                    info!(
+                        "Found temporary timeline directory, removing: {}",
+                        timeline_dir.display()
+                    );
+                    if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
+                        error!(
+                            "Failed to remove temporary directory '{}': {:?}",
+                            timeline_dir.display(),
+                            e
                         );
-                        if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
-                            error!(
-                                "Failed to remove temporary directory '{}': {:?}",
-                                timeline_dir.display(),
-                                e
-                            );
-                        }
-                    } else if is_uninit_mark(&timeline_dir) {
-                        let timeline_uninit_mark_file = &timeline_dir;
-                        info!(
-                            "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                    }
+                } else if is_uninit_mark(&timeline_dir) {
+                    let timeline_uninit_mark_file = &timeline_dir;
+                    info!(
+                        "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                        timeline_uninit_mark_file.display()
+                    );
+                    let timeline_id = timeline_uninit_mark_file
+                        .file_stem()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                            "Could not parse timeline id out of the timeline uninit mark name {}",
                             timeline_uninit_mark_file.display()
+                        )
+                        })?;
+                    let timeline_dir = conf.timeline_path(&timeline_id, &tenant_id);
+                    if let Err(e) =
+                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
+                    {
+                        error!("Failed to clean up uninit marked timeline: {e:?}");
+                    }
+                } else {
+                    let timeline_id = timeline_dir
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or_default()
+                        .parse::<TimelineId>()
+                        .with_context(|| {
+                            format!(
+                                "Could not parse timeline id out of the timeline dir name {}",
+                                timeline_dir.display()
+                            )
+                        })?;
+                    let timeline_uninit_mark_file =
+                        conf.timeline_uninit_mark_file_path(tenant_id, timeline_id);
+                    if timeline_uninit_mark_file.exists() {
+                        info!(
+                            %timeline_id,
+                            "Found an uninit mark file, removing the timeline and its uninit mark",
                         );
-                        let timeline_id = timeline_uninit_mark_file
-                            .file_stem()
-                            .and_then(OsStr::to_str)
-                            .unwrap_or_default()
-                            .parse::<TimelineId>()
-                            .with_context(|| {
-                                format!(
-                                    "Could not parse timeline id out of the timeline uninit mark name {}",
-                                    timeline_uninit_mark_file.display()
-                                )
-                            })?;
-                        let timeline_dir = myself.conf.timeline_path(&timeline_id, &myself.tenant_id);
-                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)?;
-                        removed_unint_timeline = true;
+                        if let Err(e) = remove_timeline_and_uninit_mark(
+                            &timeline_dir,
+                            &timeline_uninit_mark_file,
+                        ) {
+                            error!("Failed to clean up uninit marked timeline: {e:?}");
+                        }
+                        continue;
+                    }
+
+                    let file_name = entry.file_name();
+                    if let Ok(timeline_id) =
+                        file_name.to_str().unwrap_or_default().parse::<TimelineId>()
+                    {
+                        let metadata = load_metadata(conf, timeline_id, tenant_id)
+                            .context("failed to load metadata")?;
+                        timelines_to_load.insert(timeline_id, metadata);
+                    } else {
+                        // A file or directory that doesn't look like a timeline ID
+                        warn!(
+                            "unexpected file or directory in timelines directory: {}",
+                            file_name.to_string_lossy()
+                        );
                     }
                 }
-
-                if removed_unint_timeline {
-                    continue;
-                }
-
-                break entries;
-            };
-
-            let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-            for entry in entries {
-                let timeline_dir = entry.path();
-                assert!(!crate::is_temporary(&timeline_dir), "removed above");
-                assert!(!is_uninit_mark(&timeline_dir), "removed above");
-                let timeline_id = timeline_dir
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or_default()
-                    .parse::<TimelineId>()
-                    .with_context(|| {
-                        format!(
-                            "Could not parse timeline id out of the timeline dir name {}",
-                            timeline_dir.display()
-                        )
-                    })?;
-                let metadata = load_metadata(myself.conf, timeline_id, myself.tenant_id)
-                    .context("failed to load metadata")?;
-                timelines_to_load.insert(timeline_id, metadata);
             }
 
             // Sort the array of timeline IDs into tree-order, so that parent comes before
