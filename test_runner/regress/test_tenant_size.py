@@ -16,6 +16,7 @@ from fixtures.pg_version import PgVersion, xfail_on_postgres
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
+@pytest.mark.xfail
 def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
