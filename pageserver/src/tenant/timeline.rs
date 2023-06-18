@@ -3117,7 +3117,12 @@ impl Timeline {
                         layers.count_deltas(&img_range, &(img_lsn..lsn), Some(threshold))?;
 
                     max_deltas = max_deltas.max(num_deltas);
-                    if num_deltas >= threshold {
+                    // Create new image layers if there are at least `threshold` delta layers since last image layer...
+                    if num_deltas >= threshold
+					    // ...or it is master layer for cross-region replica: force generation of image layer in this case
+					    // to make replica independent from master.
+						|| img_lsn <= self.replica_lsn.unwrap_or(Lsn(0))
+                    {
                         debug!(
                             "key range {}-{}, has {} deltas on this timeline in LSN range {}..{}",
                             img_range.start, img_range.end, num_deltas, img_lsn, lsn
