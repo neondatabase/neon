@@ -793,6 +793,10 @@ jobs:
           rm -rf ./usr-local-pgsql # Just in case
           docker cp ${{ steps.create-container.outputs.CID }}:${USR_LOCAL_PGSQL_PATH} ./usr-local-pgsql
 
+          # Delete Neon extensitons (they always present on compute-node image)
+          rm -rf ./usr-local-pgsql/share/extension/neon*
+          rm -rf ./usr-local-pgsql/lib/neon*
+
       - name: Upload postgres-extensions to S3
         run: |
           # Directories are specified in Dockerfile.compute-node for postgres-extensions target
