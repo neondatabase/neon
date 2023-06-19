@@ -38,8 +38,8 @@ pub mod defaults {
     pub const DEFAULT_GC_PERIOD: &str = "1 hr";
     pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
     pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
-    pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "2 seconds";
-    pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "3 seconds";
+    pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
+    pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
     pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 10 * 1024 * 1024;
     pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
 }
