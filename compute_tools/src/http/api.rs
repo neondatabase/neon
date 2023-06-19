@@ -17,6 +17,8 @@ use tokio::task;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
+use std::net::TcpStream;
+
 use crate::extension_server;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
@@ -135,8 +137,14 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 filename
             );
 
-            // TODO : left off here...
-            match extension_server::download_file(&filename).await {
+            match extension_server::download_file(
+                filename,
+                // TODO alek: pass more remote_ext arguments
+                // compute.remote_ext_bucket.clone(),
+                // compute.remote_ext_region.clone(),
+            )
+            .await
+            {
                 Ok(_) => Response::new(Body::from("OK")),
                 Err(e) => {
                     error!("download_file failed: {}", e);

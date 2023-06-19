@@ -1,30 +1,28 @@
-use anyhow::{self, Context};
+use anyhow::{self};
 use remote_storage::*;
+use std::fs;
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufWriter, Write};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::Path;
 use std::str;
-use std::{fs, thread};
 use tokio::io::AsyncReadExt;
-use toml_edit;
 use tracing::info;
 
-pub fn download_file(mut stream: TcpStream) -> anyhow::Result<()> {
-    let mut buf = [0; 512];
-
-    dbg!("ALEK: calling download file");
-    // fs.write("world.txt", "hello")?;
-
-    stream.read(&mut buf).expect("Error reading from stream");
-
-    let filename = str::from_utf8(&buf)
-        .context("filename is not UTF-8")?
-        .trim_end();
+pub async fn download_file(
+    filename: &str,
+    // remote_ext_bucket: String,
+    // remote_ext_region: String,
+) -> anyhow::Result<()> {
+    fs::write("alek/writesomething", "something")?;
+    // let sharedir = get_pg_config("--sharedir");
+    // fs::write("alek/sharedir.txt", sharedir)?;
 
     println!("requested file {}", filename);
 
-    // download_extension(get_s3_config(), ExtensionType::Shared);
+    // TODO: download the extensions!
+    // let s3_config = create_s3_config(remote_ext_bucket, remote_ext_region);
+    // download_extension(&s3_config, ExtensionType::Shared);
     let from_prefix = "/tmp/from_prefix";
     let to_prefix = "/tmp/to_prefix";
 
@@ -32,17 +30,11 @@ pub fn download_file(mut stream: TcpStream) -> anyhow::Result<()> {
     let copy_to_filepath = Path::new(to_prefix).join(filename);
     fs::copy(filepath, copy_to_filepath)?;
 
-    // Write back the response to the TCP stream
-    match stream.write("OK".as_bytes()) {
-        Err(e) => anyhow::bail!("Read-Server: Error writing to stream {}", e),
-        Ok(_) => (),
-    }
-
     Ok(())
 }
 
+// FIXME: this function panics if it runs into any issues
 fn get_pg_config(argument: &str) -> String {
-    // FIXME: this function panics if it runs into any issues
     let config_output = std::process::Command::new("pg_config")
         .arg(argument)
         .output()
@@ -129,28 +121,22 @@ pub async fn download_extension(
     Ok(())
 }
 
-pub fn get_s3_config() -> anyhow::Result<RemoteStorageConfig> {
-    // TODO: Right now we are using the same config parameters as pageserver; but should we have our own configs?
-    // TODO: Should we read the s3_config from CLI arguments?
-    let cfg_file_path = Path::new("./../.neon/pageserver.toml");
-    let cfg_file_contents = std::fs::read_to_string(cfg_file_path).with_context(|| {
-        format!(
-            "Failed to read pageserver config at '{}'",
-            cfg_file_path.display()
-        )
-    })?;
-    let toml = cfg_file_contents
-        .parse::<toml_edit::Document>()
-        .with_context(|| {
-            format!(
-                "Failed to parse '{}' as pageserver config",
-                cfg_file_path.display()
-            )
-        })?;
-    let remote_storage_data = toml
-        .get("remote_storage")
-        .context("field should be present")?;
-    let remote_storage_config = RemoteStorageConfig::from_toml(remote_storage_data)?
-        .context("error configuring remote storage")?;
-    Ok(remote_storage_config)
+// TODO: add support for more of these parameters being configurable?
+pub fn create_s3_config(
+    remote_ext_bucket: String,
+    remote_ext_region: String,
+) -> RemoteStorageConfig {
+    let config = S3Config {
+        bucket_name: remote_ext_bucket,
+        bucket_region: remote_ext_region,
+        prefix_in_bucket: None,
+        endpoint: None,
+        concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
+        max_keys_per_list_response: None,
+    };
+    RemoteStorageConfig {
+        max_concurrent_syncs: NonZeroUsize::new(100).expect("100 != 0"),
+        max_sync_errors: NonZeroU32::new(100).expect("100 != 0"),
+        storage: RemoteStorageKind::AwsS3(config),
+    }
 }

@@ -979,6 +979,8 @@ class NeonEnv:
             safekeeper = Safekeeper(env=self, id=id, port=port)
             self.safekeepers.append(safekeeper)
 
+        # TODO: alek, for reference, this is where neon_cli is init'd. I don't think I need to modify this.
+        # if you do, maybe do a toml+= extension config type of thing.
         log.info(f"Config: {toml}")
         self.neon_cli.init(toml)
 
@@ -1173,6 +1175,7 @@ class AbstractNeonCli(abc.ABC):
         If `check_return_code`, on non-zero exit code logs failure and raises.
         """
 
+        log.warn("reached rawcli")
         assert type(arguments) == list
         assert type(self.COMMAND) == str
 
@@ -1454,6 +1457,7 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
+        remote_ext_config: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1475,6 +1479,11 @@ class NeonCli(AbstractNeonCli):
             args.append(endpoint_id)
         if hot_standby:
             args.extend(["--hot-standby", "true"])
+        if remote_ext_config is not None:
+            # TODO: I worry that this is not properly escaped...
+            args.extend(["--remote-ext-config", remote_ext_config])
+        log.info(args)
+        log.warning("ALEK")
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -1488,6 +1497,7 @@ class NeonCli(AbstractNeonCli):
         safekeepers: Optional[List[int]] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
+        remote_ext_config: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1497,6 +1507,8 @@ class NeonCli(AbstractNeonCli):
             "--pg-version",
             self.env.pg_version,
         ]
+        if remote_ext_config is not None:
+            args.extend(["--remote-ext-config", remote_ext_config])
         if lsn is not None:
             args.append(f"--lsn={lsn}")
         args.extend(["--pg-port", str(pg_port)])
@@ -2320,6 +2332,7 @@ class Endpoint(PgProtocol):
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
+        remote_ext_config: Optional[str] = None,
     ) -> "Endpoint":
         """
         Create a new Postgres endpoint.
@@ -2342,6 +2355,7 @@ class Endpoint(PgProtocol):
             hot_standby=hot_standby,
             pg_port=self.pg_port,
             http_port=self.http_port,
+            remote_ext_config=remote_ext_config,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
@@ -2356,7 +2370,7 @@ class Endpoint(PgProtocol):
 
         return self
 
-    def start(self) -> "Endpoint":
+    def start(self, remote_ext_config: Optional[str] = None) -> "Endpoint":
         """
         Start the Postgres instance.
         Returns self.
@@ -2372,6 +2386,8 @@ class Endpoint(PgProtocol):
             http_port=self.http_port,
             tenant_id=self.tenant_id,
             safekeepers=self.active_safekeepers,
+            # TODO  it's either start or create, not both that starts compute_ctl
+            remote_ext_config=remote_ext_config,
         )
         self.running = True
 
@@ -2450,6 +2466,7 @@ class Endpoint(PgProtocol):
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
+        remote_ext_config: Optional[str] = None,
     ) -> "Endpoint":
         """
         Create an endpoint, apply config, and start Postgres.
@@ -2464,7 +2481,8 @@ class Endpoint(PgProtocol):
             config_lines=config_lines,
             hot_standby=hot_standby,
             lsn=lsn,
-        ).start()
+            remote_ext_config=remote_ext_config,
+        ).start(remote_ext_config=remote_ext_config)
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
 
@@ -2498,6 +2516,7 @@ class EndpointFactory:
         lsn: Optional[Lsn] = None,
         hot_standby: bool = False,
         config_lines: Optional[List[str]] = None,
+        remote_ext_config: Optional[str] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -2514,6 +2533,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             lsn=lsn,
+            remote_ext_config=remote_ext_config,
         )
 
     def create(

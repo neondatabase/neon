@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
+use tracing::{error, info, warn};
 use utils::{
     auth::{Claims, Scope},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -87,6 +88,8 @@ struct TimelineTreeEl {
 //   * TODO: export/import to/from usual postgres
 fn main() -> Result<()> {
     let matches = cli().get_matches();
+
+    std::fs::write("notetoalekarrived", "cat")?;
 
     let (sub_name, sub_args) = match matches.subcommand() {
         Some(subcommand_data) => subcommand_data,
@@ -942,6 +945,10 @@ fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 }
 
 fn cli() -> Command {
+    std::fs::write("tryingtowritesomefiletoprovethatwegothere", "test")
+        .expect("file write failed in neonlocal");
+    info!("alek");
+    warn!("alek error");
     let branch_name_arg = Arg::new("branch-name")
         .long("branch-name")
         .help("Name of the branch to be created or used as an alias for other services")
@@ -1001,6 +1008,12 @@ fn cli() -> Command {
         .action(ArgAction::Append)
         .help("Additional pageserver's configuration options or overrides, refer to pageserver's 'config-override' CLI parameter docs for more")
         .required(false);
+
+    let remote_ext_config_args = Arg::new("remote-ext-config")
+        .long("remote-ext-config")
+        .num_args(1)
+        .help("Configure the S3 bucket that we search for extensions in.")
+        .required(true);
 
     let lsn_arg = Arg::new("lsn")
         .long("lsn")
@@ -1139,6 +1152,7 @@ fn cli() -> Command {
                             .required(false))
                     .arg(pg_version_arg.clone())
                     .arg(hot_standby_arg.clone())
+                    .arg(remote_ext_config_args.clone()) // TODO: is this right?
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
@@ -1152,6 +1166,7 @@ fn cli() -> Command {
                     .arg(pg_version_arg)
                     .arg(hot_standby_arg)
                     .arg(safekeepers_arg)
+                    .arg(remote_ext_config_args.clone()) // TODO: is this right? // update: probably only start and not create needs this
                 )
                 .subcommand(
                     Command::new("stop")

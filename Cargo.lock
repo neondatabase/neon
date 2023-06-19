@@ -999,6 +999,7 @@ dependencies = [
  "tar",
  "thiserror",
  "toml",
+ "tracing",
  "url",
  "utils",
  "workspace_hack",

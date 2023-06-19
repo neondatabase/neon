@@ -41,7 +41,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;
@@ -54,17 +54,19 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
+use toml_edit::Document;
+
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let matches = cli().get_matches();
 
-    let remote_ext_bucket = *matches
-        .get_one::<String>("remote-extension-bucket")
-        .expect("remote-extension bucket is required");
-    let remote_ext_region = *matches
-        .get_one::<String>("remote-extension-region")
-        .expect("remote-extension region is required");
+    let remote_ext_config = matches
+        .get_one::<String>("remote-extension-config")
+        .expect("remote-extension-config is required");
+    // let remote_ext_config = remote_ext_config.parse::<Document>()?;
+    warn!("YOU MUST BUILD RUST FOR CHANGES TOAPPEAR");
+    std::fs::write("alek/sharedir.txt", "GOT even farther ")?;
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -183,6 +185,8 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
+        // remote_ext_bucket: remote_ext_config["bucket"].to_string(), // TODO ALEK: pass all the args!
+        // remote_ext_region: remote_ext_config["region"].to_string(),
     };
     let compute = Arc::new(compute_node);
 
@@ -353,16 +357,10 @@ fn cli() -> clap::Command {
                 .value_name("CONTROL_PLANE_API_BASE_URI"),
         )
         .arg(
-            Arg::new("remote-ext-bucket")
-                .short("u")
-                .long("remote-ext-bucket")
-                .value_name("REMOTE_EXT_BUCKET"),
-        )
-        .arg(
-            Arg::new("remote-ext-region")
-                .short("r")
-                .long("remote-ext-region")
-                .value_name("REMOTE_EXT_REGION"),
+            Arg::new("remote-ext-config")
+                .short('r')
+                .long("remote-ext-config")
+                .value_name("REMOTE_EXT_CONFIG"),
         )
 }
 

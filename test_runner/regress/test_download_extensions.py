@@ -25,6 +25,8 @@ from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
+import json
+
 
 def test_file_download(neon_env_builder: NeonEnvBuilder):
     """Tests we can download a file"""
@@ -44,7 +46,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     # we should pass the remote_storage_client to env in the builder.
 
     # 4. Upload test_ext.control file to the bucket
-    # Later this will be done by CI/CD
+    # In the non-mock version this is done by CI/CD
     with open("alek/test_ext.control", "rb") as data:
         neon_env_builder.remote_storage_client.upload_fileobj(
             data, neon_env_builder.remote_storage.bucket_name, TEST_EXT_PATH
@@ -59,12 +61,20 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     with open("pg_install/v15/lib/test_ext.control", "wb") as f:
         f.write(response.read())
 
-    # env.neon_cli
-
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
+
+    remote_ext_config = json.dumps(
+        {
+            "bucket": neon_env_builder.remote_storage.bucket_name,
+            "region": "eu-central-1",
+        }
+    )
+
     # 6. Start endpoint and ensure that test_ext is present in select * from pg_available_extensions
-    endpoint = env.endpoints.create_start("test_file_download", tenant_id=tenant)
+    endpoint = env.endpoints.create_start(
+        "test_file_download", tenant_id=tenant, remote_ext_config=remote_ext_config
+    )
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE TABLE t(key int primary key, value text)")
