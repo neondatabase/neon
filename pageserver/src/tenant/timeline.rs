@@ -3004,7 +3004,7 @@ impl Timeline {
         frozen_layer: &Arc<InMemoryLayer>,
     ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
         let span = tracing::info_span!("blocking");
-        let (new_delta, sz): (DeltaLayer, _) = tokio::task::spawn_blocking({
+        let new_delta: DeltaLayer = tokio::task::spawn_blocking({
             let _g = span.entered();
             let self_clone = Arc::clone(self);
             let frozen_layer = Arc::clone(frozen_layer);
@@ -3028,20 +3028,19 @@ impl Timeline {
                 // 3. rename to the final name
                 // 4. fsync the parent directory.
                 // Note that (1),(2),(3) today happen inside write_to_disk().
-                par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
+                par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
                 par_fsync::par_fsync(&[self_clone
                     .conf
                     .timeline_path(&self_clone.timeline_id, &self_clone.tenant_id)])
                 .context("fsync of timeline dir")?;
 
-                let sz = new_delta_path.metadata()?.len();
-
-                anyhow::Ok((new_delta, sz))
+                anyhow::Ok(new_delta)
             }
         })
         .await
         .context("spawn_blocking")??;
         let new_delta_name = new_delta.filename();
+        let sz = new_delta.desc.file_size;
 
         // Add it to the layer map
         let l = Arc::new(new_delta);
@@ -3055,9 +3054,8 @@ impl Timeline {
         batch_updates.insert_historic(l.layer_desc().clone(), l);
         batch_updates.flush();
 
-        // update the timeline's physical size
-        self.metrics.resident_physical_size_gauge.add(sz);
         // update metrics
+        self.metrics.resident_physical_size_gauge.add(sz);
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
