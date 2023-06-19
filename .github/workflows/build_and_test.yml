@@ -746,6 +746,7 @@ jobs:
       #                      --build-arg PG_VERSION=${{ matrix.version }} \
       #                      --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com \
       #                      --dockerfile Dockerfile.compute-node \
+      #                      --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
       #                      --destination neondatabase/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
       #                      --cleanup \
       #                      --target postgres-extensions
@@ -769,8 +770,7 @@ jobs:
 
     env:
       # While on transition period extract extensions from compute-node image (see a comment above for compute-node-image job)
-      # # XXX: Switch to ECR repo once it's created
-      # EXTENSIONS_IMAGE: neondatabase/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+      # EXTENSIONS_IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
       EXTENSIONS_IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
       # In compute image we have a bit different directory layout (/usr/local/pgsql put into /usr/local).
       # This variable can be inlined after
@@ -919,6 +919,7 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
         if: |
@@ -931,6 +932,7 @@ jobs:
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/extensions:latest
 
       - name: Configure Docker Hub login
         run: |
@@ -954,6 +956,7 @@ jobs:
           crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/extensions:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
