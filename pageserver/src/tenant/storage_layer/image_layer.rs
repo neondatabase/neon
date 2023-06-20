@@ -404,7 +404,7 @@ impl ImageLayer {
                 timeline_id,
                 filename.key_range.clone(),
                 filename.lsn,
-                false,
+                true,
                 file_size,
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: filename.lsn,
@@ -436,7 +436,7 @@ impl ImageLayer {
                 summary.timeline_id,
                 summary.key_range,
                 summary.lsn,
-                false,
+                true,
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
