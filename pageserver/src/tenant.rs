@@ -11,7 +11,6 @@
 //! parent timeline, and the last LSN that has been written to disk.
 //!
 
-use crate::repository::Key;
 use anyhow::{bail, Context};
 use futures::FutureExt;
 use pageserver_api::models::TimelineState;
@@ -65,7 +64,7 @@ use crate::tenant::remote_timeline_client::index::{IndexPart, LayerFileMetadata}
 use crate::tenant::remote_timeline_client::{
     MaybeDeletedIndexPart, PersistIndexPartWithDeletedFlagError,
 };
-use crate::tenant::storage_layer::{range_eq, DeltaLayer, ImageLayer, Layer, LayerFileName};
+use crate::tenant::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerFileName};
 use crate::InitializationOrder;
 
 use crate::virtual_file::VirtualFile;
@@ -1331,6 +1330,7 @@ impl Tenant {
         timeline_id: TimelineId,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        // We need to connect to broker in master's region to choose safekeeper to subscribe
         let master_broker_endpoint = self
             .tenant_conf
             .read()
@@ -1342,10 +1342,11 @@ impl Tenant {
         let broker_client =
             storage_broker::connect(master_broker_endpoint, self.conf.broker_keepalive_interval)?;
 
+        // Access to S3 bucket in master's region
         let master_storage = self
             .master_storage
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("remote storage not specigied"))?;
+            .ok_or_else(|| anyhow::anyhow!("master storage not specified"))?;
         let master_client = RemoteTimelineClient::new(
             master_storage.clone(),
             self.conf,
@@ -1353,10 +1354,11 @@ impl Tenant {
             timeline_id,
         );
 
+        // Access to local S3 bucket in this region
         let remote_storage = self
             .master_storage
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("remote storage not specigied"))?;
+            .ok_or_else(|| anyhow::anyhow!("remote storage not specified"))?;
         let remote_client = RemoteTimelineClient::new(
             remote_storage.clone(),
             self.conf,
@@ -1364,6 +1366,8 @@ impl Tenant {
             timeline_id,
         );
 
+        // Get list of all timelines from master. We actually do not need all - only
+        // ancestors of the target timeline.
         let remote_timeline_ids = remote_timeline_client::list_remote_timelines(
             master_storage,
             self.conf,
@@ -1423,35 +1427,31 @@ impl Tenant {
             .expect("timeline found at master");
         let mut timeline_metadata = index_part.parse_metadata().context("parse_metadata")?;
 
-        // Skip L0 layers because LSN range of L0 and L1 layers is the same and it is not possible
-        // to distinct master and replica layers by LSN.
+        // Convert IndexLayerMetadata to LayerFileMetadata
         let mut layer_metadata: HashMap<LayerFileName, LayerFileMetadata> = index_part
             .layer_metadata
             .iter()
-            .filter(|(fname, _meta)| !range_eq(&fname.get_key_range(), &(Key::MIN..Key::MAX)))
             .map(|(fname, meta)| (fname.clone(), LayerFileMetadata::from(meta)))
             .collect();
 
         // Let replic_lsn be the largest end LSN
         let replica_lsn = layer_metadata
             .keys()
-            .map(|fname| fname.get_lsn_range().start)
+            .map(|fname| fname.get_lsn_range().end)
             .max()
             .unwrap_or(timeline_metadata.ancestor_lsn());
 
         let old_metadata = timeline_metadata.clone();
 
         // Now collect layers of ancestor branches. We do not want to reconstruct exact branch
-        // hierarhy at replica, because i this case we need to maintais several timelines.
-        // Instead of it we just add all layers with start LSN < replica_lsn to the current timeline.
+        // hierarhy at replica, because in this case we need to maintain several timelines.
+        // Instead of it we just collect all layers which may be required for the current timeline.
         while let Some(ancestor_id) = timeline_metadata.ancestor_timeline() {
             let (index_part, _client) = remote_index_and_client
                 .get(&ancestor_id)
                 .expect("timeline found at master");
             for (fname, meta) in &index_part.layer_metadata {
-                if !range_eq(&fname.get_key_range(), &(Key::MIN..Key::MAX))
-                    && fname.get_lsn_range().start < timeline_metadata.ancestor_lsn()
-                {
+                if fname.get_lsn_range().start < timeline_metadata.ancestor_lsn() {
                     layer_metadata.insert(fname.clone(), LayerFileMetadata::from(meta));
                 }
             }
@@ -1522,6 +1522,14 @@ impl Tenant {
         )
         .await?;
          */
+
+        timeline
+            .create_remote_layers(
+                &index_part,
+                HashMap::new(), // no local layers
+                replica_lsn,
+            )
+            .await?;
 
         // Start background works for this timeline
         timeline.activate(broker_client, None, ctx);

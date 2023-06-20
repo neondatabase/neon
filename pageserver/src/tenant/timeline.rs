@@ -1734,7 +1734,7 @@ impl Timeline {
         Ok(())
     }
 
-    async fn create_remote_layers(
+    pub async fn create_remote_layers(
         &self,
         index_part: &IndexPart,
         local_layers: HashMap<LayerFileName, Arc<dyn PersistentLayer>>,
@@ -3318,6 +3318,13 @@ impl Timeline {
         let layers = self.layers.read().unwrap();
         let mut level0_deltas = layers.get_level0_deltas()?;
         drop(layers);
+
+        // Do not compact L0 delta from master for cross-regio replica
+        // because master and replica layers are distinguished by LSN
+        // and L0 and L1 layers have the same LSN range
+        if let Some(replica_lsn) = &self.replica_lsn {
+            level0_deltas.retain(|l| l.get_lsn_range().start >= *replica_lsn);
+        }
 
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
