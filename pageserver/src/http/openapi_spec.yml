@@ -186,7 +186,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
     delete:
-      description: "Attempts to delete specified timeline. On 500 errors should be retried"
+      description: "Attempts to delete specified timeline. 500 and 409 errors should be retried"
       responses:
         "200":
           description: Ok
@@ -214,6 +214,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Deletion is already in progress, continue polling
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
         "412":
           description: Tenant is missing, or timeline has children
           content:

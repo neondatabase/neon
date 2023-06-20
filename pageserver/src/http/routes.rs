@@ -187,6 +187,7 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
                 format!("Cannot delete timeline which has child timelines: {children:?}")
                     .into_boxed_str(),
             ),
+            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
             Other(e) => ApiError::InternalServerError(e),
         }
     }
