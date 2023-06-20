@@ -4069,9 +4069,13 @@ mod tests {
         std::fs::write(metadata_path, metadata_bytes)?;
 
         let err = harness.try_load(&ctx).await.err().expect("should fail");
-        assert!(err
-            .to_string()
-            .starts_with("Failed to parse metadata bytes from path"));
+        // get all the stack with all .context, not tonly the last one
+        let message = format!("{err:#}");
+        let expected = "Failed to parse metadata bytes from path";
+        assert!(
+            message.contains(expected),
+            "message '{message}' expected to contain {expected}"
+        );
 
         let mut found_error_message = false;
         let mut err_source = err.source();
