@@ -145,7 +145,7 @@ where
     ///
     /// This should be called when the corresponding file on disk has been deleted.
     ///
-    pub fn remove_historic(&mut self, layer_desc: PersistentLayerDesc, layer: Arc<L>) {
+    pub fn remove_historic(&mut self, layer_desc: PersistentLayerDesc, layer: &Arc<L>) {
         self.layer_map.remove_historic_noflush(layer_desc, layer)
     }
 
@@ -325,9 +325,9 @@ where
     ///
     /// Helper function for BatchedUpdates::remove_historic
     ///
-    pub fn remove_historic_noflush(&mut self, layer_desc: PersistentLayerDesc, layer: Arc<L>) {
+    pub fn remove_historic_noflush(&mut self, layer_desc: PersistentLayerDesc, layer: &Arc<L>) {
         self.historic
-            .remove(historic_layer_coverage::LayerKey::from(&*layer));
+            .remove(historic_layer_coverage::LayerKey::from(&**layer));
         if Self::is_l0(&layer) {
             let len_before = self.l0_delta_layers.len();
             let mut l0_delta_layers = std::mem::take(&mut self.l0_delta_layers);

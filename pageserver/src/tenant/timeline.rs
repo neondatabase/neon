@@ -1783,7 +1783,7 @@ impl Timeline {
                         anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                     } else {
                         self.metrics.resident_physical_size_gauge.sub(local_size);
-                        updates.remove_historic(local_layer.layer_desc().clone(), local_layer);
+                        updates.remove_historic(local_layer.layer_desc().clone(), &local_layer);
                         // fall-through to adding the remote layer
                     }
                 } else {
@@ -2281,7 +2281,7 @@ impl Timeline {
         &self,
         // we cannot remove layers otherwise, since gc and compaction will race
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        layer: Arc<dyn PersistentLayer>,
+        layer: &Arc<dyn PersistentLayer>,
         updates: &mut BatchedUpdates<'_, dyn PersistentLayer>,
     ) -> anyhow::Result<()> {
         if !layer.is_remote_layer() {
@@ -3904,7 +3904,7 @@ impl Timeline {
         // Now that we have reshuffled the data to set of new delta layers, we can
         // delete the old ones
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
-        for l in deltas_to_compact {
+        for l in deltas_to_compact.iter() {
             layer_names_to_delete.push(l.filename());
             self.delete_historic_layer(layer_removal_cs.clone(), l, &mut updates)?;
         }
@@ -4240,7 +4240,7 @@ impl Timeline {
                     layer_names_to_delete.push(doomed_layer.filename());
                     self.delete_historic_layer(
                         layer_removal_cs.clone(),
-                        doomed_layer,
+                        &doomed_layer,
                         &mut updates,
                     )?; // FIXME: schedule succeeded deletions before returning?
                     result.layers_removed += 1;
