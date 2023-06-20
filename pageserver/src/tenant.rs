@@ -3424,8 +3424,6 @@ pub mod harness {
         buf.freeze()
     }
 
-    static LOCK: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
-
     impl From<TenantConf> for TenantConfOpt {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
@@ -3452,33 +3450,16 @@ pub mod harness {
         }
     }
 
-    pub struct TenantHarness<'a> {
+    pub struct TenantHarness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
-
-        pub lock_guard: (
-            Option<RwLockReadGuard<'a, ()>>,
-            Option<RwLockWriteGuard<'a, ()>>,
-        ),
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
 
-    impl<'a> TenantHarness<'a> {
+    impl TenantHarness {
         pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
-            Self::create_internal(test_name, false)
-        }
-        pub fn create_exclusive(test_name: &'static str) -> anyhow::Result<Self> {
-            Self::create_internal(test_name, true)
-        }
-        fn create_internal(test_name: &'static str, exclusive: bool) -> anyhow::Result<Self> {
-            let lock_guard = if exclusive {
-                (None, Some(LOCK.write().unwrap()))
-            } else {
-                (Some(LOCK.read().unwrap()), None)
-            };
-
             LOG_HANDLE.get_or_init(|| {
                 logging::init(
                     logging::LogFormat::Test,
@@ -3514,7 +3495,6 @@ pub mod harness {
                 conf,
                 tenant_conf,
                 tenant_id,
-                lock_guard,
             })
         }
 
