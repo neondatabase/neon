@@ -3576,19 +3576,24 @@ impl Timeline {
             ..Default::default()
         };
 
-        let begin = tokio::time::Instant::now();
-        let guard = self.layers.read().await;
-        let now = tokio::time::Instant::now();
-        stats.first_read_lock_acquisition_micros =
-            DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-        let (layers, mapping) = &*guard;
-        let mut level0_deltas = layers.get_level0_deltas()?;
-        drop(guard);
-        stats.level0_deltas_count = Some(level0_deltas.len());
-        stats.get_level0_deltas_plus_drop_lock_micros =
-            stats.first_read_lock_acquisition_micros.till_now();
+        let mut level0_deltas = {
+            let begin = tokio::time::Instant::now();
+            let guard = self.layers.read().await;
+            let now = tokio::time::Instant::now();
+            stats.first_read_lock_acquisition_micros =
+                DurationRecorder::Recorded(RecordedDuration(now - begin), now);
+            let (layers, mapping) = &*guard;
+            let level0_deltas = layers.get_level0_deltas()?;
+            stats.level0_deltas_count = Some(level0_deltas.len());
+            stats.get_level0_deltas_plus_drop_lock_micros =
+                stats.first_read_lock_acquisition_micros.till_now();
+            level0_deltas
+                .into_iter()
+                .map(|x| mapping.get_from_desc(&x))
+                .collect_vec()
+        };
 
-       // Only compact if enough layers have accumulated.
+        // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
             debug!(
@@ -3633,7 +3638,6 @@ impl Timeline {
 
         let remotes = deltas_to_compact
             .iter()
-            .map(|l| mapping.get_from_desc(l))
             .filter(|l| l.is_remote_layer())
             .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
             .map(|l| {
@@ -3643,12 +3647,7 @@ impl Timeline {
             })
             .collect::<Vec<_>>();
 
-        let deltas_to_compact_layers = deltas_to_compact
-            .iter()
-            .map(|l| mapping.get_from_desc(l))
-            .collect_vec();
-
-        drop_rlock(guard);
+        let deltas_to_compact_layers = deltas_to_compact.iter().collect_vec();
 
         if !remotes.is_empty() {
             // caller is holding the lock to layer_removal_cs, and we don't want to download while
@@ -3938,7 +3937,10 @@ impl Timeline {
 
         Ok(CompactLevel0Phase1Result {
             new_layers,
-            deltas_to_compact,
+            deltas_to_compact: deltas_to_compact
+                .into_iter()
+                .map(|x| Arc::new(x.layer_desc().clone()))
+                .collect(),
         })
     }
 
