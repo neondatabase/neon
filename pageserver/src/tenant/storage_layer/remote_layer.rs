@@ -122,11 +122,11 @@ impl PersistentLayer for RemoteLayer {
         None
     }
 
-    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
+    fn iter(self: Arc<Self>, _ctx: &RequestContext) -> Result<LayerIter<'static>> {
         bail!("cannot iterate a remote layer");
     }
 
-    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
+    fn key_iter(self: Arc<Self>, _ctx: &RequestContext) -> Result<LayerKeyIter<'static>> {
         bail!("cannot iterate a remote layer");
     }
 

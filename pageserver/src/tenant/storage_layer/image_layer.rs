@@ -43,7 +43,7 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use tracing::*;
 
 use utils::{
@@ -246,7 +246,7 @@ impl PersistentLayer for ImageLayer {
         Some(self.path())
     }
 
-    fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
+    fn iter(self: Arc<Self>, _ctx: &RequestContext) -> Result<LayerIter<'static>> {
         unimplemented!();
     }
 

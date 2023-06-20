@@ -3568,7 +3568,7 @@ impl Timeline {
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
         let all_values_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.iter(ctx)),
+            deltas_to_compact.iter().map(|l| Arc::clone(l).iter(ctx)),
             |iter_iter| {
                 iter_iter.kmerge_by(|a, b| {
                     if let Ok((a_key, a_lsn, _)) = a {
@@ -3590,7 +3590,9 @@ impl Timeline {
 
         // This iterator walks through all keys and is needed to calculate size used by each key
         let mut all_keys_iter = itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
+            deltas_to_compact
+                .iter()
+                .map(|l| Arc::clone(l).key_iter(ctx)),
             |iter_iter| {
                 iter_iter.kmerge_by(|a, b| {
                     let (a_key, a_lsn, _) = a;
@@ -3617,7 +3619,9 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
         for (next_key, _next_lsn, _size) in itertools::process_results(
-            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
+            deltas_to_compact
+                .iter()
+                .map(|l| Arc::clone(l).key_iter(ctx)),
             |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
         )? {
             if let Some(prev_key) = prev {
