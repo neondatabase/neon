@@ -473,6 +473,14 @@ pub(crate) enum ShutdownError {
     AlreadyStopping,
 }
 
+struct DeletionGuard(OwnedMutexGuard<bool>);
+
+impl DeletionGuard {
+    fn is_deleted(&self) -> bool {
+        *self.0
+    }
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -1139,7 +1147,11 @@ impl Tenant {
                                 )
                                 .context("create_timeline_struct")?;
 
-                            let guard = Arc::clone(&timeline.delete_lock).lock_owned().await;
+                            let guard = DeletionGuard(
+                                Arc::clone(&timeline.delete_lock)
+                                    .try_lock_owned()
+                                    .expect("cannot happen because we're the only owner"),
+                            );
 
                             // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
                             // RemoteTimelineClient is the only functioning part.
@@ -1463,7 +1475,13 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             let timelines_to_compact = timelines
                 .iter()
-                .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
+                .filter_map(|(timeline_id, timeline)| {
+                    if timeline.is_active() {
+                        Some((*timeline_id, timeline.clone()))
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>();
             drop(timelines);
             timelines_to_compact
@@ -1544,6 +1562,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         timeline: Arc<Timeline>,
+        guard: DeletionGuard,
     ) -> anyhow::Result<()> {
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.
@@ -1616,6 +1635,25 @@ impl Tenant {
             Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
         });
 
+        if let Some(remote_client) = &timeline.remote_client {
+            remote_client.delete_all().await.context("delete_all")?
+        };
+
+        // Have a failpoint that can use the `pause` failpoint action.
+        // We don't want to block the executor thread, hence, spawn_blocking + await.
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint in_progress_delete");
+                    fail::fail_point!("in_progress_delete");
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
+
         {
             // Remove the timeline from the map.
             let mut timelines = self.timelines.lock().unwrap();
@@ -1636,12 +1674,7 @@ impl Tenant {
             drop(timelines);
         }
 
-        let remote_client = match &timeline.remote_client {
-            Some(remote_client) => remote_client,
-            None => return Ok(()),
-        };
-
-        remote_client.delete_all().await?;
+        drop(guard);
 
         Ok(())
     }
@@ -1689,23 +1722,18 @@ impl Tenant {
             timeline = Arc::clone(timeline_entry.get());
 
             // Prevent two tasks from trying to delete the timeline at the same time.
-            //
-            // XXX: We should perhaps return an HTTP "202 Accepted" to signal that the caller
-            // needs to poll until the operation has finished. But for now, we return an
-            // error, because the control plane knows to retry errors.
-
             delete_lock_guard =
-                Arc::clone(&timeline.delete_lock)
-                    .try_lock_owned()
-                    .map_err(|_| {
+                DeletionGuard(Arc::clone(&timeline.delete_lock).try_lock_owned().map_err(
+                    |_| {
                         DeleteTimelineError::Other(anyhow::anyhow!(
                             "timeline deletion is already in progress"
                         ))
-                    })?;
+                    },
+                )?);
 
             // If another task finished the deletion just before we acquired the lock,
             // return success.
-            if *delete_lock_guard {
+            if delete_lock_guard.is_deleted() {
                 return Ok(());
             }
 
@@ -1779,7 +1807,7 @@ impl Tenant {
         self: Arc<Self>,
         timeline_id: TimelineId,
         timeline: Arc<Timeline>,
-        _guard: OwnedMutexGuard<bool>,
+        guard: DeletionGuard,
     ) {
         let tenant_id = self.tenant_id;
         let timeline_clone = Arc::clone(&timeline);
@@ -1792,7 +1820,7 @@ impl Tenant {
             "timeline_delete",
             false,
             async move {
-                if let Err(err) = self.delete_timeline(timeline_id, timeline).await {
+                if let Err(err) = self.delete_timeline(timeline_id, timeline, guard).await {
                     error!("Error: {err:#}");
                     timeline_clone.set_broken(err.to_string())
                 };
