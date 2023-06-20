@@ -17,8 +17,6 @@ use tokio::task;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
-use std::net::TcpStream;
-
 use crate::extension_server;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {

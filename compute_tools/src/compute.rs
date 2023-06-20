@@ -47,8 +47,8 @@ pub struct ComputeNode {
     pub state_changed: Condvar,
     //  S3 configuration variables:
     // TODO: alek pass all args here
-    // pub remote_ext_bucket: String,
-    // pub remote_ext_region: String,
+    pub remote_ext_bucket: String,
+    pub remote_ext_region: String,
 }
 
 #[derive(Clone, Debug)]
@@ -437,7 +437,6 @@ impl ComputeNode {
     }
 
     #[instrument(skip(self))]
-    // ALEK: hmmm?
     pub fn start_compute(&self, extension_server_port: u16) -> Result<std::process::Child> {
         let compute_state = self.state.lock().unwrap().clone();
         let spec = compute_state.pspec.as_ref().expect("spec must be set");

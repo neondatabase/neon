@@ -401,10 +401,18 @@ impl Endpoint {
         Ok(())
     }
 
-    pub fn start(&self, auth_token: &Option<String>, safekeepers: Vec<NodeId>) -> Result<()> {
+    pub fn start(
+        &self,
+        auth_token: &Option<String>,
+        safekeepers: Vec<NodeId>,
+        remote_ext_config: &str,
+    ) -> Result<()> {
         if self.status() == "running" {
             anyhow::bail!("The endpoint is already running");
         }
+
+        // ALEK: this is it
+        // How to tet remote-ext-config into here?
 
         // Slurp the endpoints/<endpoint id>/postgresql.conf file into
         // memory. We will include it in the spec file that we pass to
@@ -480,8 +488,12 @@ impl Endpoint {
 
         // Launch compute_ctl
         println!("Starting postgres node at '{}'", self.connstr());
+        println!("alek REMOTESTORAGE logfile {:?}", logfile);
+
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
+        // TODO: alek right here
         cmd.args(["--http-port", &self.http_address.port().to_string()])
+            .args(["--remote-ext-config", remote_ext_config])
             .args(["--pgdata", self.pgdata().to_str().unwrap()])
             .args(["--connstr", &self.connstr()])
             .args([

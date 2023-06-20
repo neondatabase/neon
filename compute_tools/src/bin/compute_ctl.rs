@@ -41,6 +41,7 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use serde_json::{self, Value};
 use tracing::{error, info, warn};
 use url::Url;
 
@@ -54,19 +55,35 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
-use toml_edit::Document;
-
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+
+    let args: Vec<String> = std::env::args().collect();
+    std::fs::write("alek/ARG", args.join(" "))?;
 
     let matches = cli().get_matches();
 
     let remote_ext_config = matches
-        .get_one::<String>("remote-extension-config")
+        .get_one::<String>("remote-ext-config")
         .expect("remote-extension-config is required");
-    // let remote_ext_config = remote_ext_config.parse::<Document>()?;
-    warn!("YOU MUST BUILD RUST FOR CHANGES TOAPPEAR");
-    std::fs::write("alek/sharedir.txt", "GOT even farther ")?;
+    let remote_ext_config: serde_json::Value = serde_json::from_str(&remote_ext_config)?;
+    let remote_ext_bucket = match &remote_ext_config["bucket"] {
+        Value::String(x) => x,
+        _ => panic!("oops"),
+    };
+    let remote_ext_region = match &remote_ext_config["region"] {
+        Value::String(x) => x,
+        _ => panic!("oops"),
+    };
+    warn!("you certainly must build changes if you want rust changes to be built");
+    std::fs::write("alek/yay", remote_ext_bucket.clone())?;
+
+    // compute_tools::extension_server::download_file(
+    //     "test_ext.control",
+    //     remote_ext_bucket.into(),
+    //     remote_ext_region.into(),
+    // )
+    // .await?;
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -185,8 +202,8 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        // remote_ext_bucket: remote_ext_config["bucket"].to_string(), // TODO ALEK: pass all the args!
-        // remote_ext_region: remote_ext_config["region"].to_string(),
+        remote_ext_bucket: remote_ext_bucket.clone(), // TODO ALEK: pass all the args!
+        remote_ext_region: remote_ext_region.clone(),
     };
     let compute = Arc::new(compute_node);
 

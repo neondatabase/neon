@@ -89,7 +89,7 @@ struct TimelineTreeEl {
 fn main() -> Result<()> {
     let matches = cli().get_matches();
 
-    std::fs::write("notetoalekarrived", "cat")?;
+    std::fs::write("alek/neon_local", "Ihavearrived")?;
 
     let (sub_name, sub_args) = match matches.subcommand() {
         Some(subcommand_data) => subcommand_data,
@@ -660,6 +660,10 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
 
+            let remote_ext_config = sub_args
+                .get_one::<String>("remote-ext-config")
+                .context("remote_ext_config is not an optional parameter")?;
+
             // If --safekeepers argument is given, use only the listed safekeeper nodes.
             let safekeepers =
                 if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
@@ -690,6 +694,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .copied()
                 .unwrap_or(false);
 
+            // TODO maybe this is the place
             if let Some(endpoint) = endpoint {
                 match (&endpoint.mode, hot_standby) {
                     (ComputeMode::Static(_), true) => {
@@ -701,7 +706,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     _ => {}
                 }
                 println!("Starting existing endpoint {endpoint_id}...");
-                endpoint.start(&auth_token, safekeepers)?;
+                endpoint.start(&auth_token, safekeepers, &remote_ext_config)?;
             } else {
                 let branch_name = sub_args
                     .get_one::<String>("branch-name")
@@ -745,7 +750,8 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     pg_version,
                     mode,
                 )?;
-                ep.start(&auth_token, safekeepers)?;
+                // TODO: alek this is where the endpoint is created / started
+                ep.start(&auth_token, safekeepers, &remote_ext_config)?;
             }
         }
         "stop" => {
@@ -945,10 +951,6 @@ fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
 }
 
 fn cli() -> Command {
-    std::fs::write("tryingtowritesomefiletoprovethatwegothere", "test")
-        .expect("file write failed in neonlocal");
-    info!("alek");
-    warn!("alek error");
     let branch_name_arg = Arg::new("branch-name")
         .long("branch-name")
         .help("Name of the branch to be created or used as an alias for other services")
