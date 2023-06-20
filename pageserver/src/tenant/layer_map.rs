@@ -93,6 +93,11 @@ pub struct LayerMap {
     /// L0 layers have key range Key::MIN..Key::MAX, and locating them using R-Tree search is very inefficient.
     /// So L0 layers are held in l0_delta_layers vector, in addition to the R-tree.
     l0_delta_layers: Vec<Arc<PersistentLayerDesc>>,
+
+    /// All sorted runs. For tiered compaction.
+    pub sorted_runs: Vec<(usize, Vec<Arc<PersistentLayerDesc>>)>,
+
+    next_tier_id: usize,
 }
 
 /// The primary update API for the layer map.
@@ -114,7 +119,22 @@ impl BatchedUpdates<'_> {
     ///
     // TODO remove the `layer` argument when `mapping` is refactored out of `LayerMap`
     pub fn insert_historic(&mut self, layer_desc: PersistentLayerDesc) {
+        unimplemented!("insert_historic");
+    }
+
+    pub fn insert_historic_new(&mut self, layer_desc: PersistentLayerDesc) {
         self.layer_map.insert_historic_noflush(layer_desc)
+    }
+
+    /// Get a reference to the current sorted runs.
+    pub fn sorted_runs(&mut self) -> &mut Vec<(usize, Vec<Arc<PersistentLayerDesc>>)> {
+        &mut self.layer_map.sorted_runs
+    }
+
+    pub fn next_tier_id(&mut self) -> usize {
+        let ret = self.layer_map.next_tier_id;
+        self.layer_map.next_tier_id += 1;
+        ret
     }
 
     ///
@@ -123,6 +143,10 @@ impl BatchedUpdates<'_> {
     /// This should be called when the corresponding file on disk has been deleted.
     ///
     pub fn remove_historic(&mut self, layer_desc: PersistentLayerDesc) {
+        unimplemented!("remove_historic");
+    }
+
+    pub fn remove_historic_new(&mut self, layer_desc: PersistentLayerDesc) {
         self.layer_map.remove_historic_noflush(layer_desc)
     }
 
@@ -644,6 +668,22 @@ impl LayerMap {
         for layer in self.iter_historic_layers() {
             layer.dump(verbose, ctx)?;
         }
+
+        println!("tiered compaction:");
+
+        println!("l0_deltas:");
+        for layer in &self.l0_delta_layers {
+            layer.dump(verbose, ctx)?;
+        }
+
+        println!("sorted_runs:");
+        for (lvl, (tier_id, layer)) in self.sorted_runs.iter().enumerate() {
+            println!("tier {}", tier_id);
+            for layer in layer {
+                layer.dump(verbose, ctx)?;
+            }
+        }
+
         println!("End dump LayerMap");
         Ok(())
     }
