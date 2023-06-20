@@ -2,6 +2,12 @@ name: 'Create Allure report'
 description: 'Generate Allure report from uploaded by actions/allure-report-store tests results'
 
 outputs:
+  base-url:
+    description: 'Base URL for Allure report'
+    value: ${{ steps.generate-report.outputs.base-url }}
+  base-s3-url:
+    description: 'Base S3 URL for Allure report'
+    value: ${{ steps.generate-report.outputs.base-s3-url }}
   report-url:
     description: 'Allure report URL'
     value: ${{ steps.generate-report.outputs.report-url }}
@@ -102,6 +108,11 @@ runs:
         REPORT_PREFIX=reports/${BRANCH_OR_PR}
         RAW_PREFIX=reports-raw/${BRANCH_OR_PR}/${GITHUB_RUN_ID}
 
+        BASE_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}
+        BASE_S3_URL=s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}
+        REPORT_URL=${BASE_URL}/index.html
+        REPORT_JSON_URL=${BASE_URL}/data/suites.json
+
         # Get previously uploaded data for this run
         ZSTD_NBTHREADS=0
 
@@ -133,8 +144,6 @@ runs:
         time aws s3 mv --recursive --only-show-errors "${WORKDIR}/report/history" "s3://${BUCKET}/${REPORT_PREFIX}/latest/history"
         time aws s3 sync --delete --only-show-errors "${WORKDIR}/report" "s3://${BUCKET}/${REPORT_PREFIX}/${GITHUB_RUN_ID}"
 
-        REPORT_URL=https://${BUCKET}.s3.amazonaws.com/${REPORT_PREFIX}/${GITHUB_RUN_ID}/index.html
-
         # Generate redirect
         cat <<EOF > ${WORKDIR}/index.html
           <!DOCTYPE html>
@@ -145,8 +154,10 @@ runs:
         EOF
         time aws s3 cp --only-show-errors ${WORKDIR}/index.html "s3://${BUCKET}/${REPORT_PREFIX}/latest/index.html"
 
-        echo "report-url=${REPORT_URL}"                                   >> $GITHUB_OUTPUT
-        echo "report-json-url=${REPORT_URL%/index.html}/data/suites.json" >> $GITHUB_OUTPUT
+        echo "base-url=${BASE_URL}"               >> $GITHUB_OUTPUT
+        echo "base-s3-url=${BASE_S3_URL}"         >> $GITHUB_OUTPUT
+        echo "report-url=${REPORT_URL}"           >> $GITHUB_OUTPUT
+        echo "report-json-url=${REPORT_JSON_URL}" >> $GITHUB_OUTPUT
 
         echo "[Allure Report](${REPORT_URL})" >> ${GITHUB_STEP_SUMMARY}
 
