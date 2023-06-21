@@ -694,7 +694,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .copied()
                 .unwrap_or(false);
 
-            // TODO maybe this is the place
+            // TODO alek maybe this is the place to pass args
             if let Some(endpoint) = endpoint {
                 match (&endpoint.mode, hot_standby) {
                     (ComputeMode::Static(_), true) => {
