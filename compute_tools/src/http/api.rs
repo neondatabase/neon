@@ -134,15 +134,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 filename
             );
 
-            match extension_server::download_file(
-                filename,
-                // TODO: pass more remote_ext arguments?
-                compute.remote_ext_bucket.clone(),
-                compute.remote_ext_region.clone(),
-                compute.remote_ext_endpoint.clone(),
-            )
-            .await
-            {
+            match extension_server::download_file(filename, &compute.remote_ext_config).await {
                 Ok(_) => Response::new(Body::from("OK")),
                 Err(e) => {
                     error!("download_file failed: {}", e);

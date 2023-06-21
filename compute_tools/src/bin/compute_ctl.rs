@@ -27,7 +27,8 @@
 //! compute_ctl -D /var/db/postgres/compute \
 //!             -C 'postgresql://cloud_admin@localhost/postgres' \
 //!             -S /var/db/postgres/specs/current.json \
-//!             -b /usr/local/bin/postgres
+//!             -b /usr/local/bin/postgres \
+//!             -r {"bucket": "my-bucket", "region": "eu-central-1"}
 //! ```
 //!
 use std::collections::HashMap;
@@ -41,7 +42,6 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use serde_json::{self, Value};
 use tracing::{error, info};
 use url::Url;
 
@@ -49,6 +49,7 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
+use compute_tools::extension_server::download_file;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -65,30 +66,12 @@ fn main() -> Result<()> {
     let remote_ext_config = matches
         .get_one::<String>("remote-ext-config")
         .expect("remote-extension-config is required");
-    let remote_ext_config: serde_json::Value = serde_json::from_str(&remote_ext_config)?;
-    let remote_ext_bucket = match &remote_ext_config["bucket"] {
-        Value::String(x) => x,
-        _ => panic!("oops"),
-    };
-    let remote_ext_region = match &remote_ext_config["region"] {
-        Value::String(x) => x,
-        _ => panic!("oops"),
-    };
-    let remote_ext_endpoint = match &remote_ext_config["endpoint"] {
-        Value::String(x) => x,
-        _ => panic!("oops"),
-    };
 
     let rt = Runtime::new().unwrap();
     rt.block_on(async move {
-        compute_tools::extension_server::download_file(
-            "test_ext.control",
-            remote_ext_bucket.into(),
-            remote_ext_region.into(),
-            remote_ext_endpoint.into(),
-        )
-        .await
-        .expect("download should work");
+        download_file("test_ext.control", remote_ext_config)
+            .await
+            .expect("download should work");
     });
 
     let http_port = *matches
@@ -208,9 +191,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        remote_ext_bucket: remote_ext_bucket.clone(), // TODO: pass more configurations?
-        remote_ext_region: remote_ext_region.clone(),
-        remote_ext_endpoint: remote_ext_endpoint.clone(),
+        remote_ext_config: remote_ext_config.clone(),
     };
     let compute = Arc::new(compute_node);
 

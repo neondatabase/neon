@@ -1,5 +1,6 @@
 use anyhow::{self};
 use remote_storage::*;
+use serde_json::{self, Value};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -8,14 +9,9 @@ use std::str;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-pub async fn download_file(
-    filename: &str,
-    remote_ext_bucket: String,
-    remote_ext_region: String,
-    remote_ext_endpoint: String,
-) -> anyhow::Result<()> {
-    println!("requested file {}", filename);
-    let s3_config = create_s3_config(remote_ext_bucket, remote_ext_region, remote_ext_endpoint);
+// TODO: get rid of this function by making s3_config part of ComputeNode
+pub async fn download_file(filename: &str, remote_ext_config: &str) -> anyhow::Result<()> {
+    let s3_config = create_s3_config(remote_ext_config)?;
     download_extension(&s3_config, ExtensionType::Shared).await?;
     Ok(())
 }
@@ -107,23 +103,33 @@ pub async fn download_extension(
     Ok(())
 }
 
-// TODO: add support for more of these parameters being configurable?
-pub fn create_s3_config(
-    remote_ext_bucket: String,
-    remote_ext_region: String,
-    remote_ext_endpoint: String,
-) -> RemoteStorageConfig {
+pub fn create_s3_config(remote_ext_config: &str) -> anyhow::Result<RemoteStorageConfig> {
+    let remote_ext_config: serde_json::Value = serde_json::from_str(remote_ext_config)?;
+    let remote_ext_bucket = match &remote_ext_config["bucket"] {
+        Value::String(x) => x,
+        _ => panic!("oops"),
+    };
+    let remote_ext_region = match &remote_ext_config["region"] {
+        Value::String(x) => x,
+        _ => panic!("oops"),
+    };
+    let remote_ext_endpoint = match &remote_ext_config["endpoint"] {
+        Value::String(x) => Some(x.clone()),
+        _ => None,
+    };
+
+    // TODO: add support for more of these parameters being configurable?
     let config = S3Config {
-        bucket_name: remote_ext_bucket,
-        bucket_region: remote_ext_region,
+        bucket_name: remote_ext_bucket.clone(),
+        bucket_region: remote_ext_region.clone(),
         prefix_in_bucket: None,
-        endpoint: Some(remote_ext_endpoint),
+        endpoint: remote_ext_endpoint,
         concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
         max_keys_per_list_response: None,
     };
-    RemoteStorageConfig {
+    Ok(RemoteStorageConfig {
         max_concurrent_syncs: NonZeroUsize::new(100).expect("100 != 0"),
         max_sync_errors: NonZeroU32::new(100).expect("100 != 0"),
         storage: RemoteStorageKind::AwsS3(config),
-    }
+    })
 }
