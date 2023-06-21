@@ -3,6 +3,8 @@
 ARG REPOSITORY=neondatabase
 ARG IMAGE=rust
 ARG TAG=pinned
+ARG GIT_VERSION=local
+
 
 FROM $REPOSITORY/$IMAGE:$TAG AS rust-build
 WORKDIR /home/nonroot

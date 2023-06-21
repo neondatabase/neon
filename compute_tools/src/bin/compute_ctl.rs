@@ -43,6 +43,7 @@ use chrono::Utc;
 use clap::Arg;
 use tracing::{error, info};
 use url::Url;
+use utils::project_git_version;
 
 use compute_api::responses::ComputeStatus;
 
@@ -56,6 +57,8 @@ use compute_tools::spec::*;
 
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
+
+    info!("version: {GIT_VERSION}");
 
     let matches = cli().get_matches();
 
@@ -285,11 +288,11 @@ fn main() -> Result<()> {
     exit(exit_code.unwrap_or(1))
 }
 
+project_git_version!(GIT_VERSION);
+
 fn cli() -> clap::Command {
-    // Env variable is set by `cargo`
-    let version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
     clap::Command::new("compute_ctl")
-        .version(version)
+        .version(GIT_VERSION)
         .arg(
             Arg::new("http-port")
                 .long("http-port")
