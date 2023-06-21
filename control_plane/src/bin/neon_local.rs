@@ -1149,7 +1149,6 @@ fn cli() -> Command {
                             .required(false))
                     .arg(pg_version_arg.clone())
                     .arg(hot_standby_arg.clone())
-                    .arg(remote_ext_config_args.clone()) // TODO: is this right?
                 )
                 .subcommand(Command::new("start")
                     .about("Start postgres.\n If the endpoint doesn't exist yet, it is created.")
@@ -1163,7 +1162,7 @@ fn cli() -> Command {
                     .arg(pg_version_arg)
                     .arg(hot_standby_arg)
                     .arg(safekeepers_arg)
-                    .arg(remote_ext_config_args.clone()) // TODO: is this right? // update: probably only start and not create needs this
+                    .arg(remote_ext_config_args.clone())
                 )
                 .subcommand(
                     Command::new("stop")

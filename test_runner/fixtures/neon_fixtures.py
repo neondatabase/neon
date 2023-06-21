@@ -1478,8 +1478,6 @@ class NeonCli(AbstractNeonCli):
             args.append(endpoint_id)
         if hot_standby:
             args.extend(["--hot-standby", "true"])
-        if remote_ext_config is not None:
-            args.extend(["--remote-ext-config", remote_ext_config])
 
         res = self.raw_cli(args)
         res.check_returncode()
@@ -2353,7 +2351,6 @@ class Endpoint(PgProtocol):
             hot_standby=hot_standby,
             pg_port=self.pg_port,
             http_port=self.http_port,
-            remote_ext_config=remote_ext_config,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
