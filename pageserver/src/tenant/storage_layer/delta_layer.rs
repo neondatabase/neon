@@ -47,7 +47,6 @@ use std::io::{Seek, SeekFrom};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tracing::*;
 
 use utils::{
@@ -411,16 +410,17 @@ impl PersistentLayer for DeltaLayer {
         Some(self.path())
     }
 
-    fn iter(self: Arc<Self>, ctx: &RequestContext) -> Result<LayerIter<'static>> {
-        self.load(LayerAccessKind::KeyIter, ctx)
+    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>> {
+        let inner = self
+            .load(LayerAccessKind::KeyIter, ctx)
             .context("load delta layer")?;
-        Ok(match DeltaValueIter::new(self) {
+        Ok(match DeltaValueIter::new(inner) {
             Ok(iter) => Box::new(iter),
             Err(err) => Box::new(std::iter::once(Err(err))),
         })
     }
 
-    fn key_iter(self: Arc<Self>, ctx: &RequestContext) -> Result<LayerKeyIter<'static>> {
+    fn key_iter(&self, ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
         let inner = self.load(LayerAccessKind::KeyIter, ctx)?;
         Ok(Box::new(
             DeltaKeyIter::new(inner).context("Layer index is corrupted")?,
@@ -886,28 +886,23 @@ impl Drop for DeltaLayerWriter {
 /// That takes up quite a lot of memory. Should do this in a more streaming
 /// fashion.
 ///
-struct DeltaValueIter {
+struct DeltaValueIter<'a> {
     all_offsets: Vec<(DeltaKey, BlobRef)>,
     next_idx: usize,
-    reader: BlockCursor<Adapter>,
+    reader: BlockCursor<Adapter<'a>>,
 }
 
-struct Adapter(Arc<DeltaLayer>);
+struct Adapter<'a>(&'a DeltaLayerInner);
 
-impl BlockReader for Adapter {
+impl<'a> BlockReader for Adapter<'a> {
     type BlockLease = PageReadGuard<'static>;
 
     fn read_blk(&self, blknum: u32) -> Result<Self::BlockLease, std::io::Error> {
-        self.0
-            .inner
-            .get()
-            .expect("Adapter is only constructed")
-            .file
-            .read_blk(blknum)
+        self.0.file.read_blk(blknum)
     }
 }
 
-impl Iterator for DeltaValueIter {
+impl<'a> Iterator for DeltaValueIter<'a> {
     type Item = Result<(Key, Lsn, Value)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -915,9 +910,8 @@ impl Iterator for DeltaValueIter {
     }
 }
 
-impl DeltaValueIter {
-    fn new(outer: Arc<DeltaLayer>) -> Result<DeltaValueIter> {
-        let inner = outer.inner.get().expect("only valled after load()");
+impl<'a> DeltaValueIter<'a> {
+    fn new(inner: &'a DeltaLayerInner) -> Result<Self> {
         let file = &inner.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             inner.index_start_blk,
@@ -938,7 +932,7 @@ impl DeltaValueIter {
         let iter = DeltaValueIter {
             all_offsets,
             next_idx: 0,
-            reader: BlockCursor::new(Adapter(outer)),
+            reader: BlockCursor::new(Adapter(inner)),
         };
 
         Ok(iter)
@@ -990,8 +984,8 @@ impl Iterator for DeltaKeyIter {
     }
 }
 
-impl DeltaKeyIter {
-    fn new(inner: &DeltaLayerInner) -> Result<Self> {
+impl<'a> DeltaKeyIter {
+    fn new(inner: &'a DeltaLayerInner) -> Result<Self> {
         let file = &inner.file;
         let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
             inner.index_start_blk,

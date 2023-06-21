@@ -3314,7 +3314,7 @@ impl Timeline {
 #[derive(Default)]
 struct CompactLevel0Phase1Result {
     new_layers: Vec<DeltaLayer>,
-    deltas_to_compact: Arc<Vec<Arc<dyn PersistentLayer>>>,
+    deltas_to_compact: Vec<Arc<dyn PersistentLayer>>,
 }
 
 /// Top-level failure to compact.
@@ -3553,9 +3553,7 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
         for (next_key, _next_lsn, _size) in itertools::process_results(
-            deltas_to_compact
-                .iter()
-                .map(|l| Arc::clone(l).key_iter(ctx)),
+            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
             |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
         )? {
             if let Some(prev_key) = prev {
@@ -3586,26 +3584,17 @@ impl Timeline {
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
         let mut next_hole = 0; // index of next hole in holes vector
 
-        // Wrap deltas_to_compact into an Arc so we can pass the .key_iter() and .iter()
-        // into the spawn_blocking.
-        let deltas_to_compact = Arc::new(deltas_to_compact);
-        let deltas_to_compact_clone = Arc::clone(&deltas_to_compact);
-        let iter_deltas_to_compact = move || {
-            let data = Arc::clone(&deltas_to_compact_clone);
-            (0..data.len()).map(move |i| Arc::clone(&data[i]))
-        };
-
         let myself = Arc::clone(self);
         let span = info_span!("compact_level0_phase1_write_layers");
         let ctx = ctx.attached_child(); // TODO: technically spawn_blocking task can outlive current task
-        let new_layers = spawn_blocking(move || {
+        let res = spawn_blocking(move || {
             let _entered = span.enter();
             stats.read_lock_drop_until_spawn_blocking_code_start_micros =
                 stats.read_lock_held_micros.till_now();
             // This iterator walks through all key-value pairs from all the layers
             // we're compacting, in key, LSN order.
             let all_values_iter = itertools::process_results(
-                iter_deltas_to_compact().map(|l| l.iter(&ctx)),
+                deltas_to_compact.iter().map(|l| l.iter(&ctx)),
                 |iter_iter| {
                     iter_iter.kmerge_by(|a, b| {
                         if let Ok((a_key, a_lsn, _)) = a {
@@ -3627,7 +3616,7 @@ impl Timeline {
 
             // This iterator walks through all keys and is needed to calculate size used by each key
             let mut all_keys_iter = itertools::process_results(
-                iter_deltas_to_compact().map(|l| l.key_iter(&ctx)),
+                deltas_to_compact.iter().map(|l| l.key_iter(&ctx)),
                 |iter_iter| {
                     iter_iter.kmerge_by(|a, b| {
                         let (a_key, a_lsn, _) = a;
@@ -3826,14 +3815,15 @@ impl Timeline {
                     warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
                 }
             }
-            anyhow::Ok(new_layers)
+            Ok(CompactLevel0Phase1Result {
+                new_layers,
+                deltas_to_compact,
+            })
         })
         .await
-        .context("spawn_blocking")??;
-        Ok(CompactLevel0Phase1Result {
-            new_layers,
-            deltas_to_compact,
-        })
+        .context("spawn_blocking")
+        .map_err(CompactionError::Other)??;
+        Ok(res)
     }
 
     ///

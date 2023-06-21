@@ -431,11 +431,11 @@ pub trait PersistentLayer: Layer {
     fn local_path(&self) -> Option<PathBuf>;
 
     /// Iterate through all keys and values stored in the layer
-    fn iter(self: Arc<Self>, ctx: &RequestContext) -> Result<LayerIter<'static>>;
+    fn iter(&self, ctx: &RequestContext) -> Result<LayerIter<'_>>;
 
     /// Iterate through all keys stored in the layer. Returns key, lsn and value size
     /// It is used only for compaction and so is currently implemented only for DeltaLayer
-    fn key_iter(self: Arc<Self>, _ctx: &RequestContext) -> Result<LayerKeyIter<'static>> {
+    fn key_iter(&self, _ctx: &RequestContext) -> Result<LayerKeyIter<'_>> {
         panic!("Not implemented")
     }
 
