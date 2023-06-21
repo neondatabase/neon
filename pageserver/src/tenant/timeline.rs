@@ -3371,7 +3371,7 @@ struct CompactLevel0Phase1StatsBuilder {
     version: Option<u64>,
     tenant_id: Option<TenantId>,
     timeline_id: Option<TimelineId>,
-    first_read_lock_acquisition_micros: DurationRecorder,
+    read_lock_acquisition_micros: DurationRecorder,
     read_lock_held_micros: DurationRecorder,
     read_lock_drop_until_spawn_blocking_code_start_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
@@ -3410,7 +3410,7 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .timeline_id
                 .ok_or_else(|| anyhow!("timeline_id not set"))?,
             first_read_lock_acquisition_micros: value
-                .first_read_lock_acquisition_micros
+                .read_lock_acquisition_micros
                 .into_recorded()
                 .ok_or_else(|| anyhow!("first_read_lock_acquisition_micros not set"))?,
             read_lock_held_micros: value
@@ -3462,7 +3462,7 @@ impl Timeline {
         let begin = tokio::time::Instant::now();
         let layers = self.layers.read().await;
         let now = tokio::time::Instant::now();
-        stats.first_read_lock_acquisition_micros =
+        stats.read_lock_acquisition_micros =
             DurationRecorder::Recorded(RecordedDuration(now - begin), now);
         let mut level0_deltas = layers.get_level0_deltas()?;
 
@@ -3579,7 +3579,7 @@ impl Timeline {
             prev = Some(next_key.next());
         }
         drop(layers);
-        stats.read_lock_held_micros = stats.first_read_lock_acquisition_micros.till_now();
+        stats.read_lock_held_micros = stats.read_lock_acquisition_micros.till_now();
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
         let mut next_hole = 0; // index of next hole in holes vector
