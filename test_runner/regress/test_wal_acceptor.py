@@ -575,11 +575,21 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
 
     pg_version = sk.http_client().timeline_status(tenant_id, timeline_id).pg_version
 
+    # Terminate first all safekeepers to prevent communication unexpectantly
+    # advancing peer_horizon_lsn.
     for sk in env.safekeepers:
         cli = sk.http_client()
         cli.timeline_delete_force(tenant_id, timeline_id)
         # restart safekeeper to clear its in-memory state
-        sk.stop().start()
+        sk.stop()
+    # wait all potenital in flight pushes to broker arrive before starting
+    # safekeepers (even without sleep, it is very unlikely they are not
+    # delivered yet).
+    time.sleep(1)
+
+    for sk in env.safekeepers:
+        sk.start()
+        cli = sk.http_client()
         cli.timeline_create(tenant_id, timeline_id, pg_version, last_lsn)
         f_partial_path = (
             Path(sk.data_dir()) / str(tenant_id) / str(timeline_id) / f_partial_saved.name
