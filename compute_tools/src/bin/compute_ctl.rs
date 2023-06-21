@@ -60,7 +60,7 @@ const BUILD_TAG_DEFAULT: &str = "local";
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
-    let build_tag = std::env::var("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT.to_string());
+    let build_tag = option_env!("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT);
 
     info!("version: {GIT_VERSION}, build_tag: {build_tag}");
 
