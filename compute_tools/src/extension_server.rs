@@ -118,7 +118,7 @@ pub fn create_s3_config(remote_ext_config: &str) -> anyhow::Result<RemoteStorage
         _ => None,
     };
 
-    // TODO: add support for more of these parameters being configurable?
+    // load will not be large, so default parameters are fine
     let config = S3Config {
         bucket_name: remote_ext_bucket.clone(),
         bucket_region: remote_ext_region.clone(),
