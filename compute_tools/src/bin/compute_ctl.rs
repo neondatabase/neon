@@ -77,15 +77,20 @@ fn main() -> Result<()> {
         Value::String(x) => x,
         _ => panic!("oops"),
     };
+    let remote_ext_endpoint = match &remote_ext_config["endpoint"] {
+        Value::String(x) => x,
+        _ => panic!("oops"),
+    };
     warn!("you certainly must build changes if you want rust changes to be built");
     std::fs::write("alek/yay", remote_ext_bucket.clone())?;
 
-    let mut rt = Runtime::new().unwrap();
+    let rt = Runtime::new().unwrap();
     rt.block_on(async move {
         compute_tools::extension_server::download_file(
             "test_ext.control",
             remote_ext_bucket.into(),
             remote_ext_region.into(),
+            remote_ext_endpoint.into(),
         )
         .await
         .expect("download should work");
@@ -210,6 +215,7 @@ fn main() -> Result<()> {
         state_changed: Condvar::new(),
         remote_ext_bucket: remote_ext_bucket.clone(), // TODO ALEK: pass all the args!
         remote_ext_region: remote_ext_region.clone(),
+        remote_ext_endpoint: remote_ext_endpoint.clone(),
     };
     let compute = Arc::new(compute_node);
 

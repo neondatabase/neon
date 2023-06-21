@@ -115,7 +115,7 @@ pub(super) mod metrics {
 
 /// AWS S3 storage.
 pub struct S3Bucket {
-    client: Client,
+    pub client: Client,
     pub bucket_name: String, // TODO: undo making these public
     pub prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,

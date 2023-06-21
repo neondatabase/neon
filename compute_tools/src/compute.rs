@@ -49,6 +49,7 @@ pub struct ComputeNode {
     // TODO: alek pass all args here
     pub remote_ext_bucket: String,
     pub remote_ext_region: String,
+    pub remote_ext_endpoint: String,
 }
 
 #[derive(Clone, Debug)]

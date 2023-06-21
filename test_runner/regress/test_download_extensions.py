@@ -71,7 +71,8 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     remote_ext_config = json.dumps(
         {
             "bucket": neon_env_builder.remote_storage.bucket_name,
-            "region": "eu-central-1",
+            "region": "us-east-1",
+            "endpoint": neon_env_builder.remote_storage.endpoint,
         }
     )
 

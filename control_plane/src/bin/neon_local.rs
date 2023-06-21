@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
-use tracing::{error, info, warn};
+// use tracing::{error, info, warn};
 use utils::{
     auth::{Claims, Scope},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},

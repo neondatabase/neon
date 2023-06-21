@@ -140,6 +140,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 // TODO alek: pass more remote_ext arguments
                 compute.remote_ext_bucket.clone(),
                 compute.remote_ext_region.clone(),
+                compute.remote_ext_endpoint.clone(),
             )
             .await
             {

@@ -13,6 +13,7 @@ pub async fn download_file(
     filename: &str,
     remote_ext_bucket: String,
     remote_ext_region: String,
+    remote_ext_endpoint: String,
 ) -> anyhow::Result<()> {
     // probably should be using the pgbin argv somehow to compute sharedir...
     let sharedir = get_pg_config("--sharedir");
@@ -21,7 +22,7 @@ pub async fn download_file(
     println!("requested file {}", filename);
 
     // TODO: download the extensions!
-    let s3_config = create_s3_config(remote_ext_bucket, remote_ext_region);
+    let s3_config = create_s3_config(remote_ext_bucket, remote_ext_region, remote_ext_endpoint);
     download_extension(&s3_config, ExtensionType::Shared).await?;
 
     // This is filler code
@@ -46,7 +47,7 @@ fn get_pg_config(argument: &str) -> String {
     stdout.trim().to_string()
 }
 
-async fn download_helper(
+async fn _download_helper(
     remote_storage: &GenericRemoteStorage,
     remote_from_path: &RemotePath,
     to_path: &str,
@@ -83,11 +84,11 @@ pass config to compute_ctl
  */
 pub async fn download_extension(
     config: &RemoteStorageConfig,
-    ext_type: ExtensionType,
+    _ext_type: ExtensionType,
 ) -> anyhow::Result<()> {
     let sharedir = get_pg_config("--sharedir");
-    let sharedir = format!("{}/extension", sharedir);
-    let libdir = get_pg_config("--libdir");
+    let _sharedir = format!("{}/extension", sharedir);
+    // let libdir = get_pg_config("--libdir");
     let remote_storage = GenericRemoteStorage::from_config(config)?;
 
     std::fs::write("alek/proof", "proof")?;
@@ -97,11 +98,17 @@ pub async fn download_extension(
             my_bucket.bucket_name, my_bucket.prefix_in_bucket
         );
         std::fs::write("alek/storagedetails", storage_details)?;
+        dbg!(my_bucket.client.clone());
+        for _ in 0..100 {
+            dbg!("++++++++++");
+        }
     }
 
     // // this is just for testing doing a testing thing
     let folder = RemotePath::new(Path::new("public_extensions"))?;
     let from_paths = remote_storage.list_files(Some(&folder)).await?;
+    dbg!(from_paths);
+    dbg!("FROM PATHS!!!!!1");
     std::fs::write("alek/antiproof", "antiproof")?;
     // let some_path = from_paths[0]
     //     .object_name()
@@ -150,12 +157,17 @@ pub async fn download_extension(
 pub fn create_s3_config(
     remote_ext_bucket: String,
     remote_ext_region: String,
+    remote_ext_endpoint: String,
 ) -> RemoteStorageConfig {
+    dbg!("create_s3_config");
+    dbg!(&remote_ext_bucket);
+    dbg!(&remote_ext_region);
+    dbg!(&remote_ext_endpoint);
     let config = S3Config {
         bucket_name: remote_ext_bucket,
         bucket_region: remote_ext_region,
         prefix_in_bucket: None,
-        endpoint: None,
+        endpoint: Some(remote_ext_endpoint),
         concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
         max_keys_per_list_response: None,
     };
