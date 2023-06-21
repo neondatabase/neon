@@ -8,6 +8,7 @@ OBJS = \
 	libpagestore.o \
 	libpqwalproposer.o \
 	neon.o \
+	access_stat.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
 	walproposer.o \

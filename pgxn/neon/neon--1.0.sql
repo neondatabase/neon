@@ -27,8 +27,18 @@ RETURNS SETOF RECORD
 AS 'MODULE_PATHNAME', 'local_cache_pages'
 LANGUAGE C PARALLEL SAFE;
 
+CREATE FUNCTION get_relation_access_statistics()
+RETURNS SETOF RECORD
+AS 'MODULE_PATHNAME', 'get_relation_access_statistics'
+LANGUAGE C PARALLEL SAFE;
+
 -- Create a view for convenient access.
 CREATE VIEW local_cache AS
-	SELECT P.* FROM local_cache_pages() AS P
+	SELECT relname,P.* FROM local_cache_pages() AS P
 	(pageoffs int8, relfilenode oid, reltablespace oid, reldatabase oid,
-	 relforknumber int2, relblocknumber int8, accesscount int4);
+	 relforknumber int2, relblocknumber int8, accesscount int4) JOIN pg_class pc ON (P.relfilenode = pc.relfilenode);
+
+CREATE VIEW relation_access_statistics AS
+	SELECT relname,P.* FROM get_relation_access_statistics() AS P
+	(relfilenode oid, reltablespace oid, reldatabase oid,
+	 seqaccess int4, rndaccess int4, access_count int8) JOIN pg_class pc ON (P.relfilenode = pc.relfilenode);

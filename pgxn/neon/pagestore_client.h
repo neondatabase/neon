@@ -210,5 +210,8 @@ extern bool lfc_cache_contains(RelFileNode rnode, ForkNumber forkNum, BlockNumbe
 extern void lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
 
+/* Access statistic */
+extern void access_stat_init(void);
+extern bool is_sequential_access(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno);
 
 #endif

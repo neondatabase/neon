@@ -1881,6 +1881,7 @@ neon_read_at_lsn(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno,
 	if (RecoveryInProgress() && !(MyBackendType == B_STARTUP))
 		XLogWaitForReplayOf(request_lsn);
 
+
 	/*
 	 * Try to find prefetched page in the list of received pages.
 	 */
@@ -2002,6 +2003,10 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 		default:
 			elog(ERROR, "unknown relpersistence '%c'", reln->smgr_relpersistence);
 	}
+
+	/* If it is expected to be sequential access then initiate prefetch of next block */
+	if (is_sequential_access(reln->smgr_rnode.node, forkNum, blkno))
+		neon_prefetch(reln, forkNum, blkno+1);
 
 	/* Try to read from local file cache */
 	if (lfc_read(reln->smgr_rnode.node, forkNum, blkno, buffer))
