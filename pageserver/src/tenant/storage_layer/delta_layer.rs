@@ -399,6 +399,10 @@ impl Layer for DeltaLayer {
     fn short_id(&self) -> String {
         self.layer_desc().short_id()
     }
+
+    fn is_delta(&self) -> bool {
+        true
+    }
 }
 
 impl PersistentLayer for DeltaLayer {

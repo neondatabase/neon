@@ -353,6 +353,11 @@ pub trait Layer: std::fmt::Debug + Send + Sync {
     /// the previous non-incremental layer.
     fn is_incremental(&self) -> bool;
 
+    /// Is this a delta layer?
+    fn is_delta(&self) -> bool {
+        false
+    }
+
     ///
     /// Return data needed to reconstruct given page at LSN.
     ///
