@@ -42,7 +42,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
 use serde_json::{self, Value};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use url::Url;
 
 use compute_api::responses::ComputeStatus;

@@ -1,8 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
-use std::{fs, thread};
+use std::thread;
 
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
