@@ -372,12 +372,27 @@ impl LocalEnv {
             "repository base path is missing"
         );
 
-        if !force {
-            ensure!(
-                !base_path.exists(),
-                "directory '{}' already exists. Perhaps already initialized?",
-                base_path.display()
-            );
+        if base_path.exists() {
+            if force {
+                println!("removing all contents of '{}'", base_path.display());
+                // instead of directly calling `remove_dir_all`, we keep the original dir but removing
+                // all contents inside. This helps if the developer symbol links another directory (i.e.,
+                // S3 local SSD) to the `.neon` base directory.
+                for entry in std::fs::read_dir(base_path)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        fs::remove_dir_all(&path)?;
+                    } else {
+                        fs::remove_file(&path)?;
+                    }
+                }
+            } else {
+                bail!(
+                    "directory '{}' already exists. Perhaps already initialized? (Hint: use --force to remove all contents)",
+                    base_path.display()
+                );
+            }
         }
 
         if !self.pg_bin_dir(pg_version)?.join("postgres").exists() {
