@@ -3453,7 +3453,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let mut stats = CompactLevel0Phase1StatsBuilder {
-            version: Some(1),
+            version: Some(2),
             tenant_id: Some(self.tenant_id),
             timeline_id: Some(self.timeline_id),
             ..Default::default()
