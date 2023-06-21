@@ -10,6 +10,7 @@
 //
 
 use anyhow::Context;
+use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
@@ -31,6 +32,7 @@ use std::str;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::StreamReader;
 use tracing::*;
@@ -772,9 +774,10 @@ impl PageServerHandler {
 
         // Send a tarball of the latest layer on the timeline
         {
-            let mut writer = pgb.copyout_writer();
+            let writer = pgb.copyout_writer();
+            let mut encoder = GzipEncoder::new(writer);
             basebackup::send_basebackup_tarball(
-                &mut writer,
+                &mut encoder,
                 &timeline,
                 lsn,
                 prev_lsn,
@@ -782,6 +785,8 @@ impl PageServerHandler {
                 &ctx,
             )
             .await?;
+            // shutdown the encoder to ensure the gzip footer is written
+            encoder.shutdown().await?;
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)?;
