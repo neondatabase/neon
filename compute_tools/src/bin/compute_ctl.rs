@@ -49,7 +49,7 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::download_file;
+use compute_tools::extension_server::{download_extension, init_remote_storage, ExtensionType};
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -66,12 +66,15 @@ fn main() -> Result<()> {
     let remote_ext_config = matches
         .get_one::<String>("remote-ext-config")
         .expect("remote-extension-config is required");
+    let remote_storage = init_remote_storage(remote_ext_config)?;
 
+    // TODO: can we give remote_storage a static lifetime, so that we don't have to copy it?
+    let copy_remote_storage = remote_storage.clone();
     let rt = Runtime::new().unwrap();
     rt.block_on(async move {
-        download_file("test_ext.control", remote_ext_config)
+        download_extension(&copy_remote_storage, ExtensionType::Shared)
             .await
-            .expect("download should work");
+            .expect("download extension should work");
     });
 
     let http_port = *matches
@@ -191,7 +194,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        remote_ext_config: remote_ext_config.clone(),
+        remote_storage: remote_storage,
     };
     let compute = Arc::new(compute_node);
 

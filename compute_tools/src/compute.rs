@@ -16,6 +16,8 @@ use utils::lsn::Lsn;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 
+use remote_storage::GenericRemoteStorage;
+
 use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -45,8 +47,8 @@ pub struct ComputeNode {
     pub state: Mutex<ComputeState>,
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
-    //  S3 configuration variables:
-    pub remote_ext_config: String,
+    ///  S3 extensions configuration variables (JSON)
+    pub remote_storage: GenericRemoteStorage,
 }
 
 #[derive(Clone, Debug)]

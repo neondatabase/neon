@@ -9,13 +9,6 @@ use std::str;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-// TODO: get rid of this function by making s3_config part of ComputeNode
-pub async fn download_file(filename: &str, remote_ext_config: &str) -> anyhow::Result<()> {
-    let remote_storage = init_remote_storage(remote_ext_config)?;
-    download_extension(&remote_storage, ExtensionType::Shared).await?;
-    Ok(())
-}
-
 fn get_pg_config(argument: &str) -> String {
     let config_output = std::process::Command::new("pg_config")
         .arg(argument)
