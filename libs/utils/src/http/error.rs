@@ -1,5 +1,6 @@
 use hyper::{header, Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::error::Error as StdError;
 use thiserror::Error;
 use tracing::error;
 
@@ -15,7 +16,7 @@ pub enum ApiError {
     Unauthorized(String),
 
     #[error("NotFound: {0}")]
-    NotFound(anyhow::Error),
+    NotFound(Box<dyn StdError + Send + Sync + 'static>),
 
     #[error("Conflict: {0}")]
     Conflict(String),

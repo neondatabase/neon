@@ -266,7 +266,7 @@ impl From<TimelineError> for ApiError {
     fn from(te: TimelineError) -> ApiError {
         match te {
             TimelineError::NotFound(ttid) => {
-                ApiError::NotFound(anyhow!("timeline {} not found", ttid))
+                ApiError::NotFound(anyhow!("timeline {} not found", ttid).into())
             }
             _ => ApiError::InternalServerError(anyhow!("{}", te)),
         }
