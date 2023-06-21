@@ -11,8 +11,8 @@ use tracing::info;
 
 // TODO: get rid of this function by making s3_config part of ComputeNode
 pub async fn download_file(filename: &str, remote_ext_config: &str) -> anyhow::Result<()> {
-    let s3_config = create_s3_config(remote_ext_config)?;
-    download_extension(&s3_config, ExtensionType::Shared).await?;
+    let remote_storage = init_remote_storage(remote_ext_config)?;
+    download_extension(&remote_storage, ExtensionType::Shared).await?;
     Ok(())
 }
 
@@ -55,11 +55,9 @@ pub enum ExtensionType {
 }
 
 pub async fn download_extension(
-    config: &RemoteStorageConfig,
+    remote_storage: &GenericRemoteStorage,
     ext_type: ExtensionType,
 ) -> anyhow::Result<()> {
-    let remote_storage = GenericRemoteStorage::from_config(config)?;
-
     let from_paths = remote_storage.list_files(None).await?;
     std::fs::write("ALEK_LIST_FILES.txt", format!("{:?}", from_paths))?;
 
@@ -103,7 +101,7 @@ pub async fn download_extension(
     Ok(())
 }
 
-pub fn create_s3_config(remote_ext_config: &str) -> anyhow::Result<RemoteStorageConfig> {
+pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRemoteStorage> {
     let remote_ext_config: serde_json::Value = serde_json::from_str(remote_ext_config)?;
     let remote_ext_bucket = match &remote_ext_config["bucket"] {
         Value::String(x) => x,
@@ -127,9 +125,10 @@ pub fn create_s3_config(remote_ext_config: &str) -> anyhow::Result<RemoteStorage
         concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
         max_keys_per_list_response: None,
     };
-    Ok(RemoteStorageConfig {
+    let config = RemoteStorageConfig {
         max_concurrent_syncs: NonZeroUsize::new(100).expect("100 != 0"),
         max_sync_errors: NonZeroU32::new(100).expect("100 != 0"),
         storage: RemoteStorageKind::AwsS3(config),
-    })
+    };
+    Ok(GenericRemoteStorage::from_config(&config)?)
 }
