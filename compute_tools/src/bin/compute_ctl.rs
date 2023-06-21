@@ -60,9 +60,6 @@ use tokio::runtime::Runtime;
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
-    let args: Vec<String> = std::env::args().collect();
-    std::fs::write("alek/ARG", args.join(" "))?;
-
     let matches = cli().get_matches();
 
     let remote_ext_config = matches
@@ -81,8 +78,6 @@ fn main() -> Result<()> {
         Value::String(x) => x,
         _ => panic!("oops"),
     };
-    warn!("you certainly must build changes if you want rust changes to be built");
-    std::fs::write("alek/yay", remote_ext_bucket.clone())?;
 
     let rt = Runtime::new().unwrap();
     rt.block_on(async move {
@@ -213,7 +208,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        remote_ext_bucket: remote_ext_bucket.clone(), // TODO ALEK: pass all the args!
+        remote_ext_bucket: remote_ext_bucket.clone(), // TODO: pass more configurations?
         remote_ext_region: remote_ext_region.clone(),
         remote_ext_endpoint: remote_ext_endpoint.clone(),
     };

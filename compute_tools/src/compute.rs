@@ -46,7 +46,7 @@ pub struct ComputeNode {
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
     //  S3 configuration variables:
-    // TODO: alek pass all args here
+    // TODO: pass more args here?
     pub remote_ext_bucket: String,
     pub remote_ext_region: String,
     pub remote_ext_endpoint: String,

@@ -28,7 +28,6 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
 use storage_broker::DEFAULT_LISTEN_ADDR as DEFAULT_BROKER_ADDR;
-// use tracing::{error, info, warn};
 use utils::{
     auth::{Claims, Scope},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -692,7 +691,6 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .copied()
                 .unwrap_or(false);
 
-            // TODO alek maybe this is the place to pass args
             if let Some(endpoint) = endpoint {
                 match (&endpoint.mode, hot_standby) {
                     (ComputeMode::Static(_), true) => {
@@ -748,7 +746,6 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     pg_version,
                     mode,
                 )?;
-                // TODO: alek this is where the endpoint is created / started
                 ep.start(&auth_token, safekeepers, &remote_ext_config)?;
             }
         }

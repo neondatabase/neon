@@ -137,7 +137,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
 
             match extension_server::download_file(
                 filename,
-                // TODO alek: pass more remote_ext arguments
+                // TODO: pass more remote_ext arguments?
                 compute.remote_ext_bucket.clone(),
                 compute.remote_ext_region.clone(),
                 compute.remote_ext_endpoint.clone(),
@@ -343,10 +343,6 @@ async fn serve(port: u16, state: Arc<ComputeNode>) {
 /// Launch a separate Hyper HTTP API server thread and return its `JoinHandle`.
 pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let state = Arc::clone(state);
-
-    // TODO: remote print statements
-    let xxx = format!("ROUTING port: {port}");
-    std::fs::write("alek/ROUTES", xxx).expect("routing write file");
 
     Ok(thread::Builder::new()
         .name("http-endpoint".into())

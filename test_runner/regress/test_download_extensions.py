@@ -38,9 +38,6 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    with open("alek/env.txt", "w") as f:
-        f.write(str(env.__dict__))
-
     TEST_EXT_PATH = "v15/share/extension/test_ext.control"
 
     # TODO: we shouldn't be using neon_env_builder.remote_storage_client,
@@ -48,7 +45,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
 
     # 4. Upload test_ext.control file to the bucket
     # In the non-mock version this is done by CI/CD
-    with open("alek/test_ext.control", "rb") as data:
+    with open("test_ext.control", "rb") as data:
         neon_env_builder.remote_storage_client.upload_fileobj(
             data, neon_env_builder.remote_storage.bucket_name, TEST_EXT_PATH
         )
@@ -101,8 +98,6 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
             # the real test query: check that test_ext is present
             cur.execute("SELECT * FROM pg_available_extensions")
             all_extensions = [x[0] for x in cur.fetchall()]
-            with open("alek/win.txt", "w") as f:
-                f.write(str(all_extensions))
             log.info(all_extensions)
             assert "test_ext" in all_extensions
 
