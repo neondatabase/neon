@@ -476,4 +476,5 @@ pg_init_libpagestore(void)
 		redo_read_buffer_filter = neon_redo_read_buffer_filter;
 	}
 	lfc_init();
+	access_stat_init();
 }
