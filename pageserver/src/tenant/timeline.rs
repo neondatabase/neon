@@ -3372,13 +3372,10 @@ struct CompactLevel0Phase1StatsBuilder {
     tenant_id: Option<TenantId>,
     timeline_id: Option<TimelineId>,
     first_read_lock_acquisition_micros: DurationRecorder,
-    get_level0_deltas_plus_drop_lock_micros: DurationRecorder,
-    level0_deltas_count: Option<usize>,
-    time_spent_between_locks: DurationRecorder,
-    second_read_lock_acquisition_micros: DurationRecorder,
-    second_read_lock_held_micros: DurationRecorder,
-    sort_holes_micros: DurationRecorder,
+    read_lock_held_micros: DurationRecorder,
+    read_lock_drop_until_spawn_blocking_code_start_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
+    level0_deltas_count: Option<usize>,
     new_deltas_count: Option<usize>,
     new_deltas_size: Option<u64>,
 }
@@ -3392,13 +3389,10 @@ struct CompactLevel0Phase1Stats {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     timeline_id: TimelineId,
     first_read_lock_acquisition_micros: RecordedDuration,
-    get_level0_deltas_plus_drop_lock_micros: RecordedDuration,
-    level0_deltas_count: usize,
-    time_spent_between_locks: RecordedDuration,
-    second_read_lock_acquisition_micros: RecordedDuration,
-    second_read_lock_held_micros: RecordedDuration,
-    sort_holes_micros: RecordedDuration,
+    read_lock_held_micros: RecordedDuration,
+    read_lock_drop_until_spawn_blocking_code_start_micros: RecordedDuration,
     write_layer_files_micros: RecordedDuration,
+    level0_deltas_count: usize,
     new_deltas_count: usize,
     new_deltas_size: u64,
 }
@@ -3407,54 +3401,41 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
     type Error = anyhow::Error;
 
     fn try_from(value: CompactLevel0Phase1StatsBuilder) -> Result<Self, Self::Error> {
-        let CompactLevel0Phase1StatsBuilder {
-            version,
-            tenant_id,
-            timeline_id,
-            first_read_lock_acquisition_micros,
-            get_level0_deltas_plus_drop_lock_micros,
-            level0_deltas_count,
-            time_spent_between_locks,
-            second_read_lock_acquisition_micros,
-            second_read_lock_held_micros,
-            sort_holes_micros,
-            write_layer_files_micros,
-            new_deltas_count,
-            new_deltas_size,
-        } = value;
-        Ok(CompactLevel0Phase1Stats {
-            version: version.ok_or_else(|| anyhow::anyhow!("version not set"))?,
-            tenant_id: tenant_id.ok_or_else(|| anyhow::anyhow!("tenant_id not set"))?,
-            timeline_id: timeline_id.ok_or_else(|| anyhow::anyhow!("timeline_id not set"))?,
-            first_read_lock_acquisition_micros: first_read_lock_acquisition_micros
+        Ok(Self {
+            version: value.version.ok_or_else(|| anyhow!("version not set"))?,
+            tenant_id: value
+                .tenant_id
+                .ok_or_else(|| anyhow!("tenant_id not set"))?,
+            timeline_id: value
+                .timeline_id
+                .ok_or_else(|| anyhow!("timeline_id not set"))?,
+            first_read_lock_acquisition_micros: value
+                .first_read_lock_acquisition_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("first_read_lock_acquisition_micros not set"))?,
-            get_level0_deltas_plus_drop_lock_micros: get_level0_deltas_plus_drop_lock_micros
+                .ok_or_else(|| anyhow!("first_read_lock_acquisition_micros not set"))?,
+            read_lock_held_micros: value
+                .read_lock_held_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_micros not set"))?,
+            read_lock_drop_until_spawn_blocking_code_start_micros: value
+                .read_lock_drop_until_spawn_blocking_code_start_micros
                 .into_recorded()
                 .ok_or_else(|| {
-                    anyhow::anyhow!("get_level0_deltas_plus_drop_lock_micros not set")
+                    anyhow!("read_lock_drop_until_spawn_blocking_code_start_micros not set")
                 })?,
-            level0_deltas_count: level0_deltas_count
-                .ok_or_else(|| anyhow::anyhow!("level0_deltas_count not set"))?,
-            time_spent_between_locks: time_spent_between_locks
+            write_layer_files_micros: value
+                .write_layer_files_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("time_spent_between_locks not set"))?,
-            second_read_lock_acquisition_micros: second_read_lock_acquisition_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("second_read_lock_acquisition_micros not set"))?,
-            second_read_lock_held_micros: second_read_lock_held_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("second_read_lock_held_micros not set"))?,
-            sort_holes_micros: sort_holes_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("sort_holes_micros not set"))?,
-            write_layer_files_micros: write_layer_files_micros
-                .into_recorded()
-                .ok_or_else(|| anyhow::anyhow!("write_layer_files_micros not set"))?,
-            new_deltas_count: new_deltas_count
-                .ok_or_else(|| anyhow::anyhow!("new_deltas_count not set"))?,
-            new_deltas_size: new_deltas_size
-                .ok_or_else(|| anyhow::anyhow!("new_deltas_size not set"))?,
+                .ok_or_else(|| anyhow!("write_layer_files_micros not set"))?,
+            level0_deltas_count: value
+                .level0_deltas_count
+                .ok_or_else(|| anyhow!("level0_deltas_count not set"))?,
+            new_deltas_count: value
+                .new_deltas_count
+                .ok_or_else(|| anyhow!("new_deltas_count not set"))?,
+            new_deltas_size: value
+                .new_deltas_size
+                .ok_or_else(|| anyhow!("new_deltas_size not set"))?,
         })
     }
 }
@@ -3484,10 +3465,6 @@ impl Timeline {
         stats.first_read_lock_acquisition_micros =
             DurationRecorder::Recorded(RecordedDuration(now - begin), now);
         let mut level0_deltas = layers.get_level0_deltas()?;
-        drop(layers);
-        stats.level0_deltas_count = Some(level0_deltas.len());
-        stats.get_level0_deltas_plus_drop_lock_micros =
-            stats.first_read_lock_acquisition_micros.till_now();
 
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
@@ -3532,14 +3509,8 @@ impl Timeline {
             end: deltas_to_compact.last().unwrap().get_lsn_range().end,
         };
 
-        let deltas_to_compact = Arc::new(deltas_to_compact);
-        let deltas_to_compact_clone = Arc::clone(&deltas_to_compact);
-        let iter_deltas_to_compact = move || {
-            let data = Arc::clone(&deltas_to_compact_clone);
-            (0..data.len()).map(move |i| Arc::clone(&data[i]))
-        };
-
-        let remotes = iter_deltas_to_compact()
+        let remotes = deltas_to_compact
+            .iter()
             .filter(|l| l.is_remote_layer())
             .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
             .map(|l| {
@@ -3572,51 +3543,9 @@ impl Timeline {
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
 
-        // This iterator walks through all key-value pairs from all the layers
-        // we're compacting, in key, LSN order.
-        let all_values_iter = itertools::process_results(
-            iter_deltas_to_compact().map(|l| l.iter(ctx)),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    if let Ok((a_key, a_lsn, _)) = a {
-                        if let Ok((b_key, b_lsn, _)) = b {
-                            match a_key.cmp(b_key) {
-                                Ordering::Less => true,
-                                Ordering::Equal => a_lsn <= b_lsn,
-                                Ordering::Greater => false,
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        true
-                    }
-                })
-            },
-        )?;
-
-        // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = itertools::process_results(
-            iter_deltas_to_compact().map(|l| l.key_iter(ctx)),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    let (a_key, a_lsn, _) = a;
-                    let (b_key, b_lsn, _) = b;
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
-                        Ordering::Greater => false,
-                    }
-                })
-            },
-        )?;
-
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
-        stats.time_spent_between_locks = stats.get_level0_deltas_plus_drop_lock_micros.till_now();
-        let layers = self.layers.read().await; // Is'n it better to hold original layers lock till here?
-        stats.second_read_lock_acquisition_micros = stats.time_spent_between_locks.till_now();
         let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
 
@@ -3624,7 +3553,9 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
         for (next_key, _next_lsn, _size) in itertools::process_results(
-            iter_deltas_to_compact().map(|l| l.key_iter(ctx)),
+            deltas_to_compact
+                .iter()
+                .map(|l| Arc::clone(l).key_iter(ctx)),
             |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
         )? {
             if let Some(prev_key) = prev {
@@ -3650,60 +3581,111 @@ impl Timeline {
             prev = Some(next_key.next());
         }
         drop(layers);
-        stats.second_read_lock_held_micros = stats.second_read_lock_acquisition_micros.till_now();
+        stats.read_lock_held_micros = stats.first_read_lock_acquisition_micros.till_now();
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
         let mut next_hole = 0; // index of next hole in holes vector
-        stats.sort_holes_micros = stats.second_read_lock_held_micros.till_now();
 
-        // Merge the contents of all the input delta layers into a new set
-        // of delta layers, based on the current partitioning.
-        //
-        // We split the new delta layers on the key dimension. We iterate through the key space, and for each key, check if including the next key to the current output layer we're building would cause the layer to become too large. If so, dump the current output layer and start new one.
-        // It's possible that there is a single key with so many page versions that storing all of them in a single layer file
-        // would be too large. In that case, we also split on the LSN dimension.
-        //
-        // LSN
-        //  ^
-        //  |
-        //  | +-----------+            +--+--+--+--+
-        //  | |           |            |  |  |  |  |
-        //  | +-----------+            |  |  |  |  |
-        //  | |           |            |  |  |  |  |
-        //  | +-----------+     ==>    |  |  |  |  |
-        //  | |           |            |  |  |  |  |
-        //  | +-----------+            |  |  |  |  |
-        //  | |           |            |  |  |  |  |
-        //  | +-----------+            +--+--+--+--+
-        //  |
-        //  +--------------> key
-        //
-        //
-        // If one key (X) has a lot of page versions:
-        //
-        // LSN
-        //  ^
-        //  |                                 (X)
-        //  | +-----------+            +--+--+--+--+
-        //  | |           |            |  |  |  |  |
-        //  | +-----------+            |  |  +--+  |
-        //  | |           |            |  |  |  |  |
-        //  | +-----------+     ==>    |  |  |  |  |
-        //  | |           |            |  |  +--+  |
-        //  | +-----------+            |  |  |  |  |
-        //  | |           |            |  |  |  |  |
-        //  | +-----------+            +--+--+--+--+
-        //  |
-        //  +--------------> key
-        // TODO: this actually divides the layers into fixed-size chunks, not
-        // based on the partitioning.
-        //
-        // TODO: we should also opportunistically materialize and
-        // garbage collect what we can.
+        // Wrap deltas_to_compact into an Arc so we can pass the .key_iter() and .iter()
+        // into the spawn_blocking.
+        let deltas_to_compact = Arc::new(deltas_to_compact);
+        let deltas_to_compact_clone = Arc::clone(&deltas_to_compact);
+        let iter_deltas_to_compact = move || {
+            let data = Arc::clone(&deltas_to_compact_clone);
+            (0..data.len()).map(move |i| Arc::clone(&data[i]))
+        };
+
         let myself = Arc::clone(self);
         let span = info_span!("compact_level0_phase1_write_layers");
+        let ctx = ctx.attached_child(); // TODO: technically spawn_blocking task can outlive current task
         let new_layers = spawn_blocking(move || {
             let _entered = span.enter();
+            stats.read_lock_drop_until_spawn_blocking_code_start_micros =
+                stats.read_lock_held_micros.till_now();
+            // This iterator walks through all key-value pairs from all the layers
+            // we're compacting, in key, LSN order.
+            let all_values_iter = itertools::process_results(
+                iter_deltas_to_compact().map(|l| l.iter(&ctx)),
+                |iter_iter| {
+                    iter_iter.kmerge_by(|a, b| {
+                        if let Ok((a_key, a_lsn, _)) = a {
+                            if let Ok((b_key, b_lsn, _)) = b {
+                                match a_key.cmp(b_key) {
+                                    Ordering::Less => true,
+                                    Ordering::Equal => a_lsn <= b_lsn,
+                                    Ordering::Greater => false,
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            true
+                        }
+                    })
+                },
+            )?;
+
+            // This iterator walks through all keys and is needed to calculate size used by each key
+            let mut all_keys_iter = itertools::process_results(
+                iter_deltas_to_compact().map(|l| l.key_iter(&ctx)),
+                |iter_iter| {
+                    iter_iter.kmerge_by(|a, b| {
+                        let (a_key, a_lsn, _) = a;
+                        let (b_key, b_lsn, _) = b;
+                        match a_key.cmp(b_key) {
+                            Ordering::Less => true,
+                            Ordering::Equal => a_lsn <= b_lsn,
+                            Ordering::Greater => false,
+                        }
+                    })
+                },
+            )?;
+
+            // Merge the contents of all the input delta layers into a new set
+            // of delta layers, based on the current partitioning.
+            //
+            // We split the new delta layers on the key dimension. We iterate through the key space, and for each key, check if including the next key to the current output layer we're building would cause the layer to become too large. If so, dump the current output layer and start new one.
+            // It's possible that there is a single key with so many page versions that storing all of them in a single layer file
+            // would be too large. In that case, we also split on the LSN dimension.
+            //
+            // LSN
+            //  ^
+            //  |
+            //  | +-----------+            +--+--+--+--+
+            //  | |           |            |  |  |  |  |
+            //  | +-----------+            |  |  |  |  |
+            //  | |           |            |  |  |  |  |
+            //  | +-----------+     ==>    |  |  |  |  |
+            //  | |           |            |  |  |  |  |
+            //  | +-----------+            |  |  |  |  |
+            //  | |           |            |  |  |  |  |
+            //  | +-----------+            +--+--+--+--+
+            //  |
+            //  +--------------> key
+            //
+            //
+            // If one key (X) has a lot of page versions:
+            //
+            // LSN
+            //  ^
+            //  |                                 (X)
+            //  | +-----------+            +--+--+--+--+
+            //  | |           |            |  |  |  |  |
+            //  | +-----------+            |  |  +--+  |
+            //  | |           |            |  |  |  |  |
+            //  | +-----------+     ==>    |  |  |  |  |
+            //  | |           |            |  |  +--+  |
+            //  | +-----------+            |  |  |  |  |
+            //  | |           |            |  |  |  |  |
+            //  | +-----------+            +--+--+--+--+
+            //  |
+            //  +--------------> key
+            // TODO: this actually divides the layers into fixed-size chunks, not
+            // based on the partitioning.
+            //
+            // TODO: we should also opportunistically materialize and
+            // garbage collect what we can.
+
             let mut new_layers = Vec::new();
             let mut prev_key: Option<Key> = None;
             let mut writer: Option<DeltaLayerWriter> = None;
@@ -3823,7 +3805,9 @@ impl Timeline {
                 layer_paths.pop().unwrap();
             }
 
-            stats.write_layer_files_micros = stats.sort_holes_micros.till_now();
+            stats.write_layer_files_micros = stats
+                .read_lock_drop_until_spawn_blocking_code_start_micros
+                .till_now();
             stats.new_deltas_count = Some(new_layers.len());
             stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
 
