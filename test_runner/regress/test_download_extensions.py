@@ -30,7 +30,17 @@ import requests
 
 
 def test_file_download(neon_env_builder: NeonEnvBuilder):
-    """Tests we can download a file"""
+    """
+    Tests we can download a file
+    First we set up the mock s3 bucket by uploading test_ext.control to the bucket
+    Then, we download test_ext.control from the bucket to pg_install/v15/share/postgresql/extension/
+    Finally, we list available extensions and assert that test_ext is present
+
+    Right now we are downloading the file in python
+    However, we have all the argument passing set up so that when an endpoint starts
+    it knows about the bucket and can list_files in the bucket. This is written to ALEK_LIST_FILES.txt
+    A good next step is to get rust to downlaod the public_extensions control files to the correct place
+    """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
         test_name="test_file_download",
@@ -55,7 +65,6 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     resp = neon_env_builder.remote_storage_client.get_object(
         Bucket=neon_env_builder.remote_storage.bucket_name, Key=TEST_EXT_PATH
     )
-    # UPDATE: this is the wrong place to install it
     response = resp["Body"]
     for pgres_version in ("v15", "v14"):
         fname = f"pg_install/{pgres_version}/share/postgresql/extension/test_ext.control"
@@ -77,15 +86,6 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     endpoint = env.endpoints.create_start(
         "test_file_download", tenant_id=tenant, remote_ext_config=remote_ext_config
     )
-
-    # step 5 attempt 2
-    # TODO: I'm not even remotely confident this is the correct port
-    # response = requests.post("http://localhost:15000/extension_server/postgis-3.so")
-    # log.info("*\n" * 100)
-    # log.info("IMPORTANT")
-    # log.info(str(env.neon_cli.__dict__["env"].__dict__))
-    # log.info(response.content.decode("utf-8"))
-
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
             # test query: insert some values and select them

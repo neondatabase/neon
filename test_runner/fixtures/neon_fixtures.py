@@ -673,8 +673,8 @@ class NeonEnvBuilder:
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
         self.remote_storage = LocalFsStorage(Path(self.repo_dir / "local_fs_remote_storage"))
 
-    # TODO: presumably we need a new method...
-    # because we are not the pageserver...
+    # TODO: do we need a new method here? for remote_ext_config because we are not the pageserver?
+    # or is it ok to re-use the s3 bucket?
     def enable_mock_s3_remote_storage(self, bucket_name: str, force_enable: bool = True):
         """
         Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
@@ -981,8 +981,6 @@ class NeonEnv:
             safekeeper = Safekeeper(env=self, id=id, port=port)
             self.safekeepers.append(safekeeper)
 
-        # TODO: alek, for reference, this is where neon_cli is init'd. I don't think I need to modify this.
-        # if you do, maybe do a toml+= extension config type of thing.
         log.info(f"Config: {toml}")
         self.neon_cli.init(toml)
 
@@ -1177,7 +1175,6 @@ class AbstractNeonCli(abc.ABC):
         If `check_return_code`, on non-zero exit code logs failure and raises.
         """
 
-        log.warn("reached rawcli")
         assert type(arguments) == list
         assert type(self.COMMAND) == str
 
@@ -1482,10 +1479,7 @@ class NeonCli(AbstractNeonCli):
         if hot_standby:
             args.extend(["--hot-standby", "true"])
         if remote_ext_config is not None:
-            # TODO: I worry that this is not properly escaped...
             args.extend(["--remote-ext-config", remote_ext_config])
-        log.info(args)
-        log.warning("ALEK")
 
         res = self.raw_cli(args)
         res.check_returncode()
