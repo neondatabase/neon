@@ -1,1 +1,0 @@
-['neon_utils', 'pg_buffercache', 'pageinspect', 'neon', 'test_load', 'plpgsql', 'test_ext', 'neon_test_utils', 'pg_prewarm', 'hnsw']
