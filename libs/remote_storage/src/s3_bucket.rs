@@ -116,8 +116,8 @@ pub(super) mod metrics {
 /// AWS S3 storage.
 pub struct S3Bucket {
     client: Client,
-    bucket_name: String,
-    prefix_in_bucket: Option<String>,
+    pub bucket_name: String, // TODO: undo making these public
+    pub prefix_in_bucket: Option<String>,
     max_keys_per_list_response: Option<i32>,
     // Every request to S3 can be throttled or cancelled, if a certain number of requests per second is exceeded.
     // Same goes to IAM, which is queried before every S3 request, if enabled. IAM has even lower RPS threshold.

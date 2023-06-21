@@ -91,10 +91,18 @@ pub async fn download_extension(
     let remote_storage = GenericRemoteStorage::from_config(config)?;
 
     std::fs::write("alek/proof", "proof")?;
+    if let GenericRemoteStorage::AwsS3(my_bucket) = remote_storage.clone() {
+        let storage_details = format!(
+            "{:?}, {:?}",
+            my_bucket.bucket_name, my_bucket.prefix_in_bucket
+        );
+        std::fs::write("alek/storagedetails", storage_details)?;
+    }
 
     // // this is just for testing doing a testing thing
-    // let folder = RemotePath::new(Path::new("public_extensions"))?;
-    // let from_paths = remote_storage.list_files(Some(&folder)).await?;
+    let folder = RemotePath::new(Path::new("public_extensions"))?;
+    let from_paths = remote_storage.list_files(Some(&folder)).await?;
+    std::fs::write("alek/antiproof", "antiproof")?;
     // let some_path = from_paths[0]
     //     .object_name()
     //     .expect("had a problem with somepath in extension server");
