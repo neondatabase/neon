@@ -62,6 +62,8 @@ fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
     let matches = cli().get_matches();
+    let pgbin_default = String::from("postgres");
+    let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
     let remote_ext_config = matches
         .get_one::<String>("remote-ext-config")
@@ -72,7 +74,7 @@ fn main() -> Result<()> {
     let copy_remote_storage = remote_storage.clone();
     let rt = Runtime::new().unwrap();
     rt.block_on(async move {
-        download_extension(&copy_remote_storage, ExtensionType::Shared)
+        download_extension(&copy_remote_storage, ExtensionType::Shared, &pgbin)
             .await
             .expect("download extension should work");
     });
@@ -139,9 +141,6 @@ fn main() -> Result<()> {
 
     let compute_id = matches.get_one::<String>("compute-id");
     let control_plane_uri = matches.get_one::<String>("control-plane-uri");
-
-    // Try to use just 'postgres' if no path is provided
-    let pgbin = matches.get_one::<String>("pgbin").unwrap();
 
     let spec;
     let mut live_config_allowed = false;

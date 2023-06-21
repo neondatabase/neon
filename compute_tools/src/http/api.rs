@@ -137,6 +137,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             match extension_server::download_extension(
                 &compute.remote_storage,
                 ExtensionType::Shared,
+                &compute.pgbin,
             )
             .await
             {

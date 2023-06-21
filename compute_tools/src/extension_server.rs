@@ -9,8 +9,11 @@ use std::str;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-fn get_pg_config(argument: &str) -> String {
-    let config_output = std::process::Command::new("pg_config")
+fn get_pg_config(argument: &str, pgbin: &str) -> String {
+    let mut pgconfig = String::from(pgbin.strip_suffix("postgres").unwrap());
+    pgconfig.push_str("pg_config");
+
+    let config_output = std::process::Command::new(pgconfig)
         .arg(argument)
         .output()
         .expect("pg_config must be installed");
@@ -50,15 +53,16 @@ pub enum ExtensionType {
 pub async fn download_extension(
     remote_storage: &GenericRemoteStorage,
     ext_type: ExtensionType,
+    pgbin: &str,
 ) -> anyhow::Result<()> {
     let from_paths = remote_storage.list_files(None).await?;
     std::fs::write("ALEK_LIST_FILES.txt", format!("{:?}", from_paths))?;
 
     // TODO: probably should be using the pgbin argv somehow to compute sharedir...,
     // right now it is getting my global pg_config, which is wrong
-    let sharedir = get_pg_config("--sharedir");
+    let sharedir = get_pg_config("--sharedir", pgbin);
     let sharedir = format!("{}/extension", sharedir);
-    let libdir = get_pg_config("--libdir");
+    let libdir = get_pg_config("--libdir", pgbin);
     match ext_type {
         ExtensionType::Shared => {
             // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
