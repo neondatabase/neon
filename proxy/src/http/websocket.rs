@@ -26,7 +26,6 @@ use tls_listener::TlsListener;
 use tokio::{
     io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
-    select,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
@@ -193,14 +192,9 @@ async fn ws_handler(
     // TODO: that deserves a refactor as now this function also handles http json client besides websockets.
     // Right now I don't want to blow up sql-over-http patch with file renames and do that as a follow up instead.
     } else if request.uri().path() == "/sql" && request.method() == Method::POST {
-        let result = select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-                Err(anyhow::anyhow!("Query timed out"))
-            }
-            response = sql_over_http::handle(config, request, sni_hostname) => {
-                response
-            }
-        };
+        let result = sql_over_http::handle(config, request, sni_hostname)
+            .instrument(info_span!("sql-over-http"))
+            .await;
         let status_code = match result {
             Ok(_) => StatusCode::OK,
             Err(_) => StatusCode::BAD_REQUEST,

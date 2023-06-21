@@ -458,6 +458,7 @@ impl Endpoint {
 
         // Create spec file
         let spec = ComputeSpec {
+            skip_pg_catalog_updates: false,
             format_version: 1.0,
             operation_uuid: None,
             cluster: Cluster {

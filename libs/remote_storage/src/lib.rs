@@ -121,6 +121,8 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<Download, DownloadError>;
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
+
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
 }
 
 pub struct Download {
@@ -248,6 +250,14 @@ impl GenericRemoteStorage {
             Self::LocalFs(s) => s.delete(path).await,
             Self::AwsS3(s) => s.delete(path).await,
             Self::Unreliable(s) => s.delete(path).await,
+        }
+    }
+
+    pub async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.delete_objects(paths).await,
+            Self::AwsS3(s) => s.delete_objects(paths).await,
+            Self::Unreliable(s) => s.delete_objects(paths).await,
         }
     }
 }

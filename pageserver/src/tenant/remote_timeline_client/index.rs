@@ -7,9 +7,11 @@ use std::collections::{HashMap, HashSet};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use utils::bin_ser::SerializeError;
 
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::upload_queue::UploadQueueInitialized;
 
 use utils::lsn::Lsn;
 
@@ -112,6 +114,21 @@ impl IndexPart {
 
     pub fn parse_metadata(&self) -> anyhow::Result<TimelineMetadata> {
         TimelineMetadata::from_bytes(&self.metadata_bytes)
+    }
+}
+
+impl TryFrom<&UploadQueueInitialized> for IndexPart {
+    type Error = SerializeError;
+
+    fn try_from(upload_queue: &UploadQueueInitialized) -> Result<Self, Self::Error> {
+        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
+        let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
+
+        Ok(Self::new(
+            upload_queue.latest_files.clone(),
+            disk_consistent_lsn,
+            metadata_bytes,
+        ))
     }
 }
 

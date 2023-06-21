@@ -24,6 +24,7 @@ enum RemoteOp {
     Upload(RemotePath),
     Download(RemotePath),
     Delete(RemotePath),
+    DeleteObjects(Vec<RemotePath>),
 }
 
 impl UnreliableWrapper {
@@ -126,5 +127,22 @@ impl RemoteStorage for UnreliableWrapper {
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
         self.attempt(RemoteOp::Delete(path.clone()))?;
         self.inner.delete(path).await
+    }
+
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        self.attempt(RemoteOp::DeleteObjects(paths.to_vec()))?;
+        let mut error_counter = 0;
+        for path in paths {
+            if (self.delete(path).await).is_err() {
+                error_counter += 1;
+            }
+        }
+        if error_counter > 0 {
+            return Err(anyhow::anyhow!(
+                "failed to delete {} objects",
+                error_counter
+            ));
+        }
+        Ok(())
     }
 }

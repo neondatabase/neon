@@ -382,11 +382,6 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
-        info!(
-            "finished configuration of compute for project {}",
-            spec.cluster.cluster_id.as_deref().unwrap_or("None")
-        );
-
         Ok(())
     }
 
@@ -439,22 +434,22 @@ impl ComputeNode {
     #[instrument(skip(self))]
     pub fn start_compute(&self, extension_server_port: u16) -> Result<std::process::Child> {
         let compute_state = self.state.lock().unwrap().clone();
-        let spec = compute_state.pspec.as_ref().expect("spec must be set");
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            spec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
-            spec.spec.operation_uuid.as_deref().unwrap_or("None"),
-            spec.tenant_id,
-            spec.timeline_id,
+            pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
+            pspec.spec.operation_uuid.as_deref().unwrap_or("None"),
+            pspec.tenant_id,
+            pspec.timeline_id,
         );
 
         self.prepare_pgdata(&compute_state, extension_server_port)?;
 
         let start_time = Utc::now();
 
-        let pg = self.start_postgres(spec.storage_auth_token.clone())?;
+        let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
 
-        if spec.spec.mode == ComputeMode::Primary {
+        if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
             self.apply_config(&compute_state)?;
         }
 
@@ -473,6 +468,11 @@ impl ComputeNode {
                 .as_millis() as u64;
         }
         self.set_status(ComputeStatus::Running);
+
+        info!(
+            "finished configuration of compute for project {}",
+            pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None")
+        );
 
         Ok(pg)
     }
