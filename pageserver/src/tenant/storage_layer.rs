@@ -174,14 +174,9 @@ impl LayerAccessStats {
     /// Create an empty stats object and record a [`LayerLoad`] event with the given residence status.
     ///
     /// See [`record_residence_event`] for why you need to do this while holding the layer map lock.
-    pub(crate) fn for_loading_layer(
-        status: LayerResidenceStatus,
-    ) -> Self {
+    pub(crate) fn for_loading_layer(status: LayerResidenceStatus) -> Self {
         let new = LayerAccessStats(Mutex::new(LayerAccessStatsLocked::default()));
-        new.record_residence_event(
-            status,
-            LayerResidenceEventReason::LayerLoad,
-        );
+        new.record_residence_event(status, LayerResidenceEventReason::LayerLoad);
         new
     }
 
@@ -199,10 +194,7 @@ impl LayerAccessStats {
             inner.clone()
         };
         let new = LayerAccessStats(Mutex::new(clone));
-        new.record_residence_event(
-            new_status,
-            LayerResidenceEventReason::ResidenceChange,
-        );
+        new.record_residence_event(new_status, LayerResidenceEventReason::ResidenceChange);
         new
     }
 

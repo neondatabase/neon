@@ -489,7 +489,9 @@ impl PageServerHandler {
         // Create empty timeline
         info!("creating new timeline");
         let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)?;
+        let timeline = tenant
+            .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
+            .await?;
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
