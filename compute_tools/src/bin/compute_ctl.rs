@@ -55,10 +55,14 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
+const BUILD_TAG_DEFAULT: &str = "local";
+
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
-    info!("version: {GIT_VERSION}");
+    let build_tag = std::env::var("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT.to_string());
+
+    info!("version: {GIT_VERSION}, build_tag: {build_tag}");
 
     let matches = cli().get_matches();
 
