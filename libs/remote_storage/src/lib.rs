@@ -187,10 +187,7 @@ impl GenericRemoteStorage {
     // A function for listing all the files in a "directory"
     // Example:
     // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
-    pub async fn list_files(
-        &self,
-        folder: Option<&RemotePath>
-    ) -> anyhow::Result<Vec<RemotePath>>{
+    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         match self {
             Self::LocalFs(s) => s.list_files(folder).await,
             Self::AwsS3(s) => s.list_files(folder).await,
@@ -209,14 +206,6 @@ impl GenericRemoteStorage {
             Self::LocalFs(s) => s.list_prefixes(prefix).await,
             Self::AwsS3(s) => s.list_prefixes(prefix).await,
             Self::Unreliable(s) => s.list_prefixes(prefix).await,
-        }
-    }
-
-    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        match self {
-            Self::LocalFs(s) => s.list_files(folder).await,
-            Self::AwsS3(s) => s.list_files(folder).await,
-            Self::Unreliable(s) => s.list_files(folder).await,
         }
     }
 

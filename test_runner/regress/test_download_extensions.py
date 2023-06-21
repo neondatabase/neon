@@ -82,8 +82,10 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
 
     # step 5 attempt 2
     # TODO: I'm not even remotely confident this is the correct port
-    # response = requests.post("http://localhost:15000/extension_server/postgis-3.so")
-    # print(response)
+    # response = requests.post("http://localhost:8080/extension_server/postgis-3.so")
+    log.info("*\n" * 100)
+    log.info("IMPORTANT")
+    # log.info(response.content)
 
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:

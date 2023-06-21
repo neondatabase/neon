@@ -38,10 +38,6 @@ fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
 
 // Service function to handle all available routes.
 async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
-    let xxx = format!("ROUTING{:?}", req.uri().path().clone());
-    std::fs::write("alek/ROUTES", xxx).expect("routing write file");
-    // TODO: NOTE TO SELF: these things are already being logged to compute.log
-
     //
     // NOTE: The URI path is currently included in traces. That's OK because
     // it doesn't contain any variable parts or sensitive information. But
@@ -346,6 +342,9 @@ async fn serve(port: u16, state: Arc<ComputeNode>) {
 /// Launch a separate Hyper HTTP API server thread and return its `JoinHandle`.
 pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let state = Arc::clone(state);
+
+    let xxx = format!("ROUTING port: {port}");
+    std::fs::write("alek/ROUTES", xxx).expect("routing write file");
 
     Ok(thread::Builder::new()
         .name("http-endpoint".into())
