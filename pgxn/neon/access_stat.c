@@ -62,8 +62,8 @@ void access_stat_init(void)
 							1024,
 							0,
 							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_UNIT_MB,
+							PGC_USERSET,
+							0,
 							NULL,
 							NULL,
 							NULL);
@@ -74,8 +74,8 @@ void access_stat_init(void)
 							1024,
 							0,
 							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_UNIT_MB,
+							PGC_USERSET,
+							0,
 							NULL,
 							NULL,
 							NULL);
@@ -86,8 +86,8 @@ void access_stat_init(void)
 							 0.9,
 							 0,
 							 INT_MAX,
-							 PGC_POSTMASTER,
-							 GUC_UNIT_MB,
+							 PGC_USERSET,
+							 0,
 							 NULL,
 							 NULL,
 							 NULL);
@@ -98,8 +98,8 @@ void access_stat_init(void)
 							10,
 							0,
 							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_UNIT_MB,
+							PGC_USERSET,
+							0,
 							NULL,
 							NULL,
 							NULL);
