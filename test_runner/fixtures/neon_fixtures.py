@@ -646,14 +646,12 @@ class NeonEnvBuilder:
 
         return env
 
-    # TODO WAN: make new thing
     def enable_remote_storage(
         self,
         remote_storage_kind: RemoteStorageKind,
         test_name: str,
         force_enable: bool = True,
     ):
-        # TODO: more of these?
         if remote_storage_kind == RemoteStorageKind.NOOP:
             return
         elif remote_storage_kind == RemoteStorageKind.LOCAL_FS:
@@ -675,14 +673,13 @@ class NeonEnvBuilder:
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
         self.remote_storage = LocalFsStorage(Path(self.repo_dir / "local_fs_remote_storage"))
 
-    # TODO: do we need a new method here? for remote_ext_config because we are not the pageserver? A: YES
     def enable_mock_s3_remote_storage(self, bucket_name: str, force_enable: bool = True):
         """
         Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
         Starts up the mock server, if that does not run yet.
         Errors, if the pageserver has some remote storage configuration already, unless `force_enable` is not set to `True`.
 
-        TODO: this also does stuff for ext_remote_storage bucket
+        Also creates the bucket for extensions, self.ext_remote_storage bucket
         """
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
         mock_endpoint = self.mock_s3_server.endpoint()
@@ -718,6 +715,8 @@ class NeonEnvBuilder:
     def enable_real_s3_remote_storage(self, test_name: str, force_enable: bool = True):
         """
         Sets up configuration to use real s3 endpoint without mock server
+
+        FIXME TODO: do we need to create the bucket for extensions?
         """
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
 
@@ -749,6 +748,17 @@ class NeonEnvBuilder:
         )
         self.remote_storage = S3Storage(
             bucket_name=bucket_name,
+            bucket_region=region,
+            access_key=access_key,
+            secret_key=secret_key,
+            prefix_in_bucket=self.remote_storage_prefix,
+        )
+
+        ext_bucket_name = os.getenv("EXT_REMOTE_STORAGE_S3_BUCKET")
+        assert ext_bucket_name, "no ext remote storage bucket name provided"
+        ext_bucket_name = f"ext_{ext_bucket_name}"
+        self.ext_remote_storage = S3Storage(
+            bucket_name=ext_bucket_name,
             bucket_region=region,
             access_key=access_key,
             secret_key=secret_key,
