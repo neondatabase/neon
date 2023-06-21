@@ -18,7 +18,6 @@ use remote_storage::GenericRemoteStorage;
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
-use tokio::task::spawn_blocking;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::TenantTimelineId;
@@ -3587,7 +3586,7 @@ impl Timeline {
         let myself = Arc::clone(self);
         let span = info_span!("compact_level0_phase1_write_layers");
         let ctx = ctx.attached_child(); // TODO: technically spawn_blocking task can outlive current task
-        let res = spawn_blocking(move || {
+        let res = tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
             stats.read_lock_drop_until_spawn_blocking_code_start_micros =
                 stats.read_lock_held_micros.till_now();
@@ -3674,7 +3673,6 @@ impl Timeline {
             //
             // TODO: we should also opportunistically materialize and
             // garbage collect what we can.
-
             let mut new_layers = Vec::new();
             let mut prev_key: Option<Key> = None;
             let mut writer: Option<DeltaLayerWriter> = None;
@@ -3815,6 +3813,7 @@ impl Timeline {
                     warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
                 }
             }
+
             Ok(CompactLevel0Phase1Result {
                 new_layers,
                 deltas_to_compact,
