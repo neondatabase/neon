@@ -70,9 +70,8 @@ fn main() -> Result<()> {
         .expect("remote-extension-config is required");
     let remote_storage = init_remote_storage(remote_ext_config)?;
 
-    // TODO: can we give remote_storage a static lifetime, so that we don't have to copy it?
-    let copy_remote_storage = remote_storage.clone();
     let rt = Runtime::new().unwrap();
+    let copy_remote_storage = remote_storage.clone();
     rt.block_on(async move {
         download_extension(&copy_remote_storage, ExtensionType::Shared, &pgbin)
             .await

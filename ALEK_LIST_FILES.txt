@@ -1,1 +1,1 @@
-[RemotePath("v15/share/extension/test_ext.control")]
+[RemotePath("v14/share/postgresql/extension/test_ext.control")]

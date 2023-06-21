@@ -6,8 +6,6 @@ from fixtures.neon_fixtures import (
 )
 import json
 
-TEST_EXT_PATH = "v15/share/extension/test_ext.control"
-
 
 def test_file_download(neon_env_builder: NeonEnvBuilder):
     """
@@ -19,7 +17,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     Right now we are downloading the file in python
     However, we have all the argument passing set up so that when an endpoint starts
     it knows about the bucket and can list_files in the bucket. This is written to ALEK_LIST_FILES.txt
-    A good next step is to get rust to downlaod the public_extensions control files to the correct place
+    A good next step is to get rust to download the public_extensions control files to the correct place
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
@@ -27,6 +25,8 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     )
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
+
+    TEST_EXT_PATH = "v14/share/postgresql/extension/test_ext.control"
 
     # 4. Upload test_ext.control file to the bucket
     # In the non-mock version this is done by CI/CD
@@ -41,10 +41,9 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
         Bucket=env.ext_remote_storage.bucket_name, Key=TEST_EXT_PATH
     )
     response = resp["Body"]
-    for pgres_version in ("v15", "v14"):
-        fname = f"pg_install/{pgres_version}/share/postgresql/extension/test_ext.control"
-        with open(fname, "wb") as f:
-            f.write(response.read())
+    fname = f"pg_install/{TEST_EXT_PATH}"
+    with open(fname, "wb") as f:
+        f.write(response.read())
 
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
