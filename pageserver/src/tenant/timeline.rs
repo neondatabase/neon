@@ -3464,7 +3464,7 @@ impl Timeline {
         stats.read_lock_acquisition_micros =
             DurationRecorder::Recorded(RecordedDuration(now - begin), now);
         let mut level0_deltas = layers.get_level0_deltas()?;
-
+        stats.level0_deltas_count = Some(level0_deltas.len());
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
