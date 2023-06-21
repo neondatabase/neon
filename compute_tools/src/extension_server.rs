@@ -11,18 +11,18 @@ use tracing::info;
 
 pub async fn download_file(
     filename: &str,
-    // remote_ext_bucket: String,
-    // remote_ext_region: String,
+    remote_ext_bucket: String,
+    remote_ext_region: String,
 ) -> anyhow::Result<()> {
     // probably should be using the pgbin argv somehow to compute sharedir...
-    // let sharedir = get_pg_config("--sharedir");
-    // fs::write("alek/sharedir.txt", sharedir)?;
+    let sharedir = get_pg_config("--sharedir");
+    fs::write("alek/sharedir.txt", sharedir)?;
 
     println!("requested file {}", filename);
 
     // TODO: download the extensions!
-    // let s3_config = create_s3_config(remote_ext_bucket, remote_ext_region);
-    // download_extension(&s3_config, ExtensionType::Shared).await?;
+    let s3_config = create_s3_config(remote_ext_bucket, remote_ext_region);
+    download_extension(&s3_config, ExtensionType::Shared).await?;
 
     // This is filler code
     // let from_prefix = "/tmp/from_prefix";

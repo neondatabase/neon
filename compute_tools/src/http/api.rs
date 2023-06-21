@@ -38,6 +38,10 @@ fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
 
 // Service function to handle all available routes.
 async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body> {
+    let xxx = format!("ROUTING{:?}", req.uri().path().clone());
+    std::fs::write("alek/ROUTES", xxx).expect("routing write file");
+    // TODO: NOTE TO SELF: these things are already being logged to compute.log
+
     //
     // NOTE: The URI path is currently included in traces. That's OK because
     // it doesn't contain any variable parts or sensitive information. But
@@ -138,8 +142,8 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             match extension_server::download_file(
                 filename,
                 // TODO alek: pass more remote_ext arguments
-                // compute.remote_ext_bucket.clone(),
-                // compute.remote_ext_region.clone(),
+                compute.remote_ext_bucket.clone(),
+                compute.remote_ext_region.clone(),
             )
             .await
             {
