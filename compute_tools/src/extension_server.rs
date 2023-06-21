@@ -9,7 +9,7 @@ use std::str;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-fn get_pg_config(argument: &str, pgbin: &str) -> (String, String) {
+fn get_pg_config(argument: &str, pgbin: &str) -> String {
     let mut pgconfig = String::from(pgbin.strip_suffix("postgres").expect("pg_config error"));
     pgconfig.push_str("pg_config");
 
@@ -35,19 +35,17 @@ fn get_pg_config(argument: &str, pgbin: &str) -> (String, String) {
         .trim()
         .to_string();
 
-    (local_path, remote_path)
+    remote_path
 }
 
 async fn download_helper(
     remote_storage: &GenericRemoteStorage,
     remote_from_path: &RemotePath,
-    download_to_dir: &str,
 ) -> anyhow::Result<()> {
     let file_name = remote_from_path.with_base(Path::new("pg_install"));
     info!(
         "Downloading {:?} to location {:?}",
-        file_name,
-        file_name.clone()
+        &remote_from_path, &file_name
     );
     let mut download = remote_storage.download(&remote_from_path).await?;
     let mut write_data_buffer = Vec::new();
@@ -71,10 +69,9 @@ pub async fn download_extension(
     ext_type: ExtensionType,
     pgbin: &str,
 ) -> anyhow::Result<()> {
-    let (mut local_sharedir, mut remote_sharedir) = get_pg_config("--sharedir", pgbin);
-    local_sharedir.push_str("/extension");
+    let mut remote_sharedir = get_pg_config("--sharedir", pgbin);
     remote_sharedir.push_str("/extension");
-    let (local_libdir, _) = get_pg_config("--libdir", pgbin);
+    // let remote_sharedir = get_pg_config("--libdir", pgbin);
     match ext_type {
         ExtensionType::Shared => {
             // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
@@ -84,7 +81,7 @@ pub async fn download_extension(
             let from_paths = remote_storage.list_files(Some(&folder)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
-                    download_helper(&remote_storage, &remote_from_path, &local_sharedir).await?;
+                    download_helper(&remote_storage, &remote_from_path).await?;
                 }
             }
         }
@@ -95,7 +92,7 @@ pub async fn download_extension(
             let from_paths = remote_storage.list_files(Some(&folder)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
-                    download_helper(&remote_storage, &remote_from_path, &local_sharedir).await?;
+                    download_helper(&remote_storage, &remote_from_path).await?;
                 }
             }
         }
@@ -104,7 +101,7 @@ pub async fn download_extension(
             // Download preload_shared_libraries from s3-bucket/public/[library-name].control into LIBDIR/
             let from_path = format!("neon-dev-extensions/public/{library_name}.control");
             let remote_from_path = RemotePath::new(Path::new(&from_path))?;
-            download_helper(&remote_storage, &remote_from_path, &local_libdir).await?;
+            download_helper(&remote_storage, &remote_from_path).await?;
         }
     }
     Ok(())
