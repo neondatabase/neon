@@ -162,6 +162,7 @@ bool is_sequential_access(RelFileNode rnode, ForkNumber forkNum, BlockNumber blk
 		}
 		/* Place entry to the tail of LRU list */
 		dlist_push_tail(&lru, &entry->lru_node);
+		entry->blkno = blkno;
 	}
 	return is_seq_access;
 }
