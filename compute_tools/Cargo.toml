@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-compression.workspace = true
 chrono.workspace = true
 clap.workspace = true
+flate2.workspace = true
 futures.workspace = true
 hyper = { workspace = true, features = ["full"] }
 notify.workspace = true
