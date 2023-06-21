@@ -1,6 +1,5 @@
 use anyhow::{self};
 use remote_storage::*;
-use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -15,39 +14,23 @@ pub async fn download_file(
     remote_ext_region: String,
     remote_ext_endpoint: String,
 ) -> anyhow::Result<()> {
-    // probably should be using the pgbin argv somehow to compute sharedir...
-    let sharedir = get_pg_config("--sharedir");
-    fs::write("alek/sharedir.txt", sharedir)?;
-
     println!("requested file {}", filename);
-
-    // TODO: download the extensions!
     let s3_config = create_s3_config(remote_ext_bucket, remote_ext_region, remote_ext_endpoint);
     download_extension(&s3_config, ExtensionType::Shared).await?;
-
-    // This is filler code
-    // let from_prefix = "/tmp/from_prefix";
-    // let to_prefix = "/tmp/to_prefix";
-
-    // let filepath = Path::new(from_prefix).join(filename);
-    // let copy_to_filepath = Path::new(to_prefix).join(filename);
-    // fs::copy(filepath, copy_to_filepath)?;
-
     Ok(())
 }
 
-// FIXME: this function panics if it runs into any issues
 fn get_pg_config(argument: &str) -> String {
     let config_output = std::process::Command::new("pg_config")
         .arg(argument)
         .output()
-        .expect("pg_config should be installed");
+        .expect("pg_config must be installed");
     assert!(config_output.status.success());
-    let stdout = std::str::from_utf8(&config_output.stdout).unwrap();
+    let stdout = std::str::from_utf8(&config_output.stdout).expect("error obtaining pg_config");
     stdout.trim().to_string()
 }
 
-async fn _download_helper(
+async fn download_helper(
     remote_storage: &GenericRemoteStorage,
     remote_from_path: &RemotePath,
     to_path: &str,
@@ -75,81 +58,52 @@ pub enum ExtensionType {
     Library(String), // String is name of the extension
 }
 
-/*
-separate stroage and compute
-storage: pageserver stores pages, accepts WAL. communicates with S3.
-compute: postgres, runs in kubernetes/ VM, started by compute_ctl. rust service. accepts some spec.
-
-pass config to compute_ctl
- */
 pub async fn download_extension(
     config: &RemoteStorageConfig,
-    _ext_type: ExtensionType,
+    ext_type: ExtensionType,
 ) -> anyhow::Result<()> {
-    let sharedir = get_pg_config("--sharedir");
-    let _sharedir = format!("{}/extension", sharedir);
-    // let libdir = get_pg_config("--libdir");
     let remote_storage = GenericRemoteStorage::from_config(config)?;
 
-    std::fs::write("alek/proof", "proof")?;
-    if let GenericRemoteStorage::AwsS3(my_bucket) = remote_storage.clone() {
-        let storage_details = format!(
-            "{:?}, {:?}",
-            my_bucket.bucket_name, my_bucket.prefix_in_bucket
-        );
-        std::fs::write("alek/storagedetails", storage_details)?;
-        dbg!(my_bucket.client.clone());
-        for _ in 0..100 {
-            dbg!("++++++++++");
+    let from_paths = remote_storage.list_files(None).await?;
+    std::fs::write("ALEK_LIST_FILES.txt", format!("{:?}", from_paths))?;
+
+    // TODO: probably should be using the pgbin argv somehow to compute sharedir...,
+    // right now it is getting my global pg_config, which is wrong
+    let sharedir = get_pg_config("--sharedir");
+    let sharedir = format!("{}/extension", sharedir);
+    let libdir = get_pg_config("--libdir");
+    match ext_type {
+        ExtensionType::Shared => {
+            // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
+            // We can do this step even before we have spec,
+            // because public extensions are common for all projects.
+            let folder = RemotePath::new(Path::new("public_extensions"))?;
+            let from_paths = remote_storage.list_files(Some(&folder)).await?;
+            for remote_from_path in from_paths {
+                if remote_from_path.extension() == Some("control") {
+                    download_helper(&remote_storage, &remote_from_path, &sharedir).await?;
+                }
+            }
+        }
+        ExtensionType::Tenant(tenant_id) => {
+            // 2. After we have spec, before project start
+            // Download control files from s3-bucket/[tenant-id]/*.control to SHAREDIR/extension
+            let folder = RemotePath::new(Path::new(&format!("{tenant_id}")))?;
+            let from_paths = remote_storage.list_files(Some(&folder)).await?;
+            for remote_from_path in from_paths {
+                if remote_from_path.extension() == Some("control") {
+                    download_helper(&remote_storage, &remote_from_path, &sharedir).await?;
+                }
+            }
+        }
+        ExtensionType::Library(library_name) => {
+            // 3. After we have spec, before postgres start
+            // Download preload_shared_libraries from s3-bucket/public/[library-name].control into LIBDIR/
+            let from_path = format!("neon-dev-extensions/public/{library_name}.control");
+            let remote_from_path = RemotePath::new(Path::new(&from_path))?;
+            download_helper(&remote_storage, &remote_from_path, &libdir).await?;
         }
     }
-
-    // // this is just for testing doing a testing thing
-    let folder = RemotePath::new(Path::new("public_extensions"))?;
-    let from_paths = remote_storage.list_files(Some(&folder)).await?;
-    dbg!(from_paths);
-    dbg!("FROM PATHS!!!!!1");
-    std::fs::write("alek/antiproof", "antiproof")?;
-    // let some_path = from_paths[0]
-    //     .object_name()
-    //     .expect("had a problem with somepath in extension server");
-    // fs::write("alek/SOMEPATH", some_path)?;
-
-    // // this is the real thing
-    // match ext_type {
-    //     ExtensionType::Shared => {
-    //         // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
-    //         // We can do this step even before we have spec,
-    //         // because public extensions are common for all projects.
-    //         let folder = RemotePath::new(Path::new("public_extensions"))?;
-    //         let from_paths = remote_storage.list_files(Some(&folder)).await?;
-    //         for remote_from_path in from_paths {
-    //             if remote_from_path.extension() == Some("control") {
-    //                 // NOTE: if you run this, it will actually write stuff to your postgress directory
-    //                 // only run if you are ok with that. TODO: delete this comment
-    //                 download_helper(&remote_storage, &remote_from_path, &sharedir).await?;
-    //             }
-    //         }
-    //     }
-    //     ExtensionType::Tenant(tenant_id) => {
-    //         // 2. After we have spec, before project start
-    //         // Download control files from s3-bucket/[tenant-id]/*.control to SHAREDIR/extension
-    //         let folder = RemotePath::new(Path::new(&format!("{tenant_id}")))?;
-    //         let from_paths = remote_storage.list_files(Some(&folder)).await?;
-    //         for remote_from_path in from_paths {
-    //             if remote_from_path.extension() == Some("control") {
-    //                 download_helper(&remote_storage, &remote_from_path, &sharedir).await?;
-    //             }
-    //         }
-    //     }
-    //     ExtensionType::Library(library_name) => {
-    //         // 3. After we have spec, before postgres start
-    //         // Download preload_shared_libraries from s3-bucket/public/[library-name].control into LIBDIR/
-    //         let from_path = format!("neon-dev-extensions/public/{library_name}.control");
-    //         let remote_from_path = RemotePath::new(Path::new(&from_path))?;
-    //         download_helper(&remote_storage, &remote_from_path, &libdir).await?;
-    //     }
-    // }
     Ok(())
 }
 
@@ -159,10 +113,6 @@ pub fn create_s3_config(
     remote_ext_region: String,
     remote_ext_endpoint: String,
 ) -> RemoteStorageConfig {
-    dbg!("create_s3_config");
-    dbg!(&remote_ext_bucket);
-    dbg!(&remote_ext_region);
-    dbg!(&remote_ext_endpoint);
     let config = S3Config {
         bucket_name: remote_ext_bucket,
         bucket_region: remote_ext_region,
