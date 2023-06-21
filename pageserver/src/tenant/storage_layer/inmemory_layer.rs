@@ -304,7 +304,7 @@ impl InMemoryLayer {
         Ok(())
     }
 
-    pub fn put_tombstone(&self, _key_range: Range<Key>, _lsn: Lsn) -> Result<()> {
+    pub async fn put_tombstone(&self, _key_range: Range<Key>, _lsn: Lsn) -> Result<()> {
         // TODO: Currently, we just leak the storage for any deleted keys
 
         Ok(())

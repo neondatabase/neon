@@ -421,6 +421,21 @@ remote:
     }
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum GetTimelineError {
+    #[error("Timeline {tenant_id}/{timeline_id} is not active, state: {state:?}")]
+    NotActive {
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        state: TimelineState,
+    },
+    #[error("Timeline {tenant_id}/{timeline_id} was not found")]
+    NotFound {
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteTimelineError {
     #[error("NotFound")]
@@ -473,6 +488,14 @@ pub(crate) enum ShutdownError {
     AlreadyStopping,
 }
 
+struct DeletionGuard(OwnedMutexGuard<bool>);
+
+impl DeletionGuard {
+    fn is_deleted(&self) -> bool {
+        *self.0
+    }
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -519,6 +542,7 @@ impl Tenant {
         );
         timeline
             .load_layer_map(new_disk_consistent_lsn)
+            .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
@@ -560,7 +584,7 @@ impl Tenant {
                 || timeline
                     .layers
                     .read()
-                    .unwrap()
+                    .await
                     .iter_historic_layers()
                     .next()
                     .is_some(),
@@ -937,6 +961,117 @@ impl Tenant {
         tenant
     }
 
+    pub fn scan_and_sort_timelines_dir(
+        self: Arc<Tenant>,
+    ) -> anyhow::Result<Vec<(TimelineId, TimelineMetadata)>> {
+        let timelines_dir = self.conf.timelines_path(&self.tenant_id);
+        let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
+
+        for entry in
+            std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
+        {
+            let entry = entry.context("read timeline dir entry")?;
+            let timeline_dir = entry.path();
+
+            if crate::is_temporary(&timeline_dir) {
+                info!(
+                    "Found temporary timeline directory, removing: {}",
+                    timeline_dir.display()
+                );
+                if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
+                    error!(
+                        "Failed to remove temporary directory '{}': {:?}",
+                        timeline_dir.display(),
+                        e
+                    );
+                }
+            } else if is_uninit_mark(&timeline_dir) {
+                if !timeline_dir.exists() {
+                    warn!(
+                        "Timeline dir entry become invalid: {}",
+                        timeline_dir.display()
+                    );
+                    continue;
+                }
+                let timeline_uninit_mark_file = &timeline_dir;
+                info!(
+                    "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                    timeline_uninit_mark_file.display()
+                );
+                let timeline_id = timeline_uninit_mark_file
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or_default()
+                    .parse::<TimelineId>()
+                    .with_context(|| {
+                        format!(
+                            "Could not parse timeline id out of the timeline uninit mark name {}",
+                            timeline_uninit_mark_file.display()
+                        )
+                    })?;
+                let timeline_dir = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+                if let Err(e) =
+                    remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
+                {
+                    error!("Failed to clean up uninit marked timeline: {e:?}");
+                }
+            } else {
+                if !timeline_dir.exists() {
+                    warn!(
+                        "Timeline dir entry become invalid: {}",
+                        timeline_dir.display()
+                    );
+                    continue;
+                }
+                let timeline_id = timeline_dir
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or_default()
+                    .parse::<TimelineId>()
+                    .with_context(|| {
+                        format!(
+                            "Could not parse timeline id out of the timeline dir name {}",
+                            timeline_dir.display()
+                        )
+                    })?;
+                let timeline_uninit_mark_file = self
+                    .conf
+                    .timeline_uninit_mark_file_path(self.tenant_id, timeline_id);
+                if timeline_uninit_mark_file.exists() {
+                    info!(
+                        %timeline_id,
+                        "Found an uninit mark file, removing the timeline and its uninit mark",
+                    );
+                    if let Err(e) =
+                        remove_timeline_and_uninit_mark(&timeline_dir, &timeline_uninit_mark_file)
+                    {
+                        error!("Failed to clean up uninit marked timeline: {e:?}");
+                    }
+                    continue;
+                }
+
+                let file_name = entry.file_name();
+                if let Ok(timeline_id) =
+                    file_name.to_str().unwrap_or_default().parse::<TimelineId>()
+                {
+                    let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
+                        .context("failed to load metadata")?;
+                    timelines_to_load.insert(timeline_id, metadata);
+                } else {
+                    // A file or directory that doesn't look like a timeline ID
+                    warn!(
+                        "unexpected file or directory in timelines directory: {}",
+                        file_name.to_string_lossy()
+                    );
+                }
+            }
+        }
+
+        // Sort the array of timeline IDs into tree-order, so that parent comes before
+        // all its children.
+        tree_sort_timelines(timelines_to_load)
+    }
+
     ///
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
@@ -953,110 +1088,16 @@ impl Tenant {
 
         utils::failpoint_sleep_millis_async!("before-loading-tenant");
 
-        // TODO split this into two functions, scan and actual load
-
         // Load in-memory state to reflect the local files on disk
         //
         // Scan the directory, peek into the metadata file of each timeline, and
         // collect a list of timelines and their ancestors.
-        let tenant_id = self.tenant_id;
-        let conf = self.conf;
         let span = info_span!("blocking");
+        let cloned = Arc::clone(self);
 
         let sorted_timelines: Vec<(_, _)> = tokio::task::spawn_blocking(move || {
             let _g = span.entered();
-            let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-            let timelines_dir = conf.timelines_path(&tenant_id);
-
-            for entry in
-                std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
-            {
-                let entry = entry.context("read timeline dir entry")?;
-                let timeline_dir = entry.path();
-
-                if crate::is_temporary(&timeline_dir) {
-                    info!(
-                        "Found temporary timeline directory, removing: {}",
-                        timeline_dir.display()
-                    );
-                    if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
-                        error!(
-                            "Failed to remove temporary directory '{}': {:?}",
-                            timeline_dir.display(),
-                            e
-                        );
-                    }
-                } else if is_uninit_mark(&timeline_dir) {
-                    let timeline_uninit_mark_file = &timeline_dir;
-                    info!(
-                        "Found an uninit mark file {}, removing the timeline and its uninit mark",
-                        timeline_uninit_mark_file.display()
-                    );
-                    let timeline_id = timeline_uninit_mark_file
-                        .file_stem()
-                        .and_then(OsStr::to_str)
-                        .unwrap_or_default()
-                        .parse::<TimelineId>()
-                        .with_context(|| {
-                            format!(
-                            "Could not parse timeline id out of the timeline uninit mark name {}",
-                            timeline_uninit_mark_file.display()
-                        )
-                        })?;
-                    let timeline_dir = conf.timeline_path(&timeline_id, &tenant_id);
-                    if let Err(e) =
-                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
-                    {
-                        error!("Failed to clean up uninit marked timeline: {e:?}");
-                    }
-                } else {
-                    let timeline_id = timeline_dir
-                        .file_name()
-                        .and_then(OsStr::to_str)
-                        .unwrap_or_default()
-                        .parse::<TimelineId>()
-                        .with_context(|| {
-                            format!(
-                                "Could not parse timeline id out of the timeline dir name {}",
-                                timeline_dir.display()
-                            )
-                        })?;
-                    let timeline_uninit_mark_file =
-                        conf.timeline_uninit_mark_file_path(tenant_id, timeline_id);
-                    if timeline_uninit_mark_file.exists() {
-                        info!(
-                            %timeline_id,
-                            "Found an uninit mark file, removing the timeline and its uninit mark",
-                        );
-                        if let Err(e) = remove_timeline_and_uninit_mark(
-                            &timeline_dir,
-                            &timeline_uninit_mark_file,
-                        ) {
-                            error!("Failed to clean up uninit marked timeline: {e:?}");
-                        }
-                        continue;
-                    }
-
-                    let file_name = entry.file_name();
-                    if let Ok(timeline_id) =
-                        file_name.to_str().unwrap_or_default().parse::<TimelineId>()
-                    {
-                        let metadata = load_metadata(conf, timeline_id, tenant_id)
-                            .context("failed to load metadata")?;
-                        timelines_to_load.insert(timeline_id, metadata);
-                    } else {
-                        // A file or directory that doesn't look like a timeline ID
-                        warn!(
-                            "unexpected file or directory in timelines directory: {}",
-                            file_name.to_string_lossy()
-                        );
-                    }
-                }
-            }
-
-            // Sort the array of timeline IDs into tree-order, so that parent comes before
-            // all its children.
-            tree_sort_timelines(timelines_to_load)
+            cloned.scan_and_sort_timelines_dir()
         })
         .await
         .context("load spawn_blocking")
@@ -1137,7 +1178,11 @@ impl Tenant {
                                 )
                                 .context("create_timeline_struct")?;
 
-                            let guard = Arc::clone(&timeline.delete_lock).lock_owned().await;
+                            let guard = DeletionGuard(
+                                Arc::clone(&timeline.delete_lock)
+                                    .try_lock_owned()
+                                    .expect("cannot happen because we're the only owner"),
+                            );
 
                             // Note: here we even skip populating layer map. Timeline is essentially uninitialized.
                             // RemoteTimelineClient is the only functioning part.
@@ -1200,19 +1245,21 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         active_only: bool,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, GetTimelineError> {
         let timelines_accessor = self.timelines.lock().unwrap();
-        let timeline = timelines_accessor.get(&timeline_id).with_context(|| {
-            format!("Timeline {}/{} was not found", self.tenant_id, timeline_id)
-        })?;
+        let timeline = timelines_accessor
+            .get(&timeline_id)
+            .ok_or(GetTimelineError::NotFound {
+                tenant_id: self.tenant_id,
+                timeline_id,
+            })?;
 
         if active_only && !timeline.is_active() {
-            anyhow::bail!(
-                "Timeline {}/{} is not active, state: {:?}",
-                self.tenant_id,
+            Err(GetTimelineError::NotActive {
+                tenant_id: self.tenant_id,
                 timeline_id,
-                timeline.current_state()
-            )
+                state: timeline.current_state(),
+            })
         } else {
             Ok(Arc::clone(timeline))
         }
@@ -1304,6 +1351,7 @@ impl Tenant {
             .context("init_empty_test_timeline")?;
         modification
             .commit()
+            .await
             .context("commit init_empty_test_timeline modification")?;
 
         // Flush to disk so that uninit_tl's check for valid disk_consistent_lsn passes.
@@ -1460,7 +1508,13 @@ impl Tenant {
             let timelines = self.timelines.lock().unwrap();
             let timelines_to_compact = timelines
                 .iter()
-                .map(|(timeline_id, timeline)| (*timeline_id, timeline.clone()))
+                .filter_map(|(timeline_id, timeline)| {
+                    if timeline.is_active() {
+                        Some((*timeline_id, timeline.clone()))
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>();
             drop(timelines);
             timelines_to_compact
@@ -1541,6 +1595,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         timeline: Arc<Timeline>,
+        guard: DeletionGuard,
     ) -> anyhow::Result<()> {
         {
             // Grab the layer_removal_cs lock, and actually perform the deletion.
@@ -1613,6 +1668,25 @@ impl Tenant {
             Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
         });
 
+        if let Some(remote_client) = &timeline.remote_client {
+            remote_client.delete_all().await.context("delete_all")?
+        };
+
+        // Have a failpoint that can use the `pause` failpoint action.
+        // We don't want to block the executor thread, hence, spawn_blocking + await.
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint in_progress_delete");
+                    fail::fail_point!("in_progress_delete");
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
+
         {
             // Remove the timeline from the map.
             let mut timelines = self.timelines.lock().unwrap();
@@ -1633,12 +1707,7 @@ impl Tenant {
             drop(timelines);
         }
 
-        let remote_client = match &timeline.remote_client {
-            Some(remote_client) => remote_client,
-            None => return Ok(()),
-        };
-
-        remote_client.delete_all().await?;
+        drop(guard);
 
         Ok(())
     }
@@ -1686,23 +1755,18 @@ impl Tenant {
             timeline = Arc::clone(timeline_entry.get());
 
             // Prevent two tasks from trying to delete the timeline at the same time.
-            //
-            // XXX: We should perhaps return an HTTP "202 Accepted" to signal that the caller
-            // needs to poll until the operation has finished. But for now, we return an
-            // error, because the control plane knows to retry errors.
-
             delete_lock_guard =
-                Arc::clone(&timeline.delete_lock)
-                    .try_lock_owned()
-                    .map_err(|_| {
+                DeletionGuard(Arc::clone(&timeline.delete_lock).try_lock_owned().map_err(
+                    |_| {
                         DeleteTimelineError::Other(anyhow::anyhow!(
                             "timeline deletion is already in progress"
                         ))
-                    })?;
+                    },
+                )?);
 
             // If another task finished the deletion just before we acquired the lock,
             // return success.
-            if *delete_lock_guard {
+            if delete_lock_guard.is_deleted() {
                 return Ok(());
             }
 
@@ -1776,7 +1840,7 @@ impl Tenant {
         self: Arc<Self>,
         timeline_id: TimelineId,
         timeline: Arc<Timeline>,
-        _guard: OwnedMutexGuard<bool>,
+        guard: DeletionGuard,
     ) {
         let tenant_id = self.tenant_id;
         let timeline_clone = Arc::clone(&timeline);
@@ -1789,7 +1853,7 @@ impl Tenant {
             "timeline_delete",
             false,
             async move {
-                if let Err(err) = self.delete_timeline(timeline_id, timeline).await {
+                if let Err(err) = self.delete_timeline(timeline_id, timeline, guard).await {
                     error!("Error: {err:#}");
                     timeline_clone.set_broken(err.to_string())
                 };
@@ -3345,9 +3409,8 @@ where
 #[cfg(test)]
 pub mod harness {
     use bytes::{Bytes, BytesMut};
-    use once_cell::sync::Lazy;
     use once_cell::sync::OnceCell;
-    use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+    use std::sync::Arc;
     use std::{fs, path::PathBuf};
     use utils::logging;
     use utils::lsn::Lsn;
@@ -3380,8 +3443,6 @@ pub mod harness {
         buf.freeze()
     }
 
-    static LOCK: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
-
     impl From<TenantConf> for TenantConfOpt {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
@@ -3408,33 +3469,16 @@ pub mod harness {
         }
     }
 
-    pub struct TenantHarness<'a> {
+    pub struct TenantHarness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
-
-        pub lock_guard: (
-            Option<RwLockReadGuard<'a, ()>>,
-            Option<RwLockWriteGuard<'a, ()>>,
-        ),
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
 
-    impl<'a> TenantHarness<'a> {
+    impl TenantHarness {
         pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
-            Self::create_internal(test_name, false)
-        }
-        pub fn create_exclusive(test_name: &'static str) -> anyhow::Result<Self> {
-            Self::create_internal(test_name, true)
-        }
-        fn create_internal(test_name: &'static str, exclusive: bool) -> anyhow::Result<Self> {
-            let lock_guard = if exclusive {
-                (None, Some(LOCK.write().unwrap()))
-            } else {
-                (Some(LOCK.read().unwrap()), None)
-            };
-
             LOG_HANDLE.get_or_init(|| {
                 logging::init(
                     logging::LogFormat::Test,
@@ -3470,7 +3514,6 @@ pub mod harness {
                 conf,
                 tenant_conf,
                 tenant_id,
-                lock_guard,
             })
         }
 
@@ -3495,26 +3538,12 @@ pub mod harness {
                 self.tenant_id,
                 None,
             ));
-            // populate tenant with locally available timelines
-            let mut timelines_to_load = HashMap::new();
-            for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
-                .expect("should be able to read timelines dir")
-            {
-                let timeline_dir_entry = timeline_dir_entry?;
-                let timeline_id: TimelineId = timeline_dir_entry
-                    .path()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .parse()?;
-
-                let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
-                timelines_to_load.insert(timeline_id, timeline_metadata);
-            }
             tenant
                 .load(None, ctx)
                 .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
                 .await?;
+
+            // TODO reuse Tenant::activate (needs broker)
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
                 timeline.set_state(TimelineState::Active);
@@ -3580,13 +3609,17 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
@@ -3647,7 +3680,7 @@ mod tests {
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
-        let writer = tline.writer();
+        let writer = tline.writer().await;
 
         #[allow(non_snake_case)]
         let TEST_KEY_A: Key = Key::from_hex("112222222233333333444444445500000001").unwrap();
@@ -3655,13 +3688,21 @@ mod tests {
         let TEST_KEY_B: Key = Key::from_hex("112222222233333333444444445500000002").unwrap();
 
         // Insert a value on the timeline
-        writer.put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))?;
-        writer.put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x20), &test_value("foo at 0x20"))
+            .await?;
+        writer
+            .put(TEST_KEY_B, Lsn(0x20), &test_value("foobar at 0x20"))
+            .await?;
         writer.finish_write(Lsn(0x20));
 
-        writer.put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x30), &test_value("foo at 0x30"))
+            .await?;
         writer.finish_write(Lsn(0x30));
-        writer.put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))?;
+        writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("foo at 0x40"))
+            .await?;
         writer.finish_write(Lsn(0x40));
 
         //assert_current_logical_size(&tline, Lsn(0x40));
@@ -3673,8 +3714,10 @@ mod tests {
         let newtline = tenant
             .get_timeline(NEW_TIMELINE_ID, true)
             .expect("Should have a local timeline");
-        let new_writer = newtline.writer();
-        new_writer.put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))?;
+        let new_writer = newtline.writer().await;
+        new_writer
+            .put(TEST_KEY_A, Lsn(0x40), &test_value("bar at 0x40"))
+            .await?;
         new_writer.finish_write(Lsn(0x40));
 
         // Check page contents on both branches
@@ -3700,38 +3743,46 @@ mod tests {
         let mut lsn = start_lsn;
         #[allow(non_snake_case)]
         {
-            let writer = tline.writer();
+            let writer = tline.writer().await;
             // Create a relation on the timeline
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
         }
         tline.freeze_and_flush().await?;
         {
-            let writer = tline.writer();
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            let writer = tline.writer().await;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             lsn += 0x10;
-            writer.put(
-                *TEST_KEY,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
-            )?;
+            writer
+                .put(
+                    *TEST_KEY,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("foo at {}", lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
         }
         tline.freeze_and_flush().await
@@ -4018,9 +4069,13 @@ mod tests {
         std::fs::write(metadata_path, metadata_bytes)?;
 
         let err = harness.try_load(&ctx).await.err().expect("should fail");
-        assert!(err
-            .to_string()
-            .starts_with("Failed to parse metadata bytes from path"));
+        // get all the stack with all .context, not tonly the last one
+        let message = format!("{err:#}");
+        let expected = "Failed to parse metadata bytes from path";
+        assert!(
+            message.contains(expected),
+            "message '{message}' expected to contain {expected}"
+        );
 
         let mut found_error_message = false;
         let mut err_source = err.source();
@@ -4046,32 +4101,40 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, Lsn(0x08), DEFAULT_PG_VERSION, &ctx)
             .await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x10), &Value::Image(TEST_IMG("foo at 0x10")))
+            .await?;
         writer.finish_write(Lsn(0x10));
         drop(writer);
 
         tline.freeze_and_flush().await?;
         tline.compact(&ctx).await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x20), &Value::Image(TEST_IMG("foo at 0x20")))
+            .await?;
         writer.finish_write(Lsn(0x20));
         drop(writer);
 
         tline.freeze_and_flush().await?;
         tline.compact(&ctx).await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x30), &Value::Image(TEST_IMG("foo at 0x30")))
+            .await?;
         writer.finish_write(Lsn(0x30));
         drop(writer);
 
         tline.freeze_and_flush().await?;
         tline.compact(&ctx).await?;
 
-        let writer = tline.writer();
-        writer.put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))?;
+        let writer = tline.writer().await;
+        writer
+            .put(*TEST_KEY, Lsn(0x40), &Value::Image(TEST_IMG("foo at 0x40")))
+            .await?;
         writer.finish_write(Lsn(0x40));
         drop(writer);
 
@@ -4122,12 +4185,14 @@ mod tests {
         for _ in 0..50 {
             for _ in 0..10000 {
                 test_key.field6 = blknum;
-                let writer = tline.writer();
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                let writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
 
@@ -4172,12 +4237,14 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer();
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            let writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -4190,12 +4257,14 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer();
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                let writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 writer.finish_write(lsn);
                 drop(writer);
                 updated[blknum] = lsn;
@@ -4247,12 +4316,14 @@ mod tests {
         for blknum in 0..NUM_KEYS {
             lsn = Lsn(lsn.0 + 0x10);
             test_key.field6 = blknum as u32;
-            let writer = tline.writer();
-            writer.put(
-                test_key,
-                lsn,
-                &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-            )?;
+            let writer = tline.writer().await;
+            writer
+                .put(
+                    test_key,
+                    lsn,
+                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                )
+                .await?;
             writer.finish_write(lsn);
             updated[blknum] = lsn;
             drop(writer);
@@ -4273,12 +4344,14 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer();
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
-                )?;
+                let writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} at {}", blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating {} at {}", blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
@@ -4339,12 +4412,14 @@ mod tests {
                 lsn = Lsn(lsn.0 + 0x10);
                 let blknum = thread_rng().gen_range(0..NUM_KEYS);
                 test_key.field6 = blknum as u32;
-                let writer = tline.writer();
-                writer.put(
-                    test_key,
-                    lsn,
-                    &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
-                )?;
+                let writer = tline.writer().await;
+                writer
+                    .put(
+                        test_key,
+                        lsn,
+                        &Value::Image(TEST_IMG(&format!("{} {} at {}", idx, blknum, lsn))),
+                    )
+                    .await?;
                 println!("updating [{}][{}] at {}", idx, blknum, lsn);
                 writer.finish_write(lsn);
                 drop(writer);
@@ -4415,6 +4490,7 @@ mod tests {
             .context("init_empty_test_timeline")?;
         modification
             .commit()
+            .await
             .context("commit init_empty_test_timeline modification")?;
 
         // Do the flush. The flush code will check the expectations that we set above.
@@ -4433,6 +4509,44 @@ mod tests {
             assert!(expect_initdb_optimization);
             assert!(initdb_optimization_count > 0);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_uninit_mark_crash() -> anyhow::Result<()> {
+        let name = "test_uninit_mark_crash";
+        let harness = TenantHarness::create(name)?;
+        {
+            let (tenant, ctx) = harness.load().await;
+            let tline =
+                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            // Keeps uninit mark in place
+            std::mem::forget(tline);
+        }
+
+        let (tenant, _) = harness.load().await;
+        match tenant.get_timeline(TIMELINE_ID, false) {
+            Ok(_) => panic!("timeline should've been removed during load"),
+            Err(e) => {
+                assert_eq!(
+                    e,
+                    GetTimelineError::NotFound {
+                        tenant_id: tenant.tenant_id,
+                        timeline_id: TIMELINE_ID,
+                    }
+                )
+            }
+        }
+
+        assert!(!harness
+            .conf
+            .timeline_path(&TIMELINE_ID, &tenant.tenant_id)
+            .exists());
+
+        assert!(!harness
+            .conf
+            .timeline_uninit_mark_file_path(tenant.tenant_id, TIMELINE_ID)
+            .exists());
 
         Ok(())
     }

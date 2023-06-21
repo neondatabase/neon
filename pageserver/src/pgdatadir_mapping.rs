@@ -43,6 +43,16 @@ pub enum CalculateLogicalSizeError {
     Other(#[from] anyhow::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RelationError {
+    #[error("Relation Already Exists")]
+    AlreadyExists,
+    #[error("invalid relnode")]
+    InvalidRelnode,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 ///
 /// This impl provides all the functionality to store PostgreSQL relations, SLRUs,
 /// and other special kinds of files, in a versioned key-value store. The
@@ -101,9 +111,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(anyhow::anyhow!(
-                "invalid relnode"
-            )));
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
         }
 
         let nblocks = self.get_rel_size(tag, lsn, latest, ctx).await?;
@@ -148,9 +158,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(anyhow::anyhow!(
-                "invalid relnode"
-            )));
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
         }
 
         if let Some(nblocks) = self.get_cached_rel_size(&tag, lsn) {
@@ -193,9 +203,9 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
-            return Err(PageReconstructError::Other(anyhow::anyhow!(
-                "invalid relnode"
-            )));
+            return Err(PageReconstructError::Other(
+                RelationError::InvalidRelnode.into(),
+            ));
         }
 
         // first try to lookup relation in cache
@@ -724,7 +734,7 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         rec: NeonWalRecord,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         self.put(rel_block_to_key(rel, blknum), Value::WalRecord(rec));
         Ok(())
     }
@@ -751,7 +761,7 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
     }
@@ -875,32 +885,38 @@ impl<'a> DatadirModification<'a> {
         rel: RelTag,
         nblocks: BlockNumber,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+    ) -> Result<(), RelationError> {
+        if rel.relnode == 0 {
+            return Err(RelationError::AlreadyExists);
+        }
         // It's possible that this is the first rel for this db in this
         // tablespace.  Create the reldir entry for it if so.
-        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await?)?;
+        let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
+            .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
         let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
             // Didn't exist. Update dbdir
             dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
-            let buf = DbDirectory::ser(&dbdir)?;
+            let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
 
             // and create the RelDirectory
             RelDirectory::default()
         } else {
             // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key, ctx).await?)?
+            RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
+                .context("deserialize db")?
         };
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
-            anyhow::bail!("rel {rel} already exists");
+            return Err(RelationError::AlreadyExists);
         }
         self.put(
             rel_dir_key,
-            Value::Image(Bytes::from(RelDirectory::ser(&rel_dir)?)),
+            Value::Image(Bytes::from(
+                RelDirectory::ser(&rel_dir).context("serialize")?,
+            )),
         );
 
         // Put size
@@ -925,7 +941,7 @@ impl<'a> DatadirModification<'a> {
         nblocks: BlockNumber,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         let last_lsn = self.tline.get_last_record_lsn();
         if self.tline.get_rel_exists(rel, last_lsn, true, ctx).await? {
             let size_key = rel_size_to_key(rel);
@@ -956,7 +972,7 @@ impl<'a> DatadirModification<'a> {
         nblocks: BlockNumber,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Put size
         let size_key = rel_size_to_key(rel);
@@ -977,7 +993,7 @@ impl<'a> DatadirModification<'a> {
 
     /// Drop a relation.
     pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &RequestContext) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, "invalid relnode");
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
 
         // Remove it from the directory entry
         let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
@@ -1122,7 +1138,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub fn flush(&mut self) -> anyhow::Result<()> {
+    pub async fn flush(&mut self) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1130,19 +1146,20 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let writer = self.tline.writer();
+        let writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let mut result: anyhow::Result<()> = Ok(());
-        self.pending_updates.retain(|&key, value| {
-            if result.is_ok() && (is_rel_block_key(key) || is_slru_block_key(key)) {
-                result = writer.put(key, self.lsn, value);
-                false
+        let mut retained_pending_updates = HashMap::new();
+        for (key, value) in self.pending_updates.drain() {
+            if is_rel_block_key(key) || is_slru_block_key(key) {
+                // This bails out on first error without modifying pending_updates.
+                // That's Ok, cf this function's doc comment.
+                writer.put(key, self.lsn, &value).await?;
             } else {
-                true
+                retained_pending_updates.insert(key, value);
             }
-        });
-        result?;
+        }
+        self.pending_updates.extend(retained_pending_updates);
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
@@ -1157,17 +1174,17 @@ impl<'a> DatadirModification<'a> {
     /// underlying timeline.
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
-    pub fn commit(&mut self) -> anyhow::Result<()> {
-        let writer = self.tline.writer();
+    pub async fn commit(&mut self) -> anyhow::Result<()> {
+        let writer = self.tline.writer().await;
         let lsn = self.lsn;
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
         for (key, value) in self.pending_updates.drain() {
-            writer.put(key, lsn, &value)?;
+            writer.put(key, lsn, &value).await?;
         }
         for key_range in self.pending_deletions.drain(..) {
-            writer.delete(key_range, lsn)?;
+            writer.delete(key_range, lsn).await?;
         }
 
         writer.finish_write(lsn);

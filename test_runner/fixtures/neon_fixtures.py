@@ -1631,6 +1631,8 @@ class NeonPageserver(PgProtocol):
             r".*ERROR.*ancestor timeline \S+ is being stopped",
             # this is expected given our collaborative shutdown approach for the UploadQueue
             ".*Compaction failed, retrying in .*: queue is in state Stopped.*",
+            # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
+            ".*Error processing HTTP request: NotFound: Timeline .* was not found",
         ]
 
     def start(
@@ -2412,6 +2414,17 @@ class Endpoint(PgProtocol):
                 conf.write("\n")
 
         return self
+
+    def respec(self, **kwargs):
+        """Update the endpoint.json file used by control_plane."""
+        # Read config
+        config_path = os.path.join(self.endpoint_path(), "endpoint.json")
+        with open(config_path, "r") as f:
+            data_dict = json.load(f)
+
+        # Write it back updated
+        with open(config_path, "w") as file:
+            json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     def stop(self) -> "Endpoint":
         """

@@ -11,6 +11,7 @@ from fixtures.neon_fixtures import (
     wait_for_wal_insert_lsn,
 )
 from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.utils import timeline_delete_wait_completed
 from fixtures.pg_version import PgVersion, xfail_on_postgres
 from fixtures.types import Lsn, TenantId, TimelineId
 
@@ -628,12 +629,12 @@ def test_get_tenant_size_with_multiple_branches(
     size_debug_file_before.write(size_debug)
 
     # teardown, delete branches, and the size should be going down
-    http_client.timeline_delete(tenant_id, first_branch_timeline_id)
+    timeline_delete_wait_completed(http_client, tenant_id, first_branch_timeline_id)
 
     size_after_deleting_first = http_client.tenant_size(tenant_id)
     assert size_after_deleting_first < size_after_thinning_branch
 
-    http_client.timeline_delete(tenant_id, second_branch_timeline_id)
+    timeline_delete_wait_completed(http_client, tenant_id, second_branch_timeline_id)
     size_after_deleting_second = http_client.tenant_size(tenant_id)
     assert size_after_deleting_second < size_after_deleting_first
 

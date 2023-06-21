@@ -142,7 +142,7 @@ impl From<TenantMapInsertError> for ApiError {
 impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
-            TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid)),
+            TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
             _ => ApiError::InternalServerError(anyhow::Error::new(tse)),
         }
     }
@@ -151,7 +151,7 @@ impl From<TenantStateError> for ApiError {
 impl From<GetTenantError> for ApiError {
     fn from(tse: GetTenantError) -> ApiError {
         match tse {
-            GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid)),
+            GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
             e @ GetTenantError::NotActive(_) => {
                 // Why is this not `ApiError::NotFound`?
                 // Because we must be careful to never return 404 for a tenant if it does
@@ -169,7 +169,7 @@ impl From<SetNewTenantConfigError> for ApiError {
     fn from(e: SetNewTenantConfigError) -> ApiError {
         match e {
             SetNewTenantConfigError::GetTenant(tid) => {
-                ApiError::NotFound(anyhow!("tenant {}", tid))
+                ApiError::NotFound(anyhow!("tenant {}", tid).into())
             }
             e @ SetNewTenantConfigError::Persist(_) => {
                 ApiError::InternalServerError(anyhow::Error::new(e))
@@ -182,7 +182,7 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::DeleteTimelineError) -> Self {
         use crate::tenant::DeleteTimelineError::*;
         match value {
-            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found")),
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
             HasChildren(children) => ApiError::PreconditionFailed(
                 format!("Cannot delete timeline which has child timelines: {children:?}")
                     .into_boxed_str(),
@@ -215,7 +215,7 @@ async fn build_timeline_info(
 ) -> anyhow::Result<TimelineInfo> {
     crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
 
-    let mut info = build_timeline_info_common(timeline, ctx)?;
+    let mut info = build_timeline_info_common(timeline, ctx).await?;
     if include_non_incremental_logical_size {
         // XXX we should be using spawn_ondemand_logical_size_calculation here.
         // Otherwise, if someone deletes the timeline / detaches the tenant while
@@ -233,7 +233,7 @@ async fn build_timeline_info(
     Ok(info)
 }
 
-fn build_timeline_info_common(
+async fn build_timeline_info_common(
     timeline: &Arc<Timeline>,
     ctx: &RequestContext,
 ) -> anyhow::Result<TimelineInfo> {
@@ -264,7 +264,7 @@ fn build_timeline_info_common(
             None
         }
     };
-    let current_physical_size = Some(timeline.layer_size_sum());
+    let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
     let remote_consistent_lsn = timeline.get_remote_consistent_lsn().unwrap_or(Lsn(0));
 
@@ -330,6 +330,7 @@ async fn timeline_create_handler(
             Ok(Some(new_timeline)) => {
                 // Created. Construct a TimelineInfo for it.
                 let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
+                    .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
@@ -396,7 +397,7 @@ async fn timeline_detail_handler(
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
-            .map_err(ApiError::NotFound)?;
+            .map_err(|e| ApiError::NotFound(e.into()))?;
 
         let timeline_info = build_timeline_info(
             &timeline,
@@ -591,7 +592,7 @@ async fn tenant_status(
         // Calculate total physical size of all timelines
         let mut current_physical_size = 0;
         for timeline in tenant.list_timelines().iter() {
-            current_physical_size += timeline.layer_size_sum();
+            current_physical_size += timeline.layer_size_sum().await;
         }
 
         let state = tenant.current_state();
@@ -701,7 +702,7 @@ async fn layer_map_info_handler(
     check_permission(&request, Some(tenant_id))?;
 
     let timeline = active_timeline_of_active_tenant(tenant_id, timeline_id).await?;
-    let layer_map_info = timeline.layer_map_info(reset);
+    let layer_map_info = timeline.layer_map_info(reset).await;
 
     json_response(StatusCode::OK, layer_map_info)
 }
@@ -1060,7 +1061,7 @@ async fn timeline_download_remote_layers_handler_get(
     let info = timeline
         .get_download_all_remote_layers_task_info()
         .context("task never started since last pageserver process start")
-        .map_err(ApiError::NotFound)?;
+        .map_err(|e| ApiError::NotFound(e.into()))?;
     json_response(StatusCode::OK, info)
 }
 
@@ -1071,7 +1072,7 @@ async fn active_timeline_of_active_tenant(
     let tenant = mgr::get_tenant(tenant_id, true).await?;
     tenant
         .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)
+        .map_err(|e| ApiError::NotFound(e.into()))
 }
 
 async fn always_panic_handler(
