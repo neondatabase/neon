@@ -6,6 +6,8 @@ from fixtures.neon_fixtures import (
 )
 import json
 
+TEST_EXT_PATH = "v15/share/extension/test_ext.control"
+
 
 def test_file_download(neon_env_builder: NeonEnvBuilder):
     """
@@ -26,22 +28,17 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    TEST_EXT_PATH = "v15/share/extension/test_ext.control"
-
-    # TODO: we shouldn't be using neon_env_builder.remote_storage_client,
-    # we should pass the remote_storage_client to env in the builder.
-
     # 4. Upload test_ext.control file to the bucket
     # In the non-mock version this is done by CI/CD
     with open("test_ext.control", "rb") as data:
-        neon_env_builder.remote_storage_client.upload_fileobj(
-            data, neon_env_builder.remote_storage.bucket_name, TEST_EXT_PATH
+        env.remote_storage_client.upload_fileobj(
+            data, env.ext_remote_storage.bucket_name, TEST_EXT_PATH
         )
 
     # 5. Download file from the bucket to correct local location
     # Later this will be replaced by our rust code
-    resp = neon_env_builder.remote_storage_client.get_object(
-        Bucket=neon_env_builder.remote_storage.bucket_name, Key=TEST_EXT_PATH
+    resp = env.remote_storage_client.get_object(
+        Bucket=env.ext_remote_storage.bucket_name, Key=TEST_EXT_PATH
     )
     response = resp["Body"]
     for pgres_version in ("v15", "v14"):
@@ -54,9 +51,9 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
 
     remote_ext_config = json.dumps(
         {
-            "bucket": neon_env_builder.remote_storage.bucket_name,
+            "bucket": env.ext_remote_storage.bucket_name,
             "region": "us-east-1",
-            "endpoint": neon_env_builder.remote_storage.endpoint,
+            "endpoint": env.ext_remote_storage.endpoint,
         }
     )
 
