@@ -55,6 +55,8 @@ use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
 
+use tokio::runtime::Runtime;
+
 fn main() -> Result<()> {
     init_tracing_and_logging(DEFAULT_LOG_LEVEL)?;
 
@@ -78,12 +80,16 @@ fn main() -> Result<()> {
     warn!("you certainly must build changes if you want rust changes to be built");
     std::fs::write("alek/yay", remote_ext_bucket.clone())?;
 
-    // compute_tools::extension_server::download_file(
-    //     "test_ext.control",
-    //     remote_ext_bucket.into(),
-    //     remote_ext_region.into(),
-    // )
-    // .await?;
+    let mut rt = Runtime::new().unwrap();
+    rt.block_on(async move {
+        compute_tools::extension_server::download_file(
+            "test_ext.control",
+            remote_ext_bucket.into(),
+            remote_ext_region.into(),
+        )
+        .await
+        .expect("download should work");
+    });
 
     let http_port = *matches
         .get_one::<u16>("http-port")

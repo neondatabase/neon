@@ -343,6 +343,7 @@ async fn serve(port: u16, state: Arc<ComputeNode>) {
 pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let state = Arc::clone(state);
 
+    // TODO: remote print statements
     let xxx = format!("ROUTING port: {port}");
     std::fs::write("alek/ROUTES", xxx).expect("routing write file");
 

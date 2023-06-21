@@ -90,14 +90,17 @@ pub async fn download_extension(
     let libdir = get_pg_config("--libdir");
     let remote_storage = GenericRemoteStorage::from_config(config)?;
 
-    // just doing a testing thing
-    let folder = RemotePath::new(Path::new("public_extensions"))?;
-    let from_paths = remote_storage.list_files(Some(&folder)).await?;
-    let some_path = from_paths[0]
-        .object_name()
-        .expect("had a problem with somepath in extension server");
-    fs::write("alek/SOMEPATH", some_path)?;
+    std::fs::write("alek/proof", "proof")?;
 
+    // // this is just for testing doing a testing thing
+    // let folder = RemotePath::new(Path::new("public_extensions"))?;
+    // let from_paths = remote_storage.list_files(Some(&folder)).await?;
+    // let some_path = from_paths[0]
+    //     .object_name()
+    //     .expect("had a problem with somepath in extension server");
+    // fs::write("alek/SOMEPATH", some_path)?;
+
+    // // this is the real thing
     // match ext_type {
     //     ExtensionType::Shared => {
     //         // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
