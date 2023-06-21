@@ -1,1 +1,0 @@
-"v14/share/postgresql/extension"

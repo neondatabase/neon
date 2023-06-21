@@ -1,4 +1,4 @@
-use anyhow::{self};
+use anyhow::{self, bail};
 use remote_storage::*;
 use serde_json::{self, Value};
 use std::fs::File;
@@ -43,10 +43,12 @@ async fn download_helper(
     remote_from_path: &RemotePath,
     download_to_dir: &str,
 ) -> anyhow::Result<()> {
-    std::fs::write("ALEK_DOWNLOAD.txt", format!("{:?}", download_to_dir))?;
-    let file_name = remote_from_path.object_name().expect("it must exist");
-    info!("Downloading {:?}", file_name);
-    info!("To location {:?}", download_to_dir);
+    let file_name = remote_from_path.with_base(Path::new("pg_install"));
+    info!(
+        "Downloading {:?} to location {:?}",
+        file_name,
+        file_name.clone()
+    );
     let mut download = remote_storage.download(&remote_from_path).await?;
     let mut write_data_buffer = Vec::new();
     download
@@ -69,13 +71,9 @@ pub async fn download_extension(
     ext_type: ExtensionType,
     pgbin: &str,
 ) -> anyhow::Result<()> {
-    let from_paths = remote_storage.list_files(None).await?;
-    std::fs::write("ALEK_LIST_FILES.txt", format!("{:?}", from_paths))?;
-
     let (mut local_sharedir, mut remote_sharedir) = get_pg_config("--sharedir", pgbin);
     local_sharedir.push_str("/extension");
     remote_sharedir.push_str("/extension");
-    std::fs::write("ALEK_SHAREDIR.txt", format!("{:?}", remote_sharedir))?;
     let (local_libdir, _) = get_pg_config("--libdir", pgbin);
     match ext_type {
         ExtensionType::Shared => {
@@ -84,10 +82,6 @@ pub async fn download_extension(
             // because public extensions are common for all projects.
             let folder = RemotePath::new(Path::new(&remote_sharedir))?;
             let from_paths = remote_storage.list_files(Some(&folder)).await?;
-            std::fs::write(
-                "ALEK_QUEUE_DOWNLOAD.txt",
-                format!("{:?}", from_paths.clone()),
-            )?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
                     download_helper(&remote_storage, &remote_from_path, &local_sharedir).await?;
@@ -120,22 +114,26 @@ pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRem
     let remote_ext_config: serde_json::Value = serde_json::from_str(remote_ext_config)?;
     let remote_ext_bucket = match &remote_ext_config["bucket"] {
         Value::String(x) => x,
-        _ => panic!("oops"),
+        _ => bail!("remote_ext_config missing bucket"),
     };
     let remote_ext_region = match &remote_ext_config["region"] {
         Value::String(x) => x,
-        _ => panic!("oops"),
+        _ => bail!("remote_ext_config missing region"),
     };
     let remote_ext_endpoint = match &remote_ext_config["endpoint"] {
+        Value::String(x) => Some(x.clone()),
+        _ => None,
+    };
+    let remote_ext_prefix = match &remote_ext_config["prefix"] {
         Value::String(x) => Some(x.clone()),
         _ => None,
     };
 
     // load will not be large, so default parameters are fine
     let config = S3Config {
-        bucket_name: remote_ext_bucket.clone(),
-        bucket_region: remote_ext_region.clone(),
-        prefix_in_bucket: None,
+        bucket_name: remote_ext_bucket.to_string(),
+        bucket_region: remote_ext_region.to_string(),
+        prefix_in_bucket: remote_ext_prefix,
         endpoint: remote_ext_endpoint,
         concurrency_limit: NonZeroUsize::new(100).expect("100 != 0"),
         max_keys_per_list_response: None,

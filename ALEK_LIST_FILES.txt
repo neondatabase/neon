@@ -1,1 +1,0 @@
-[RemotePath("v14/share/postgresql/extension/test_ext.control")]

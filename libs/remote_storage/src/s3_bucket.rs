@@ -349,6 +349,7 @@ impl RemoteStorage for S3Bucket {
 
     /// See the doc for `RemoteStorage::list_files`
     async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        // TODO: if bucket prefix is empty, folder is prefixed with a "/" I think. Is this desired?
         let folder_name = folder
             .map(|p| self.relative_path_to_s3_object(p))
             .or_else(|| self.prefix_in_bucket.clone());

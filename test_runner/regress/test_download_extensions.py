@@ -5,6 +5,7 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
 )
 import json
+import os
 
 
 def test_file_download(neon_env_builder: NeonEnvBuilder):
@@ -27,23 +28,24 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     TEST_EXT_PATH = "v14/share/postgresql/extension/test_ext.control"
+    BUCKET_PREFIX = "5314225671"  # this is a hash of the commit number
 
     # 4. Upload test_ext.control file to the bucket
     # In the non-mock version this is done by CI/CD
     with open("test_ext.control", "rb") as data:
         env.remote_storage_client.upload_fileobj(
-            data, env.ext_remote_storage.bucket_name, TEST_EXT_PATH
+            data, env.ext_remote_storage.bucket_name, os.path.join(BUCKET_PREFIX, TEST_EXT_PATH)
         )
 
     # 5. Download file from the bucket to correct local location
     # Later this will be replaced by our rust code
     resp = env.remote_storage_client.get_object(
-        Bucket=env.ext_remote_storage.bucket_name, Key=TEST_EXT_PATH
+        Bucket=env.ext_remote_storage.bucket_name, Key=os.path.join(BUCKET_PREFIX, TEST_EXT_PATH)
     )
     response = resp["Body"]
     fname = f"pg_install/{TEST_EXT_PATH}"
-    with open(fname, "wb") as f:
-        f.write(response.read())
+    # with open(fname, "wb") as f:
+    #     f.write(response.read())
 
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
@@ -53,6 +55,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
             "bucket": env.ext_remote_storage.bucket_name,
             "region": "us-east-1",
             "endpoint": env.ext_remote_storage.endpoint,
+            "prefix": BUCKET_PREFIX,
         }
     )
 
