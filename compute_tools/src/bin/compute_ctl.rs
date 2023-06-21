@@ -43,7 +43,6 @@ use chrono::Utc;
 use clap::Arg;
 use tracing::{error, info};
 use url::Url;
-use utils::project_git_version;
 
 use compute_api::responses::ComputeStatus;
 
@@ -62,7 +61,7 @@ fn main() -> Result<()> {
 
     let build_tag = option_env!("BUILD_TAG").unwrap_or(BUILD_TAG_DEFAULT);
 
-    info!("version: {GIT_VERSION}, build_tag: {build_tag}");
+    info!("build_tag: {build_tag}");
 
     let matches = cli().get_matches();
 
@@ -292,11 +291,11 @@ fn main() -> Result<()> {
     exit(exit_code.unwrap_or(1))
 }
 
-project_git_version!(GIT_VERSION);
-
 fn cli() -> clap::Command {
+    // Env variable is set by `cargo`
+    let version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
     clap::Command::new("compute_ctl")
-        .version(GIT_VERSION)
+        .version(version)
         .arg(
             Arg::new("http-port")
                 .long("http-port")

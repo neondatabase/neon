@@ -918,7 +918,6 @@ dependencies = [
  "clap 4.3.0",
  "compute_api",
  "futures",
- "git-version",
  "hyper",
  "notify",
  "num_cpus",

@@ -10,7 +10,6 @@ chrono.workspace = true
 clap.workspace = true
 futures.workspace = true
 hyper = { workspace = true, features = ["full"] }
-git-version.workspace = true
 notify.workspace = true
 num_cpus.workspace = true
 opentelemetry.workspace = true
@@ -31,4 +30,3 @@ url.workspace = true
 compute_api.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
-
