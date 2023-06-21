@@ -3499,121 +3499,147 @@ impl Timeline {
             return Ok(CompactLevel0Phase1Result::default());
         }
 
-        // Gather the files to compact in this iteration.
-        //
-        // Start with the oldest Level 0 delta file, and collect any other
-        // level 0 files that form a contiguous sequence, such that the end
-        // LSN of previous file matches the start LSN of the next file.
-        //
-        // Note that if the files don't form such a sequence, we might
-        // "compact" just a single file. That's a bit pointless, but it allows
-        // us to get rid of the level 0 file, and compact the other files on
-        // the next iteration. This could probably made smarter, but such
-        // "gaps" in the sequence of level 0 files should only happen in case
-        // of a crash, partial download from cloud storage, or something like
-        // that, so it's not a big deal in practice.
-        level0_deltas.sort_by_key(|l| l.get_lsn_range().start);
-        let mut level0_deltas_iter = level0_deltas.iter();
+        // NB: the .iter() and .key_iter() calls do IO. Do it inside spawn_blocking.
+        let span = info_span!("compact_level0_phase1_write_layers");
+        let span_ctx = ctx.attached_child();
+        let res = tokio::task::spawn_blocking(move || {
+            let ctx = span_ctx;
+            let _entered = span.enter();
+            // Gather the files to compact in this iteration.
+            //
+            // Start with the oldest Level 0 delta file, and collect any other
+            // level 0 files that form a contiguous sequence, such that the end
+            // LSN of previous file matches the start LSN of the next file.
+            //
+            // Note that if the files don't form such a sequence, we might
+            // "compact" just a single file. That's a bit pointless, but it allows
+            // us to get rid of the level 0 file, and compact the other files on
+            // the next iteration. This could probably made smarter, but such
+            // "gaps" in the sequence of level 0 files should only happen in case
+            // of a crash, partial download from cloud storage, or something like
+            // that, so it's not a big deal in practice.
+            level0_deltas.sort_by_key(|l| l.get_lsn_range().start);
+            let mut level0_deltas_iter = level0_deltas.iter();
 
-        let first_level0_delta = level0_deltas_iter.next().unwrap();
-        let mut prev_lsn_end = first_level0_delta.get_lsn_range().end;
-        let mut deltas_to_compact = vec![Arc::clone(first_level0_delta)];
-        for l in level0_deltas_iter {
-            let lsn_range = l.get_lsn_range();
+            let first_level0_delta = level0_deltas_iter.next().unwrap();
+            let mut prev_lsn_end = first_level0_delta.get_lsn_range().end;
+            let mut deltas_to_compact = vec![Arc::clone(first_level0_delta)];
+            for l in level0_deltas_iter {
+                let lsn_range = l.get_lsn_range();
 
-            if lsn_range.start != prev_lsn_end {
-                break;
+                if lsn_range.start != prev_lsn_end {
+                    break;
+                }
+                deltas_to_compact.push(Arc::clone(l));
+                prev_lsn_end = lsn_range.end;
             }
-            deltas_to_compact.push(Arc::clone(l));
-            prev_lsn_end = lsn_range.end;
-        }
-        let lsn_range = Range {
-            start: deltas_to_compact.first().unwrap().get_lsn_range().start,
-            end: deltas_to_compact.last().unwrap().get_lsn_range().end,
-        };
+            let lsn_range = Range {
+                start: deltas_to_compact.first().unwrap().get_lsn_range().start,
+                end: deltas_to_compact.last().unwrap().get_lsn_range().end,
+            };
 
-        let deltas_to_compact = Arc::new(deltas_to_compact);
-        let deltas_to_compact_clone = Arc::clone(&deltas_to_compact);
-        let iter_deltas_to_compact = move || {
-            let data = Arc::clone(&deltas_to_compact_clone);
-            (0..data.len()).map(move |i| Arc::clone(&data[i]))
-        };
+            let deltas_to_compact = Arc::new(deltas_to_compact);
+            let deltas_to_compact_clone = Arc::clone(&deltas_to_compact);
+            let iter_deltas_to_compact = move || {
+                let data = Arc::clone(&deltas_to_compact_clone);
+                (0..data.len()).map(move |i| Arc::clone(&data[i]))
+            };
 
-        let remotes = iter_deltas_to_compact()
-            .filter(|l| l.is_remote_layer())
-            .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
-            .map(|l| {
-                l.clone()
-                    .downcast_remote_layer()
-                    .expect("just checked it is remote layer")
-            })
-            .collect::<Vec<_>>();
+            let remotes = iter_deltas_to_compact()
+                .filter(|l| l.is_remote_layer())
+                .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
+                .map(|l| {
+                    l.clone()
+                        .downcast_remote_layer()
+                        .expect("just checked it is remote layer")
+                })
+                .collect::<Vec<_>>();
 
-        if !remotes.is_empty() {
-            // caller is holding the lock to layer_removal_cs, and we don't want to download while
-            // holding that; in future download_remote_layer might take it as well. this is
-            // regardless of earlier image creation downloading on-demand, while holding the lock.
-            return Err(CompactionError::DownloadRequired(remotes));
-        }
+            if !remotes.is_empty() {
+                // caller is holding the lock to layer_removal_cs, and we don't want to download while
+                // holding that; in future download_remote_layer might take it as well. this is
+                // regardless of earlier image creation downloading on-demand, while holding the lock.
+                return Err(CompactionError::DownloadRequired(remotes));
+            }
 
-        info!(
-            "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total)",
-            lsn_range.start,
-            lsn_range.end,
-            deltas_to_compact.len(),
-            level0_deltas.len()
-        );
+            info!(
+                "Starting Level0 compaction in LSN range {}-{} for {} layers ({} deltas in total)",
+                lsn_range.start,
+                lsn_range.end,
+                deltas_to_compact.len(),
+                level0_deltas.len()
+            );
 
-        for l in deltas_to_compact.iter() {
-            info!("compact includes {}", l.filename().file_name());
-        }
+            for l in deltas_to_compact.iter() {
+                info!("compact includes {}", l.filename().file_name());
+            }
 
-        // We don't need the original list of layers anymore. Drop it so that
-        // we don't accidentally use it later in the function.
-        drop(level0_deltas);
+            // We don't need the original list of layers anymore. Drop it so that
+            // we don't accidentally use it later in the function.
+            drop(level0_deltas);
 
-        // This iterator walks through all key-value pairs from all the layers
-        // we're compacting, in key, LSN order.
-        let all_values_iter = itertools::process_results(
-            iter_deltas_to_compact().map(|l| l.iter(ctx)),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    if let Ok((a_key, a_lsn, _)) = a {
-                        if let Ok((b_key, b_lsn, _)) = b {
-                            match a_key.cmp(b_key) {
-                                Ordering::Less => true,
-                                Ordering::Equal => a_lsn <= b_lsn,
-                                Ordering::Greater => false,
+            // This iterator walks through all key-value pairs from all the layers
+            // we're compacting, in key, LSN order.
+            let all_values_iter = itertools::process_results(
+                iter_deltas_to_compact().map(|l| l.iter(&ctx)),
+                |iter_iter| {
+                    iter_iter.kmerge_by(|a, b| {
+                        if let Ok((a_key, a_lsn, _)) = a {
+                            if let Ok((b_key, b_lsn, _)) = b {
+                                match a_key.cmp(b_key) {
+                                    Ordering::Less => true,
+                                    Ordering::Equal => a_lsn <= b_lsn,
+                                    Ordering::Greater => false,
+                                }
+                            } else {
+                                false
                             }
                         } else {
-                            false
+                            true
                         }
-                    } else {
-                        true
-                    }
-                })
-            },
-        )?;
+                    })
+                },
+            )?;
 
-        // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = itertools::process_results(
-            iter_deltas_to_compact().map(|l| l.key_iter(ctx)),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    let (a_key, a_lsn, _) = a;
-                    let (b_key, b_lsn, _) = b;
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
-                        Ordering::Greater => false,
-                    }
-                })
-            },
-        )?;
+            // This iterator walks through all keys and is needed to calculate size used by each key
+            let all_keys_iter = itertools::process_results(
+                iter_deltas_to_compact().map(|l| l.key_iter(&ctx)),
+                |iter_iter| {
+                    iter_iter.kmerge_by(|a, b| {
+                        let (a_key, a_lsn, _) = a;
+                        let (b_key, b_lsn, _) = b;
+                        match a_key.cmp(b_key) {
+                            Ordering::Less => true,
+                            Ordering::Equal => a_lsn <= b_lsn,
+                            Ordering::Greater => false,
+                        }
+                    })
+                },
+            )?;
+
+            Ok((
+                deltas_to_compact,
+                iter_deltas_to_compact,
+                lsn_range,
+                all_keys_iter,
+                all_values_iter,
+            ))
+        })
+        .await
+        .context("spawn_blocking")
+        .map_err(CompactionError::Other)??;
+        let (
+            deltas_to_compact,
+            iter_deltas_to_compact,
+            lsn_range,
+            mut all_keys_iter,
+            all_values_iter,
+        ) = res;
 
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
+
         stats.time_spent_between_locks = stats.get_level0_deltas_plus_drop_lock_micros.till_now();
         let layers = self.layers.read().await; // Is'n it better to hold original layers lock till here?
         stats.second_read_lock_acquisition_micros = stats.time_spent_between_locks.till_now();
