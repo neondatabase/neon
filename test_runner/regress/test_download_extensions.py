@@ -1,32 +1,13 @@
-import os
-import shutil
-import time
 from contextlib import closing
-from datetime import datetime
-from itertools import chain
-from pathlib import Path
 from typing import List
-
-import pytest
 from fixtures.log_helper import log
-from fixtures.metrics import (
-    PAGESERVER_GLOBAL_METRICS,
-    PAGESERVER_PER_TENANT_METRICS,
-    PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
-    parse_metrics,
-)
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     RemoteStorageKind,
     available_remote_storages,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
-from fixtures.utils import wait_until
-from prometheus_client.samples import Sample
-
 import json
-import requests
 
 
 def test_file_download(neon_env_builder: NeonEnvBuilder):
