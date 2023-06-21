@@ -2295,7 +2295,7 @@ impl Timeline {
         _updates: &mut BatchedUpdates<'_>,
     ) -> anyhow::Result<()> {
         warn!("not deleting the layer {layer:?} as old GC is not supposed to run");
-        return Ok(());
+        Ok(())
     }
 
     /// Removes the layer from local FS (if present) and from memory.
@@ -3860,69 +3860,74 @@ impl Timeline {
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<Option<CompactTieredPhase1Result>, CompactionError> {
-        let guard = self.layers.read().await;
-        let (layers, _) = &*guard;
+        let (deltas_to_compact_layers, tier_to_compect, lsn_range) = {
+            let guard = self.layers.read().await;
+            let (layers, _) = &*guard;
 
-        // Precondition: only compact if enough layers have accumulated.
-        let threshold = 8;
-        assert!(threshold >= 2);
-        if layers.sorted_runs.len() < threshold {
-            debug!(
-                level0_deltas = layers.sorted_runs.len(),
-                threshold, "too few sorted runs to compact"
-            );
-            return Ok(None);
-        }
-
-        // Gather the files to compact in this iteration.
-
-        let tier_sizes: Vec<(usize, u64)> = layers
-            .sorted_runs
-            .iter()
-            .map(|(tier_id, layers)| (*tier_id, layers.iter().map(|layer| layer.file_size()).sum()))
-            .collect::<Vec<_>>();
-
-        let Some(tier_to_compect) = Self::get_compact_task(tier_sizes) else {
-            return Ok(None);
-        };
-
-        if tier_to_compect.len() < 2 {
-            return Ok(None);
-        }
-
-        let mut deltas_to_compact_layers = vec![];
-        for (tier_id, layers) in layers.sorted_runs.iter() {
-            if tier_to_compect.contains(tier_id) {
-                deltas_to_compact_layers.extend(layers.iter().cloned());
+            // Precondition: only compact if enough layers have accumulated.
+            let threshold = 8;
+            assert!(threshold >= 2);
+            if layers.sorted_runs.len() < threshold {
+                debug!(
+                    level0_deltas = layers.sorted_runs.len(),
+                    threshold, "too few sorted runs to compact"
+                );
+                return Ok(None);
             }
-        }
-        drop_rlock(guard);
 
-        let deltas_to_compact_layers = deltas_to_compact_layers
-            .into_iter()
-            .map(|l| self.lcache.get_from_desc(&l))
-            .collect_vec();
+            // Gather the files to compact in this iteration.
 
-        let lsn_range = {
-            let lsn_range_start = deltas_to_compact_layers
+            let tier_sizes: Vec<(usize, u64)> = layers
+                .sorted_runs
                 .iter()
-                .map(|l| l.get_lsn_range().start)
-                .min()
-                .unwrap();
-            let lsn_range_end = deltas_to_compact_layers
-                .iter()
-                .map(|l| l.get_lsn_range().end)
-                .max()
-                .unwrap();
-            lsn_range_start..lsn_range_end
+                .map(|(tier_id, layers)| {
+                    (*tier_id, layers.iter().map(|layer| layer.file_size()).sum())
+                })
+                .collect::<Vec<_>>();
+
+            let Some(tier_to_compect) = Self::get_compact_task(tier_sizes) else {
+                return Ok(None);
+            };
+
+            if tier_to_compect.len() < 2 {
+                return Ok(None);
+            }
+
+            let mut deltas_to_compact_layers = vec![];
+            for (tier_id, layers) in layers.sorted_runs.iter() {
+                if tier_to_compect.contains(tier_id) {
+                    deltas_to_compact_layers.extend(layers.iter().cloned());
+                }
+            }
+
+            let deltas_to_compact_layers = deltas_to_compact_layers
+                .into_iter()
+                .map(|l| self.lcache.get_from_desc(&l))
+                .collect_vec();
+
+            let lsn_range = {
+                let lsn_range_start = deltas_to_compact_layers
+                    .iter()
+                    .map(|l| l.get_lsn_range().start)
+                    .min()
+                    .unwrap();
+                let lsn_range_end = deltas_to_compact_layers
+                    .iter()
+                    .map(|l| l.get_lsn_range().end)
+                    .max()
+                    .unwrap();
+                lsn_range_start..lsn_range_end
+            };
+
+            info!(
+                "Starting tier compaction in LSN range {}-{} for tiers {:?}",
+                lsn_range.start, lsn_range.end, tier_to_compect
+            );
+
+            layers.dump(false, ctx)?;
+
+            (deltas_to_compact_layers, tier_to_compect, lsn_range)
         };
-
-        info!(
-            "Starting tier compaction in LSN range {}-{} for tiers {:?}",
-            lsn_range.start, lsn_range.end, tier_to_compect
-        );
-
-        layers.dump(false, ctx);
 
         // TODO: leverage the properties that some layers do not overlap, kmerge is too costly
 
