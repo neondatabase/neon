@@ -124,7 +124,6 @@ bool is_sequential_access(RelFileNode rnode, ForkNumber forkNum, BlockNumber blk
 				/* Hash overflow: find candidate for replacement */
 				AccessStatEntry* victim = dlist_container(AccessStatEntry, lru_node, dlist_pop_head_node(&lru));
 				as_delete_item(hash, victim);
-				pfree(victim);
 			}
 			entry = as_insert(hash, rnode, &found);
 			Assert(!found);
