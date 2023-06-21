@@ -89,8 +89,6 @@ struct TimelineTreeEl {
 fn main() -> Result<()> {
     let matches = cli().get_matches();
 
-    std::fs::write("alek/neon_local", "Ihavearrived")?;
-
     let (sub_name, sub_args) = match matches.subcommand() {
         Some(subcommand_data) => subcommand_data,
         None => bail!("no subcommand provided"),
