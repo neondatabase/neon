@@ -182,7 +182,7 @@ typedef struct
 #define NUM_ACCESS_STAT_COLUMNS 6
 
 Datum
-get_relations_access_statistics(PG_FUNCTION_ARGS)
+get_relation_access_statistics(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *funcctx;
 	Datum		result;
