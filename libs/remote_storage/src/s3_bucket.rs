@@ -347,13 +347,13 @@ impl RemoteStorage for S3Bucket {
         Ok(document_keys)
     }
 
-    async fn list_files(
-        &self,
-        folder: Option<&RemotePath>
-    ) -> anyhow::Result<Vec<RemotePath>>{
-        let folder_name = folder.map(|x| 
-            String::from(x.object_name().expect("invalid folder name"))
-        );
+    /// See the doc for `RemoteStorage::list_files`
+    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        let folder_name = folder
+            .map(|p| self.relative_path_to_s3_object(p))
+            .or_else(|| self.prefix_in_bucket.clone());
+
+        // AWS may need to break the response into several parts
         let mut continuation_token = None;
         let mut all_files = vec![];
         loop {
@@ -362,6 +362,7 @@ impl RemoteStorage for S3Bucket {
                 .acquire()
                 .await
                 .context("Concurrency limiter semaphore got closed during S3 list_files")?;
+            metrics::inc_list_objects();
 
             let response = self
                 .client
@@ -372,8 +373,12 @@ impl RemoteStorage for S3Bucket {
                 .set_max_keys(self.max_keys_per_list_response)
                 .send()
                 .await
+                .map_err(|e| {
+                    metrics::inc_list_objects_fail();
+                    e
+                })
                 .context("Failed to list files in S3 bucket")?;
-        
+
             for object in response.contents().unwrap_or_default() {
                 let object_path = object.key().expect("response does not contain a key");
                 let remote_path = self.s3_object_to_relative_path(object_path);

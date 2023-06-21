@@ -2433,6 +2433,17 @@ class Endpoint(PgProtocol):
 
         return self
 
+    def respec(self, **kwargs):
+        """Update the endpoint.json file used by control_plane."""
+        # Read config
+        config_path = os.path.join(self.endpoint_path(), "endpoint.json")
+        with open(config_path, "r") as f:
+            data_dict = json.load(f)
+
+        # Write it back updated
+        with open(config_path, "w") as file:
+            json.dump(dict(data_dict, **kwargs), file, indent=4)
+
     def stop(self) -> "Endpoint":
         """
         Stop the Postgres instance if it's running.

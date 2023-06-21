@@ -67,6 +67,7 @@ pub struct EndpointConf {
     pg_port: u16,
     http_port: u16,
     pg_version: u32,
+    skip_pg_catalog_updates: bool,
 }
 
 //
@@ -135,6 +136,7 @@ impl ComputeControlPlane {
             mode,
             tenant_id,
             pg_version,
+            skip_pg_catalog_updates: false,
         });
 
         ep.create_endpoint_dir()?;
@@ -148,6 +150,7 @@ impl ComputeControlPlane {
                 http_port,
                 pg_port,
                 pg_version,
+                skip_pg_catalog_updates: false,
             })?,
         )?;
         std::fs::write(
@@ -183,6 +186,9 @@ pub struct Endpoint {
     // the endpoint runs in.
     pub env: LocalEnv,
     pageserver: Arc<PageServerNode>,
+
+    // Optimizations
+    skip_pg_catalog_updates: bool,
 }
 
 impl Endpoint {
@@ -216,6 +222,7 @@ impl Endpoint {
             mode: conf.mode,
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
+            skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
         })
     }
 
@@ -458,7 +465,7 @@ impl Endpoint {
 
         // Create spec file
         let spec = ComputeSpec {
-            skip_pg_catalog_updates: false,
+            skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
             cluster: Cluster {

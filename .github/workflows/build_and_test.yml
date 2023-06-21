@@ -914,6 +914,20 @@ jobs:
             exit 1
           fi
 
+      - name: Create tag "release-${{ needs.tag.outputs.build-tag }}"
+        if: github.ref_name == 'release'
+        uses: actions/github-script@v6
+        with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: "refs/tags/release-${{ needs.tag.outputs.build-tag }}",
+              sha: context.sha,
+            })
+
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]
     container:

@@ -48,6 +48,14 @@ impl LocalFs {
         Ok(Self { storage_root })
     }
 
+    // mirrors S3Bucket::s3_object_to_relative_path
+    fn local_file_to_relative_path(&self, key: PathBuf) -> RemotePath {
+        let relative_path = key
+            .strip_prefix(&self.storage_root)
+            .expect("relative path must contain storage_root as prefix");
+        RemotePath(relative_path.into())
+    }
+
     async fn read_storage_metadata(
         &self,
         file_path: &Path,
@@ -132,29 +140,29 @@ impl RemoteStorage for LocalFs {
         Ok(prefixes)
     }
 
-    async fn list_files(
-        &self, 
-        folder: Option<&RemotePath>
-    ) -> anyhow::Result<Vec<RemotePath>> {
-        /* Note: if you want, you can return a DownloadError instead of an anyhow::Error
-        as follows: replace all ?'s with:
-            .map_err(|e| DownloadError::Other(anyhow::Error::from(e)))?;
-        */
-        let full_path = match folder.clone() {
+    // recursively lists all files in a directory,
+    // mirroring the `list_files` for `s3_bucket`
+    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        let full_path = match folder {
             Some(folder) => folder.with_base(&self.storage_root),
             None => self.storage_root.clone(),
         };
-        let mut entries = fs::read_dir(full_path).await?;
         let mut files = vec![];
-        while let Some(entry) = entries.next_entry().await? {
-            let file_name: PathBuf = entry.file_name().into();
-            let file_type = entry.file_type().await?;
-            if file_type.is_file() {
-                let mut file_remote_path = RemotePath::new(&file_name)?;
-                if let Some(folder) = folder {
-                    file_remote_path = folder.join(&file_name);
-                } 
-                files.push(file_remote_path);
+        let mut directory_queue = vec![full_path.clone()];
+
+        while !directory_queue.is_empty() {
+            let cur_folder = directory_queue
+                .pop()
+                .expect("queue cannot be empty: we just checked");
+            let mut entries = fs::read_dir(cur_folder.clone()).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let file_name: PathBuf = entry.file_name().into();
+                let full_file_name = cur_folder.clone().join(&file_name);
+                let file_remote_path = self.local_file_to_relative_path(full_file_name.clone());
+                files.push(file_remote_path.clone());
+                if full_file_name.is_dir() {
+                    directory_queue.push(full_file_name);
+                }
             }
         }
         Ok(files)

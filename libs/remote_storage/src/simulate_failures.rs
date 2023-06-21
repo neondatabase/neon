@@ -83,10 +83,7 @@ impl RemoteStorage for UnreliableWrapper {
         self.inner.list_prefixes(prefix).await
     }
 
-    async fn list_files(
-        &self,
-        folder: Option<&RemotePath>
-    ) -> anyhow::Result<Vec<RemotePath>>{
+    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
         self.attempt(RemoteOp::ListPrefixes(folder.cloned()))?;
         self.inner.list_files(folder).await
     }
