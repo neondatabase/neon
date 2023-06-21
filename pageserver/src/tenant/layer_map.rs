@@ -328,11 +328,11 @@ where
     pub fn remove_historic_noflush(&mut self, layer_desc: PersistentLayerDesc, layer: &Arc<L>) {
         self.historic
             .remove(historic_layer_coverage::LayerKey::from(&**layer));
-        if Self::is_l0(&layer) {
+        if Self::is_l0(layer) {
             let len_before = self.l0_delta_layers.len();
             let mut l0_delta_layers = std::mem::take(&mut self.l0_delta_layers);
             l0_delta_layers.retain(|other| {
-                !Self::compare_arced_layers(self.get_layer_from_mapping(&other.key()), &layer)
+                !Self::compare_arced_layers(self.get_layer_from_mapping(&other.key()), layer)
             });
             self.l0_delta_layers = l0_delta_layers;
             // this assertion is related to use of Arc::ptr_eq in Self::compare_arced_layers,
@@ -930,7 +930,7 @@ mod tests {
             assert_eq!(count_layer_in(&map, &downloaded), expected_in_counts);
 
             map.batch_update()
-                .remove_historic(downloaded.get_persistent_layer_desc(), downloaded.clone());
+                .remove_historic(downloaded.get_persistent_layer_desc(), &downloaded);
             assert_eq!(count_layer_in(&map, &downloaded), (0, 0));
         }
 
