@@ -23,6 +23,7 @@ use tokio::task::JoinSet;
 use tracing::*;
 use utils::completion;
 use utils::crashsafe::path_with_suffix_extension;
+use utils::fs_ext;
 
 use std::cmp::min;
 use std::collections::hash_map::Entry;
@@ -289,7 +290,7 @@ impl Drop for UninitializedTimeline<'_> {
 
 fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
     let timeline_path = &uninit_mark.timeline_path;
-    match ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
+    match fs_ext::ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
         Ok(()) => {
             info!("Timeline dir {timeline_path:?} removed successfully, removing the uninit mark")
         }
@@ -322,7 +323,7 @@ impl TimelineUninitMark {
         let uninit_mark_parent = uninit_mark_file
             .parent()
             .with_context(|| format!("Uninit mark file {uninit_mark_file:?} has no parent"))?;
-        ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
+        fs_ext::ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
             format!("Failed to remove uninit mark file at path {uninit_mark_file:?}")
         })?;
         crashsafe::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
@@ -3391,19 +3392,6 @@ pub fn dump_layerfile_from_path(
     }
 
     Ok(())
-}
-
-fn ignore_absent_files<F>(fs_operation: F) -> io::Result<()>
-where
-    F: Fn() -> io::Result<()>,
-{
-    fs_operation().or_else(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })
 }
 
 #[cfg(test)]
