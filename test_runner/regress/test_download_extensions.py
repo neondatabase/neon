@@ -20,7 +20,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
         test_name="test_file_download",
-        use_ext_remote_storage=True,
+        enable_remote_extensions=True,
     )
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
