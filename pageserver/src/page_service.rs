@@ -774,8 +774,20 @@ impl PageServerHandler {
         pgb.write_message_noflush(&BeMessage::CopyOutResponse)?;
         pgb.flush().await?;
 
-        // Send a tarball of the latest layer on the timeline
-        {
+        // Send a tarball of the latest layer on the timeline. Compress if not
+        // fullbackup. TODO Compress in that case too (tests need to be updated)
+        if full_backup {
+            let mut writer = pgb.copyout_writer();
+            basebackup::send_basebackup_tarball(
+                &mut writer,
+                &timeline,
+                lsn,
+                prev_lsn,
+                full_backup,
+                &ctx,
+            )
+            .await?;
+        } else {
             let writer = pgb.copyout_writer();
             let mut encoder = GzipEncoder::new(writer);
             basebackup::send_basebackup_tarball(
