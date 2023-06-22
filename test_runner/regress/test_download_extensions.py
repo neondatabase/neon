@@ -9,6 +9,18 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
 )
 
+"""
+TODO:
+- add more tests
+  -- multiple extension.control files to download
+  -- does CREATE EXTENSION actually call extension_server?
+
+- Handle not just Shared Extensions but also other types
+- libs/remote_storage/src/s3_bucket.rs TODO // TODO: if bucket prefix is empty, folder is prefixed with a "/" I think. Is this desired?
+- how to add env variable EXT_REMOTE_STORAGE_S3_BUCKET?
+- add tests for my thing with real S3 storage
+"""
+
 
 def test_file_download(neon_env_builder: NeonEnvBuilder):
     """
