@@ -3841,7 +3841,7 @@ impl Timeline {
         // Trigger 1: by space amplification, do full compaction
         let total_tier_size = tier_sizes.iter().map(|(_, size)| *size).sum::<u64>();
         let (_, last_tier_size) = *tier_sizes.last().unwrap();
-        let estimated_space_amp = last_tier_size as f64 / (total_tier_size - last_tier_size) as f64;
+        let estimated_space_amp = (total_tier_size - last_tier_size) as f64 / last_tier_size as f64;
         if estimated_space_amp > space_amplification_ratio {
             info!("full compaction triggered by space amplification");
             return Some(
