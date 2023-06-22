@@ -600,7 +600,8 @@ class NeonEnvBuilder:
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
-        self.remote_storage_client = None
+        self.ext_remote_storage: Optional[Any] = None
+        self.remote_storage_client: Optional[Any] = None
         self.remote_storage_users = remote_storage_users
         self.broker = broker
         self.run_id = run_id
@@ -716,8 +717,6 @@ class NeonEnvBuilder:
     def enable_real_s3_remote_storage(self, test_name: str, force_enable: bool = True):
         """
         Sets up configuration to use real s3 endpoint without mock server
-
-        FIXME TODO: do we need to create the bucket for extensions?
         """
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
 
@@ -1482,7 +1481,6 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
-        remote_ext_config: Optional[str] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
