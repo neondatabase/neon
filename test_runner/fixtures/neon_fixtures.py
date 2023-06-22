@@ -600,6 +600,7 @@ class NeonEnvBuilder:
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
+        self.remote_storage_client = None
         self.remote_storage_users = remote_storage_users
         self.broker = broker
         self.run_id = run_id
