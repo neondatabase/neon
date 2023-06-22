@@ -3857,7 +3857,7 @@ impl Timeline {
         let mut compact_tiers = Vec::new();
         for (tier_id, size) in tier_sizes {
             if total_size_up_to_lvl != 0 && total_size_up_to_lvl as f64 / size as f64 > size_ratio {
-                info!("full compaction triggered by size ratio");
+                info!("compaction triggered by size ratio");
                 return Some(compact_tiers);
             }
             total_size_up_to_lvl += size;
