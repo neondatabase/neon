@@ -3874,7 +3874,7 @@ impl Timeline {
             let (layers, _) = &*guard;
 
             // Precondition: only compact if enough layers have accumulated.
-            let threshold = 8;
+            let threshold = 3;
             assert!(threshold >= 2);
 
             info!("getting tiered compaction task");
