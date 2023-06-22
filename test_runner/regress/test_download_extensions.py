@@ -21,6 +21,15 @@ TODO:
 """
 
 
+def ext_contents(i):
+    output = f"""# mock extension{i}
+comment = 'This is a mock extension'
+default_version = '1.0'
+module_pathname = '$libdir/test_ext{i}'
+relocatable = true"""
+    return output
+
+
 def test_file_download(neon_env_builder: NeonEnvBuilder):
     """
     Tests we can download a file
@@ -47,17 +56,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     # In the non-mock version this is done by CI/CD
 
     for i in range(NUM_EXT):
-        test_ext_file = BytesIO(
-            bytes(
-                f"# mock extension\
-                comment = 'This is a mock extension'\
-                default_version = '1.0'\
-                module_pathname = '$libdir/test_ext{i}'\
-                relocatable = true\
-                ",
-                "utf-8",
-            )
-        )
+        test_ext_file = BytesIO(bytes(ext_contents(i), "utf-8"))
         env.remote_storage_client.upload_fileobj(
             test_ext_file,
             env.ext_remote_storage.bucket_name,
@@ -105,3 +104,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
             log.info(all_extensions)
             for i in range(NUM_EXT):
                 assert f"test_ext{i}" in all_extensions
+
+            cur.execute("CREATE EXTENSION test_ext0")
+            log.info("**" * 100)
+            log.info(cur.fetchall())
