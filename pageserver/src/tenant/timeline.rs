@@ -4169,6 +4169,10 @@ impl Timeline {
         }) = self
             .compact_tiered_phase1(layer_removal_cs.clone(), target_file_size, ctx)
             .await? else { return Ok(()); };
+        
+        println!("new_layers: {:?}", new_layers);
+        println!("new_tier_at: {:?}", new_tier_at);
+        println!("removed_tiers: {:?}", removed_tiers);
 
         // Before deleting any layers, we need to wait for their upload ops to finish.
         // See storage_sync module level comment on consistency.
