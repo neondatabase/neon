@@ -3865,8 +3865,13 @@ impl Timeline {
             // Precondition: only compact if enough layers have accumulated.
             let threshold = 8;
             assert!(threshold >= 2);
+
+            info!("getting tiered compaction task");
+
+            layers.dump(false, ctx)?;
+
             if layers.sorted_runs.len() < threshold {
-                debug!(
+                info!(
                     level0_deltas = layers.sorted_runs.len(),
                     threshold, "too few sorted runs to compact"
                 );
