@@ -653,13 +653,14 @@ class NeonEnvBuilder:
         remote_storage_kind: RemoteStorageKind,
         test_name: str,
         force_enable: bool = True,
+        enable_remote_extensions: bool = False,
     ):
         if remote_storage_kind == RemoteStorageKind.NOOP:
             return
         elif remote_storage_kind == RemoteStorageKind.LOCAL_FS:
             self.enable_local_fs_remote_storage(force_enable=force_enable)
         elif remote_storage_kind == RemoteStorageKind.MOCK_S3:
-            self.enable_mock_s3_remote_storage(bucket_name=test_name, force_enable=force_enable)
+            self.enable_mock_s3_remote_storage(bucket_name=test_name, force_enable=force_enable, enable_remote_extensions=enable_remote_extensions)
         elif remote_storage_kind == RemoteStorageKind.REAL_S3:
             self.enable_real_s3_remote_storage(test_name=test_name, force_enable=force_enable)
         else:
@@ -675,7 +676,7 @@ class NeonEnvBuilder:
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
         self.remote_storage = LocalFsStorage(Path(self.repo_dir / "local_fs_remote_storage"))
 
-    def enable_mock_s3_remote_storage(self, bucket_name: str, force_enable: bool = True):
+    def enable_mock_s3_remote_storage(self, bucket_name: str, force_enable: bool = True, enable_remote_extensions: bool = False):
         """
         Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
         Starts up the mock server, if that does not run yet.
@@ -704,15 +705,16 @@ class NeonEnvBuilder:
             secret_key=self.mock_s3_server.secret_key(),
         )
 
-        ext_bucket_name = f"ext_{bucket_name}"
-        self.remote_storage_client.create_bucket(Bucket=ext_bucket_name)
-        self.ext_remote_storage = S3Storage(
-            bucket_name=ext_bucket_name,
-            endpoint=mock_endpoint,
-            bucket_region=mock_region,
-            access_key=self.mock_s3_server.access_key(),
-            secret_key=self.mock_s3_server.secret_key(),
-        )
+        if enable_remote_extensions:
+            ext_bucket_name = f"ext_{bucket_name}"
+            self.remote_storage_client.create_bucket(Bucket=ext_bucket_name)
+            self.ext_remote_storage = S3Storage(
+                bucket_name=ext_bucket_name,
+                endpoint=mock_endpoint,
+                bucket_region=mock_region,
+                access_key=self.mock_s3_server.access_key(),
+                secret_key=self.mock_s3_server.secret_key(),
+            )
 
     def enable_real_s3_remote_storage(self, test_name: str, force_enable: bool = True):
         """

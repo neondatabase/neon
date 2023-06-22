@@ -629,7 +629,7 @@ def test_timeline_delete_works_for_remote_smoke(
         )
 
     # for some reason the check above doesnt immediately take effect for the below.
-    # Assume it is mock server incosistency and check twice.
+    # Assume it is mock server inconsistency and check twice.
     wait_until(
         2,
         0.5,
