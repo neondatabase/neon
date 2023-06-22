@@ -755,15 +755,15 @@ class NeonEnvBuilder:
         )
 
         ext_bucket_name = os.getenv("EXT_REMOTE_STORAGE_S3_BUCKET")
-        assert ext_bucket_name, "no ext remote storage bucket name provided"
-        ext_bucket_name = f"ext_{ext_bucket_name}"
-        self.ext_remote_storage = S3Storage(
-            bucket_name=ext_bucket_name,
-            bucket_region=region,
-            access_key=access_key,
-            secret_key=secret_key,
-            prefix_in_bucket=self.remote_storage_prefix,
-        )
+        if ext_bucket_name is not None:
+            ext_bucket_name = f"ext_{ext_bucket_name}"
+            self.ext_remote_storage = S3Storage(
+                bucket_name=ext_bucket_name,
+                bucket_region=region,
+                access_key=access_key,
+                secret_key=secret_key,
+                prefix_in_bucket=self.remote_storage_prefix,
+            )
 
     def cleanup_local_storage(self):
         if self.preserve_database_files:
