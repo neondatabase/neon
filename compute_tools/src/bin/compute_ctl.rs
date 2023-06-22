@@ -71,13 +71,13 @@ fn main() -> Result<()> {
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
     let remote_ext_config = matches.get_one::<String>("remote-ext-config");
-    let remote_storage = match remote_ext_config {
+    let ext_remote_storage = match remote_ext_config {
         Some(x) => Some(init_remote_storage(x)?),
         None => None,
     };
 
     let rt = Runtime::new().unwrap();
-    let copy_remote_storage = remote_storage.clone();
+    let copy_remote_storage = ext_remote_storage.clone();
     rt.block_on(async move {
         download_extension(&copy_remote_storage, ExtensionType::Shared, pgbin)
             .await
@@ -198,7 +198,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        remote_storage,
+        ext_remote_storage,
     };
     let compute = Arc::new(compute_node);
 

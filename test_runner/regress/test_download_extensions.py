@@ -87,3 +87,7 @@ relocatable = true
             all_extensions = [x[0] for x in cur.fetchall()]
             log.info(all_extensions)
             assert "test_ext" in all_extensions
+
+    # TODO: we shouldn't need these...
+    endpoint.stop()
+    env.pageserver.http_client().tenant_detach(tenant)

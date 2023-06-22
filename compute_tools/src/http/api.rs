@@ -135,7 +135,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             );
 
             match extension_server::download_extension(
-                &compute.remote_storage,
+                &compute.ext_remote_storage,
                 ExtensionType::Shared,
                 &compute.pgbin,
             )
@@ -159,59 +159,6 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         }
     }
 }
-
-// TODO: delete this function
-// // debug only
-// async fn download_file(filename: &str) -> anyhow::Result<()> {
-//     info!("requested file {}", filename);
-
-//     let from_prefix: &str = "/tmp"; //debug only
-//     let to_prefix = "/home/anastasia/work/neon/pg_install/v15/";
-
-//     if filename.ends_with(".so") {
-//         info!("requested file is a shared object file {}", filename);
-
-//         let from_path = Path::new(from_prefix).join("lib").join(filename);
-//         let to_path = Path::new(to_prefix).join("lib/postgresql/").join(filename);
-
-//         info!(
-//             "copying file {} from {} to {}",
-//             filename,
-//             from_path.display(),
-//             to_path.display()
-//         );
-
-//         fs::copy(from_path, to_path)?;
-//     } else {
-//         info!("requested all extension files with prefix {}", filename);
-
-//         let from_path = Path::new(from_prefix).join("share/extension/");
-//         let to_path = Path::new(to_prefix).join("share/postgresql/extension/");
-
-//         info!(
-//             "copying files from {} to {}",
-//             from_path.display(),
-//             to_path.display()
-//         );
-
-//         for file in fs::read_dir(from_path.clone()).unwrap().flatten() {
-//             let fname = file.file_name().into_string().unwrap();
-
-//             if fname.starts_with(filename) && fname.ends_with(".sql") {
-//                 info!(
-//                     "copying file {} from {} to {}",
-//                     fname,
-//                     from_path.display(),
-//                     to_path.display()
-//                 );
-
-//                 fs::copy(file.path(), to_path.join(fname))?;
-//             }
-//         }
-//     }
-
-//     Ok(())
-// }
 
 async fn handle_configure_request(
     req: Request<Body>,
