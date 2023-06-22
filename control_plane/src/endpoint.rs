@@ -412,7 +412,7 @@ impl Endpoint {
         &self,
         auth_token: &Option<String>,
         safekeepers: Vec<NodeId>,
-        remote_ext_config: &str,
+        remote_ext_config: Option<&String>,
     ) -> Result<()> {
         if self.status() == "running" {
             anyhow::bail!("The endpoint is already running");
@@ -496,7 +496,6 @@ impl Endpoint {
 
         let mut cmd = Command::new(self.env.neon_distrib_dir.join("compute_ctl"));
         cmd.args(["--http-port", &self.http_address.port().to_string()])
-            .args(["--remote-ext-config", remote_ext_config])
             .args(["--pgdata", self.pgdata().to_str().unwrap()])
             .args(["--connstr", &self.connstr()])
             .args([
@@ -514,6 +513,9 @@ impl Endpoint {
             .stdin(std::process::Stdio::null())
             .stderr(logfile.try_clone()?)
             .stdout(logfile);
+        if let Some(remote_ext_config) = remote_ext_config {
+            cmd.args(["--remote-ext-config", remote_ext_config]);
+        }
         let _child = cmd.spawn()?;
 
         // Wait for it to start

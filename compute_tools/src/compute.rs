@@ -48,7 +48,7 @@ pub struct ComputeNode {
     /// `Condvar` to allow notifying waiters about state changes.
     pub state_changed: Condvar,
     ///  S3 extensions configuration variables (JSON)
-    pub remote_storage: GenericRemoteStorage,
+    pub remote_storage: Option<GenericRemoteStorage>,
 }
 
 #[derive(Clone, Debug)]

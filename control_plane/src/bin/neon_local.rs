@@ -657,9 +657,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
 
-            let remote_ext_config = sub_args
-                .get_one::<String>("remote-ext-config")
-                .context("remote_ext_config is not an optional parameter")?;
+            let remote_ext_config = sub_args.get_one::<String>("remote-ext-config");
 
             // If --safekeepers argument is given, use only the listed safekeeper nodes.
             let safekeepers =
@@ -1010,7 +1008,7 @@ fn cli() -> Command {
         .long("remote-ext-config")
         .num_args(1)
         .help("Configure the S3 bucket that we search for extensions in.")
-        .required(true);
+        .required(false);
 
     let lsn_arg = Arg::new("lsn")
         .long("lsn")

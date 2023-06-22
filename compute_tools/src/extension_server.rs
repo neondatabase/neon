@@ -65,10 +65,15 @@ pub enum ExtensionType {
 }
 
 pub async fn download_extension(
-    remote_storage: &GenericRemoteStorage,
+    remote_storage: &Option<GenericRemoteStorage>,
     ext_type: ExtensionType,
     pgbin: &str,
 ) -> anyhow::Result<()> {
+    let remote_storage = match remote_storage {
+        Some(remote_storage) => remote_storage,
+        None => return Ok(()),
+    };
+
     let mut remote_sharedir = get_pg_config("--sharedir", pgbin);
     remote_sharedir.push_str("/extension");
     // let remote_sharedir = get_pg_config("--libdir", pgbin);

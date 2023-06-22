@@ -65,10 +65,11 @@ fn main() -> Result<()> {
     let pgbin_default = String::from("postgres");
     let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
 
-    let remote_ext_config = matches
-        .get_one::<String>("remote-ext-config")
-        .expect("remote-extension-config is required");
-    let remote_storage = init_remote_storage(remote_ext_config)?;
+    let remote_ext_config = matches.get_one::<String>("remote-ext-config");
+    let remote_storage = match remote_ext_config {
+        Some(x) => Some(init_remote_storage(x)?),
+        None => None,
+    };
 
     let rt = Runtime::new().unwrap();
     let copy_remote_storage = remote_storage.clone();

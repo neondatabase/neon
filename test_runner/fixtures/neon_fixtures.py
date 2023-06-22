@@ -2353,7 +2353,6 @@ class Endpoint(PgProtocol):
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         config_lines: Optional[List[str]] = None,
-        remote_ext_config: Optional[str] = None,
     ) -> "Endpoint":
         """
         Create a new Postgres endpoint.
@@ -2406,7 +2405,6 @@ class Endpoint(PgProtocol):
             http_port=self.http_port,
             tenant_id=self.tenant_id,
             safekeepers=self.active_safekeepers,
-            # TODO  it's either start or create, not both that starts compute_ctl
             remote_ext_config=remote_ext_config,
         )
         self.running = True
@@ -2512,7 +2510,6 @@ class Endpoint(PgProtocol):
             config_lines=config_lines,
             hot_standby=hot_standby,
             lsn=lsn,
-            remote_ext_config=remote_ext_config,
         ).start(remote_ext_config=remote_ext_config)
 
         log.info(f"Postgres startup took {time.time() - started_at} seconds")
