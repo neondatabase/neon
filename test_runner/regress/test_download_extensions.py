@@ -1,11 +1,12 @@
+import json
+import os
 from contextlib import closing
+
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
 )
-import json
-import os
 
 
 def test_file_download(neon_env_builder: NeonEnvBuilder):
@@ -39,11 +40,11 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
 
     # 5. Download file from the bucket to correct local location
     # Later this will be replaced by our rust code
-    resp = env.remote_storage_client.get_object(
-        Bucket=env.ext_remote_storage.bucket_name, Key=os.path.join(BUCKET_PREFIX, TEST_EXT_PATH)
-    )
-    response = resp["Body"]
-    fname = f"pg_install/{TEST_EXT_PATH}"
+    # resp = env.remote_storage_client.get_object(
+    #     Bucket=env.ext_remote_storage.bucket_name, Key=os.path.join(BUCKET_PREFIX, TEST_EXT_PATH)
+    # )
+    # response = resp["Body"]
+    # fname = f"pg_install/{TEST_EXT_PATH}"
     # with open(fname, "wb") as f:
     #     f.write(response.read())
 

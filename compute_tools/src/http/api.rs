@@ -127,7 +127,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
 
-            let filename = route.split("/").last().unwrap();
+            let filename = route.split('/').last().unwrap();
 
             info!(
                 "serving /extension_server POST request, filename: {:?}",

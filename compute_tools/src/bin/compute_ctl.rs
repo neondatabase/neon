@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     let rt = Runtime::new().unwrap();
     let copy_remote_storage = remote_storage.clone();
     rt.block_on(async move {
-        download_extension(&copy_remote_storage, ExtensionType::Shared, &pgbin)
+        download_extension(&copy_remote_storage, ExtensionType::Shared, pgbin)
             .await
             .expect("download extension should work");
     });
@@ -192,7 +192,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        remote_storage: remote_storage,
+        remote_storage,
     };
     let compute = Arc::new(compute_node);
 

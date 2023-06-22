@@ -47,14 +47,14 @@ async fn download_helper(
         "Downloading {:?} to location {:?}",
         &remote_from_path, &file_name
     );
-    let mut download = remote_storage.download(&remote_from_path).await?;
+    let mut download = remote_storage.download(remote_from_path).await?;
     let mut write_data_buffer = Vec::new();
     download
         .download_stream
         .read_to_end(&mut write_data_buffer)
         .await?;
     let mut output_file = BufWriter::new(File::create(file_name)?);
-    output_file.write_all(&mut write_data_buffer)?;
+    output_file.write_all(&write_data_buffer)?;
     Ok(())
 }
 
@@ -81,18 +81,18 @@ pub async fn download_extension(
             let from_paths = remote_storage.list_files(Some(&folder)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
-                    download_helper(&remote_storage, &remote_from_path).await?;
+                    download_helper(remote_storage, &remote_from_path).await?;
                 }
             }
         }
         ExtensionType::Tenant(tenant_id) => {
             // 2. After we have spec, before project start
             // Download control files from s3-bucket/[tenant-id]/*.control to SHAREDIR/extension
-            let folder = RemotePath::new(Path::new(&format!("{tenant_id}")))?;
+            let folder = RemotePath::new(Path::new(&tenant_id.to_string()))?;
             let from_paths = remote_storage.list_files(Some(&folder)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
-                    download_helper(&remote_storage, &remote_from_path).await?;
+                    download_helper(remote_storage, &remote_from_path).await?;
                 }
             }
         }
@@ -101,7 +101,7 @@ pub async fn download_extension(
             // Download preload_shared_libraries from s3-bucket/public/[library-name].control into LIBDIR/
             let from_path = format!("neon-dev-extensions/public/{library_name}.control");
             let remote_from_path = RemotePath::new(Path::new(&from_path))?;
-            download_helper(&remote_storage, &remote_from_path).await?;
+            download_helper(remote_storage, &remote_from_path).await?;
         }
     }
     Ok(())
@@ -140,5 +140,5 @@ pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRem
         max_sync_errors: NonZeroU32::new(100).expect("100 != 0"),
         storage: RemoteStorageKind::AwsS3(config),
     };
-    Ok(GenericRemoteStorage::from_config(&config)?)
+    GenericRemoteStorage::from_config(&config)
 }
