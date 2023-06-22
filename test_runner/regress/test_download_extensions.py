@@ -28,6 +28,9 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
+    assert env.ext_remote_storage is not None
+    assert env.remote_storage_client is not None
+
     TEST_EXT_PATH = "v14/share/postgresql/extension/test_ext.control"
     BUCKET_PREFIX = "5314225671"  # this is a hash of the commit number
 

@@ -798,6 +798,7 @@ class NeonEnvBuilder:
         # `self.remote_storage_prefix` is coupled with `S3Storage` storage type,
         # so this line effectively a no-op
         assert isinstance(self.remote_storage, S3Storage)
+        assert self.remote_storage_client is not None
 
         if self.keep_remote_storage_contents:
             log.info("keep_remote_storage_contents skipping remote storage cleanup")

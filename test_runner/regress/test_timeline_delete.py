@@ -275,6 +275,7 @@ def assert_prefix_empty(neon_env_builder: NeonEnvBuilder, prefix: Optional[str] 
     assert isinstance(neon_env_builder.remote_storage, S3Storage)
 
     # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
+    assert neon_env_builder.remote_storage_client is not None
     response = neon_env_builder.remote_storage_client.list_objects_v2(
         Bucket=neon_env_builder.remote_storage.bucket_name,
         Prefix=prefix or neon_env_builder.remote_storage.prefix_in_bucket or "",
