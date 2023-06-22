@@ -173,13 +173,14 @@ impl PersistentLayerDesc {
 
     pub fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
+            "----- layer for ten {} tli {} keys {}-{} lsn {}-{} size {} ----",
             self.tenant_id,
             self.timeline_id,
             self.key_range.start,
             self.key_range.end,
             self.lsn_range.start,
-            self.lsn_range.end
+            self.lsn_range.end,
+            self.file_size
         );
 
         Ok(())
