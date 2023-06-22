@@ -3769,6 +3769,16 @@ impl Timeline {
         let (layers, _) = &mut *guard;
         let mut updates = layers.batch_update();
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
+
+        let tier_id = updates.next_tier_id();
+        updates.sorted_runs().push((
+            tier_id,
+            new_layers
+                .iter()
+                .map(|l| Arc::new(l.layer_desc().clone()))
+                .collect(),
+        ));
+
         for l in new_layers {
             let new_delta_path = l.path();
 
@@ -3809,6 +3819,7 @@ impl Timeline {
             layer_names_to_delete.push(l.filename());
             self.delete_historic_layer_new(layer_removal_cs.clone(), l, &mut updates)?;
         }
+
         updates.flush();
         drop_wlock(guard);
 
