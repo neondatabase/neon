@@ -660,7 +660,11 @@ class NeonEnvBuilder:
         elif remote_storage_kind == RemoteStorageKind.LOCAL_FS:
             self.enable_local_fs_remote_storage(force_enable=force_enable)
         elif remote_storage_kind == RemoteStorageKind.MOCK_S3:
-            self.enable_mock_s3_remote_storage(bucket_name=test_name, force_enable=force_enable, enable_remote_extensions=enable_remote_extensions)
+            self.enable_mock_s3_remote_storage(
+                bucket_name=test_name,
+                force_enable=force_enable,
+                enable_remote_extensions=enable_remote_extensions,
+            )
         elif remote_storage_kind == RemoteStorageKind.REAL_S3:
             self.enable_real_s3_remote_storage(test_name=test_name, force_enable=force_enable)
         else:
@@ -676,7 +680,9 @@ class NeonEnvBuilder:
         assert force_enable or self.remote_storage is None, "remote storage is enabled already"
         self.remote_storage = LocalFsStorage(Path(self.repo_dir / "local_fs_remote_storage"))
 
-    def enable_mock_s3_remote_storage(self, bucket_name: str, force_enable: bool = True, enable_remote_extensions: bool = False):
+    def enable_mock_s3_remote_storage(
+        self, bucket_name: str, force_enable: bool = True, enable_remote_extensions: bool = False
+    ):
         """
         Sets up the pageserver to use the S3 mock server, creates the bucket, if it's not present already.
         Starts up the mock server, if that does not run yet.
