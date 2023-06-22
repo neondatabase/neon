@@ -3953,7 +3953,7 @@ impl Timeline {
     /// for example. The caller should hold `Tenant::gc_cs` lock to ensure
     /// that.
     ///
-    #[instrument(skip_all, fields(timline_id=%self.timeline_id))]
+    #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn update_gc_info(
         &self,
         retain_lsns: Vec<Lsn>,

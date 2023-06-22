@@ -1367,7 +1367,7 @@ mod tests {
     struct TestSetup {
         runtime: &'static tokio::runtime::Runtime,
         entered_runtime: EnterGuard<'static>,
-        harness: TenantHarness<'static>,
+        harness: TenantHarness,
         tenant: Arc<Tenant>,
         tenant_ctx: RequestContext,
         remote_fs_dir: PathBuf,
