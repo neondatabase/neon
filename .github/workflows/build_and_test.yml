@@ -728,7 +728,6 @@ jobs:
       # During the transition period we need to have extensions in both places (in S3 and in compute-node image),
       # so we won't build extension twice, but extract them from compute-node.
       #
-      # # XXX: We don't push this image to ECR yet, we need to create a repo first
       # - name: Kaniko build extensions only
       #   run: |
       #     # Kaniko is suposed to clean up after itself if --cleanup flag is set, but it doesn't.
@@ -770,8 +769,8 @@ jobs:
 
     env:
       # While on transition period extract extensions from compute-node image (see a comment above for compute-node-image job)
-      # EXTENSIONS_IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
-      EXTENSIONS_IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+      # EXTENSIONS_IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+      EXTENSIONS_IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
       # In compute image we have a bit different directory layout (/usr/local/pgsql put into /usr/local).
       # This variable can be inlined after
       # USR_LOCAL_PGSQL_PATH: /usr/local/pgsql
@@ -797,11 +796,14 @@ jobs:
           rm -rf ./usr-local-pgsql/share/extension/neon*
           rm -rf ./usr-local-pgsql/lib/neon*
 
+      # XXX: check upload to prod bucket
       - name: Upload postgres-extensions to S3
+        env:
+          BUCKET: ${{ github.ref_name == 'release' && 'neon-prod-extensions' || 'neon-dev-extensions' }}
         run: |
           # Directories are specified in Dockerfile.compute-node for postgres-extensions target
-          aws s3 cp --recursive ./usr-local-pgsql/share/extension s3://neon-dev-extensions/${{needs.tag.outputs.build-tag}}/${{ matrix.version }}/share/extension
-          aws s3 cp --recursive ./usr-local-pgsql/lib             s3://neon-dev-extensions/${{needs.tag.outputs.build-tag}}/${{ matrix.version }}/lib
+          aws s3 cp --recursive ./usr-local-pgsql/share/extension s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}/share/extension
+          aws s3 cp --recursive ./usr-local-pgsql/lib             s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}/lib
 
       - name: Cleanup
         if: ${{ always() && steps.create-container.outputs.CID }}
