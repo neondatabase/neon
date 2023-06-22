@@ -1,3 +1,4 @@
+import enum
 import os
 import queue
 import shutil
@@ -117,10 +118,18 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
 
 
+class Check(enum.Enum):
+    RETRY_WITHOUT_RESTART = enum.auto()
+    RETRY_WITH_RESTART = enum.auto()
+
+
 # cover the two cases: remote storage configured vs not configured
 @pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
+@pytest.mark.parametrize("check", list(Check))
 def test_delete_timeline_post_rm_failure(
-    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+    check: Check,
 ):
     """
     If there is a failure after removing the timeline directory, the delete operation
@@ -160,12 +169,19 @@ def test_delete_timeline_post_rm_failure(
         f".*DELETE.*{env.initial_timeline}.*InternalServerError.*{failpoint_name}"
     )
 
-    # retry without failpoint, it should succeed
-    ps_http.configure_failpoints((failpoint_name, "off"))
+    if check is Check.RETRY_WITH_RESTART:
+        env.pageserver.stop()
+        env.pageserver.start()
+        env.pageserver.allowed_errors.append(".*flush_loop is not running, state is Exited.*")
 
-    # this should succeed
-    # this also checks that delete can be retried even when timeline is in Broken state
-    timeline_delete_wait_completed(ps_http, env.initial_tenant, env.initial_timeline)
+        # Pageserver should've resumed deletion after restart.
+        wait_timeline_detail_404(ps_http, env.initial_tenant, env.initial_timeline)
+    elif check is Check.RETRY_WITHOUT_RESTART:
+        # this should succeed
+        # this also checks that delete can be retried even when timeline is in Broken state
+        ps_http.configure_failpoints((failpoint_name, "off"))
+        timeline_delete_wait_completed(ps_http, env.initial_tenant, env.initial_timeline)
+
     env.pageserver.allowed_errors.append(
         f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*"
     )
@@ -634,3 +650,21 @@ def test_timeline_delete_works_for_remote_smoke(
         0.5,
         lambda: assert_prefix_empty(neon_env_builder),
     )
+
+
+@pytest.mark.parametrize(
+    "remote_storage_kind",
+    list(
+        filter(
+            lambda s: s in (RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3),
+            available_remote_storages(),
+        )
+    ),
+)
+def test_timeline_delete_retry_after_index_is_deleted(
+    neon_env_builder: NeonEnvBuilder,
+    remote_storage_kind: RemoteStorageKind,
+):
+    """
+    This test case excersizes the situation when
+    """
