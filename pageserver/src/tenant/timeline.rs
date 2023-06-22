@@ -3771,13 +3771,16 @@ impl Timeline {
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
 
         let tier_id = updates.next_tier_id();
-        updates.sorted_runs().push((
-            tier_id,
-            new_layers
-                .iter()
-                .map(|l| Arc::new(l.layer_desc().clone()))
-                .collect(),
-        ));
+        updates.sorted_runs().insert(
+            0,
+            (
+                tier_id,
+                new_layers
+                    .iter()
+                    .map(|l| Arc::new(l.layer_desc().clone()))
+                    .collect(),
+            ),
+        );
 
         for l in new_layers {
             let new_delta_path = l.path();
@@ -4169,7 +4172,7 @@ impl Timeline {
         }) = self
             .compact_tiered_phase1(layer_removal_cs.clone(), target_file_size, ctx)
             .await? else { return Ok(()); };
-        
+
         println!("new_layers: {:?}", new_layers);
         println!("new_tier_at: {:?}", new_tier_at);
         println!("removed_tiers: {:?}", removed_tiers);
