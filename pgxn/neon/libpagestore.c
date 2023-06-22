@@ -58,6 +58,7 @@ char	   *neon_auth_token;
 int			n_unflushed_requests = 0;
 int			flush_every_n_requests = 8;
 int			readahead_buffer_size = 128;
+int         readahead_distance = 10;
 
 bool	(*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
@@ -452,6 +453,18 @@ pg_init_libpagestore(void)
 							PGC_USERSET,
 							0,	/* no flags required */
 							NULL, (GucIntAssignHook) &readahead_buffer_resize, NULL);
+	DefineCustomIntVariable("neon.readahead_distance",
+							"Number of read-ahead blocks",
+							NULL,
+							&readahead_distance,
+							10,
+							0,
+							INT_MAX,
+							PGC_USERSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
 
 	relsize_hash_init();
 

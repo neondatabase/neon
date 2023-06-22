@@ -49,7 +49,6 @@ static int max_access_stat_count;
 static double min_seq_access_ratio;
 static int min_seq_access_count;
 
-
 void access_stat_init(void)
 {
 	MemoryContext memctx = AllocSetContextCreate(TopMemoryContext,

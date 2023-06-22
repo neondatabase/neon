@@ -2006,7 +2006,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 
 	/* If it is expected to be sequential access then initiate prefetch of next block */
 	if (is_sequential_access(reln->smgr_rnode.node, forkNum, blkno))
-		neon_prefetch(reln, forkNum, blkno+1);
+		neon_prefetch(reln, forkNum, blkno + readahead_distance);
 
 	/* Try to read from local file cache */
 	if (lfc_read(reln->smgr_rnode.node, forkNum, blkno, buffer))
