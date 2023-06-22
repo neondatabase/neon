@@ -1,6 +1,7 @@
 import json
 import os
 from contextlib import closing
+from io import BytesIO
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -26,11 +27,6 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     First we set up the mock s3 bucket by uploading test_ext.control to the bucket
     Then, we download test_ext.control from the bucket to pg_install/v15/share/postgresql/extension/
     Finally, we list available extensions and assert that test_ext is present
-
-    Right now we are downloading the file in python
-    However, we have all the argument passing set up so that when an endpoint starts
-    it knows about the bucket and can list_files in the bucket. This is written to ALEK_LIST_FILES.txt
-    A good next step is to get rust to download the public_extensions control files to the correct place
     """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
@@ -43,14 +39,24 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     assert env.remote_storage_client is not None
 
     TEST_EXT_PATH = "v14/share/postgresql/extension/test_ext.control"
-    BUCKET_PREFIX = "5314225671"  # this is a hash of the commit number
+    BUCKET_PREFIX = "5314225671"  # this is the build number
 
     # 4. Upload test_ext.control file to the bucket
     # In the non-mock version this is done by CI/CD
-    with open("test_ext.control", "rb") as data:
-        env.remote_storage_client.upload_fileobj(
-            data, env.ext_remote_storage.bucket_name, os.path.join(BUCKET_PREFIX, TEST_EXT_PATH)
-        )
+
+    test_ext_file = BytesIO(
+        b"""# mock extension
+comment = 'This is a mock extension'
+default_version = '1.0'
+module_pathname = '$libdir/test_ext'
+relocatable = true
+    """
+    )
+    env.remote_storage_client.upload_fileobj(
+        test_ext_file,
+        env.ext_remote_storage.bucket_name,
+        os.path.join(BUCKET_PREFIX, TEST_EXT_PATH),
+    )
 
     # 5. Download file from the bucket to correct local location
     # Later this will be replaced by our rust code
@@ -92,6 +98,3 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
             all_extensions = [x[0] for x in cur.fetchall()]
             log.info(all_extensions)
             assert "test_ext" in all_extensions
-
-    endpoint.stop()
-    env.pageserver.http_client().tenant_detach(tenant)

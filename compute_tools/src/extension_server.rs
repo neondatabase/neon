@@ -4,48 +4,45 @@ use serde_json::{self, Value};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
-    let mut pgconfig = String::from(pgbin.strip_suffix("postgres").expect("pg_config error"));
-    pgconfig.push_str("pg_config");
-
+    // gives the result of `pg_config [argument]`
+    // where argument is a flag like `--version` or `--sharedir`
+    let pgconfig = pgbin.replace("postgres", "pg_config");
     let config_output = std::process::Command::new(pgconfig)
         .arg(argument)
         .output()
-        .expect("pg_config must be installed");
-    assert!(config_output.status.success());
-    let local_path = std::str::from_utf8(&config_output.stdout)
-        .expect("error obtaining pg_config")
-        .trim()
-        .to_string();
-
-    let mut rm_prefix: String = std::env::current_dir()
-        .expect("pg_config error")
-        .to_str()
-        .expect("pg_config error")
-        .into();
-    rm_prefix.push_str("/pg_install/");
-    let remote_path = local_path
-        .strip_prefix(&rm_prefix)
+        .expect("pg_config error");
+    std::str::from_utf8(&config_output.stdout)
         .expect("pg_config error")
         .trim()
-        .to_string();
+        .to_string()
+}
 
-    remote_path
+fn get_pg_version(pgbin: &str) -> String {
+    // pg_config --version returns a (platform specific) human readable string
+    // such as "PostgreSQL 15.4". We parse this to v14/v15
+    let human_version = get_pg_config("--version", pgbin);
+    if human_version.contains("v15") {
+        return "v15".to_string();
+    }
+    "v14".to_string()
 }
 
 async fn download_helper(
     remote_storage: &GenericRemoteStorage,
     remote_from_path: &RemotePath,
+    download_location: &Path,
 ) -> anyhow::Result<()> {
-    let file_name = remote_from_path.with_base(Path::new("pg_install"));
+    // downloads file at remote_from_path to download_location/[file_name]
+    let local_path = download_location.join(remote_from_path.object_name().expect("bad object"));
     info!(
         "Downloading {:?} to location {:?}",
-        &remote_from_path, &file_name
+        &remote_from_path, &local_path
     );
     let mut download = remote_storage.download(remote_from_path).await?;
     let mut write_data_buffer = Vec::new();
@@ -53,7 +50,7 @@ async fn download_helper(
         .download_stream
         .read_to_end(&mut write_data_buffer)
         .await?;
-    let mut output_file = BufWriter::new(File::create(file_name)?);
+    let mut output_file = BufWriter::new(File::create(local_path)?);
     output_file.write_all(&write_data_buffer)?;
     Ok(())
 }
@@ -73,40 +70,43 @@ pub async fn download_extension(
         Some(remote_storage) => remote_storage,
         None => return Ok(()),
     };
-
-    let mut remote_sharedir = get_pg_config("--sharedir", pgbin);
-    remote_sharedir.push_str("/extension");
-    // let remote_sharedir = get_pg_config("--libdir", pgbin);
+    let pg_version = get_pg_version(pgbin);
     match ext_type {
         ExtensionType::Shared => {
             // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
             // We can do this step even before we have spec,
             // because public extensions are common for all projects.
-            let folder = RemotePath::new(Path::new(&remote_sharedir))?;
-            let from_paths = remote_storage.list_files(Some(&folder)).await?;
+            let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
+            let remote_sharedir = Path::new(&pg_version).join("share/postgresql/extension");
+            let remote_sharedir = RemotePath::new(Path::new(&remote_sharedir))?;
+            let from_paths = remote_storage.list_files(Some(&remote_sharedir)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
-                    download_helper(remote_storage, &remote_from_path).await?;
+                    download_helper(remote_storage, &remote_from_path, &local_sharedir).await?;
                 }
             }
         }
         ExtensionType::Tenant(tenant_id) => {
             // 2. After we have spec, before project start
             // Download control files from s3-bucket/[tenant-id]/*.control to SHAREDIR/extension
-            let folder = RemotePath::new(Path::new(&tenant_id.to_string()))?;
-            let from_paths = remote_storage.list_files(Some(&folder)).await?;
+
+            let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
+            let remote_path = RemotePath::new(Path::new(&tenant_id.to_string()))?;
+            let from_paths = remote_storage.list_files(Some(&remote_path)).await?;
             for remote_from_path in from_paths {
                 if remote_from_path.extension() == Some("control") {
-                    download_helper(remote_storage, &remote_from_path).await?;
+                    download_helper(remote_storage, &remote_from_path, &local_sharedir).await?;
                 }
             }
         }
         ExtensionType::Library(library_name) => {
             // 3. After we have spec, before postgres start
             // Download preload_shared_libraries from s3-bucket/public/[library-name].control into LIBDIR/
-            let from_path = format!("neon-dev-extensions/public/{library_name}.control");
-            let remote_from_path = RemotePath::new(Path::new(&from_path))?;
-            download_helper(remote_storage, &remote_from_path).await?;
+
+            let local_libdir: PathBuf = Path::new(&get_pg_config("--libdir", pgbin)).into();
+            let remote_path = format!("{library_name}.control");
+            let remote_from_path = RemotePath::new(Path::new(&remote_path))?;
+            download_helper(remote_storage, &remote_from_path, &local_libdir).await?;
         }
     }
     Ok(())

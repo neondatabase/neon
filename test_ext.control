@@ -1,5 +1,0 @@
-# mock extension
-comment = 'This is a mock extension'
-default_version = '1.0'
-module_pathname = '$libdir/test_ext'
-relocatable = true
