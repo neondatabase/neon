@@ -3869,7 +3869,7 @@ impl Timeline {
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<Option<CompactTieredPhase1Result>, CompactionError> {
-        let (deltas_to_compact_layers, tier_to_compect, lsn_range) = {
+        let (deltas_to_compact_layers, tier_to_compact, lsn_range) = {
             let guard = self.layers.read().await;
             let (layers, _) = &*guard;
 
@@ -3899,20 +3899,24 @@ impl Timeline {
                 })
                 .collect::<Vec<_>>();
 
-            let Some(tier_to_compect) = Self::get_compact_task(tier_sizes) else {
+            let Some(tier_to_compact) = Self::get_compact_task(tier_sizes) else {
                 return Ok(None);
             };
 
-            if tier_to_compect.len() < 2 {
+            println!("tier_to_compact: {tier_to_compact:?}");
+
+            if tier_to_compact.len() < 2 {
                 return Ok(None);
             }
 
             let mut deltas_to_compact_layers = vec![];
             for (tier_id, layers) in layers.sorted_runs.iter() {
-                if tier_to_compect.contains(tier_id) {
+                if tier_to_compact.contains(tier_id) {
                     deltas_to_compact_layers.extend(layers.iter().cloned());
                 }
             }
+
+            println!("deltas_to_compact_layers: {deltas_to_compact_layers:?}");
 
             let deltas_to_compact_layers = deltas_to_compact_layers
                 .into_iter()
@@ -3936,12 +3940,12 @@ impl Timeline {
 
             info!(
                 "Starting tier compaction in LSN range {}-{} for tiers {:?}",
-                lsn_range.start, lsn_range.end, tier_to_compect
+                lsn_range.start, lsn_range.end, tier_to_compact
             );
 
             layers.dump(false, ctx)?;
 
-            (deltas_to_compact_layers, tier_to_compect, lsn_range)
+            (deltas_to_compact_layers, tier_to_compact, lsn_range)
         };
 
         // TODO: leverage the properties that some layers do not overlap, kmerge is too costly
@@ -4145,8 +4149,8 @@ impl Timeline {
 
         Ok(Some(CompactTieredPhase1Result {
             new_layers,
-            new_tier_at: *tier_to_compect.last().unwrap(),
-            removed_tiers: tier_to_compect,
+            new_tier_at: *tier_to_compact.last().unwrap(),
+            removed_tiers: tier_to_compact,
         }))
     }
 
