@@ -702,7 +702,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     _ => {}
                 }
                 println!("Starting existing endpoint {endpoint_id}...");
-                endpoint.start(&auth_token, safekeepers, &remote_ext_config)?;
+                endpoint.start(&auth_token, safekeepers, remote_ext_config)?;
             } else {
                 let branch_name = sub_args
                     .get_one::<String>("branch-name")
@@ -746,7 +746,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     pg_version,
                     mode,
                 )?;
-                ep.start(&auth_token, safekeepers, &remote_ext_config)?;
+                ep.start(&auth_token, safekeepers, remote_ext_config)?;
             }
         }
         "stop" => {
@@ -1162,7 +1162,7 @@ fn cli() -> Command {
                     .arg(pg_version_arg)
                     .arg(hot_standby_arg)
                     .arg(safekeepers_arg)
-                    .arg(remote_ext_config_args.clone())
+                    .arg(remote_ext_config_args)
                 )
                 .subcommand(
                     Command::new("stop")
