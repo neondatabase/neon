@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import List
+from typing import Any, List, MutableMapping, cast
 
 import pytest
 from _pytest.config import Config
@@ -56,3 +56,15 @@ def pytest_collection_modifyitems(config: Config, items: List[pytest.Item]):
             # Rerun 3 times = 1 original run + 2 reruns
             log.info(f"Marking {item.nodeid} as flaky. It will be rerun up to 3 times")
             item.add_marker(pytest.mark.flaky(reruns=2))
+
+            # pytest-rerunfailures is not compatible with pytest-timeout (timeout is not set for reruns),
+            #   we can workaround it by setting `timeout_func_only` to True[1].
+            # Unfortunately, setting `timeout_func_only = True` globally in pytest.ini is broken[2],
+            #   but we still can do it using pytest marker.
+            #
+            # - [1] https://github.com/pytest-dev/pytest-rerunfailures/issues/99
+            # - [2] https://github.com/pytest-dev/pytest-timeout/issues/142
+            timeout_marker = item.get_closest_marker("timeout")
+            if timeout_marker is not None:
+                kwargs = cast(MutableMapping[str, Any], timeout_marker.kwargs)
+                kwargs["func_only"] = True
