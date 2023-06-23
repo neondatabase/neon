@@ -27,10 +27,9 @@ fn get_pg_version(pgbin: &str) -> String {
     // pg_config --version returns a (platform specific) human readable string
     // such as "PostgreSQL 15.4". We parse this to v14/v15
     let human_version = get_pg_config("--version", pgbin);
-    if human_version.contains("v15") {
+    if human_version.contains("15") {
         return "v15".to_string();
-    }
-    else if human_version.contains("v14") {
+    } else if human_version.contains("14") {
         return "v14".to_string();
     }
     panic!("Unsuported postgres version {human_version}");

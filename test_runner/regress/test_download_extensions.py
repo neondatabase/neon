@@ -16,7 +16,7 @@ TODO:
 - libs/remote_storage/src/s3_bucket.rs TODO // TODO: if bucket prefix is empty,
     the folder is prefixed with a "/" I think. Is this desired?
 
-- Handle LIBRARY exttensions
+- test LIBRARY exttensions
 - how to add env variable EXT_REMOTE_STORAGE_S3_BUCKET?
 """
 
@@ -32,7 +32,7 @@ relocatable = true"""
 
 @pytest.mark.parametrize(
     "remote_storage_kind",
-    [RemoteStorageKind.LOCAL_FS, RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3],
+    [RemoteStorageKind.MOCK_S3],
 )
 def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     """
@@ -41,10 +41,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     Then, we download test_ext.control from the bucket to pg_install/v15/share/postgresql/extension/
     Finally, we list available extensions and assert that test_ext is present
     """
-
-    if remote_storage_kind != RemoteStorageKind.MOCK_S3:
-        # skip these for now
-        return None
+    #  RemoteStorageKind.REAL_S3, RemoteStorageKind.LOCAL_FS
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
