@@ -151,7 +151,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
         .collect::<Vec<_>>();
 
     let roles_decl = if roles.is_empty() {
-        String::from("roles pg_catalog.pg_roles.rolname%type := NULL;")
+        String::from("roles text[] := NULL;")
     } else {
         format!(
             r#"
@@ -163,7 +163,7 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
     };
 
     let database_decl = if dbs.is_empty() {
-        String::from("dbs pg_catalog.pg_database.datname%type := NULL;")
+        String::from("dbs text[] := NULL;")
     } else {
         format!(
             r#"
