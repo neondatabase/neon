@@ -20,8 +20,8 @@ TODO:
 """
 
 
-def ext_contents(i):
-    output = f"""# mock extension{i}
+def ext_contents(owner, i):
+    output = f"""# mock {owner} extension{i}
 comment = 'This is a mock extension'
 default_version = '1.0'
 module_pathname = '$libdir/test_ext{i}'
@@ -43,37 +43,40 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     )
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
+    tenant_id, _ = env.neon_cli.create_tenant()
+    env.neon_cli.create_timeline("test_file_download", tenant_id=tenant_id)
 
     assert env.ext_remote_storage is not None
     assert env.remote_storage_client is not None
 
     NUM_EXT = 5
-    TEST_EXT_PATHS = [f"v14/share/postgresql/extension/test_ext{i}.control" for i in range(NUM_EXT)]
+    PUB_EXT_PATHS = [f"v14/share/postgresql/extension/test_ext{i}.control" for i in range(NUM_EXT)]
     BUCKET_PREFIX = "5314225671"  # this is the build number
 
-    # 4. Upload test_ext.control file to the bucket
-    # In the non-mock version this is done by CI/CD
-
+    # Upload test_ext{i}.control files to the bucket
+    # Note: In real life this is done by CI/CD
     for i in range(NUM_EXT):
-        test_ext_file = BytesIO(bytes(ext_contents(i), "utf-8"))
+        # public extensions
+        test_ext_file = BytesIO(bytes(ext_contents("public", i), "utf-8"))
         env.remote_storage_client.upload_fileobj(
             test_ext_file,
             env.ext_remote_storage.bucket_name,
-            os.path.join(BUCKET_PREFIX, TEST_EXT_PATHS[i]),
+            os.path.join(BUCKET_PREFIX, PUB_EXT_PATHS[i]),
+        )
+        # private extensions
+        test_ext_file = BytesIO(bytes(ext_contents(str(tenant_id), i), "utf-8"))
+        env.remote_storage_client.upload_fileobj(
+            test_ext_file,
+            env.ext_remote_storage.bucket_name,
+            os.path.join(BUCKET_PREFIX, f"{str(tenant_id)}/private_ext{i}.control"),
         )
 
-    # 5. Download file from the bucket to correct local location
-    # our rust code should be equivalent to the following:
-    # resp = env.remote_storage_client.get_object(
-    #     Bucket=env.ext_remote_storage.bucket_name, Key=os.path.join(BUCKET_PREFIX, TEST_EXT_PATH)
-    # )
-    # response = resp["Body"]
-    # fname = f"pg_install/{TEST_EXT_PATH}"
-    # with open(fname, "wb") as f:
-    #     f.write(response.read())
-
-    tenant, _ = env.neon_cli.create_tenant()
-    env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
+    # Rust will then download the control files from the bucket
+    # our rust code should obtain the same result as the following:
+    # env.remote_storage_client.get_object(
+    #     Bucket=env.ext_remote_storage.bucket_name,
+    #     Key=os.path.join(BUCKET_PREFIX, PUB_EXT_PATHS[0])
+    # )["Body"].read()
 
     remote_ext_config = json.dumps(
         {
@@ -84,26 +87,29 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
         }
     )
 
-    # 6. Start endpoint and ensure that test_ext is present in select * from pg_available_extensions
     endpoint = env.endpoints.create_start(
-        "test_file_download", tenant_id=tenant, remote_ext_config=remote_ext_config
+        "test_file_download", tenant_id=tenant_id, remote_ext_config=remote_ext_config
     )
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            # test query: insert some values and select them
+            # example query: insert some values and select them
             cur.execute("CREATE TABLE t(key int primary key, value text)")
             for i in range(100):
                 cur.execute(f"insert into t values({i}, {2*i})")
             cur.execute("select * from t")
             log.info(cur.fetchall())
 
-            # the real test query: check that test_ext is present
+            # Test query: check that test_ext0 was successfully downloaded
             cur.execute("SELECT * FROM pg_available_extensions")
             all_extensions = [x[0] for x in cur.fetchall()]
             log.info(all_extensions)
             for i in range(NUM_EXT):
                 assert f"test_ext{i}" in all_extensions
+                assert f"private_ext{i}" in all_extensions
 
+            # TODO: can create extension actually install an extension?
             # cur.execute("CREATE EXTENSION test_ext0")
             # log.info("**" * 100)
             # log.info(cur.fetchall())
+
+            # TODO: cleanup downloaded extensions
