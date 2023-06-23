@@ -62,6 +62,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     "pageserver_getpage_reconstruct_seconds_bucket",
     "pageserver_getpage_reconstruct_seconds_count",
     "pageserver_getpage_reconstruct_seconds_sum",
+    *[f"pageserver_basebackup_query_seconds_{x}" for x in ["bucket", "count", "sum"]],
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (

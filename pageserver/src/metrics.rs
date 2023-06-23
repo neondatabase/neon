@@ -1,3 +1,4 @@
+use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
     register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
@@ -423,6 +424,27 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+pub struct BasebackupQueryTime(HistogramVec);
+pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
+    BasebackupQueryTime({
+        register_histogram_vec!(
+            "pageserver_basebackup_query_seconds",
+            "Histogram of basebackup queries durations, by result type",
+            &["result"],
+            CRITICAL_OP_BUCKETS.into(),
+        )
+        .expect("failed to define a metric")
+    })
+});
+
+impl DurationResultObserver for BasebackupQueryTime {
+    fn observe_result<T, E>(&self, res: &Result<T, E>, duration: std::time::Duration) {
+        let label_value = if res.is_ok() { "ok" } else { "error" };
+        let metric = self.0.get_metric_with_label_values(&[label_value]).unwrap();
+        metric.observe(duration.as_secs_f64());
+    }
+}
 
 pub static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
