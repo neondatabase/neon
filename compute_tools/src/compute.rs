@@ -155,9 +155,9 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
     } else {
         format!(
             r#"
-               roles pg_catalog.pg_roles.rolname%type[] := ARRAY(SELECT rolname
-                                                                 FROM pg_catalog.pg_roles
-                                                                 WHERE rolname IN ({}));"#,
+               roles text[] := ARRAY(SELECT rolname
+                                     FROM pg_catalog.pg_roles
+                                     WHERE rolname IN ({}));"#,
             roles.join(", ")
         )
     };
@@ -167,9 +167,9 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
     } else {
         format!(
             r#"
-               dbs pg_catalog.pg_database.datname%type[] := ARRAY(SELECT datname
-                                                                  FROM pg_catalog.pg_database
-                                                                  WHERE datname IN ({}));"#,
+               dbs text[] := ARRAY(SELECT datname
+                                   FROM pg_catalog.pg_database
+                                   WHERE datname IN ({}));"#,
             dbs.join(", ")
         )
     };
