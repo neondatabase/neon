@@ -106,6 +106,8 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
            111
         """
     )
+    # TODO: maybe if we are using REAL_S3 storage, we should not upload files
+    # or at least, maybe we should delete them afterwards
     env.remote_storage_client.upload_fileobj(
         test_lib_file,
         env.ext_remote_storage.bucket_name,
@@ -164,6 +166,12 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
             # - try to load non-existing library
 
     # cleanup downloaded extensions
+    # TODO: clean up downloaded libraries too
+    # TODO: make sure this runs even if the test fails
+    # this is important because if the files aren't cleaned up then the test can
+    # pass even without successfully downloading the files if a previous run (or
+    # run with different type of remote storage) of the test did download the
+    # files
     for file in cleanup_files:
         try:
             log.info(f"Deleting {file}")
