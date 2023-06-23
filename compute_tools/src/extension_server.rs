@@ -30,7 +30,10 @@ fn get_pg_version(pgbin: &str) -> String {
     if human_version.contains("v15") {
         return "v15".to_string();
     }
-    "v14".to_string()
+    else if human_version.contains("v14") {
+        return "v14".to_string();
+    }
+    panic!("Unsuported postgres version {human_version}");
 }
 
 async fn download_helper(
