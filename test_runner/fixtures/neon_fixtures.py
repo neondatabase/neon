@@ -666,7 +666,11 @@ class NeonEnvBuilder:
                 enable_remote_extensions=enable_remote_extensions,
             )
         elif remote_storage_kind == RemoteStorageKind.REAL_S3:
-            self.enable_real_s3_remote_storage(test_name=test_name, force_enable=force_enable)
+            self.enable_real_s3_remote_storage(
+                test_name=test_name, 
+                force_enable=force_enable,
+                enable_remote_extensions=enable_remote_extensions,
+            )
         else:
             raise RuntimeError(f"Unknown storage type: {remote_storage_kind}")
 
@@ -722,7 +726,7 @@ class NeonEnvBuilder:
                 secret_key=self.mock_s3_server.secret_key(),
             )
 
-    def enable_real_s3_remote_storage(self, test_name: str, force_enable: bool = True):
+    def enable_real_s3_remote_storage(self, test_name: str, force_enable: bool = True, enable_remote_extensions: bool = False):
         """
         Sets up configuration to use real s3 endpoint without mock server
         """
@@ -762,9 +766,10 @@ class NeonEnvBuilder:
             prefix_in_bucket=self.remote_storage_prefix,
         )
 
-        ext_bucket_name = os.getenv("EXT_REMOTE_STORAGE_S3_BUCKET")
-        if ext_bucket_name is not None:
-            ext_bucket_name = f"ext_{ext_bucket_name}"
+        if enable_remote_extensions:
+            ext_bucket_name = os.getenv("EXT_REMOTE_STORAGE_S3_BUCKET")
+            if ext_bucket_name is None:
+                ext_bucket_name = "neon-dev-extensions"
             self.ext_remote_storage = S3Storage(
                 bucket_name=ext_bucket_name,
                 bucket_region=region,

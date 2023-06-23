@@ -3,6 +3,7 @@ import os
 from contextlib import closing
 from io import BytesIO
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -11,12 +12,12 @@ from fixtures.neon_fixtures import (
 
 """
 TODO:
-- Handle not just Shared Extensions but also other types
-
-- how to add env variable EXT_REMOTE_STORAGE_S3_BUCKET?
-- add tests for my thing with real S3 storage
+- **add tests with real S3 storage**
 - libs/remote_storage/src/s3_bucket.rs TODO // TODO: if bucket prefix is empty,
     the folder is prefixed with a "/" I think. Is this desired?
+
+- Handle LIBRARY exttensions
+- how to add env variable EXT_REMOTE_STORAGE_S3_BUCKET?
 """
 
 
@@ -29,15 +30,24 @@ relocatable = true"""
     return output
 
 
-def test_file_download(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize(
+    "remote_storage_kind",
+    [RemoteStorageKind.LOCAL_FS, RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3],
+)
+def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     """
     Tests we can download a file
     First we set up the mock s3 bucket by uploading test_ext.control to the bucket
     Then, we download test_ext.control from the bucket to pg_install/v15/share/postgresql/extension/
     Finally, we list available extensions and assert that test_ext is present
     """
+
+    if remote_storage_kind != RemoteStorageKind.MOCK_S3:
+        # skip these for now
+        return None
+
     neon_env_builder.enable_remote_storage(
-        remote_storage_kind=RemoteStorageKind.MOCK_S3,
+        remote_storage_kind=remote_storage_kind,
         test_name="test_file_download",
         enable_remote_extensions=True,
     )
@@ -50,26 +60,30 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
     assert env.remote_storage_client is not None
 
     NUM_EXT = 5
-    PUB_EXT_PATHS = [f"v14/share/postgresql/extension/test_ext{i}.control" for i in range(NUM_EXT)]
+    PUB_EXT_ROOT = "v14/share/postgresql/extension"
     BUCKET_PREFIX = "5314225671"  # this is the build number
+    cleanup_files = []
 
     # Upload test_ext{i}.control files to the bucket
     # Note: In real life this is done by CI/CD
     for i in range(NUM_EXT):
         # public extensions
-        test_ext_file = BytesIO(bytes(ext_contents("public", i), "utf-8"))
+        public_ext = BytesIO(bytes(ext_contents("public", i), "utf-8"))
+        remote_name = f"{BUCKET_PREFIX}/{PUB_EXT_ROOT}/test_ext{i}.control"
+        local_name = f"pg_install/{PUB_EXT_ROOT}/test_ext{i}.control"
         env.remote_storage_client.upload_fileobj(
-            test_ext_file,
-            env.ext_remote_storage.bucket_name,
-            os.path.join(BUCKET_PREFIX, PUB_EXT_PATHS[i]),
+            public_ext, env.ext_remote_storage.bucket_name, remote_name
         )
+        cleanup_files.append(local_name)
+
         # private extensions
-        test_ext_file = BytesIO(bytes(ext_contents(str(tenant_id), i), "utf-8"))
+        private_ext = BytesIO(bytes(ext_contents(str(tenant_id), i), "utf-8"))
+        remote_name = f"{BUCKET_PREFIX}/{str(tenant_id)}/private_ext{i}.control"
+        local_name = f"pg_install/{PUB_EXT_ROOT}/private_ext{i}.control"
         env.remote_storage_client.upload_fileobj(
-            test_ext_file,
-            env.ext_remote_storage.bucket_name,
-            os.path.join(BUCKET_PREFIX, f"{str(tenant_id)}/private_ext{i}.control"),
+            private_ext, env.ext_remote_storage.bucket_name, remote_name
         )
+        cleanup_files.append(local_name)
 
     # Rust will then download the control files from the bucket
     # our rust code should obtain the same result as the following:
@@ -112,4 +126,10 @@ def test_file_download(neon_env_builder: NeonEnvBuilder):
             # log.info("**" * 100)
             # log.info(cur.fetchall())
 
-            # TODO: cleanup downloaded extensions
+    # cleanup downloaded extensions (TODO: the file names are quesionable here)
+    for file in cleanup_files:
+        try:
+            log.info(f"Deleting {file}")
+            os.remove(file)
+        except FileNotFoundError:
+            log.info(f"{file} does not exist, so cannot be deleted")
