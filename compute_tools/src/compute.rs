@@ -16,7 +16,7 @@ use utils::lsn::Lsn;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, RemotePath};
 
 use crate::config;
 use crate::pg_helpers::*;
@@ -49,6 +49,8 @@ pub struct ComputeNode {
     pub state_changed: Condvar,
     ///  S3 extensions configuration variables
     pub ext_remote_storage: Option<GenericRemoteStorage>,
+    pub availiable_extensions: Vec<RemotePath>,
+    pub availiable_libraries: Vec<RemotePath>,
 }
 
 #[derive(Clone, Debug)]

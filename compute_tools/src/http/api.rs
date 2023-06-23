@@ -16,7 +16,7 @@ use tokio::task;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
-use crate::extension_server::{self, ExtensionType};
+use crate::extension_server::{download_extension_sql_files, download_library_file};
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
@@ -127,6 +127,8 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
 
+            let is_library = false;
+
             let filename = route.split('/').last().unwrap();
 
             info!(
@@ -134,17 +136,47 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 filename
             );
 
-            match extension_server::download_extension(
-                &compute.ext_remote_storage,
-                ExtensionType::Shared,
-                &compute.pgbin,
-            )
-            .await
-            {
-                Ok(_) => Response::new(Body::from("OK")),
-                Err(e) => {
-                    error!("download_extension failed: {}", e);
-                    Response::new(Body::from(e.to_string()))
+            if compute.ext_remote_storage.is_none() {
+                error!("Remote extension storage is not set up");
+                let mut resp = Response::new(Body::from("Remote extension storage is not set up"));
+                *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                return resp;
+            }
+            let ext_storage = &compute.ext_remote_storage.unwrap();
+
+            if !is_library {
+                match download_extension_sql_files(
+                    filename,
+                    &compute.availiable_extensions,
+                    &ext_storage,
+                    &compute.pgbin,
+                )
+                .await
+                {
+                    Ok(_) => Response::new(Body::from("OK")),
+                    Err(e) => {
+                        error!("extension download failed: {}", e);
+                        let mut resp = Response::new(Body::from(e.to_string()));
+                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        resp
+                    }
+                }
+            } else {
+                match download_library_file(
+                    filename,
+                    &compute.availiable_libraries,
+                    &ext_storage,
+                    &compute.pgbin,
+                )
+                .await
+                {
+                    Ok(_) => Response::new(Body::from("OK")),
+                    Err(e) => {
+                        error!("library download failed: {}", e);
+                        let mut resp = Response::new(Body::from(e.to_string()));
+                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        resp
+                    }
                 }
             }
         }
