@@ -605,4 +605,12 @@ LIMIT 100",
             }
         }
     }
+
+    pub async fn get_available_extensions(&self, tenant_id: Option<TenantId>) -> Result<()> {
+        if let Some(remote_storage) = self.ext_remote_storage.as_ref() {
+            extension_server::get_available_extensions(remote_storage, &self.pgbin, tenant_id)
+                .await?;
+        }
+        Ok(())
+    }
 }

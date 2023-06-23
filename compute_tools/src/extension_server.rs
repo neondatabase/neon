@@ -66,7 +66,7 @@ async fn download_helper(
 // if tenant_id is provided - search in a private per-tenant extension path,
 // otherwise - in public extension path
 //
-pub async fn get_availiable_extensions(
+pub async fn get_available_extensions(
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
     tenant_id: Option<TenantId>,
