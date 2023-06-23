@@ -971,7 +971,7 @@ impl Timeline {
 
     pub fn set_state(&self, new_state: TimelineState) {
         if self.current_state() == TimelineState::Creating {
-            info!("timelines in Creating state are never activated, nothing to stop");
+            // Do a few assertions before panicking to detect other code that is lacking checks for `Creating` state.
             assert_eq!(
                 *self.flush_loop_state.lock().unwrap(),
                 FlushLoopState::NotStarted
@@ -985,7 +985,7 @@ impl Timeline {
                 "would have nothing to flush anyways"
             );
             assert!(self.walreceiver.lock().unwrap().is_none());
-            // TODO: assert other tasks launched in activate are not running
+            panic!("timelines in Creating state never change state");
             return;
         }
         match (self.current_state(), new_state) {
@@ -1059,9 +1059,7 @@ impl Timeline {
                     // A timeline _object_ in state Creating never transitions out of it.
                     // It gets replaced by another object in Loading state once creation is done.
                     // So, `self` is not the right object to subscribe to.
-                    // Luckily, there's no code path that calls this function.
-                    // But let's error out instead of an unreachable, just to be on the safe side.
-                    return Err(current_state);
+                    panic!("timelines in Creating state never change state, hence can't wait for it to become active");
                 }
                 TimelineState::Loading => {
                     receiver
@@ -2208,9 +2206,7 @@ impl Timeline {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
         if self.current_state() == TimelineState::Creating {
-            return Err(CalculateLogicalSizeError::Other(anyhow!(
-                "cannot calculate logical size for timeline in Creating state"
-            )));
+            panic!("cannot calculate logical size for timeline in Creating state");
         }
 
         let mut timeline_state_updates = self.subscribe_for_state_updates();
