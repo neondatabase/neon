@@ -68,13 +68,13 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::page_cache;
 use crate::repository::GcResult;
 use crate::repository::{Key, Value};
 use crate::task_mgr::TaskKind;
 use crate::walredo::WalRedoManager;
 use crate::METADATA_FILE_NAME;
 use crate::ZERO_PAGE;
+use crate::{import_datadir, page_cache};
 use crate::{is_temporary, task_mgr};
 
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -86,6 +86,7 @@ use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
 use super::storage_layer::{DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset};
+use super::TimelineLoadCause;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
@@ -690,12 +691,22 @@ impl Timeline {
     /// Flush to disk all data that was written with the put_* functions
     #[instrument(skip(self), fields(tenant_id=%self.tenant_id, timeline_id=%self.timeline_id))]
     pub async fn freeze_and_flush(&self) -> anyhow::Result<()> {
+        if self.current_state() == TimelineState::Creating {
+            // make a few additional sanity checks before panicking
+            assert!(self.layers.read().await.open_layer.is_none());
+            panic!("caller must prevent calls for timelines in Creating state")
+        }
         self.freeze_inmem_layer(false).await;
         self.flush_frozen_layers_and_wait().await
     }
 
     /// Outermost timeline compaction operation; downloads needed layers.
     pub async fn compact(self: &Arc<Self>, ctx: &RequestContext) -> anyhow::Result<()> {
+        assert!(
+            !matches!(self.current_state(), TimelineState::Creating),
+            "caller must prevent calls for timelines in Creating state"
+        );
+
         const ROUNDS: usize = 2;
 
         let last_record_lsn = self.get_last_record_lsn();
@@ -949,12 +960,34 @@ impl Timeline {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
+        if self.current_state() == TimelineState::Creating {
+            panic!("timelines in Creating state are never activated");
+        }
+        self.maybe_spawn_flush_loop();
         self.launch_wal_receiver(ctx, broker_client);
         self.set_state(TimelineState::Active);
         self.launch_eviction_task(background_jobs_can_start);
     }
 
     pub fn set_state(&self, new_state: TimelineState) {
+        if self.current_state() == TimelineState::Creating {
+            // Do a few assertions before panicking to detect other code that is lacking checks for `Creating` state.
+            assert_eq!(
+                *self.flush_loop_state.lock().unwrap(),
+                FlushLoopState::NotStarted
+            );
+            assert!(
+                self.layers
+                    .try_read()
+                    .expect("we would never be modifying Timeline::layers in a Creating timeline")
+                    .open_layer
+                    .is_none(),
+                "would have nothing to flush anyways"
+            );
+            assert!(self.walreceiver.lock().unwrap().is_none());
+            panic!("timelines in Creating state never change state");
+            return;
+        }
         match (self.current_state(), new_state) {
             (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
                 warn!("Ignoring new state, equal to the existing one: {equal_state_2:?}");
@@ -1022,6 +1055,12 @@ impl Timeline {
         loop {
             let current_state = receiver.borrow().clone();
             match current_state {
+                TimelineState::Creating => {
+                    // A timeline _object_ in state Creating never transitions out of it.
+                    // It gets replaced by another object in Loading state once creation is done.
+                    // So, `self` is not the right object to subscribe to.
+                    panic!("timelines in Creating state never change state, hence can't wait for it to become active");
+                }
                 TimelineState::Loading => {
                     receiver
                         .changed()
@@ -1390,13 +1429,18 @@ impl Timeline {
         timeline_id: TimelineId,
         tenant_id: TenantId,
         walredo_mgr: Arc<dyn WalRedoManager + Send + Sync>,
-        remote_client: Option<RemoteTimelineClient>,
+        remote_client: Option<Arc<RemoteTimelineClient>>,
         pg_version: u32,
+        is_create_placeholder: bool,
         initial_logical_size_can_start: Option<completion::Barrier>,
         initial_logical_size_attempt: Option<completion::Completion>,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
-        let (state, _) = watch::channel(TimelineState::Loading);
+        let (state, _) = watch::channel(if is_create_placeholder {
+            TimelineState::Creating
+        } else {
+            TimelineState::Loading
+        });
 
         let (layer_flush_start_tx, _) = tokio::sync::watch::channel(0);
         let (layer_flush_done_tx, _) = tokio::sync::watch::channel((0, Ok(())));
@@ -1424,7 +1468,7 @@ impl Timeline {
                 walredo_mgr,
                 walreceiver: Mutex::new(None),
 
-                remote_client: remote_client.map(Arc::new),
+                remote_client,
 
                 // initialize in-memory 'last_record_lsn' from 'disk_consistent_lsn'.
                 last_record_lsn: SeqWait::new(RecordLsn {
@@ -1440,6 +1484,7 @@ impl Timeline {
                 ancestor_lsn: metadata.ancestor_lsn(),
 
                 metrics: TimelineMetrics::new(
+                    is_create_placeholder,
                     &tenant_id,
                     &timeline_id,
                     crate::metrics::EvictionsWithLowResidenceDurationBuilder::new(
@@ -1595,20 +1640,41 @@ impl Timeline {
         ));
     }
 
-    ///
-    /// Initialize with an empty layer map. Used when creating a new timeline.
-    ///
-    pub(super) fn init_empty_layer_map(&self, start_lsn: Lsn) {
-        let mut layers = self.layers.try_write().expect(
-            "in the context where we call this function, no other task has access to the object",
-        );
-        layers.next_open_layer_at = Some(Lsn(start_lsn.0));
+    /// Prepares timeline data by loading it from the basebackup archive.
+    pub(crate) async fn import_basebackup_from_tar(
+        self: &Arc<Self>,
+        copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
+        base_lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        import_datadir::import_basebackup_from_tar(self, copyin_read, base_lsn, ctx)
+            .await
+            .context("Failed to import basebackup")?;
+
+        // Flush loop needs to be spawned in order to be able to flush.
+        // We want to run proper checkpoint before we mark timeline as available to outside world
+        // Thus spawning flush loop manually and skipping flush_loop setup in initialize_with_lock
+        self.maybe_spawn_flush_loop();
+
+        fail::fail_point!("before-checkpoint-new-timeline", |_| {
+            bail!("failpoint before-checkpoint-new-timeline");
+        });
+
+        self.freeze_and_flush()
+            .await
+            .context("Failed to flush after basebackup import")?;
+
+        Ok(())
     }
 
     ///
     /// Scan the timeline directory to populate the layer map.
     ///
-    pub(super) async fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
+    pub(super) async fn load_layer_map(
+        &self,
+        cause: &TimelineLoadCause,
+        disk_consistent_lsn: Lsn,
+    ) -> anyhow::Result<()> {
         let mut layers = self.layers.write().await;
         let mut updates = layers.batch_update();
         let mut num_layers = 0;
@@ -1711,7 +1777,19 @@ impl Timeline {
         }
 
         updates.flush();
-        layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
+
+        if disk_consistent_lsn == Lsn(0) {
+            // If disk_consistent_lsn is 0, then we're still in bootstrap/basebackup_import/create_test_timeline.
+            // Set next_open_layer_at to initdb_lsn to enable the put@initdb_lsn optimization in flush_frozen_layer.
+            assert!(matches!(cause, TimelineLoadCause::TimelineCreate { .. }));
+            assert_eq!(
+                num_layers, 0,
+                "if we crash, creating timelines get removed from disk"
+            );
+            layers.next_open_layer_at = Some(self.initdb_lsn);
+        } else {
+            layers.next_open_layer_at = Some(Lsn(disk_consistent_lsn.0) + 1);
+        }
 
         info!(
             "loaded layer map with {} layers at {}, total physical size: {}",
@@ -2127,6 +2205,10 @@ impl Timeline {
     ) -> Result<u64, CalculateLogicalSizeError> {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
+        if self.current_state() == TimelineState::Creating {
+            panic!("cannot calculate logical size for timeline in Creating state");
+        }
+
         let mut timeline_state_updates = self.subscribe_for_state_updates();
         let self_calculation = Arc::clone(self);
 
@@ -2147,7 +2229,8 @@ impl Timeline {
                             TimelineState::Active => continue,
                             TimelineState::Broken { .. }
                             | TimelineState::Stopping
-                            | TimelineState::Loading => {
+                            | TimelineState::Loading
+                            | TimelineState::Creating  => {
                                 break format!("aborted because timeline became inactive (new state: {new_state:?})")
                             }
                         }
@@ -4073,6 +4156,11 @@ impl Timeline {
     ) -> anyhow::Result<GcResult> {
         let now = SystemTime::now();
         let mut result: GcResult = GcResult::default();
+
+        if self.current_state() == TimelineState::Creating {
+            debug!("timeline creating placeholder does not need GC");
+            return Ok(GcResult::default());
+        }
 
         // Nothing to GC. Return early.
         let latest_gc_cutoff = *self.get_latest_gc_cutoff_lsn();

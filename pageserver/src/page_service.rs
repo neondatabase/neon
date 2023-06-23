@@ -14,6 +14,7 @@ use bytes::Buf;
 use bytes::Bytes;
 use futures::Stream;
 use pageserver_api::models::TenantState;
+use pageserver_api::models::TimelineState;
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
@@ -24,6 +25,7 @@ use postgres_backend::{self, is_expected_io_error, AuthType, PostgresBackend, Qu
 use pq_proto::framed::ConnectionError;
 use pq_proto::FeStartupPacket;
 use pq_proto::{BeMessage, FeMessage, RowDescriptor};
+use std::collections::hash_map::Entry;
 use std::io;
 use std::net::TcpListener;
 use std::pin::pin;
@@ -51,6 +53,8 @@ use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant;
+use crate::tenant::compare_arced_timeline;
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::mgr;
 use crate::tenant::mgr::GetTenantError;
 use crate::tenant::{Tenant, Timeline};
@@ -487,11 +491,20 @@ impl PageServerHandler {
     where
         IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         task_mgr::associate_with(Some(tenant_id), Some(timeline_id));
         // Create empty timeline
         info!("creating new timeline");
         let tenant = get_active_tenant_with_timeout(tenant_id, &ctx).await?;
-        let timeline = tenant.create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)?;
+
+        let (guard, real_timeline_not_in_tenants_map) = tenant
+            .create_empty_timeline(timeline_id, base_lsn, pg_version, &ctx)
+            .await?;
+
+        // TODO spawn flush loop of timeline early (before activation),
+        // but then we need to take care of shutting it down in case we fail
+        // (bootstrap_timeline probably also needs it?)
 
         // TODO mark timeline as not ready until it reaches end_lsn.
         // We might have some wal to import as well, and we should prevent compute
@@ -505,21 +518,49 @@ impl PageServerHandler {
 
         // Import basebackup provided via CopyData
         info!("importing basebackup");
-        pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
-        pgb.flush().await?;
+        let doit = async {
+            pgb.write_message_noflush(&BeMessage::CopyInResponse)?;
+            pgb.flush().await?;
 
-        let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
-        timeline
-            .import_basebackup_from_tar(
-                &mut copyin_reader,
-                base_lsn,
-                self.broker_client.clone(),
-                &ctx,
-            )
-            .await?;
+            let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
+            real_timeline_not_in_tenants_map
+                .import_basebackup_from_tar(&mut copyin_reader, base_lsn, &ctx)
+                .await?;
 
-        // Read the end of the tar archive.
-        read_tar_eof(copyin_reader).await?;
+            // Read the end of the tar archive.
+            read_tar_eof(copyin_reader).await?;
+            anyhow::Ok(())
+        };
+        let placeholder_timeline = match doit.await {
+            Ok(()) => {
+                match guard.creation_complete_remove_uninit_marker_and_get_placeholder_timeline() {
+                    Ok(placeholder_timeline) => placeholder_timeline,
+                    Err(err) => {
+                        error!(
+                            "failed to remove uninit marker for new_timeline_id={timeline_id}: {err:#}"
+                        );
+                        return Err(QueryError::Other(err.context("remove uninit marker file")));
+                    }
+                }
+            }
+            Err(e) => {
+                debug_assert_current_span_has_tenant_and_timeline_id();
+                guard.creation_failed();
+                return Err(QueryError::Other(e));
+            }
+        };
+
+        // todo share with Tenant::create_timeline
+        match tenant.timelines.lock().unwrap().entry(timeline_id) {
+            Entry::Vacant(_) => unreachable!("we created a placeholder earlier, and load_local_timeline should have inserted the real timeline"),
+            Entry::Occupied(mut o) => {
+                info!("replacing placeholder timeline with the real one");
+                assert_eq!(placeholder_timeline.current_state(), TimelineState::Creating);
+                assert!(compare_arced_timeline(&placeholder_timeline, o.get()));
+                let replaced_placeholder = o.insert(Arc::clone(&real_timeline_not_in_tenants_map));
+                assert!(compare_arced_timeline(&replaced_placeholder, &placeholder_timeline));
+            },
+        }
 
         // TODO check checksum
         // Meanwhile you can verify client-side by taking fullbackup
@@ -527,7 +568,9 @@ impl PageServerHandler {
         // It wouldn't work if base came from vanilla postgres though,
         // since we discard some log files.
 
-        info!("done");
+        info!("done, activating timeline");
+        real_timeline_not_in_tenants_map.activate(self.broker_client.clone(), None, &ctx);
+
         Ok(())
     }
 

@@ -20,7 +20,9 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
-use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
+use crate::tenant::{
+    create_tenant_files, CreateTenantFilesMode, Tenant, TenantState, TimelineLoadCause,
+};
 use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 
 use utils::fs_ext::PathExt;
@@ -121,6 +123,7 @@ pub async fn init_tenant_mgr(
                         &tenant_dir_path,
                         broker_client.clone(),
                         remote_storage.clone(),
+                        TimelineLoadCause::Startup,
                         Some(init_order.clone()),
                         &ctx,
                     ) {
@@ -157,6 +160,7 @@ pub fn schedule_local_tenant_processing(
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    cause: TimelineLoadCause,
     init_order: Option<InitializationOrder>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
@@ -174,6 +178,7 @@ pub fn schedule_local_tenant_processing(
         })?,
         "Cannot load tenant from empty directory {tenant_path:?}"
     );
+    // TODO ensure there's no uninit mark / handle it correctly during ignore and load
 
     let tenant_id = tenant_path
         .file_name()
@@ -216,6 +221,7 @@ pub fn schedule_local_tenant_processing(
             tenant_id,
             broker_client,
             remote_storage,
+            cause,
             init_order,
             ctx,
         )
@@ -315,7 +321,7 @@ pub async fn create_tenant(
         //       See https://github.com/neondatabase/neon/issues/4233
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, None, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, TimelineLoadCause::TenantCreate, None, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 
@@ -463,7 +469,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, None, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, TimelineLoadCause::TenantLoad, None, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -536,7 +542,7 @@ pub async fn attach_tenant(
             .context("check for attach marker file existence")?;
         anyhow::ensure!(marker_file_exists, "create_tenant_files should have created the attach marker file");
 
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), None, ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), TimelineLoadCause::Attach, None, ctx)?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
 

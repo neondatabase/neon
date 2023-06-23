@@ -768,6 +768,7 @@ impl StorageTimeMetrics {
 
 #[derive(Debug)]
 pub struct TimelineMetrics {
+    fake: bool,
     tenant_id: String,
     timeline_id: String,
     pub get_reconstruct_data_time_histo: Histogram,
@@ -792,6 +793,7 @@ pub struct TimelineMetrics {
 
 impl TimelineMetrics {
     pub fn new(
+        fake: bool,
         tenant_id: &TenantId,
         timeline_id: &TimelineId,
         evictions_with_low_residence_duration_builder: EvictionsWithLowResidenceDurationBuilder,
@@ -850,7 +852,8 @@ impl TimelineMetrics {
         MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
         MATERIALIZED_PAGE_CACHE_HIT.get();
 
-        TimelineMetrics {
+        let m = TimelineMetrics {
+            fake,
             tenant_id,
             timeline_id,
             get_reconstruct_data_time_histo,
@@ -872,12 +875,16 @@ impl TimelineMetrics {
                 evictions_with_low_residence_duration,
             ),
             read_num_fs_layers,
-        }
-    }
-}
+        };
 
-impl Drop for TimelineMetrics {
-    fn drop(&mut self) {
+        if fake {
+            m.remove_metrics();
+        }
+
+        m
+    }
+
+    fn remove_metrics(&self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
         let _ = GET_RECONSTRUCT_DATA_TIME.remove_label_values(&[tenant_id, timeline_id]);
@@ -910,6 +917,14 @@ impl Drop for TimelineMetrics {
 
         for op in SMGR_QUERY_TIME_OPERATIONS {
             let _ = SMGR_QUERY_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
+        }
+    }
+}
+
+impl Drop for TimelineMetrics {
+    fn drop(&mut self) {
+        if !self.fake {
+            self.remove_metrics();
         }
     }
 }
