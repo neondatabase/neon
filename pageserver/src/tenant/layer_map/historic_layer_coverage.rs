@@ -485,7 +485,7 @@ impl<Value: Clone> BufferedHistoricLayerCoverage<Value> {
     /// This function is unlikely to be used in the future because LayerMap now only records the
     /// layer descriptors. Therefore, anything added to the layer map will only be removed or
     /// added, and never replaced.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn replace<F>(
         &mut self,
         layer_key: &LayerKey,

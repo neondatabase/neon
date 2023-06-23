@@ -56,7 +56,6 @@ use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
 use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
-use crate::tenant::layer_map;
 use pageserver_api::reltag::RelTag;
 
 use postgres_connection::PgConnectionConfig;
@@ -125,11 +124,16 @@ pub struct LayerMapping(HashMap<PersistentLayerKey, Arc<dyn PersistentLayer>>);
 
 impl LayerMapping {
     fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
+        // The assumption for the `expect()` is that all code maintains the following invariant:
+        // A layer's descriptor is present in the LayerMap => the LayerMapping contains a layer for the descriptor.
         self.0.get(&desc.key()).expect("not found").clone()
     }
 
     pub(crate) fn insert(&mut self, layer: Arc<dyn PersistentLayer>) {
-        self.0.insert(layer.layer_desc().key(), layer);
+        let present = self.0.insert(layer.layer_desc().key(), layer.clone());
+        if present.is_some() && cfg!(debug_assertions) {
+            panic!("overwriting a layer: {:?}", layer.layer_desc())
+        }
     }
 
     pub(crate) fn new() -> Self {
@@ -137,7 +141,13 @@ impl LayerMapping {
     }
 
     pub(crate) fn remove(&mut self, layer: Arc<dyn PersistentLayer>) {
-        self.0.remove(&layer.layer_desc().key());
+        let present = self.0.remove(&layer.layer_desc().key());
+        if present.is_none() && cfg!(debug_assertions) {
+            panic!(
+                "removing layer that is not present in layer mapping: {:?}",
+                layer.layer_desc()
+            )
+        }
     }
 
     pub(crate) fn replace_and_verify(
@@ -153,23 +163,23 @@ impl LayerMapping {
         let new_l0 = LayerMap::is_l0(new.layer_desc());
 
         fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!(
-            "replacing downloaded layer into layermap failed because layer was not found"
+            "layermap-replace-notfound"
         ));
 
         anyhow::ensure!(
             key == other,
-            "replacing downloaded layer into layermap failed because two layers have different keys: {key:?} != {other:?}"
+            "expected and new layer have different keys: {key:?} != {other:?}"
         );
 
         anyhow::ensure!(
-             expected_l0 == new_l0,
-             "replacing downloaded layer into layermap failed because one layer is l0 while the other is not: {expected_l0} != {new_l0}"
-         );
+            expected_l0 == new_l0,
+            "one layer is l0 while the other is not: {expected_l0} != {new_l0}"
+        );
 
         if let Some(layer) = self.0.get_mut(&expected.layer_desc().key()) {
             anyhow::ensure!(
-                layer_map::compare_arced_layers(&expected, layer),
-                "replacing downloaded layer into layermap failed because another layer was found instead of expected, expected={expected:?}, new={new:?}",
+                compare_arced_layers(&expected, layer),
+                "another layer was found instead of expected, expected={expected:?}, new={new:?}",
                 expected = Arc::as_ptr(&expected),
                 new = Arc::as_ptr(layer),
             );
@@ -1362,7 +1372,7 @@ impl Timeline {
             }
             Err(err) => {
                 if cfg!(debug_assertions) {
-                    error!(evicted=?local_layer, "failed to replace: {err}");
+                    panic!("failed to replace: {err}, evicted: {local_layer:?}");
                 } else {
                     error!(evicted=?local_layer, "failed to replace: {err}");
                 }
@@ -2997,7 +3007,9 @@ impl Timeline {
         fail_point!("flush-frozen-before-sync");
 
         // The new on-disk layers are now in the layer map. We can remove the
-        // in-memory layer from the map now.
+        // in-memory layer from the map now. We do not modify `LayerMapping` because
+        // it only contains persistent layers. The flushed layer is stored in
+        // the mapping in `create_delta_layer`.
         {
             let mut layers = self.layers.write().await;
             let l = layers.0.frozen_layers.pop_front();
@@ -3005,7 +3017,7 @@ impl Timeline {
             // Only one thread may call this function at a time (for this
             // timeline). If two threads tried to flush the same frozen
             // layer to disk at the same time, that would not work.
-            assert!(layer_map::compare_arced_layers(&l.unwrap(), &frozen_layer));
+            assert!(compare_arced_layers(&l.unwrap(), &frozen_layer));
 
             // release lock on 'layers'
         }
@@ -3647,8 +3659,6 @@ impl Timeline {
             })
             .collect::<Vec<_>>();
 
-        let deltas_to_compact_layers = deltas_to_compact.iter().collect_vec();
-
         if !remotes.is_empty() {
             // caller is holding the lock to layer_removal_cs, and we don't want to download while
             // holding that; in future download_remote_layer might take it as well. this is
@@ -3675,7 +3685,7 @@ impl Timeline {
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
         let all_values_iter = itertools::process_results(
-            deltas_to_compact_layers.iter().map(|l| l.iter(ctx)),
+            deltas_to_compact.iter().map(|l| l.iter(ctx)),
             |iter_iter| {
                 iter_iter.kmerge_by(|a, b| {
                     if let Ok((a_key, a_lsn, _)) = a {
@@ -3697,7 +3707,7 @@ impl Timeline {
 
         // This iterator walks through all keys and is needed to calculate size used by each key
         let mut all_keys_iter = itertools::process_results(
-            deltas_to_compact_layers.iter().map(|l| l.key_iter(ctx)),
+            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
             |iter_iter| {
                 iter_iter.kmerge_by(|a, b| {
                     let (a_key, a_lsn, _) = a;
@@ -3725,7 +3735,7 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
         for (next_key, _next_lsn, _size) in itertools::process_results(
-            deltas_to_compact_layers.iter().map(|l| l.key_iter(ctx)),
+            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
             |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
         )? {
             if let Some(prev_key) = prev {
@@ -4950,4 +4960,32 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
             missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
         ),
     }
+}
+
+/// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
+///
+/// Returns `true` if the two `Arc` point to the same layer, false otherwise.
+///
+/// If comparing persistent layers, ALWAYS compare the layer descriptor key.
+#[inline(always)]
+pub fn compare_arced_layers<L: ?Sized>(left: &Arc<L>, right: &Arc<L>) -> bool {
+    // "dyn Trait" objects are "fat pointers" in that they have two components:
+    // - pointer to the object
+    // - pointer to the vtable
+    //
+    // rust does not provide a guarantee that these vtables are unique, but however
+    // `Arc::ptr_eq` as of writing (at least up to 1.67) uses a comparison where both the
+    // pointer and the vtable need to be equal.
+    //
+    // See: https://github.com/rust-lang/rust/issues/103763
+    //
+    // A future version of rust will most likely use this form below, where we cast each
+    // pointer into a pointer to unit, which drops the inaccessible vtable pointer, making it
+    // not affect the comparison.
+    //
+    // See: https://github.com/rust-lang/rust/pull/106450
+    let left = Arc::as_ptr(left) as *const ();
+    let right = Arc::as_ptr(right) as *const ();
+
+    left == right
 }
