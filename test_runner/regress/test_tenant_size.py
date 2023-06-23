@@ -16,7 +16,6 @@ from fixtures.pg_version import PgVersion, xfail_on_postgres
 from fixtures.types import Lsn, TenantId, TimelineId
 
 
-@pytest.mark.xfail
 def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
     env = neon_simple_env
     (tenant_id, _) = env.neon_cli.create_tenant()
@@ -323,7 +322,6 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     size_debug_file.write(size_debug)
 
 
-@pytest.mark.xfail
 def test_single_branch_get_tenant_size_grows(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion
 ):
