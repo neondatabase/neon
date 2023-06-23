@@ -16,7 +16,7 @@ use tokio::task;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
-use crate::extension_server::{self, ExtensionType};
+use crate::extension_server::{download_extension_sql_files, download_library_file};
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
@@ -126,25 +126,51 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         // download extension files from S3 on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
+            info!("req.uri {:?}", req.uri());
+
+            let mut is_library = false;
+
+            if let Some(params) = req.uri().query() {
+                info!("serving {:?} POST request with params: {}", route, params);
+
+                if params == "is_library=true" {
+                    is_library = true;
+                } else {
+                    let mut resp = Response::new(Body::from("Wrong request parameters"));
+                    *resp.status_mut() = StatusCode::BAD_REQUEST;
+                    return resp;
+                }
+            }
 
             let filename = route.split('/').last().unwrap().to_string();
 
             info!(
-                "serving /extension_server POST request, filename: {:?}",
-                &filename
+                "serving /extension_server POST request, filename: {:?} is_library: {}",
+                filename, is_library
             );
 
-            match extension_server::download_extension(
-                &compute.ext_remote_storage,
-                ExtensionType::Library(filename),
-                &compute.pgbin,
-            )
-            .await
-            {
-                Ok(_) => Response::new(Body::from("OK")),
-                Err(e) => {
-                    error!("download_extension failed: {}", e);
-                    Response::new(Body::from(e.to_string()))
+            if is_library {
+                match compute.download_library_file(filename.to_string()).await {
+                    Ok(_) => Response::new(Body::from("OK")),
+                    Err(e) => {
+                        error!("library download failed: {}", e);
+                        let mut resp = Response::new(Body::from(e.to_string()));
+                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        resp
+                    }
+                }
+            } else {
+                match compute
+                    .download_extension_sql_files(filename.to_string())
+                    .await
+                {
+                    Ok(_) => Response::new(Body::from("OK")),
+                    Err(e) => {
+                        error!("extension download failed: {}", e);
+                        let mut resp = Response::new(Body::from(e.to_string()));
+                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        resp
+                    }
                 }
             }
         }

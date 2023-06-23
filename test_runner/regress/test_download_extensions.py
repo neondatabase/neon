@@ -11,19 +11,15 @@ from fixtures.neon_fixtures import (
 )
 
 """
-TODO:
-status:
-it appears that list_files on a non-existing path is bad whether you are real or mock s3 storage 
-
-1. debug real s3 tests: I think the paths were slightly different than I was expecting
-2. Make sure it gracefully is sad when tenant is not found
+TODO Alek:
+Calling list_files on a non-existing path returns [] (expectedly) but then
+causes the program to crash somehow (for both real and mock s3 storage)
 stderr: command failed: unexpected compute status: Empty
 
-3. clean up the junk I put in the bucket (one time task)
-4. can we simultaneously do MOCK and REAL s3 tests, or are the env vars conflicting/
-5. libs/remote_storage/src/s3_bucket.rs TODO // TODO: if bucket prefix is empty,
+- real s3 tests: I think the paths were slightly different than I was expecting
+-  clean up the junk I put in the bucket 
+- libs/remote_storage/src/s3_bucket.rs TODO // TODO: if bucket prefix is empty,
     the folder is prefixed with a "/" I think. Is this desired?
-6. test LIBRARY extensions: maybe Anastasia already did this?
 """
 
 
@@ -87,12 +83,37 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
                 private_ext, env.ext_remote_storage.bucket_name, private_remote_name
             )
 
-    # Rust will then download the control files from the bucket
-    # our rust code should obtain the same result as the following:
-    # env.remote_storage_client.get_object(
-    #     Bucket=env.ext_remote_storage.bucket_name,
-    #     Key=os.path.join(BUCKET_PREFIX, PUB_EXT_PATHS[0])
-    # )["Body"].read()
+    TEST_EXT_SQL_PATH = "v14/share/postgresql/extension/test_ext--1.0.sql"
+    test_ext_sql_file = BytesIO(
+        b"""
+            CREATE FUNCTION test_ext_add(integer, integer) RETURNS integer
+    AS 'select $1 + $2;'
+    LANGUAGE SQL
+    IMMUTABLE
+    RETURNS NULL ON NULL INPUT;
+        """
+    )
+    env.remote_storage_client.upload_fileobj(
+        test_ext_sql_file,
+        env.ext_remote_storage.bucket_name,
+        os.path.join(BUCKET_PREFIX, TEST_EXT_SQL_PATH),
+    )
+
+    # upload some fake library file
+    TEST_LIB_PATH = "v14/lib/test_ext.so"
+    test_lib_file = BytesIO(
+        b"""
+           111
+        """
+    )
+    env.remote_storage_client.upload_fileobj(
+        test_lib_file,
+        env.ext_remote_storage.bucket_name,
+        os.path.join(BUCKET_PREFIX, TEST_LIB_PATH),
+    )
+
+    tenant, _ = env.neon_cli.create_tenant()
+    env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
 
     region = "us-east-1"
     if remote_storage_kind == RemoteStorageKind.REAL_S3:
@@ -108,17 +129,13 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     )
 
     endpoint = env.endpoints.create_start(
-        "test_file_download", tenant_id=tenant_id, remote_ext_config=remote_ext_config
+        "test_file_download",
+        tenant_id=tenant,
+        remote_ext_config=remote_ext_config,
+        config_lines=["log_min_messages=debug3"],
     )
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:
-            # example query: insert some values and select them
-            cur.execute("CREATE TABLE t(key int primary key, value text)")
-            for i in range(100):
-                cur.execute(f"insert into t values({i}, {2*i})")
-            cur.execute("select * from t")
-            log.info(cur.fetchall())
-
             # Test query: check that test_ext0 was successfully downloaded
             cur.execute("SELECT * FROM pg_available_extensions")
             all_extensions = [x[0] for x in cur.fetchall()]
@@ -127,8 +144,24 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
                 assert f"test_ext{i}" in all_extensions
                 # assert f"private_ext{i}" in all_extensions
 
-            # TODO: can create extension actually install an extension?
-            # cur.execute("CREATE EXTENSION test_ext0")
+            cur.execute("CREATE EXTENSION test_ext")
+
+            cur.execute("SELECT extname FROM pg_extension")
+            all_extensions = [x[0] for x in cur.fetchall()]
+            log.info(all_extensions)
+            assert "test_ext" in all_extensions
+
+            try:
+                cur.execute("LOAD 'test_ext.so'")
+            except Exception as e:
+                # expected to fail with
+                # could not load library ... test_ext.so: file too short
+                # because test_ext.so is not real library file
+                log.info("LOAD test_ext.so failed (expectedly): %s", e)
+                assert "file too short" in str(e)
+
+            # TODO add more test cases:
+            # - try to load non-existing library
 
     # cleanup downloaded extensions
     for file in cleanup_files:

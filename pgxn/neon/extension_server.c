@@ -29,9 +29,13 @@ static int extension_server_port = 0;
 
 static download_extension_file_hook_type prev_download_extension_file_hook = NULL;
 
-// curl -X POST http://localhost:8080/extension_server/postgis-3.so
+// to download all SQL files for an extension:
+// curl -X POST http://localhost:8080/extension_server/postgis
+//
+// to download specific library file:
+// curl -X POST http://localhost:8080/extension_server/postgis-3.so?=true
 static bool
-neon_download_extension_file_http(const char *filename)
+neon_download_extension_file_http(const char *filename, bool is_library)
 {
     CURL *curl;
     CURLcode res;
@@ -44,13 +48,21 @@ neon_download_extension_file_http(const char *filename)
         elog(ERROR, "Failed to initialize curl handle");
     }
 
-    compute_ctl_url = psprintf("http://localhost:%d/extension_server/%s", extension_server_port, filename);
+
+    if (is_library)
+    {
+        elog(LOG, "request library");
+    }
+
+    compute_ctl_url = psprintf("http://localhost:%d/extension_server/%s%s",
+                      extension_server_port, filename, is_library?"?is_library=true":"");
 
     elog(LOG, "curl_easy_perform() url: %s", compute_ctl_url);
 
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
     curl_easy_setopt(curl, CURLOPT_URL, compute_ctl_url);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L /* seconds */);
+
 
     if (curl)
     {
