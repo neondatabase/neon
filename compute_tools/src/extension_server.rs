@@ -52,6 +52,7 @@ async fn download_helper(
         .download_stream
         .read_to_end(&mut write_data_buffer)
         .await?;
+    dbg!(str::from_utf8(&write_data_buffer)?);
     let mut output_file = BufWriter::new(File::create(local_path)?);
     output_file.write_all(&write_data_buffer)?;
     Ok(())

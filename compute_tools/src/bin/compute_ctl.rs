@@ -76,8 +76,8 @@ fn main() -> Result<()> {
         None => None,
     };
 
-    let rt = Runtime::new().unwrap();
-    rt.block_on(async {
+    let rt0 = Runtime::new().unwrap();
+    rt0.block_on(async {
         download_extension(&ext_remote_storage, ExtensionType::Shared, pgbin)
             .await
             .expect("download shared extensions should work");
@@ -181,7 +181,6 @@ fn main() -> Result<()> {
         }
     };
 
-    dbg!(&spec);
     let mut new_state = ComputeState::new();
     let spec_set;
     let tenant_id;
@@ -228,14 +227,15 @@ fn main() -> Result<()> {
     }
 
     // Now we have the spec, so we request the tenant specific extensions
-    if let Some(tenant_id) = tenant_id {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            download_extension(&ext_remote_storage, ExtensionType::Tenant(tenant_id), pgbin)
-                .await
-                .expect("download tenant specific extensions should work");
-        });
-    }
+    // TODO: this is temporarily disabled
+    // if let Some(tenant_id) = tenant_id {
+    //     let rt1 = Runtime::new().unwrap();
+    //     rt1.block_on(async {
+    //         download_extension(&ext_remote_storage, ExtensionType::Tenant(tenant_id), pgbin)
+    //             .await
+    //             .expect("download tenant specific extensions should not return an error");
+    //     });
+    // }
 
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();

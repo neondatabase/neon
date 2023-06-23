@@ -767,6 +767,7 @@ class NeonEnvBuilder:
         )
 
         if enable_remote_extensions:
+            # TODO: add an env variable for EXT_REMOTE_STORAGE_S3_BUCKET
             ext_bucket_name = os.getenv("EXT_REMOTE_STORAGE_S3_BUCKET")
             if ext_bucket_name is None:
                 ext_bucket_name = "neon-dev-extensions"
