@@ -120,12 +120,12 @@ impl PartialOrd for Hole {
     }
 }
 
-pub struct LayerMapping(HashMap<PersistentLayerKey, Arc<dyn PersistentLayer>>);
+pub struct LayerFileManager(HashMap<PersistentLayerKey, Arc<dyn PersistentLayer>>);
 
-impl LayerMapping {
+impl LayerFileManager {
     fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
         // The assumption for the `expect()` is that all code maintains the following invariant:
-        // A layer's descriptor is present in the LayerMap => the LayerMapping contains a layer for the descriptor.
+        // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0.get(&desc.key()).expect("not found").clone()
     }
 
@@ -216,7 +216,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(crate) layers: tokio::sync::RwLock<(LayerMap, LayerMapping)>,
+    pub(crate) layers: tokio::sync::RwLock<(LayerMap, LayerFileManager)>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -1285,7 +1285,7 @@ impl Timeline {
         _layer_removal_cs: &tokio::sync::MutexGuard<'_, ()>,
         local_layer: &Arc<dyn PersistentLayer>,
         batch_updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerMapping,
+        mapping: &mut LayerFileManager,
     ) -> anyhow::Result<bool> {
         if local_layer.is_remote_layer() {
             // TODO(issue #3851): consider returning an err here instead of false,
@@ -1504,7 +1504,7 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: tokio::sync::RwLock::new((LayerMap::default(), LayerMapping::new())),
+                layers: tokio::sync::RwLock::new((LayerMap::default(), LayerFileManager::new())),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
@@ -2379,7 +2379,7 @@ impl Timeline {
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
         layer: Arc<PersistentLayerDesc>,
         updates: &mut BatchedUpdates<'_>,
-        mapping: &mut LayerMapping,
+        mapping: &mut LayerFileManager,
     ) -> anyhow::Result<()> {
         let layer = mapping.get_from_desc(&layer);
         if !layer.is_remote_layer() {
@@ -3007,7 +3007,7 @@ impl Timeline {
         fail_point!("flush-frozen-before-sync");
 
         // The new on-disk layers are now in the layer map. We can remove the
-        // in-memory layer from the map now. We do not modify `LayerMapping` because
+        // in-memory layer from the map now. We do not modify `LayerFileManager` because
         // it only contains persistent layers. The flushed layer is stored in
         // the mapping in `create_delta_layer`.
         {
