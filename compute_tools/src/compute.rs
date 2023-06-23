@@ -16,11 +16,11 @@ use utils::lsn::Lsn;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, RemotePath};
 
-use crate::config;
 use crate::pg_helpers::*;
 use crate::spec::*;
+use crate::{config, extension_server};
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -49,6 +49,8 @@ pub struct ComputeNode {
     pub state_changed: Condvar,
     ///  S3 extensions configuration variables
     pub ext_remote_storage: Option<GenericRemoteStorage>,
+    pub availiable_extensions: Vec<RemotePath>,
+    pub availiable_libraries: Vec<RemotePath>,
 }
 
 #[derive(Clone, Debug)]
@@ -577,6 +579,30 @@ LIMIT 100",
             format!("{{\"pg_stat_statements\": [{}]}}", result_rows.join(","))
         } else {
             "{{\"pg_stat_statements\": []}}".to_string()
+        }
+    }
+
+    pub async fn download_extension_sql_files(&self, filename: String) -> Result<()> {
+        match &self.ext_remote_storage {
+            None => anyhow::bail!("No remote extension storage"),
+            Some(remote_storage) => {
+                extension_server::download_extension_sql_files(
+                    &filename,
+                    &remote_storage,
+                    &self.pgbin,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn download_library_file(&self, filename: String) -> Result<()> {
+        match &self.ext_remote_storage {
+            None => anyhow::bail!("No remote extension storage"),
+            Some(remote_storage) => {
+                extension_server::download_library_file(&filename, &remote_storage, &self.pgbin)
+                    .await
+            }
         }
     }
 }

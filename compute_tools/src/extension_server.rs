@@ -1,4 +1,4 @@
-use anyhow::{self, bail};
+use anyhow::{self, bail, Result};
 use remote_storage::*;
 use serde_json::{self, Value};
 use std::fs::File;
@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::str;
 use tokio::io::AsyncReadExt;
 use tracing::info;
+use utils::id::TenantId;
 
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
@@ -57,60 +58,117 @@ async fn download_helper(
     Ok(())
 }
 
-pub enum ExtensionType {
-    Shared,          // we just use the public folder here
-    Tenant(String),  // String is tenant_id
-    Library(String), // String is name of the extension
-}
-
-pub async fn download_extension(
-    remote_storage: &Option<GenericRemoteStorage>,
-    ext_type: ExtensionType,
+// download extension control files
+//
+// return list of all extension files to use it in the future searches
+//
+// if tenant_id is provided - search in a private per-tenant extension path,
+// otherwise - in public extension path
+//
+pub async fn get_availiable_extensions(
+    remote_storage: &GenericRemoteStorage,
     pgbin: &str,
-) -> anyhow::Result<()> {
-    let remote_storage = match remote_storage {
-        Some(remote_storage) => remote_storage,
-        None => return Ok(()),
-    };
+    tenant_id: Option<TenantId>,
+) -> anyhow::Result<Vec<RemotePath>> {
+    let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
     let pg_version = get_pg_version(pgbin);
-    match ext_type {
-        ExtensionType::Shared => {
-            // 1. Download control files from s3-bucket/public/*.control to SHAREDIR/extension
-            // We can do this step even before we have spec,
-            // because public extensions are common for all projects.
-            let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-            let remote_sharedir = Path::new(&pg_version).join("share/postgresql/extension");
-            let remote_sharedir = RemotePath::new(Path::new(&remote_sharedir))?;
-            let from_paths = remote_storage.list_files(Some(&remote_sharedir)).await?;
-            for remote_from_path in from_paths {
-                if remote_from_path.extension() == Some("control") {
-                    download_helper(remote_storage, &remote_from_path, &local_sharedir).await?;
-                }
-            }
-        }
-        ExtensionType::Tenant(tenant_id) => {
-            // 2. After we have spec, before project start
-            // Download control files from s3-bucket/[tenant-id]/*.control to SHAREDIR/extension
 
-            let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-            let remote_path = RemotePath::new(Path::new(&tenant_id.to_string()))?;
-            let from_paths = remote_storage.list_files(Some(&remote_path)).await?;
-            for remote_from_path in from_paths {
-                if remote_from_path.extension() == Some("control") {
-                    download_helper(remote_storage, &remote_from_path, &local_sharedir).await?;
-                }
-            }
-        }
-        ExtensionType::Library(library_name) => {
-            // 3. After we have spec, before postgres start
-            // Download preload_shared_libraries from s3-bucket/public/[library-name].control into LIBDIR/
+    let remote_sharedir = match tenant_id {
+        None => RemotePath::new(&Path::new(&pg_version).join("share/postgresql/extension"))?,
+        Some(tenant_id) => RemotePath::new(
+            &Path::new(&pg_version)
+                .join(&tenant_id.to_string())
+                .join("share/postgresql/extension"),
+        )?,
+    };
 
-            let local_libdir: PathBuf = Path::new(&get_pg_config("--libdir", pgbin)).into();
-            let remote_path = format!("{library_name}.control");
-            let remote_from_path = RemotePath::new(Path::new(&remote_path))?;
-            download_helper(remote_storage, &remote_from_path, &local_libdir).await?;
+    info!(
+        "get_availiable_extensions remote_sharedir: {:?}, local_sharedir: {:?}",
+        remote_sharedir, local_sharedir
+    );
+
+    let from_paths = remote_storage.list_files(Some(&remote_sharedir)).await?;
+
+    // download all found control files
+    for remote_from_path in &from_paths {
+        if remote_from_path.extension() == Some("control") {
+            download_helper(remote_storage, &remote_from_path, &local_sharedir).await?;
         }
     }
+
+    Ok(from_paths)
+}
+
+// download all sql files for a given extension name
+//
+pub async fn download_extension_sql_files(
+    ext_name: &str,
+    //availiable_extensions: &Vec<RemotePath>,
+    remote_storage: &GenericRemoteStorage,
+    pgbin: &str,
+) -> Result<()> {
+    let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
+
+    let pg_version = get_pg_version(pgbin);
+    let remote_sharedir =
+        RemotePath::new(&Path::new(&pg_version).join("share/postgresql/extension")).unwrap();
+
+    // TODO cache availiable_extensions list on the first read to avoid unneeded s3 calls
+    let availiable_extensions = remote_storage.list_files(Some(&remote_sharedir)).await?;
+
+    info!(
+        "list of availiable_extension files {:?}",
+        &availiable_extensions
+    );
+
+    // check if extension files exist
+    let files_to_download: Vec<&RemotePath> = availiable_extensions
+        .iter()
+        .filter(|ext| {
+            ext.extension() == Some("sql") && ext.object_name().unwrap().starts_with(ext_name)
+        })
+        .collect();
+
+    if files_to_download.is_empty() {
+        bail!("Files for extension {ext_name} are not found in the extension store");
+    }
+
+    for remote_from_path in files_to_download {
+        download_helper(remote_storage, &remote_from_path, &local_sharedir).await?;
+    }
+
+    Ok(())
+}
+
+// download shared library file
+pub async fn download_library_file(
+    lib_name: &str,
+    // availiable_libraries: &Vec<RemotePath>,
+    remote_storage: &GenericRemoteStorage,
+    pgbin: &str,
+) -> Result<()> {
+    let local_libdir: PathBuf = Path::new(&get_pg_config("--pkglibdir", pgbin)).into();
+
+    let pg_version = get_pg_version(pgbin);
+    let remote_sharedir = RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap();
+
+    // TODO cache availiable_libraries list on the first read to avoid unneeded s3 calls
+    let availiable_libraries = remote_storage.list_files(Some(&remote_sharedir)).await?;
+
+    info!("list of library files {:?}", &availiable_libraries);
+
+    // check if the library file exists
+    let lib = availiable_libraries
+        .iter()
+        .find(|lib: &&RemotePath| lib.object_name().unwrap() == lib_name);
+
+    match lib {
+        None => bail!("Shared library file {lib_name} is not found in the extension store"),
+        Some(lib) => {
+            download_helper(remote_storage, &lib, &local_libdir).await?;
+        }
+    }
+
     Ok(())
 }
 

@@ -49,7 +49,7 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::{download_extension, init_remote_storage, ExtensionType};
+use compute_tools::extension_server::{get_availiable_extensions, init_remote_storage};
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -75,13 +75,6 @@ fn main() -> Result<()> {
         Some(x) => Some(init_remote_storage(x)?),
         None => None,
     };
-
-    let rt = Runtime::new().unwrap();
-    rt.block_on(async {
-        download_extension(&ext_remote_storage, ExtensionType::Shared, pgbin)
-            .await
-            .expect("download shared extensions should work");
-    });
 
     let http_port = *matches
         .get_one::<u16>("http-port")
@@ -201,7 +194,9 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        ext_remote_storage: ext_remote_storage.clone(),
+        ext_remote_storage,
+        availiable_extensions: Vec::new(),
+        availiable_libraries: Vec::new(),
     };
     let compute = Arc::new(compute_node);
 
@@ -211,6 +206,19 @@ fn main() -> Result<()> {
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
     let extension_server_port: u16 = http_port;
+
+    // exen before we have spec, we can get public availiable extensions
+    // TODO maybe convert get_availiable_extensions into ComputeNode method as well as other functions
+    let rt = Runtime::new().unwrap();
+    let copy_remote_storage = compute.ext_remote_storage.clone();
+
+    if let Some(remote_storage) = copy_remote_storage {
+        rt.block_on(async move {
+            get_availiable_extensions(&remote_storage, pgbin, None)
+                .await
+                .unwrap();
+        });
+    }
 
     if !spec_set {
         // No spec provided, hang waiting for it.
@@ -258,6 +266,17 @@ fn main() -> Result<()> {
     let _monitor_handle = launch_monitor(&compute).expect("cannot launch compute monitor thread");
     let _configurator_handle =
         launch_configurator(&compute).expect("cannot launch configurator thread");
+
+    // download private tenant extensions before postgres start
+    // TODO
+    // compute_node.availiable_extensions = get_availiable_extensions(ext_remote_storage,
+    //     pg_version, //TODO
+    //     pgbin,
+    //     tenant_id); //TODO get tenant_id from spec
+
+    // download preload shared libraries before postgres start (if any)
+    // TODO
+    // download_library_file();
 
     // Start Postgres
     let mut delay_exit = false;
