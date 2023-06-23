@@ -215,6 +215,7 @@ fn main() -> Result<()> {
             .await
             .context("get_avilable_extensions error")
     })?;
+    drop(rt);
 
     if !spec_set {
         // No spec provided, hang waiting for it.
