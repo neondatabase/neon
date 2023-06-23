@@ -1128,8 +1128,6 @@ async fn disk_usage_eviction_run(
         freed_bytes: 0,
     };
 
-    use crate::task_mgr::MGMT_REQUEST_RUNTIME;
-
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     let state = get_state(&r);
@@ -1147,7 +1145,7 @@ async fn disk_usage_eviction_run(
     let _g = cancel.drop_guard();
 
     crate::task_mgr::spawn(
-        MGMT_REQUEST_RUNTIME.handle(),
+        crate::task_mgr::BACKGROUND_RUNTIME.handle(),
         TaskKind::DiskUsageEviction,
         None,
         None,
