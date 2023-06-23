@@ -845,11 +845,6 @@ impl TimelineMetrics {
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
-        // TODO(chi): remove this once we remove Lazy for all metrics. Otherwise this will not appear in the exporter
-        // and integration test will error.
-        MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
-        MATERIALIZED_PAGE_CACHE_HIT.get();
-
         TimelineMetrics {
             tenant_id,
             timeline_id,
@@ -1324,4 +1319,8 @@ pub fn preinitialize_metrics() {
 
     // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
     BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
+
+    // Python tests need these.
+    MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
+    MATERIALIZED_PAGE_CACHE_HIT.get();
 }
