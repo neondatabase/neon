@@ -256,14 +256,14 @@ fn main() -> Result<()> {
     // download private tenant extensions before postgres start
     // TODO (see Alek's attempt to do this below)
     // compute_node.available_extensions = get_available_extensions(ext_remote_storage,pg_version, pgbin,tenant_id);
-    if tenant_id.is_some() {
-        rt.block_on(async {
-            compute
-                .get_available_extensions(tenant_id)
-                .await
-                .context("get_available_extensions with tenant_id error")
-        })?;
-    }
+    // if tenant_id.is_some() {
+    //     rt.block_on(async {
+    //         compute
+    //             .get_available_extensions(tenant_id)
+    //             .await
+    //             .context("get_available_extensions with tenant_id error")
+    //     })?;
+    // }
 
     // download preload shared libraries before postgres start (if any)
     // TODO

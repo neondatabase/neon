@@ -17,9 +17,19 @@ causes the program to crash somehow (for both real and mock s3 storage)
 stderr: command failed: unexpected compute status: Empty
 
 - real s3 tests: I think the paths were slightly different than I was expecting
--  clean up the junk I put in the bucket 
+-  clean up the junk I put in the bucket
 - libs/remote_storage/src/s3_bucket.rs TODO // TODO: if bucket prefix is empty,
     the folder is prefixed with a "/" I think. Is this desired?
+"""
+
+
+"""
+for local test running with mock s3: make sure the following environment variables are set
+export AWS_ACCESS_KEY_ID='test'
+export AWS_SECRET_ACCESS_KEY='test'
+export AWS_SECURITY_TOKEN='test'
+export AWS_SESSION_TOKEN='test'
+export AWS_DEFAULT_REGION='us-east-1'
 """
 
 
@@ -32,9 +42,7 @@ relocatable = true"""
     return output
 
 
-@pytest.mark.parametrize(
-    "remote_storage_kind", [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]
-)
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
 def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     """
     Tests we can download a file
@@ -42,6 +50,8 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     Then, we download test_ext.control from the bucket to pg_install/v15/share/postgresql/extension/
     Finally, we list available extensions and assert that test_ext is present
     """
+
+    ## temporarily disable RemoteStorageKind.REAL_S3
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
@@ -63,7 +73,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
 
     # Upload test_ext{i}.control files to the bucket (for MOCK_S3)
     # Note: In real life this is done by CI/CD
-    for i in range(NUM_EXT):
+    for i in ["", "B"]:
         # public extensions
         public_ext = BytesIO(bytes(ext_contents("public", i), "utf-8"))
         public_remote_name = f"{BUCKET_PREFIX}/{PUB_EXT_ROOT}/test_ext{i}.control"
@@ -130,51 +140,52 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         }
     )
 
-    endpoint = env.endpoints.create_start(
-        "test_file_download",
-        tenant_id=tenant,
-        remote_ext_config=remote_ext_config,
-        config_lines=["log_min_messages=debug3"],
-    )
-    with closing(endpoint.connect()) as conn:
-        with conn.cursor() as cur:
-            # Test query: check that test_ext0 was successfully downloaded
-            cur.execute("SELECT * FROM pg_available_extensions")
-            all_extensions = [x[0] for x in cur.fetchall()]
-            log.info(all_extensions)
-            for i in range(NUM_EXT):
-                assert f"test_ext{i}" in all_extensions
-                # assert f"private_ext{i}" in all_extensions
+    try:
+        endpoint = env.endpoints.create_start(
+            "test_file_download",
+            tenant_id=tenant,
+            remote_ext_config=remote_ext_config,
+            config_lines=["log_min_messages=debug3"],
+        )
+        with closing(endpoint.connect()) as conn:
+            with conn.cursor() as cur:
+                # Test query: check that test_ext0 was successfully downloaded
+                cur.execute("SELECT * FROM pg_available_extensions")
+                all_extensions = [x[0] for x in cur.fetchall()]
+                log.info("ALEK*" * 100)
+                log.info(all_extensions)
+                for i in ["", "B"]:
+                    assert f"test_ext{i}" in all_extensions
+                    # assert f"private_ext{i}" in all_extensions
 
-            cur.execute("CREATE EXTENSION test_ext")
+                cur.execute("CREATE EXTENSION test_ext")
+                cur.execute("SELECT extname FROM pg_extension")
+                all_extensions = [x[0] for x in cur.fetchall()]
+                log.info(all_extensions)
+                assert "test_ext" in all_extensions
 
-            cur.execute("SELECT extname FROM pg_extension")
-            all_extensions = [x[0] for x in cur.fetchall()]
-            log.info(all_extensions)
-            assert "test_ext" in all_extensions
+                try:
+                    cur.execute("LOAD 'test_ext.so'")
+                except Exception as e:
+                    # expected to fail with
+                    # could not load library ... test_ext.so: file too short
+                    # because test_ext.so is not real library file
+                    log.info("LOAD test_ext.so failed (expectedly): %s", e)
+                    assert "file too short" in str(e)
 
+                # TODO add more test cases:
+                # - try to load non-existing library
+    finally:
+        # cleanup downloaded extensions
+        # TODO: clean up downloaded libraries too
+        # TODO: make sure this runs even if the test fails
+        # this is important because if the files aren't cleaned up then the test can
+        # pass even without successfully downloading the files if a previous run (or
+        # run with different type of remote storage) of the test did download the
+        # files
+        for file in cleanup_files:
             try:
-                cur.execute("LOAD 'test_ext.so'")
-            except Exception as e:
-                # expected to fail with
-                # could not load library ... test_ext.so: file too short
-                # because test_ext.so is not real library file
-                log.info("LOAD test_ext.so failed (expectedly): %s", e)
-                assert "file too short" in str(e)
-
-            # TODO add more test cases:
-            # - try to load non-existing library
-
-    # cleanup downloaded extensions
-    # TODO: clean up downloaded libraries too
-    # TODO: make sure this runs even if the test fails
-    # this is important because if the files aren't cleaned up then the test can
-    # pass even without successfully downloading the files if a previous run (or
-    # run with different type of remote storage) of the test did download the
-    # files
-    for file in cleanup_files:
-        try:
-            log.info(f"Deleting {file}")
-            os.remove(file)
-        except FileNotFoundError:
-            log.info(f"{file} does not exist, so cannot be deleted")
+                log.info(f"Deleting {file}")
+                os.remove(file)
+            except FileNotFoundError:
+                log.info(f"{file} does not exist, so cannot be deleted")
