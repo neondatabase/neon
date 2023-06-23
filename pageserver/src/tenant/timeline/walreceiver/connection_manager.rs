@@ -1322,7 +1322,7 @@ mod tests {
 
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
-    async fn dummy_state(harness: &TenantHarness<'_>) -> ConnectionManagerState {
+    async fn dummy_state(harness: &TenantHarness) -> ConnectionManagerState {
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x8), crate::DEFAULT_PG_VERSION, &ctx)

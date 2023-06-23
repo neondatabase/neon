@@ -23,6 +23,7 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_checkpoint,
     last_flush_lsn_upload,
 )
+from fixtures.pageserver.utils import timeline_delete_wait_completed
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
@@ -215,7 +216,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     # Test (a subset of) pageserver global metrics
     for metric in PAGESERVER_GLOBAL_METRICS:
         ps_samples = ps_metrics.query_all(metric, {})
-        assert len(ps_samples) > 0
+        assert len(ps_samples) > 0, f"expected at least one sample for {metric}"
         for sample in ps_samples:
             labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
             log.info(f"{sample.name}{{{labels}}} {sample.value}")
@@ -331,9 +332,10 @@ def test_pageserver_with_empty_tenants(
     client.tenant_create(tenant_with_empty_timelines)
     temp_timelines = client.timeline_list(tenant_with_empty_timelines)
     for temp_timeline in temp_timelines:
-        client.timeline_delete(
-            tenant_with_empty_timelines, TimelineId(temp_timeline["timeline_id"])
+        timeline_delete_wait_completed(
+            client, tenant_with_empty_timelines, TimelineId(temp_timeline["timeline_id"])
         )
+
     files_in_timelines_dir = sum(
         1
         for _p in Path.iterdir(

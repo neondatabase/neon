@@ -394,7 +394,9 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = tenant.get_timeline(timeline_id, true)?;
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
@@ -1273,6 +1275,6 @@ async fn get_active_tenant_timeline(
         .map_err(GetActiveTimelineError::Tenant)?;
     let timeline = tenant
         .get_timeline(timeline_id, true)
-        .map_err(GetActiveTimelineError::Timeline)?;
+        .map_err(|e| GetActiveTimelineError::Timeline(anyhow::anyhow!(e)))?;
     Ok(timeline)
 }

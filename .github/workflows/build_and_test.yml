@@ -623,51 +623,6 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-
-  neon-image-depot:
-    # For testing this will run side-by-side for a few merges.
-    # This action is not really optimized yet, but gets the job done
-    runs-on: [ self-hosted, gen3, large ]
-    needs: [ tag ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Setup go
-        uses: actions/setup-go@v3
-        with:
-          go-version: '1.19'
-
-      - name: Set up Depot CLI
-        uses: depot/setup-action@v1
-
-      - name: Install Crane & ECR helper
-        run: go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
-
-      - name: Configure ECR login
-        run: |
-          mkdir /github/home/.docker/
-          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
-
-      - name: Build and push
-        uses: depot/build-push-action@v1
-        with:
-          # if no depot.json file is at the root of your repo, you must specify the project id
-          project: nrdv0s4kcs
-          push: true
-          tags: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:depot-${{needs.tag.outputs.build-tag}}
-          build-args: |
-            GIT_VERSION=${{ github.sha }}
-            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
-
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
@@ -704,6 +659,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
@@ -761,6 +717,7 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
+                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-node
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
@@ -958,6 +915,20 @@ jobs:
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1
           fi
+
+      - name: Create tag "release-${{ needs.tag.outputs.build-tag }}"
+        if: github.ref_name == 'release'
+        uses: actions/github-script@v6
+        with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: "refs/tags/release-${{ needs.tag.outputs.build-tag }}",
+              sha: context.sha,
+            })
 
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]

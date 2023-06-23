@@ -681,7 +681,7 @@ pub async fn immediate_gc(
         .get(&tenant_id)
         .map(Arc::clone)
         .with_context(|| format!("tenant {tenant_id}"))
-        .map_err(ApiError::NotFound)?;
+        .map_err(|e| ApiError::NotFound(e.into()))?;
 
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
     // Use tenant's pitr setting
@@ -730,11 +730,11 @@ pub async fn immediate_compact(
         .get(&tenant_id)
         .map(Arc::clone)
         .with_context(|| format!("tenant {tenant_id}"))
-        .map_err(ApiError::NotFound)?;
+        .map_err(|e| ApiError::NotFound(e.into()))?;
 
     let timeline = tenant
         .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+        .map_err(|e| ApiError::NotFound(e.into()))?;
 
     // Run in task_mgr to avoid race with tenant_detach operation
     let ctx = ctx.detached_child(TaskKind::Compaction, DownloadBehavior::Download);
