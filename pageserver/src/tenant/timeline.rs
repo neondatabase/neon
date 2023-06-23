@@ -986,7 +986,6 @@ impl Timeline {
             );
             assert!(self.walreceiver.lock().unwrap().is_none());
             panic!("timelines in Creating state never change state");
-            return;
         }
         match (self.current_state(), new_state) {
             (equal_state_1, equal_state_2) if equal_state_1 == equal_state_2 => {
