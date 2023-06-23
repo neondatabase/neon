@@ -1780,7 +1780,7 @@ impl Timeline {
 
         if disk_consistent_lsn == Lsn(0) {
             // If disk_consistent_lsn is 0, then we're still in bootstrap/basebackup_import/create_test_timeline.
-            // Set next_open_layer_at to initdb_lsn because to enable the put@initdb_lsn optimization in flush_frozen_layer.
+            // Set next_open_layer_at to initdb_lsn to enable the put@initdb_lsn optimization in flush_frozen_layer.
             assert!(matches!(cause, TimelineLoadCause::TimelineCreate { .. }));
             assert_eq!(
                 num_layers, 0,

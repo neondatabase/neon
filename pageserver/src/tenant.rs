@@ -2671,7 +2671,7 @@ impl Tenant {
         // TODO should we check for state in s3 as well?
         // Right now we're overwriting IndexPart but other layer files would remain.
 
-        // do a few opportunistic checks before trying to get out spot
+        // do a few opportunistic checks before trying to get our spot
         check_uninit_mark_not_exist()?;
         check_timeline_path_not_exist()?;
 
@@ -2692,8 +2692,8 @@ impl Tenant {
         };
 
         // Do all the checks again, now we know that we won.
-        check_timeline_path_not_exist()?;
         check_uninit_mark_not_exist()?;
+        check_timeline_path_not_exist()?;
 
         let create_uninit_mark_file = || {
             fs::OpenOptions::new()
