@@ -77,11 +77,10 @@ fn main() -> Result<()> {
     };
 
     let rt = Runtime::new().unwrap();
-    let copy_remote_storage = ext_remote_storage.clone();
-    rt.block_on(async move {
-        download_extension(&copy_remote_storage, ExtensionType::Shared, pgbin)
+    rt.block_on(async {
+        download_extension(&ext_remote_storage, ExtensionType::Shared, pgbin)
             .await
-            .expect("download extension should work");
+            .expect("download shared extensions should work");
     });
 
     let http_port = *matches
@@ -182,14 +181,18 @@ fn main() -> Result<()> {
         }
     };
 
+    dbg!(&spec);
     let mut new_state = ComputeState::new();
     let spec_set;
+    let tenant_id;
     if let Some(spec) = spec {
         let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
+        tenant_id = Some(pspec.tenant_id.to_string());
         new_state.pspec = Some(pspec);
         spec_set = true;
     } else {
         spec_set = false;
+        tenant_id = None;
     }
     let compute_node = ComputeNode {
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
@@ -198,7 +201,7 @@ fn main() -> Result<()> {
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
-        ext_remote_storage,
+        ext_remote_storage: ext_remote_storage.clone(),
     };
     let compute = Arc::new(compute_node);
 
@@ -222,6 +225,16 @@ fn main() -> Result<()> {
                 break;
             }
         }
+    }
+
+    // Now we have the spec, so we request the tenant specific extensions
+    if let Some(tenant_id) = tenant_id {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            download_extension(&ext_remote_storage, ExtensionType::Tenant(tenant_id), pgbin)
+                .await
+                .expect("download tenant specific extensions should work");
+        });
     }
 
     // We got all we need, update the state.
