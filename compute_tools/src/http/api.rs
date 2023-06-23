@@ -127,16 +127,16 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
 
-            let filename = route.split('/').last().unwrap();
+            let filename = route.split('/').last().unwrap().to_string();
 
             info!(
                 "serving /extension_server POST request, filename: {:?}",
-                filename
+                &filename
             );
 
             match extension_server::download_extension(
                 &compute.ext_remote_storage,
-                ExtensionType::Shared,
+                ExtensionType::Library(filename),
                 &compute.pgbin,
             )
             .await
