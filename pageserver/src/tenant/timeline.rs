@@ -129,7 +129,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(crate) layers: tokio::sync::RwLock<LayerMap<dyn PersistentLayer>>,
+    pub(crate) layers: Arc<tokio::sync::RwLock<LayerMap<dyn PersistentLayer>>>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -1418,7 +1418,7 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: tokio::sync::RwLock::new(LayerMap::default()),
+                layers: Arc::new(tokio::sync::RwLock::new(LayerMap::default())),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
@@ -3371,8 +3371,11 @@ struct CompactLevel0Phase1StatsBuilder {
     tenant_id: Option<TenantId>,
     timeline_id: Option<TimelineId>,
     read_lock_acquisition_micros: DurationRecorder,
-    read_lock_held_micros: DurationRecorder,
-    read_lock_drop_until_spawn_blocking_code_start_micros: DurationRecorder,
+    read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
+    read_lock_held_prerequisites_micros: DurationRecorder,
+    read_lock_held_compute_holes_micros: DurationRecorder,
+    read_lock_drop_micros: DurationRecorder,
+    prepare_iterators_micros: DurationRecorder,
     write_layer_files_micros: DurationRecorder,
     level0_deltas_count: Option<usize>,
     new_deltas_count: Option<usize>,
@@ -3387,9 +3390,12 @@ struct CompactLevel0Phase1Stats {
     tenant_id: TenantId,
     #[serde_as(as = "serde_with::DisplayFromStr")]
     timeline_id: TimelineId,
-    first_read_lock_acquisition_micros: RecordedDuration,
-    read_lock_held_micros: RecordedDuration,
-    read_lock_drop_until_spawn_blocking_code_start_micros: RecordedDuration,
+    read_lock_acquisition_micros: RecordedDuration,
+    read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
+    read_lock_held_prerequisites_micros: RecordedDuration,
+    read_lock_held_compute_holes_micros: RecordedDuration,
+    read_lock_drop_micros: RecordedDuration,
+    prepare_iterators_micros: RecordedDuration,
     write_layer_files_micros: RecordedDuration,
     level0_deltas_count: usize,
     new_deltas_count: usize,
@@ -3408,20 +3414,30 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
             timeline_id: value
                 .timeline_id
                 .ok_or_else(|| anyhow!("timeline_id not set"))?,
-            first_read_lock_acquisition_micros: value
+            read_lock_acquisition_micros: value
                 .read_lock_acquisition_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow!("first_read_lock_acquisition_micros not set"))?,
-            read_lock_held_micros: value
-                .read_lock_held_micros
+                .ok_or_else(|| anyhow!("read_lock_acquisition_micros not set"))?,
+            read_lock_held_spawn_blocking_startup_micros: value
+                .read_lock_held_spawn_blocking_startup_micros
                 .into_recorded()
-                .ok_or_else(|| anyhow!("read_lock_held_micros not set"))?,
-            read_lock_drop_until_spawn_blocking_code_start_micros: value
-                .read_lock_drop_until_spawn_blocking_code_start_micros
+                .ok_or_else(|| anyhow!("read_lock_held_spawn_blocking_startup_micros not set"))?,
+            read_lock_held_prerequisites_micros: value
+                .read_lock_held_prerequisites_micros
                 .into_recorded()
-                .ok_or_else(|| {
-                    anyhow!("read_lock_drop_until_spawn_blocking_code_start_micros not set")
-                })?,
+                .ok_or_else(|| anyhow!("read_lock_held_prerequisites_micros not set"))?,
+            read_lock_held_compute_holes_micros: value
+                .read_lock_held_compute_holes_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_compute_holes_micros not set"))?,
+            read_lock_drop_micros: value
+                .read_lock_drop_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_drop_micros not set"))?,
+            prepare_iterators_micros: value
+                .prepare_iterators_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("prepare_iterators_micros not set"))?,
             write_layer_files_micros: value
                 .write_layer_files_micros
                 .into_recorded()
@@ -3445,24 +3461,16 @@ impl Timeline {
     /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
     /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
     /// start of level0 files compaction, the on-demand download should be revisited as well.
-    async fn compact_level0_phase1(
-        self: &Arc<Self>,
+    fn compact_level0_phase1(
+        self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
+        layers: tokio::sync::OwnedRwLockReadGuard<LayerMap<dyn PersistentLayer>>,
+        mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
-        let mut stats = CompactLevel0Phase1StatsBuilder {
-            version: Some(2),
-            tenant_id: Some(self.tenant_id),
-            timeline_id: Some(self.timeline_id),
-            ..Default::default()
-        };
-
-        let begin = tokio::time::Instant::now();
-        let layers = self.layers.read().await;
-        let now = tokio::time::Instant::now();
-        stats.read_lock_acquisition_micros =
-            DurationRecorder::Recorded(RecordedDuration(now - begin), now);
+        stats.read_lock_held_spawn_blocking_startup_micros =
+            stats.read_lock_acquisition_micros.till_now(); // set by caller
         let mut level0_deltas = layers.get_level0_deltas()?;
         stats.level0_deltas_count = Some(level0_deltas.len());
         // Only compact if enough layers have accumulated.
@@ -3542,6 +3550,10 @@ impl Timeline {
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
 
+        stats.read_lock_held_prerequisites_micros = stats
+            .read_lock_held_spawn_blocking_startup_micros
+            .till_now();
+
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
@@ -3577,252 +3589,237 @@ impl Timeline {
             }
             prev = Some(next_key.next());
         }
+        stats.read_lock_held_compute_holes_micros =
+            stats.read_lock_held_prerequisites_micros.till_now();
         drop(layers);
-        stats.read_lock_held_micros = stats.read_lock_acquisition_micros.till_now();
+        stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
         let mut next_hole = 0; // index of next hole in holes vector
 
-        let myself = Arc::clone(self);
-        let span = info_span!("compact_level0_phase1_write_layers");
-        let ctx = ctx.attached_child(); // TODO: technically spawn_blocking task can outlive current task
-        let res = tokio::task::spawn_blocking(move || {
-            let _entered = span.enter();
-            stats.read_lock_drop_until_spawn_blocking_code_start_micros =
-                stats.read_lock_held_micros.till_now();
-            // This iterator walks through all key-value pairs from all the layers
-            // we're compacting, in key, LSN order.
-            let all_values_iter = itertools::process_results(
-                deltas_to_compact.iter().map(|l| l.iter(&ctx)),
-                |iter_iter| {
-                    iter_iter.kmerge_by(|a, b| {
-                        if let Ok((a_key, a_lsn, _)) = a {
-                            if let Ok((b_key, b_lsn, _)) = b {
-                                match a_key.cmp(b_key) {
-                                    Ordering::Less => true,
-                                    Ordering::Equal => a_lsn <= b_lsn,
-                                    Ordering::Greater => false,
-                                }
-                            } else {
-                                false
+        // This iterator walks through all key-value pairs from all the layers
+        // we're compacting, in key, LSN order.
+        let all_values_iter = itertools::process_results(
+            deltas_to_compact.iter().map(|l| l.iter(&ctx)),
+            |iter_iter| {
+                iter_iter.kmerge_by(|a, b| {
+                    if let Ok((a_key, a_lsn, _)) = a {
+                        if let Ok((b_key, b_lsn, _)) = b {
+                            match a_key.cmp(b_key) {
+                                Ordering::Less => true,
+                                Ordering::Equal => a_lsn <= b_lsn,
+                                Ordering::Greater => false,
                             }
                         } else {
-                            true
+                            false
                         }
-                    })
-                },
-            )?;
+                    } else {
+                        true
+                    }
+                })
+            },
+        )?;
 
-            // This iterator walks through all keys and is needed to calculate size used by each key
-            let mut all_keys_iter = itertools::process_results(
-                deltas_to_compact.iter().map(|l| l.key_iter(&ctx)),
-                |iter_iter| {
-                    iter_iter.kmerge_by(|a, b| {
-                        let (a_key, a_lsn, _) = a;
-                        let (b_key, b_lsn, _) = b;
-                        match a_key.cmp(b_key) {
-                            Ordering::Less => true,
-                            Ordering::Equal => a_lsn <= b_lsn,
-                            Ordering::Greater => false,
-                        }
-                    })
-                },
-            )?;
+        // This iterator walks through all keys and is needed to calculate size used by each key
+        let mut all_keys_iter = itertools::process_results(
+            deltas_to_compact.iter().map(|l| l.key_iter(&ctx)),
+            |iter_iter| {
+                iter_iter.kmerge_by(|a, b| {
+                    let (a_key, a_lsn, _) = a;
+                    let (b_key, b_lsn, _) = b;
+                    match a_key.cmp(b_key) {
+                        Ordering::Less => true,
+                        Ordering::Equal => a_lsn <= b_lsn,
+                        Ordering::Greater => false,
+                    }
+                })
+            },
+        )?;
 
-            // Merge the contents of all the input delta layers into a new set
-            // of delta layers, based on the current partitioning.
-            //
-            // We split the new delta layers on the key dimension. We iterate through the key space, and for each key, check if including the next key to the current output layer we're building would cause the layer to become too large. If so, dump the current output layer and start new one.
-            // It's possible that there is a single key with so many page versions that storing all of them in a single layer file
-            // would be too large. In that case, we also split on the LSN dimension.
-            //
-            // LSN
-            //  ^
-            //  |
-            //  | +-----------+            +--+--+--+--+
-            //  | |           |            |  |  |  |  |
-            //  | +-----------+            |  |  |  |  |
-            //  | |           |            |  |  |  |  |
-            //  | +-----------+     ==>    |  |  |  |  |
-            //  | |           |            |  |  |  |  |
-            //  | +-----------+            |  |  |  |  |
-            //  | |           |            |  |  |  |  |
-            //  | +-----------+            +--+--+--+--+
-            //  |
-            //  +--------------> key
-            //
-            //
-            // If one key (X) has a lot of page versions:
-            //
-            // LSN
-            //  ^
-            //  |                                 (X)
-            //  | +-----------+            +--+--+--+--+
-            //  | |           |            |  |  |  |  |
-            //  | +-----------+            |  |  +--+  |
-            //  | |           |            |  |  |  |  |
-            //  | +-----------+     ==>    |  |  |  |  |
-            //  | |           |            |  |  +--+  |
-            //  | +-----------+            |  |  |  |  |
-            //  | |           |            |  |  |  |  |
-            //  | +-----------+            +--+--+--+--+
-            //  |
-            //  +--------------> key
-            // TODO: this actually divides the layers into fixed-size chunks, not
-            // based on the partitioning.
-            //
-            // TODO: we should also opportunistically materialize and
-            // garbage collect what we can.
-            let mut new_layers = Vec::new();
-            let mut prev_key: Option<Key> = None;
-            let mut writer: Option<DeltaLayerWriter> = None;
-            let mut key_values_total_size = 0u64;
-            let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
-            let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
-            for x in all_values_iter {
-                let (key, lsn, value) = x?;
-                let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
-                // We need to check key boundaries once we reach next key or end of layer with the same key
-                if !same_key || lsn == dup_end_lsn {
-                    let mut next_key_size = 0u64;
-                    let is_dup_layer = dup_end_lsn.is_valid();
-                    dup_start_lsn = Lsn::INVALID;
-                    if !same_key {
-                        dup_end_lsn = Lsn::INVALID;
-                    }
-                    // Determine size occupied by this key. We stop at next key or when size becomes larger than target_file_size
-                    for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
-                        next_key_size = next_size;
-                        if key != next_key {
-                            if dup_end_lsn.is_valid() {
-                                // We are writting segment with duplicates:
-                                // place all remaining values of this key in separate segment
-                                dup_start_lsn = dup_end_lsn; // new segments starts where old stops
-                                dup_end_lsn = lsn_range.end; // there are no more values of this key till end of LSN range
-                            }
-                            break;
-                        }
-                        key_values_total_size += next_size;
-                        // Check if it is time to split segment: if total keys size is larger than target file size.
-                        // We need to avoid generation of empty segments if next_size > target_file_size.
-                        if key_values_total_size > target_file_size && lsn != next_lsn {
-                            // Split key between multiple layers: such layer can contain only single key
-                            dup_start_lsn = if dup_end_lsn.is_valid() {
-                                dup_end_lsn // new segment with duplicates starts where old one stops
-                            } else {
-                                lsn // start with the first LSN for this key
-                            };
-                            dup_end_lsn = next_lsn; // upper LSN boundary is exclusive
-                            break;
-                        }
-                    }
-                    // handle case when loop reaches last key: in this case dup_end is non-zero but dup_start is not set.
-                    if dup_end_lsn.is_valid() && !dup_start_lsn.is_valid() {
-                        dup_start_lsn = dup_end_lsn;
-                        dup_end_lsn = lsn_range.end;
-                    }
-                    if writer.is_some() {
-                        let written_size = writer.as_mut().unwrap().size();
-                        let contains_hole =
-                            next_hole < holes.len() && key >= holes[next_hole].key_range.end;
-                        // check if key cause layer overflow or contains hole...
-                        if is_dup_layer
-                            || dup_end_lsn.is_valid()
-                            || written_size + key_values_total_size > target_file_size
-                            || contains_hole
-                        {
-                            // ... if so, flush previous layer and prepare to write new one
-                            new_layers
-                                .push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
-                            writer = None;
+        stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
 
-                            if contains_hole {
-                                // skip hole
-                                next_hole += 1;
-                            }
-                        }
-                    }
-                    // Remember size of key value because at next iteration we will access next item
-                    key_values_total_size = next_key_size;
+        // Merge the contents of all the input delta layers into a new set
+        // of delta layers, based on the current partitioning.
+        //
+        // We split the new delta layers on the key dimension. We iterate through the key space, and for each key, check if including the next key to the current output layer we're building would cause the layer to become too large. If so, dump the current output layer and start new one.
+        // It's possible that there is a single key with so many page versions that storing all of them in a single layer file
+        // would be too large. In that case, we also split on the LSN dimension.
+        //
+        // LSN
+        //  ^
+        //  |
+        //  | +-----------+            +--+--+--+--+
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            |  |  |  |  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+     ==>    |  |  |  |  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            |  |  |  |  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            +--+--+--+--+
+        //  |
+        //  +--------------> key
+        //
+        //
+        // If one key (X) has a lot of page versions:
+        //
+        // LSN
+        //  ^
+        //  |                                 (X)
+        //  | +-----------+            +--+--+--+--+
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            |  |  +--+  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+     ==>    |  |  |  |  |
+        //  | |           |            |  |  +--+  |
+        //  | +-----------+            |  |  |  |  |
+        //  | |           |            |  |  |  |  |
+        //  | +-----------+            +--+--+--+--+
+        //  |
+        //  +--------------> key
+        // TODO: this actually divides the layers into fixed-size chunks, not
+        // based on the partitioning.
+        //
+        // TODO: we should also opportunistically materialize and
+        // garbage collect what we can.
+        let mut new_layers = Vec::new();
+        let mut prev_key: Option<Key> = None;
+        let mut writer: Option<DeltaLayerWriter> = None;
+        let mut key_values_total_size = 0u64;
+        let mut dup_start_lsn: Lsn = Lsn::INVALID; // start LSN of layer containing values of the single key
+        let mut dup_end_lsn: Lsn = Lsn::INVALID; // end LSN of layer containing values of the single key
+        for x in all_values_iter {
+            let (key, lsn, value) = x?;
+            let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
+            // We need to check key boundaries once we reach next key or end of layer with the same key
+            if !same_key || lsn == dup_end_lsn {
+                let mut next_key_size = 0u64;
+                let is_dup_layer = dup_end_lsn.is_valid();
+                dup_start_lsn = Lsn::INVALID;
+                if !same_key {
+                    dup_end_lsn = Lsn::INVALID;
                 }
-                if writer.is_none() {
-                    // Create writer if not initiaized yet
-                    writer = Some(DeltaLayerWriter::new(
-                        myself.conf,
-                        myself.timeline_id,
-                        myself.tenant_id,
-                        key,
+                // Determine size occupied by this key. We stop at next key or when size becomes larger than target_file_size
+                for (next_key, next_lsn, next_size) in all_keys_iter.by_ref() {
+                    next_key_size = next_size;
+                    if key != next_key {
                         if dup_end_lsn.is_valid() {
-                            // this is a layer containing slice of values of the same key
-                            debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
-                            dup_start_lsn..dup_end_lsn
+                            // We are writting segment with duplicates:
+                            // place all remaining values of this key in separate segment
+                            dup_start_lsn = dup_end_lsn; // new segments starts where old stops
+                            dup_end_lsn = lsn_range.end; // there are no more values of this key till end of LSN range
+                        }
+                        break;
+                    }
+                    key_values_total_size += next_size;
+                    // Check if it is time to split segment: if total keys size is larger than target file size.
+                    // We need to avoid generation of empty segments if next_size > target_file_size.
+                    if key_values_total_size > target_file_size && lsn != next_lsn {
+                        // Split key between multiple layers: such layer can contain only single key
+                        dup_start_lsn = if dup_end_lsn.is_valid() {
+                            dup_end_lsn // new segment with duplicates starts where old one stops
                         } else {
-                            debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
-                            lsn_range.clone()
-                        },
-                    )?);
+                            lsn // start with the first LSN for this key
+                        };
+                        dup_end_lsn = next_lsn; // upper LSN boundary is exclusive
+                        break;
+                    }
                 }
+                // handle case when loop reaches last key: in this case dup_end is non-zero but dup_start is not set.
+                if dup_end_lsn.is_valid() && !dup_start_lsn.is_valid() {
+                    dup_start_lsn = dup_end_lsn;
+                    dup_end_lsn = lsn_range.end;
+                }
+                if writer.is_some() {
+                    let written_size = writer.as_mut().unwrap().size();
+                    let contains_hole =
+                        next_hole < holes.len() && key >= holes[next_hole].key_range.end;
+                    // check if key cause layer overflow or contains hole...
+                    if is_dup_layer
+                        || dup_end_lsn.is_valid()
+                        || written_size + key_values_total_size > target_file_size
+                        || contains_hole
+                    {
+                        // ... if so, flush previous layer and prepare to write new one
+                        new_layers.push(writer.take().unwrap().finish(prev_key.unwrap().next())?);
+                        writer = None;
 
-                fail_point!("delta-layer-writer-fail-before-finish", |_| {
-                    Err(anyhow::anyhow!(
-                        "failpoint delta-layer-writer-fail-before-finish"
-                    ))
-                });
-
-                writer.as_mut().unwrap().put_value(key, lsn, value)?;
-                prev_key = Some(key);
+                        if contains_hole {
+                            // skip hole
+                            next_hole += 1;
+                        }
+                    }
+                }
+                // Remember size of key value because at next iteration we will access next item
+                key_values_total_size = next_key_size;
             }
-            if let Some(writer) = writer {
-                new_layers.push(writer.finish(prev_key.unwrap().next())?);
+            if writer.is_none() {
+                // Create writer if not initiaized yet
+                writer = Some(DeltaLayerWriter::new(
+                    self.conf,
+                    self.timeline_id,
+                    self.tenant_id,
+                    key,
+                    if dup_end_lsn.is_valid() {
+                        // this is a layer containing slice of values of the same key
+                        debug!("Create new dup layer {}..{}", dup_start_lsn, dup_end_lsn);
+                        dup_start_lsn..dup_end_lsn
+                    } else {
+                        debug!("Create new layer {}..{}", lsn_range.start, lsn_range.end);
+                        lsn_range.clone()
+                    },
+                )?);
             }
 
-            // Sync layers
-            if !new_layers.is_empty() {
-                let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
+            fail_point!("delta-layer-writer-fail-before-finish", |_| {
+                Err(anyhow::anyhow!("failpoint delta-layer-writer-fail-before-finish").into())
+            });
 
-                // Fsync all the layer files and directory using multiple threads to
-                // minimize latency.
-                par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
+            writer.as_mut().unwrap().put_value(key, lsn, value)?;
+            prev_key = Some(key);
+        }
+        if let Some(writer) = writer {
+            new_layers.push(writer.finish(prev_key.unwrap().next())?);
+        }
 
-                par_fsync::par_fsync(&[myself
-                    .conf
-                    .timeline_path(&myself.timeline_id, &myself.tenant_id)])
+        // Sync layers
+        if !new_layers.is_empty() {
+            let mut layer_paths: Vec<PathBuf> = new_layers.iter().map(|l| l.path()).collect();
+
+            // Fsync all the layer files and directory using multiple threads to
+            // minimize latency.
+            par_fsync::par_fsync(&layer_paths).context("fsync all new layers")?;
+
+            par_fsync::par_fsync(&[self.conf.timeline_path(&self.timeline_id, &self.tenant_id)])
                 .context("fsync of timeline dir")?;
 
-                layer_paths.pop().unwrap();
+            layer_paths.pop().unwrap();
+        }
+
+        stats.write_layer_files_micros = stats.prepare_iterators_micros.till_now();
+        stats.new_deltas_count = Some(new_layers.len());
+        stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
+
+        drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
+
+        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
+            .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
+        {
+            Ok(stats_json) => {
+                info!(
+                    stats_json = stats_json.as_str(),
+                    "compact_level0_phase1 stats available"
+                )
             }
-
-            stats.write_layer_files_micros = stats
-                .read_lock_drop_until_spawn_blocking_code_start_micros
-                .till_now();
-            stats.new_deltas_count = Some(new_layers.len());
-            stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
-
-            drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
-
-            match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
-                .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
-            {
-                Ok(stats_json) => {
-                    info!(
-                        stats_json = stats_json.as_str(),
-                        "compact_level0_phase1 stats available"
-                    )
-                }
-                Err(e) => {
-                    warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
-                }
+            Err(e) => {
+                warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
             }
+        }
 
-            Ok(CompactLevel0Phase1Result {
-                new_layers,
-                deltas_to_compact,
-            })
+        Ok(CompactLevel0Phase1Result {
+            new_layers,
+            deltas_to_compact,
         })
-        .await
-        .context("spawn_blocking")
-        .map_err(CompactionError::Other)??;
-        Ok(res)
     }
 
     ///
@@ -3838,9 +3835,36 @@ impl Timeline {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = self
-            .compact_level0_phase1(layer_removal_cs.clone(), target_file_size, ctx)
-            .await?;
+        } = {
+            let phase1_span = info_span!("compact_level0_phase1");
+            let myself = Arc::clone(self);
+            let ctx = ctx.attached_child(); // technically, the spawn_blocking can outlive this future
+            let mut stats = CompactLevel0Phase1StatsBuilder {
+                version: Some(2),
+                tenant_id: Some(self.tenant_id),
+                timeline_id: Some(self.timeline_id),
+                ..Default::default()
+            };
+
+            let begin = tokio::time::Instant::now();
+            let phase1_layers_locked = Arc::clone(&self.layers).read_owned().await;
+            let now = tokio::time::Instant::now();
+            stats.read_lock_acquisition_micros =
+                DurationRecorder::Recorded(RecordedDuration(now - begin), now);
+            let layer_removal_cs = layer_removal_cs.clone();
+            tokio::task::spawn_blocking(move || {
+                let _entered = phase1_span.enter();
+                myself.compact_level0_phase1(
+                    layer_removal_cs,
+                    phase1_layers_locked,
+                    stats,
+                    target_file_size,
+                    &ctx,
+                )
+            })
+            .await
+            .context("spawn_blocking")??
+        };
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
