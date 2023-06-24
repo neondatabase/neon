@@ -190,14 +190,14 @@ fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
                         CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
                         IF array_length(roles, 1) IS NOT NULL THEN
                             EXECUTE format('GRANT neon_superuser TO %s',
-                                           array_to_string(roles, ', '));
+                                           array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(roles) as x), ', '));
                             FOREACH r IN ARRAY roles LOOP
-                                EXECUTE format('ALTER ROLE %s CREATEROLE CREATEDB', r);
+                                EXECUTE format('ALTER ROLE %s CREATEROLE CREATEDB', quote_ident(r));
                             END LOOP;
                         END IF;
                         IF array_length(dbs, 1) IS NOT NULL THEN
                             EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %s TO neon_superuser',
-                                           array_to_string(dbs, ', '));
+                                           array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(dbs) as x), ', '));
                         END IF;
                     END IF;
                 END
