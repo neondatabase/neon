@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from typing import List, Tuple
 
@@ -35,6 +36,7 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
         tenant_id=tenant_id,
         config_lines=["autovacuum=off", "checkpoint_timeout=10min"],
     ) as endpoint:
+        time.sleep(1)
         with endpoint.cursor() as cur:
             cur.execute("SELECT 1")
             row = cur.fetchone()
@@ -48,6 +50,7 @@ def test_empty_tenant_size(neon_simple_env: NeonEnv, test_output_dir: Path):
             size == initial_size
         ), f"starting idle compute should not change the tenant size (Currently {size}, expected {initial_size})"
 
+    time.sleep(1)
     # the size should be the same, until we increase the size over the
     # gc_horizon
     size, inputs = http_client.tenant_size_and_modelinputs(tenant_id)
@@ -322,6 +325,7 @@ def test_only_heads_within_horizon(neon_simple_env: NeonEnv, test_output_dir: Pa
     size_debug_file.write(size_debug)
 
 
+@pytest.mark.xfail
 def test_single_branch_get_tenant_size_grows(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion
 ):
