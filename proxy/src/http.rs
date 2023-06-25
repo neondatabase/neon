@@ -6,6 +6,8 @@ pub mod server;
 pub mod sql_over_http;
 pub mod websocket;
 
+use std::time::Duration;
+
 pub use reqwest::{Request, Response, StatusCode};
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
 
@@ -17,6 +19,17 @@ use reqwest_middleware::RequestBuilder;
 /// We deliberately don't want to replace this with a public static.
 pub fn new_client() -> ClientWithMiddleware {
     reqwest_middleware::ClientBuilder::new(reqwest::Client::new())
+        .with(reqwest_tracing::TracingMiddleware::default())
+        .build()
+}
+
+pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
+    let timeout_client = reqwest::ClientBuilder::new()
+        .timeout(default_timout)
+        .build()
+        .expect("Failed to create http client with timeout");
+
+    reqwest_middleware::ClientBuilder::new(timeout_client)
         .with(reqwest_tracing::TracingMiddleware::default())
         .build()
 }

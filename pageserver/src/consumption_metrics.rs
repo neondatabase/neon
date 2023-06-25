@@ -24,6 +24,8 @@ const RESIDENT_SIZE: &str = "resident_size";
 const REMOTE_STORAGE_SIZE: &str = "remote_storage_size";
 const TIMELINE_LOGICAL_SIZE: &str = "timeline_logical_size";
 
+const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[serde_as]
 #[derive(Serialize, Debug)]
 struct Ids {
@@ -73,7 +75,10 @@ pub async fn collect_metrics(
     );
 
     // define client here to reuse it for all requests
-    let client = reqwest::Client::new();
+    let client = reqwest::ClientBuilder::new()
+        .timeout(DEFAULT_HTTP_REPORTING_TIMEOUT)
+        .build()
+        .expect("Failed to create http client with timeout");
     let mut cached_metrics: HashMap<PageserverConsumptionMetricsKey, u64> = HashMap::new();
     let mut prev_iteration_time: std::time::Instant = std::time::Instant::now();
 
