@@ -278,31 +278,38 @@ pub async fn collect_metrics_iteration(
         })
         .expect("PageserverConsumptionMetric should not fail serialization");
 
-        let res = client
-            .post(metric_collection_endpoint.clone())
-            .json(&chunk_json)
-            .send()
-            .await;
+        let mut attempt = 0;
 
-        match res {
-            Ok(res) => {
-                if res.status().is_success() {
-                    // update cached metrics after they were sent successfully
-                    for (curr_key, curr_val) in chunk.iter() {
-                        cached_metrics.insert(curr_key.clone(), *curr_val);
-                    }
-                } else {
-                    error!("metrics endpoint refused the sent metrics: {:?}", res);
-                    for metric in chunk_to_send.iter() {
-                        // Report if the metric value is suspiciously large
-                        if metric.value > (1u64 << 40) {
+        while attempt < 3 {
+            let res = client
+                .post(metric_collection_endpoint.clone())
+                .json(&chunk_json)
+                .send()
+                .await;
+
+            match res {
+                Ok(res) => {
+                    if res.status().is_success() {
+                        // update cached metrics after they were sent successfully
+                        for (curr_key, curr_val) in chunk.iter() {
+                            cached_metrics.insert(curr_key.clone(), *curr_val);
+                        }
+                    } else {
+                        error!("metrics endpoint refused the sent metrics: {:?}", res);
+                        for metric in chunk_to_send
+                            .iter()
+                            .filter(|metric| metric.value > (1u64 << 40))
+                        {
+                            // Report if the metric value is suspiciously large
                             error!("potentially abnormal metric value: {:?}", metric);
                         }
                     }
+                    break;
                 }
-            }
-            Err(err) => {
-                error!("failed to send metrics: {:?}", err);
+                Err(err) => {
+                    error!("failed to send metrics: {:?}", err);
+                    attempt += 1;
+                }
             }
         }
     }
