@@ -555,13 +555,14 @@ impl Timeline {
             None => None,
         };
 
-        let mut reconstruct_state = ValueReconstructState {
+        let reconstruct_state = ValueReconstructState {
             records: Vec::new(),
             img: cached_page_img,
         };
 
         let timer = self.metrics.get_reconstruct_data_time_histo.start_timer();
-        self.get_reconstruct_data(key, lsn, &mut reconstruct_state, ctx)
+        let reconstruct_state = self
+            .get_reconstruct_data(key, lsn, reconstruct_state, ctx)
             .await?;
         timer.stop_and_record();
 
@@ -2352,9 +2353,9 @@ impl Timeline {
         &self,
         key: Key,
         request_lsn: Lsn,
-        reconstruct_state: &mut ValueReconstructState,
+        mut reconstruct_state: ValueReconstructState,
         ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
+    ) -> Result<ValueReconstructState, PageReconstructError> {
         // Start from the current timeline.
         let mut timeline_owned;
         let mut timeline = self;
@@ -2384,12 +2385,12 @@ impl Timeline {
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
-                ValueReconstructResult::Complete => return Ok(()),
+                ValueReconstructResult::Complete => return Ok(reconstruct_state),
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
                         MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
-                        return Ok(());
+                        return Ok(reconstruct_state);
                     }
                     if prev_lsn <= cont_lsn {
                         // Didn't make any progress in last iteration. Error out to avoid
@@ -2493,13 +2494,19 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match open_layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
-                                Ok(result) => result,
+                            result = match Arc::clone(open_layer)
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx.attached_child(),
+                                )
+                                .await
+                            {
+                                Ok((new_reconstruct_state, result)) => {
+                                    reconstruct_state = new_reconstruct_state;
+                                    result
+                                }
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
@@ -2520,13 +2527,19 @@ impl Timeline {
                         if cont_lsn > start_lsn {
                             //info!("CHECKING for {} at {} on frozen layer {}", key, cont_lsn, frozen_layer.filename().display());
                             let lsn_floor = max(cached_lsn + 1, start_lsn);
-                            result = match frozen_layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
-                                Ok(result) => result,
+                            result = match Arc::clone(frozen_layer)
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx.attached_child(),
+                                )
+                                .await
+                            {
+                                Ok((new_reconstruct_state, result)) => {
+                                    reconstruct_state = new_reconstruct_state;
+                                    result
+                                }
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
@@ -2555,13 +2568,19 @@ impl Timeline {
                             // Get all the data needed to reconstruct the page version from this layer.
                             // But if we have an older cached page image, no need to go past that.
                             let lsn_floor = max(cached_lsn + 1, lsn_floor);
-                            result = match layer.get_value_reconstruct_data(
-                                key,
-                                lsn_floor..cont_lsn,
-                                reconstruct_state,
-                                ctx,
-                            ) {
-                                Ok(result) => result,
+                            result = match Arc::clone(&layer)
+                                .get_value_reconstruct_data(
+                                    key,
+                                    lsn_floor..cont_lsn,
+                                    reconstruct_state,
+                                    ctx.attached_child(),
+                                )
+                                .await
+                            {
+                                Ok((new_reconstruct_state, result)) => {
+                                    reconstruct_state = new_reconstruct_state;
+                                    result
+                                }
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
                             cont_lsn = lsn_floor;
