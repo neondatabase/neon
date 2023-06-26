@@ -667,7 +667,7 @@ class NeonEnvBuilder:
             )
         elif remote_storage_kind == RemoteStorageKind.REAL_S3:
             self.enable_real_s3_remote_storage(
-                test_name=test_name, 
+                test_name=test_name,
                 force_enable=force_enable,
                 enable_remote_extensions=enable_remote_extensions,
             )

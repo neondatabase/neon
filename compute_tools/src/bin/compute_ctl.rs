@@ -190,21 +190,22 @@ fn main() -> Result<()> {
         if let Some(ref ext_remote_storage) = ext_remote_storage {
             new_state.extensions.available_extensions =
                 rt.block_on(get_available_extensions(&ext_remote_storage, pgbin, None))?;
-        }
 
-        // append private tenant extensions
-        // TODO not implemented yet
-        // let private_ext_list = rt.block_on(get_available_extensions(
-        //     &ext_remote_storage,
-        //     pgbin,
-        //     tenant_id,
-        // ))?;
-        // new_state.extensions.available_extensions.extend(private_ext_list);
+            // append private tenant extensions
+            let private_ext_list = rt.block_on(get_available_extensions(
+                &ext_remote_storage,
+                pgbin,
+                tenant_id,
+            ))?;
+            new_state
+                .extensions
+                .available_extensions
+                .extend(private_ext_list);
+        }
 
         spec_set = true;
     } else {
         spec_set = false;
-        tenant_id = None;
     }
     let compute_node = ComputeNode {
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,

@@ -11,28 +11,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pg_version import PgVersion
 
-"""
-TODO Alek:
-Calling list_files on a non-existing path returns [] (expectedly) but then
-causes the program to crash somehow (for both real and mock s3 storage)
-stderr: command failed: unexpected compute status: Empty
-
-- real s3 tests: I think the paths were slightly different than I was expecting
--  clean up the junk I put in the bucket
-- libs/remote_storage/src/s3_bucket.rs TODO // TODO: if bucket prefix is empty,
-    the folder is prefixed with a "/" I think. Is this desired?
-"""
-
-
-"""
-for local test running with mock s3: make sure the following environment variables are set
-export AWS_ACCESS_KEY_ID='test'
-export AWS_SECRET_ACCESS_KEY='test'
-export AWS_SECURITY_TOKEN='test'
-export AWS_SESSION_TOKEN='test'
-export AWS_DEFAULT_REGION='us-east-1'
-"""
-
 
 def ext_contents(owner, i):
     output = f"""# mock {owner} extension{i}
@@ -43,7 +21,10 @@ relocatable = true"""
     return output
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
+# NOTE: you must have appropriate AWS credentials to run REAL_S3 test.
+@pytest.mark.parametrize(
+    "remote_storage_kind", [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]
+)
 def test_file_download(
     neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind, pg_version: PgVersion
 ):
@@ -53,8 +34,6 @@ def test_file_download(
     Then, we download test_ext.control from the bucket to pg_install/v15/share/postgresql/extension/
     Finally, we list available extensions and assert that test_ext is present
     """
-
-    ## temporarily disable RemoteStorageKind.REAL_S3
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
@@ -81,19 +60,18 @@ def test_file_download(
         public_remote_name = f"{BUCKET_PREFIX}/{PUB_EXT_ROOT}/test_ext{i}.control"
         public_local_name = f"pg_install/{PUB_EXT_ROOT}/test_ext{i}.control"
         # private extensions
-        BytesIO(bytes(ext_contents(str(tenant_id), i), "utf-8"))
-        f"{BUCKET_PREFIX}/{str(tenant_id)}/private_ext{i}.control"
+        private_ext = BytesIO(bytes(ext_contents(str(tenant_id), i), "utf-8"))
+        private_remote_name = f"{BUCKET_PREFIX}/{str(tenant_id)}/private_ext{i}.control"
         private_local_name = f"pg_install/{PUB_EXT_ROOT}/private_ext{i}.control"
 
         cleanup_files += [public_local_name, private_local_name]
 
-        if remote_storage_kind == RemoteStorageKind.MOCK_S3:
-            env.remote_storage_client.upload_fileobj(
-                public_ext, env.ext_remote_storage.bucket_name, public_remote_name
-            )
-            # env.remote_storage_client.upload_fileobj(
-            #     private_ext, env.ext_remote_storage.bucket_name, private_remote_name
-            # )
+        env.remote_storage_client.upload_fileobj(
+            public_ext, env.ext_remote_storage.bucket_name, public_remote_name
+        )
+        env.remote_storage_client.upload_fileobj(
+            private_ext, env.ext_remote_storage.bucket_name, private_remote_name
+        )
 
     TEST_EXT_SQL_PATH = f"v{pg_version}/share/postgresql/extension/test_ext0--1.0.sql"
     test_ext_sql_file = BytesIO(
@@ -119,16 +97,11 @@ def test_file_download(
             111
             """
         )
-        # TODO: maybe if we are using REAL_S3 storage, we should not upload files
-        # or at least, maybe we should delete them afterwards
         env.remote_storage_client.upload_fileobj(
             test_lib_file,
             env.ext_remote_storage.bucket_name,
             os.path.join(BUCKET_PREFIX, TEST_LIB_PATH),
         )
-
-    tenant, _ = env.neon_cli.create_tenant()
-    env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)
 
     region = "us-east-1"
     if remote_storage_kind == RemoteStorageKind.REAL_S3:
@@ -146,7 +119,7 @@ def test_file_download(
     try:
         endpoint = env.endpoints.create_start(
             "test_file_download",
-            tenant_id=tenant,
+            tenant_id=tenant_id,
             remote_ext_config=remote_ext_config,
             config_lines=["log_min_messages=debug3"],
         )
@@ -159,7 +132,7 @@ def test_file_download(
                 log.info(all_extensions)
                 for i in range(5):
                     assert f"test_ext{i}" in all_extensions
-                    # assert f"private_ext{i}" in all_extensions
+                    assert f"private_ext{i}" in all_extensions
 
                 cur.execute("CREATE EXTENSION test_ext0")
                 cur.execute("SELECT extname FROM pg_extension")
@@ -181,7 +154,7 @@ def test_file_download(
     finally:
         # cleanup downloaded extensions
         # TODO: clean up downloaded libraries too
-        # TODO: make sure this runs even if the test fails
+        # This runs even if the test fails
         # this is important because if the files aren't cleaned up then the test can
         # pass even without successfully downloading the files if a previous run (or
         # run with different type of remote storage) of the test did download the

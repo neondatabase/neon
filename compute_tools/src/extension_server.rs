@@ -92,9 +92,10 @@ pub async fn get_available_extensions(
     let remote_sharedir = match tenant_id {
         None => RemotePath::new(&Path::new(&pg_version).join("share/postgresql/extension"))?,
         Some(tenant_id) => RemotePath::new(
-            &Path::new(&pg_version)
-                .join(&tenant_id.to_string())
-                .join("share/postgresql/extension"),
+            // &Path::new(&pg_version)
+            //     .join(&tenant_id.to_string())
+            //     .join("share/postgresql/extension"),
+            Path::new(&tenant_id.to_string()),
         )?,
     };
 
