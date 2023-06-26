@@ -278,9 +278,9 @@ pub async fn collect_metrics_iteration(
         })
         .expect("PageserverConsumptionMetric should not fail serialization");
 
-        let mut attempt = 0;
+        const MAX_RETRIES: u32 = 3;
 
-        while attempt < 3 {
+        for attempt in 0..MAX_RETRIES {
             let res = client
                 .post(metric_collection_endpoint.clone())
                 .json(&chunk_json)
@@ -307,8 +307,7 @@ pub async fn collect_metrics_iteration(
                     break;
                 }
                 Err(err) => {
-                    error!("failed to send metrics: {:?}", err);
-                    attempt += 1;
+                    error!("failed to send metrics attempt:{attempt}: error: {:?}", err);
                 }
             }
         }
