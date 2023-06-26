@@ -223,13 +223,14 @@ impl Layer for DeltaLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
+            "----- delta layer for ten {} tli {} keys {}-{} lsn {}-{} size {} ----",
             self.desc.tenant_id,
             self.desc.timeline_id,
             self.desc.key_range.start,
             self.desc.key_range.end,
             self.desc.lsn_range.start,
-            self.desc.lsn_range.end
+            self.desc.lsn_range.end,
+            self.desc.file_size,
         );
 
         if !verbose {

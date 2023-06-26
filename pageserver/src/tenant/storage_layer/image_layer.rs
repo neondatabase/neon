@@ -149,17 +149,18 @@ impl std::fmt::Debug for ImageLayerInner {
     }
 }
 
-#[async_trait::async_trait]
 impl Layer for ImageLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
-            "----- image layer for ten {} tli {} key {}-{} at {} ----",
+            "----- image layer for ten {} tli {} key {}-{} at {} incremental {} size {} ----",
             self.desc.tenant_id,
             self.desc.timeline_id,
             self.desc.key_range.start,
             self.desc.key_range.end,
-            self.lsn
+            self.lsn,
+            self.desc.is_incremental,
+            self.desc.file_size
         );
 
         if !verbose {
@@ -193,7 +194,7 @@ impl Layer for ImageLayer {
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
+        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
 
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -213,7 +214,11 @@ impl Layer for ImageLayer {
             reconstruct_state.img = Some((self.lsn, value));
             Ok((reconstruct_state, ValueReconstructResult::Complete))
         } else {
-            Ok((reconstruct_state, ValueReconstructResult::Missing))
+            if self.desc.is_incremental {
+                Ok((reconstruct_state, ValueReconstructResult::Continue))
+            } else {
+                Ok((reconstruct_state, ValueReconstructResult::Missing))
+            }
         }
     }
 
