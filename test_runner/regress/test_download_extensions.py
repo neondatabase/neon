@@ -42,7 +42,7 @@ relocatable = true"""
     return output
 
 
-@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.REAL_S3])
+@pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
 def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
     """
     Tests we can download a file
@@ -66,7 +66,6 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     assert env.ext_remote_storage is not None
     assert env.remote_storage_client is not None
 
-    NUM_EXT = 5
     PUB_EXT_ROOT = "v14/share/postgresql/extension"
     BUCKET_PREFIX = "5314225671"  # this is the build number
     cleanup_files = []
@@ -79,8 +78,8 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         public_remote_name = f"{BUCKET_PREFIX}/{PUB_EXT_ROOT}/test_ext{i}.control"
         public_local_name = f"pg_install/{PUB_EXT_ROOT}/test_ext{i}.control"
         # private extensions
-        private_ext = BytesIO(bytes(ext_contents(str(tenant_id), i), "utf-8"))
-        private_remote_name = f"{BUCKET_PREFIX}/{str(tenant_id)}/private_ext{i}.control"
+        BytesIO(bytes(ext_contents(str(tenant_id), i), "utf-8"))
+        f"{BUCKET_PREFIX}/{str(tenant_id)}/private_ext{i}.control"
         private_local_name = f"pg_install/{PUB_EXT_ROOT}/private_ext{i}.control"
 
         cleanup_files += [public_local_name, private_local_name]
@@ -158,20 +157,20 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
                     assert f"test_ext{i}" in all_extensions
                     # assert f"private_ext{i}" in all_extensions
 
-                # cur.execute("CREATE EXTENSION test_ext0")
-                # cur.execute("SELECT extname FROM pg_extension")
-                # all_extensions = [x[0] for x in cur.fetchall()]
-                # log.info(all_extensions)
-                # assert "test_ext0" in all_extensions
+                cur.execute("CREATE EXTENSION test_ext0")
+                cur.execute("SELECT extname FROM pg_extension")
+                all_extensions = [x[0] for x in cur.fetchall()]
+                log.info(all_extensions)
+                assert "test_ext0" in all_extensions
 
-                # try:
-                #     cur.execute("LOAD 'test_ext0.so'")
-                # except Exception as e:
-                #     # expected to fail with
-                #     # could not load library ... test_ext.so: file too short
-                #     # because test_ext.so is not real library file
-                #     log.info("LOAD test_ext0.so failed (expectedly): %s", e)
-                #     assert "file too short" in str(e)
+                try:
+                    cur.execute("LOAD 'test_ext0.so'")
+                except Exception as e:
+                    # expected to fail with
+                    # could not load library ... test_ext.so: file too short
+                    # because test_ext.so is not real library file
+                    log.info("LOAD test_ext0.so failed (expectedly): %s", e)
+                    assert "file too short" in str(e)
 
                 # TODO add more test cases:
                 # - try to load non-existing library

@@ -10,6 +10,21 @@ use tokio::io::AsyncReadExt;
 use tracing::info;
 use utils::id::TenantId;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionsState {
+    pub available_extensions: Vec<RemotePath>,
+    pub available_libraries: Vec<RemotePath>,
+}
+
+impl ExtensionsState {
+    pub fn new() -> Self {
+        ExtensionsState {
+            available_extensions: Vec::new(),
+            available_libraries: Vec::new(),
+        }
+    }
+}
+
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
     // where argument is a flag like `--version` or `--sharedir`
@@ -84,7 +99,7 @@ pub async fn get_available_extensions(
     };
 
     info!(
-        "get_availiable_extensions remote_sharedir: {:?}, local_sharedir: {:?}",
+        "get_available_extensions remote_sharedir: {:?}, local_sharedir: {:?}",
         remote_sharedir, local_sharedir
     );
 
@@ -100,30 +115,68 @@ pub async fn get_available_extensions(
     Ok(from_paths)
 }
 
+// Download requested shared_preload_libraries
+//
+// Note that tenant_id is not optional here, because we only download libraries
+// after we know the tenant spec and the tenant_id.
+//
+// return list of all library files to use it in the future searches
+pub async fn get_available_libraries(
+    remote_storage: &GenericRemoteStorage,
+    pgbin: &str,
+    _tenant_id: TenantId,
+    preload_libraries: &Vec<String>,
+) -> anyhow::Result<Vec<RemotePath>> {
+    let local_libdir: PathBuf = Path::new(&get_pg_config("--pkglibdir", pgbin)).into();
+
+    let pg_version = get_pg_version(pgbin);
+    let remote_libdir = RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap();
+
+    let available_libraries = remote_storage.list_files(Some(&remote_libdir)).await?;
+
+    // TODO list private libraries as well
+    //
+    // let remote_libdir_private = RemotePath::new(&Path::new(&pg_version).join(tenant_id.to_string()).join("lib/")).unwrap();
+    // let available_libraries_private = remote_storage.list_files(Some(&remote_libdir_private)).await?;
+    // available_libraries.extend(available_libraries_private);
+
+    info!("list of library files {:?}", &available_libraries);
+
+    // download all requested libraries
+    for lib_name in preload_libraries {
+        let lib_path = available_libraries
+            .iter()
+            .find(|lib: &&RemotePath| lib.object_name().unwrap() == lib_name);
+
+        match lib_path {
+            None => bail!("Shared library file {lib_name} is not found in the extension store"),
+            Some(lib_path) => {
+                download_helper(remote_storage, &lib_path, &local_libdir).await?;
+                info!("downloaded library {:?}", &lib_path);
+            }
+        }
+    }
+
+    return Ok(available_libraries);
+}
+
 // download all sql files for a given extension name
 //
 pub async fn download_extension_sql_files(
     ext_name: &str,
-    //availiable_extensions: &Vec<RemotePath>,
     remote_storage: &GenericRemoteStorage,
+    available_extensions: &Vec<RemotePath>,
     pgbin: &str,
 ) -> Result<()> {
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
 
-    let pg_version = get_pg_version(pgbin);
-    let remote_sharedir =
-        RemotePath::new(&Path::new(&pg_version).join("share/postgresql/extension")).unwrap();
-
-    // TODO cache availiable_extensions list on the first read to avoid unneeded s3 calls
-    let availiable_extensions = remote_storage.list_files(Some(&remote_sharedir)).await?;
-
     info!(
-        "list of availiable_extension files {:?}",
-        &availiable_extensions
+        "list of available_extension files {:?}",
+        &available_extensions
     );
 
     // check if extension files exist
-    let files_to_download: Vec<&RemotePath> = availiable_extensions
+    let files_to_download: Vec<&RemotePath> = available_extensions
         .iter()
         .filter(|ext| {
             ext.extension() == Some("sql") && ext.object_name().unwrap().starts_with(ext_name)
@@ -144,22 +197,26 @@ pub async fn download_extension_sql_files(
 // download shared library file
 pub async fn download_library_file(
     lib_name: &str,
-    // availiable_libraries: &Vec<RemotePath>,
+    available_libraries: &Vec<RemotePath>,
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
 ) -> Result<()> {
     let local_libdir: PathBuf = Path::new(&get_pg_config("--pkglibdir", pgbin)).into();
 
     let pg_version = get_pg_version(pgbin);
-    let remote_sharedir = RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap();
+    let remote_libdir = RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap();
 
-    // TODO cache availiable_libraries list on the first read to avoid unneeded s3 calls
-    let availiable_libraries = remote_storage.list_files(Some(&remote_sharedir)).await?;
+    info!(
+        "cached list of available_libraries files {:?}",
+        &available_libraries
+    );
+    // TODO cache available_libraries list on the first read to avoid unneeded s3 calls
+    let available_libraries = remote_storage.list_files(Some(&remote_libdir)).await?;
 
-    info!("list of library files {:?}", &availiable_libraries);
+    info!("list of library files {:?}", &available_libraries);
 
     // check if the library file exists
-    let lib = availiable_libraries
+    let lib = available_libraries
         .iter()
         .find(|lib: &&RemotePath| lib.object_name().unwrap() == lib_name);
 

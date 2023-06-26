@@ -16,8 +16,6 @@ use tokio::task;
 use tracing::{error, info};
 use tracing_utils::http::OtelName;
 
-use crate::extension_server::{download_extension_sql_files, download_library_file};
-
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
     ComputeStatusResponse {
         start_time: state.start_time,

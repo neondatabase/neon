@@ -311,7 +311,7 @@ impl Endpoint {
 
                 // TODO: use future host field from safekeeper spec
                 // Pass the list of safekeepers to the replica so that it can connect to any of them,
-                // whichever is availiable.
+                // whichever is available.
                 let sk_ports = self
                     .env
                     .safekeepers
