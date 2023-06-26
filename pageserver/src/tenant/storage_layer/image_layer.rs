@@ -213,7 +213,11 @@ impl Layer for ImageLayer {
             reconstruct_state.img = Some((self.lsn, value));
             Ok(ValueReconstructResult::Complete)
         } else {
-            Ok(ValueReconstructResult::Missing)
+            if self.desc.is_incremental {
+                Ok(ValueReconstructResult::Continue)
+            } else {
+                Ok(ValueReconstructResult::Missing)
+            }
         }
     }
 

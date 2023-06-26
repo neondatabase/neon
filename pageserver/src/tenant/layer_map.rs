@@ -703,6 +703,11 @@ impl LayerMap {
             frozen_layer.dump(verbose, ctx)?;
         }
 
+        println!("l0_deltas:");
+        for layer in &self.l0_delta_layers {
+            layer.dump(verbose, ctx)?;
+        }
+
         println!("historic_layers:");
         for layer in self.iter_historic_layers() {
             layer.dump(verbose, ctx)?;
