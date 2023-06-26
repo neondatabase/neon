@@ -108,20 +108,21 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
         os.path.join(BUCKET_PREFIX, TEST_EXT_SQL_PATH),
     )
 
-    # upload some fake library file
-    TEST_LIB_PATH = "v14/lib/test_ext0.so"
-    test_lib_file = BytesIO(
-        b"""
-           111
-        """
-    )
-    # TODO: maybe if we are using REAL_S3 storage, we should not upload files
-    # or at least, maybe we should delete them afterwards
-    env.remote_storage_client.upload_fileobj(
-        test_lib_file,
-        env.ext_remote_storage.bucket_name,
-        os.path.join(BUCKET_PREFIX, TEST_LIB_PATH),
-    )
+    # upload some fake library files
+    for i in range(2):
+        TEST_LIB_PATH = f"v14/lib/test_ext{i}.so"
+        test_lib_file = BytesIO(
+            b"""
+            111
+            """
+        )
+        # TODO: maybe if we are using REAL_S3 storage, we should not upload files
+        # or at least, maybe we should delete them afterwards
+        env.remote_storage_client.upload_fileobj(
+            test_lib_file,
+            env.ext_remote_storage.bucket_name,
+            os.path.join(BUCKET_PREFIX, TEST_LIB_PATH),
+        )
 
     tenant, _ = env.neon_cli.create_tenant()
     env.neon_cli.create_timeline("test_file_download", tenant_id=tenant)

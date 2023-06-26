@@ -143,10 +143,23 @@ pub async fn get_available_libraries(
     info!("list of library files {:?}", &available_libraries);
 
     // download all requested libraries
+    // add file extension if it isn't in the filename
     for lib_name in preload_libraries {
+        let lib_name_with_ext = if !lib_name.ends_with(".so") {
+            lib_name.to_owned() + ".so"
+        } else {
+            lib_name.to_string()
+        };
+
+        info!("looking for library {:?}", &lib_name_with_ext);
+
+        for lib in available_libraries.iter() {
+            info!("object_name {}", lib.object_name().unwrap());
+        }
+
         let lib_path = available_libraries
             .iter()
-            .find(|lib: &&RemotePath| lib.object_name().unwrap() == lib_name);
+            .find(|lib: &&RemotePath| lib.object_name().unwrap() == lib_name_with_ext);
 
         match lib_path {
             None => bail!("Shared library file {lib_name} is not found in the extension store"),

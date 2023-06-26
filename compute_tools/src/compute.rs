@@ -452,6 +452,8 @@ impl ComputeNode {
         let spec = &pspec.spec;
         let mut libs_vec = Vec::new();
 
+        info!("shared_preload_libraries is set to {:?}", libs_vec);
+
         if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
             libs_vec = libs
                 .split(',')
@@ -460,7 +462,12 @@ impl ComputeNode {
                 .collect();
         }
 
-        info!("shared_preload_libraries is set to {:?}", libs_vec);
+        // TEST ONLY!
+        libs_vec.push("test_ext1".to_string());
+        info!(
+            "shared_preload_libraries extra settings set to {:?}",
+            libs_vec
+        );
 
         // download requested shared_preload_libraries and
         // fill in list of available libraries
@@ -474,7 +481,12 @@ impl ComputeNode {
                 &libs_vec,
             ))?;
 
+            info!("available libs: {:?}", libs);
             compute_state.extensions.available_libraries.extend(libs);
+            info!(
+                "cache available libraries: {:?}",
+                compute_state.extensions.available_libraries
+            );
         }
 
         self.prepare_pgdata(&compute_state, extension_server_port)?;
