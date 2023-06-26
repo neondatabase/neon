@@ -756,7 +756,6 @@ jobs:
 
   upload-postgres-extensions-to-s3:
     # XXX: commenting this out for testing
-    # TODO: backet for release should be different from the main
     # if: |
     #   (github.ref_name == 'main' || github.ref_name == 'release') &&
     #   github.event_name != 'workflow_dispatch'
@@ -796,14 +795,20 @@ jobs:
           rm -rf ./usr-local-pgsql/share/extension/neon*
           rm -rf ./usr-local-pgsql/lib/neon*
 
-      # XXX: check upload to prod bucket
       - name: Upload postgres-extensions to S3
+        # TODO: Remove when prod buckets are ready
+        # if: github.ref_name == 'main' && github.event_name != 'workflow_dispatch'
         env:
-          BUCKET: ${{ github.ref_name == 'release' && 'neon-prod-extensions' || 'neon-dev-extensions' }}
+          BUCKETS: |
+            ${{ github.ref_name == 'release' &&
+              '["neon-prod-extensions-ap-southeast-1", "neon-prod-extensions-eu-central-1", "neon-prod-extensions-us-east-1", "neon-prod-extensions-us-east-2", "neon-prod-extensions-us-west-2"]' ||
+              '["neon-dev-extensions-eu-central-1", "neon-dev-extensions-eu-west-1", "neon-dev-extensions-us-east-2"]' }}
         run: |
-          # Directories are specified in Dockerfile.compute-node for postgres-extensions target
-          aws s3 cp --recursive ./usr-local-pgsql/share/extension s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}/share/extension
-          aws s3 cp --recursive ./usr-local-pgsql/lib             s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}/lib
+          for BUCKET in $(echo $BUCKETS | jq --raw-output '.[]'); do
+            # Source directories are specified in Dockerfile.compute-node for postgres-extensions target
+            aws s3 cp --recursive --only-show-errors ./usr-local-pgsql/share/extension s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}/share/extension
+            aws s3 cp --recursive --only-show-errors ./usr-local-pgsql/lib             s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}/lib
+          done
 
       - name: Cleanup
         if: ${{ always() && steps.create-container.outputs.CID }}
