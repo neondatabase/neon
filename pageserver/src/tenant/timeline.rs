@@ -3747,7 +3747,7 @@ impl Timeline {
     }
 
     fn get_compact_task(tier_sizes: Vec<(usize, u64)>) -> Option<Vec<usize>> {
-        let size_ratio = 1.0;
+        let size_ratio = 1.25;
         let space_amplification_ratio = 2.0;
 
         // Trigger 1: by space amplification, do full compaction
@@ -3768,7 +3768,7 @@ impl Timeline {
         let mut total_size_up_to_lvl = 0;
         let mut compact_tiers = Vec::new();
         for (tier_id, size) in tier_sizes {
-            if total_size_up_to_lvl != 0 && total_size_up_to_lvl as f64 / size as f64 > size_ratio {
+            if total_size_up_to_lvl != 0 && size as f64 / total_size_up_to_lvl as f64 > size_ratio {
                 info!("compaction triggered by size ratio");
                 return Some(compact_tiers);
             }
@@ -3813,7 +3813,9 @@ impl Timeline {
 
             println!("tier_to_compact: {tier_to_compact:?}");
 
-            if tier_to_compact.len() < 2 {
+            let min_merge_width = 3;
+
+            if tier_to_compact.len() < min_merge_width {
                 return Ok(None);
             }
 
