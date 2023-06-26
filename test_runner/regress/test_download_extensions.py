@@ -9,6 +9,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     RemoteStorageKind,
 )
+from fixtures.pg_version import PgVersion
 
 """
 TODO Alek:
@@ -43,7 +44,9 @@ relocatable = true"""
 
 
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.MOCK_S3])
-def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind):
+def test_file_download(
+    neon_env_builder: NeonEnvBuilder, remote_storage_kind: RemoteStorageKind, pg_version: PgVersion
+):
     """
     Tests we can download a file
     First we set up the mock s3 bucket by uploading test_ext.control to the bucket
@@ -66,7 +69,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
     assert env.ext_remote_storage is not None
     assert env.remote_storage_client is not None
 
-    PUB_EXT_ROOT = "v14/share/postgresql/extension"
+    PUB_EXT_ROOT = f"v{pg_version}/share/postgresql/extension"
     BUCKET_PREFIX = "5314225671"  # this is the build number
     cleanup_files = []
 
@@ -92,7 +95,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
             #     private_ext, env.ext_remote_storage.bucket_name, private_remote_name
             # )
 
-    TEST_EXT_SQL_PATH = "v14/share/postgresql/extension/test_ext0--1.0.sql"
+    TEST_EXT_SQL_PATH = f"v{pg_version}/share/postgresql/extension/test_ext0--1.0.sql"
     test_ext_sql_file = BytesIO(
         b"""
             CREATE FUNCTION test_ext_add(integer, integer) RETURNS integer
@@ -110,7 +113,7 @@ def test_file_download(neon_env_builder: NeonEnvBuilder, remote_storage_kind: Re
 
     # upload some fake library files
     for i in range(2):
-        TEST_LIB_PATH = f"v14/lib/test_ext{i}.so"
+        TEST_LIB_PATH = f"v{pg_version}/lib/test_ext{i}.so"
         test_lib_file = BytesIO(
             b"""
             111
