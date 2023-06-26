@@ -3792,7 +3792,7 @@ impl Timeline {
             let threshold = 8;
             assert!(threshold >= 2);
 
-            info!("getting tiered compaction task");
+            info!("getting tiered compaction task, before compaction:");
 
             layers.dump(false, ctx)?;
 
@@ -4078,7 +4078,6 @@ impl Timeline {
             .compact_tiered_phase1(layer_removal_cs.clone(), target_file_size, ctx)
             .await? else { return Ok(()); };
 
-        println!("new_layers: {:?}", new_layers);
         println!("new_tier_at: {:?}", new_tier_at);
         println!("removed_tiers: {:?}", removed_tiers);
 
@@ -4162,6 +4161,10 @@ impl Timeline {
         updates.sorted_runs().runs = new_sorted_runs;
 
         updates.flush();
+
+        println!("after compaction:");
+        layers.dump(false, ctx)?;
+
         drop_wlock(guard);
 
         // Also schedule the deletions in remote storage

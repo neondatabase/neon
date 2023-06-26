@@ -708,13 +708,6 @@ impl LayerMap {
             layer.dump(verbose, ctx)?;
         }
 
-        println!("tiered compaction:");
-
-        println!("l0_deltas:");
-        for layer in &self.l0_delta_layers {
-            layer.dump(verbose, ctx)?;
-        }
-
         println!("sorted_runs:");
         for (lvl, (tier_id, layer)) in self.sorted_runs.runs.iter().enumerate() {
             println!("tier {}", tier_id);
