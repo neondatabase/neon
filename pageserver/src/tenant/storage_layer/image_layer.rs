@@ -194,7 +194,7 @@ impl Layer for ImageLayer {
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+        let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
 
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -213,12 +213,10 @@ impl Layer for ImageLayer {
 
             reconstruct_state.img = Some((self.lsn, value));
             Ok((reconstruct_state, ValueReconstructResult::Complete))
+        } else if self.desc.is_incremental {
+            Ok((reconstruct_state, ValueReconstructResult::Continue))
         } else {
-            if self.desc.is_incremental {
-                Ok((reconstruct_state, ValueReconstructResult::Continue))
-            } else {
-                Ok((reconstruct_state, ValueReconstructResult::Missing))
-            }
+            Ok((reconstruct_state, ValueReconstructResult::Missing))
         }
     }
 
