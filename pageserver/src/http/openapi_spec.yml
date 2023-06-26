@@ -188,8 +188,6 @@ paths:
     delete:
       description: "Attempts to delete specified timeline. 500 and 409 errors should be retried"
       responses:
-        "200":
-          description: Ok
         "400":
           description: Error when no tenant id found in path or no timeline id
           content:
