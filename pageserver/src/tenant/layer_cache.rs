@@ -39,17 +39,16 @@ pub struct LayerInUseRead(tokio::sync::OwnedRwLockReadGuard<()>);
 pub struct DeleteGuard(Arc<tokio::sync::OwnedMutexGuard<()>>);
 
 impl LayerCache {
-    pub fn new(timeline: Weak<Timeline>) -> Self {
-        let timeline_arc = timeline.upgrade().unwrap();
+    pub fn new(timeline: Weak<Timeline>, tenant_id: TenantId, timeline_id: TimelineId) -> Self {
         Self {
             layers_operation_lock: Arc::new(tokio::sync::RwLock::new(())),
             layers_removal_lock: Arc::new(tokio::sync::Mutex::new(())),
             mapping: Mutex::new(HashMap::new()),
-            timeline,
-            tenant_id: timeline_arc.tenant_id,
-            timeline_id: timeline_arc.timeline_id,
-            tenant_id_str: timeline_arc.tenant_id.to_string(),
-            timeline_id_str: timeline_arc.timeline_id.to_string(),
+            timeline: timeline,
+            tenant_id: tenant_id,
+            timeline_id: timeline_id,
+            tenant_id_str: tenant_id.to_string(),
+            timeline_id_str: timeline_id.to_string(),
         }
     }
 

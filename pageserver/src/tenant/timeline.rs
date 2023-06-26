@@ -1421,7 +1421,7 @@ impl Timeline {
                 tenant_id,
                 pg_version,
                 layers: tokio::sync::RwLock::new((LayerMap::default(), LayerMapping::new())),
-                lcache: LayerCache::new(myself.clone()),
+                lcache: LayerCache::new(myself.clone(), tenant_id, timeline_id),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
