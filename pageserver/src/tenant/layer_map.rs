@@ -95,9 +95,54 @@ pub struct LayerMap {
     l0_delta_layers: Vec<Arc<PersistentLayerDesc>>,
 
     /// All sorted runs. For tiered compaction.
-    pub sorted_runs: Vec<(usize, Vec<Arc<PersistentLayerDesc>>)>,
+    pub sorted_runs: SortedRuns,
+}
 
+#[derive(Default)]
+pub struct SortedRuns {
+    pub runs: Vec<(usize, Vec<Arc<PersistentLayerDesc>>)>,
     next_tier_id: usize,
+}
+
+impl SortedRuns {
+    /// Create a new sorted run and insert it at the top of the LSM tree.
+    pub fn create_new_run(&mut self, layers: Vec<Arc<PersistentLayerDesc>>) -> usize {
+        let tier_id = self.next_tier_id();
+        self.runs.insert(0, (tier_id, layers));
+        tier_id
+    }
+
+    /// Create a new sorted run and insert it at the bottom of the LSM tree.
+    pub fn create_new_bottom_run(&mut self, layers: Vec<Arc<PersistentLayerDesc>>) -> usize {
+        let tier_id = self.next_tier_id();
+        self.runs.push((tier_id, layers));
+        tier_id
+    }
+
+    pub fn compute_tier_sizes(&self) -> Vec<(usize, u64)> {
+        self.runs
+            .iter()
+            .map(|(tier_id, layers)| (*tier_id, layers.iter().map(|layer| layer.file_size()).sum()))
+            .collect::<Vec<_>>()
+    }
+
+    /// Remove a sorted run from the LSM tree.
+    pub fn remove_run(&mut self, tier_id: usize) {
+        self.runs.retain(|(id, _)| *id != tier_id);
+    }
+
+    /// Remove layers and the corresponding sorted runs.
+    pub fn insert_run_at(&mut self, idx: usize, layers: Vec<Arc<PersistentLayerDesc>>) {}
+
+    pub fn num_of_tiers(&self) -> usize {
+        self.runs.len()
+    }
+
+    pub fn next_tier_id(&mut self) -> usize {
+        let ret = self.next_tier_id;
+        self.next_tier_id += 1;
+        ret
+    }
 }
 
 /// The primary update API for the layer map.
@@ -127,14 +172,8 @@ impl BatchedUpdates<'_> {
     }
 
     /// Get a reference to the current sorted runs.
-    pub fn sorted_runs(&mut self) -> &mut Vec<(usize, Vec<Arc<PersistentLayerDesc>>)> {
+    pub fn sorted_runs(&mut self) -> &mut SortedRuns {
         &mut self.layer_map.sorted_runs
-    }
-
-    pub fn next_tier_id(&mut self) -> usize {
-        let ret = self.layer_map.next_tier_id;
-        self.layer_map.next_tier_id += 1;
-        ret
     }
 
     ///
@@ -677,7 +716,7 @@ impl LayerMap {
         }
 
         println!("sorted_runs:");
-        for (lvl, (tier_id, layer)) in self.sorted_runs.iter().enumerate() {
+        for (lvl, (tier_id, layer)) in self.sorted_runs.runs.iter().enumerate() {
             println!("tier {}", tier_id);
             for layer in layer {
                 layer.dump(verbose, ctx)?;

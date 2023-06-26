@@ -1,9 +1,11 @@
 use super::storage_layer::{PersistentLayer, PersistentLayerDesc, PersistentLayerKey, RemoteLayer};
 use super::Timeline;
+use crate::metrics::{STORAGE_PHYSICAL_SIZE, STORAGE_PHYSICAL_SIZE_FILE_TYPE};
 use crate::tenant::layer_map::{self, LayerMap};
 use anyhow::Result;
 use std::sync::{Mutex, Weak};
 use std::{collections::HashMap, sync::Arc};
+use utils::id::{TenantId, TimelineId};
 
 pub struct LayerCache {
     /// Layer removal lock.
@@ -21,6 +23,11 @@ pub struct LayerCache {
     #[allow(unused)]
     timeline: Weak<Timeline>,
 
+    pub tenant_id: TenantId,
+    pub timeline_id: TimelineId,
+    pub tenant_id_str: String,
+    pub timeline_id_str: String,
+
     mapping: Mutex<HashMap<PersistentLayerKey, Arc<dyn PersistentLayer>>>,
 }
 
@@ -33,11 +40,16 @@ pub struct DeleteGuard(Arc<tokio::sync::OwnedMutexGuard<()>>);
 
 impl LayerCache {
     pub fn new(timeline: Weak<Timeline>) -> Self {
+        let timeline_arc = timeline.upgrade().unwrap();
         Self {
             layers_operation_lock: Arc::new(tokio::sync::RwLock::new(())),
             layers_removal_lock: Arc::new(tokio::sync::Mutex::new(())),
             mapping: Mutex::new(HashMap::new()),
             timeline,
+            tenant_id: timeline_arc.tenant_id,
+            timeline_id: timeline_arc.timeline_id,
+            tenant_id_str: timeline_arc.tenant_id.to_string(),
+            timeline_id_str: timeline_arc.timeline_id.to_string(),
         }
     }
 
@@ -67,18 +79,21 @@ impl LayerCache {
 
     /// Should only be called when initializing the timeline. Bypass checks and layer operation lock.
     pub fn remove_local_when_init(&self, layer: Arc<dyn PersistentLayer>) {
+        self.metrics_size_sub(&*layer);
         let mut guard = self.mapping.lock().unwrap();
         guard.remove(&layer.layer_desc().key());
     }
 
     /// Should only be called when initializing the timeline. Bypass checks and layer operation lock.
     pub fn populate_remote_when_init(&self, layer: Arc<RemoteLayer>) {
+        self.metrics_size_add(&*layer);
         let mut guard = self.mapping.lock().unwrap();
         guard.insert(layer.layer_desc().key(), layer);
     }
 
     /// Should only be called when initializing the timeline. Bypass checks and layer operation lock.
     pub fn populate_local_when_init(&self, layer: Arc<dyn PersistentLayer>) {
+        self.metrics_size_add(&*layer);
         let mut guard = self.mapping.lock().unwrap();
         guard.insert(layer.layer_desc().key(), layer);
     }
@@ -130,6 +145,7 @@ impl LayerCache {
 
     /// Called within write path. When compaction and image layer creation we will create new layers.
     pub fn create_new_layer(&self, layer: Arc<dyn PersistentLayer>) {
+        self.metrics_size_add(&*layer);
         let mut guard = self.mapping.lock().unwrap();
         guard.insert(layer.layer_desc().key(), layer);
     }
@@ -137,7 +153,38 @@ impl LayerCache {
     /// Called within write path. When GC and compaction we will remove layers and delete them on disk.
     /// Will move logic to delete files here later.
     pub fn delete_layer(&self, layer: Arc<dyn PersistentLayer>) {
+        self.metrics_size_sub(&*layer);
         let mut guard = self.mapping.lock().unwrap();
         guard.remove(&layer.layer_desc().key());
+    }
+
+    fn metrics_size_add(&self, layer: &dyn PersistentLayer) {
+        STORAGE_PHYSICAL_SIZE
+            .with_label_values(&[
+                Self::get_layer_type(layer),
+                &self.tenant_id_str,
+                &self.timeline_id_str,
+            ])
+            .add(layer.file_size() as i64);
+    }
+
+    fn metrics_size_sub(&self, layer: &dyn PersistentLayer) {
+        STORAGE_PHYSICAL_SIZE
+            .with_label_values(&[
+                Self::get_layer_type(layer),
+                &self.tenant_id_str,
+                &self.timeline_id_str,
+            ])
+            .sub(layer.file_size() as i64);
+    }
+
+    fn get_layer_type(layer: &dyn PersistentLayer) -> &'static str {
+        if layer.is_delta() {
+            &STORAGE_PHYSICAL_SIZE_FILE_TYPE[1]
+        } else if layer.is_incremental() {
+            &STORAGE_PHYSICAL_SIZE_FILE_TYPE[2]
+        } else {
+            &STORAGE_PHYSICAL_SIZE_FILE_TYPE[0]
+        }
     }
 }

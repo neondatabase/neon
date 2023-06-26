@@ -3081,6 +3081,9 @@ impl Timeline {
             LayerResidenceEventReason::LayerCreate,
         );
         batch_updates.insert_historic_new(l.layer_desc().clone());
+        batch_updates
+            .sorted_runs()
+            .create_new_run(vec![l.layer_desc().clone().into()]);
         self.lcache.create_new_layer(l);
         batch_updates.flush();
 
@@ -3340,9 +3343,8 @@ impl Timeline {
 
         // add this layer to the end of all sorted runs; this is only done when initializing with init_lsn
         // for now, and therefore the sorted runs are empty.
-        assert!(updates.sorted_runs().is_empty());
-        let tier_id = updates.next_tier_id();
-        updates.sorted_runs().push((tier_id, sorted_run));
+        assert_eq!(updates.sorted_runs().num_of_tiers(), 0);
+        updates.sorted_runs().create_new_bottom_run(sorted_run);
         updates.flush();
         drop_wlock(guard);
         timer.stop_and_record();
@@ -3740,98 +3742,8 @@ impl Timeline {
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
-        let CompactLevel0Phase1Result {
-            new_layers,
-            deltas_to_compact,
-        } = self
-            .compact_level0_phase1(layer_removal_cs.clone(), target_file_size, ctx)
-            .await?;
-
-        if new_layers.is_empty() && deltas_to_compact.is_empty() {
-            // If L0 does not need to be compacted, look into other layers
-            return self
-                .compact_tiered(layer_removal_cs, target_file_size, ctx)
-                .await;
-        }
-
-        // Before deleting any layers, we need to wait for their upload ops to finish.
-        // See storage_sync module level comment on consistency.
-        // Do it here because we don't want to hold self.layers.write() while waiting.
-        if let Some(remote_client) = &self.remote_client {
-            debug!("waiting for upload ops to complete");
-            remote_client
-                .wait_completion()
-                .await
-                .context("wait for layer upload ops to complete")?;
-        }
-
-        let mut guard = self.layers.write().await;
-        let (layers, _) = &mut *guard;
-        let mut updates = layers.batch_update();
-        let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
-
-        let tier_id = updates.next_tier_id();
-        updates.sorted_runs().insert(
-            0,
-            (
-                tier_id,
-                new_layers
-                    .iter()
-                    .map(|l| Arc::new(l.layer_desc().clone()))
-                    .collect(),
-            ),
-        );
-
-        for l in new_layers {
-            let new_delta_path = l.path();
-
-            let metadata = new_delta_path.metadata().with_context(|| {
-                format!(
-                    "read file metadata for new created layer {}",
-                    new_delta_path.display()
-                )
-            })?;
-
-            if let Some(remote_client) = &self.remote_client {
-                remote_client.schedule_layer_file_upload(
-                    &l.filename(),
-                    &LayerFileMetadata::new(metadata.len()),
-                )?;
-            }
-
-            // update the timeline's physical size
-            self.metrics
-                .resident_physical_size_gauge
-                .add(metadata.len());
-
-            new_layer_paths.insert(new_delta_path, LayerFileMetadata::new(metadata.len()));
-            let x: Arc<dyn PersistentLayer + 'static> = Arc::new(l);
-            x.access_stats().record_residence_event(
-                &updates,
-                LayerResidenceStatus::Resident,
-                LayerResidenceEventReason::LayerCreate,
-            );
-            updates.insert_historic_new(x.layer_desc().clone());
-            self.lcache.create_new_layer(x);
-        }
-
-        // Now that we have reshuffled the data to set of new delta layers, we can
-        // delete the old ones
-        let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
-        for l in deltas_to_compact {
-            layer_names_to_delete.push(l.filename());
-            self.delete_historic_layer_new(layer_removal_cs.clone(), l, &mut updates)?;
-        }
-
-        updates.flush();
-        drop_wlock(guard);
-
-        // Also schedule the deletions in remote storage
-        if let Some(remote_client) = &self.remote_client {
-            remote_client.schedule_layer_file_deletion(&layer_names_to_delete)?;
-        }
-
-        Ok(())
+        self.compact_tiered(layer_removal_cs, target_file_size, ctx)
+            .await
     }
 
     fn get_compact_task(tier_sizes: Vec<(usize, u64)>) -> Option<Vec<usize>> {
@@ -3877,30 +3789,23 @@ impl Timeline {
             let (layers, _) = &*guard;
 
             // Precondition: only compact if enough layers have accumulated.
-            let threshold = 3;
+            let threshold = 8;
             assert!(threshold >= 2);
 
             info!("getting tiered compaction task");
 
             layers.dump(false, ctx)?;
 
-            if layers.sorted_runs.len() < threshold {
+            if layers.sorted_runs.num_of_tiers() < threshold {
                 info!(
-                    level0_deltas = layers.sorted_runs.len(),
+                    level0_deltas = layers.sorted_runs.num_of_tiers(),
                     threshold, "too few sorted runs to compact"
                 );
                 return Ok(None);
             }
 
             // Gather the files to compact in this iteration.
-
-            let tier_sizes: Vec<(usize, u64)> = layers
-                .sorted_runs
-                .iter()
-                .map(|(tier_id, layers)| {
-                    (*tier_id, layers.iter().map(|layer| layer.file_size()).sum())
-                })
-                .collect::<Vec<_>>();
+            let tier_sizes: Vec<(usize, u64)> = layers.sorted_runs.compute_tier_sizes();
 
             let Some(tier_to_compact) = Self::get_compact_task(tier_sizes) else {
                 return Ok(None);
@@ -3913,7 +3818,7 @@ impl Timeline {
             }
 
             let mut deltas_to_compact_layers = vec![];
-            for (tier_id, layers) in layers.sorted_runs.iter() {
+            for (tier_id, layers) in layers.sorted_runs.runs.iter() {
                 if tier_to_compact.contains(tier_id) {
                     deltas_to_compact_layers.extend(layers.iter().cloned());
                 }
@@ -4197,7 +4102,7 @@ impl Timeline {
         let mut new_tier_at_index = None;
         let mut layers_to_delete = vec![];
         let mut layer_names_to_delete = vec![];
-        for (tier_id, tier) in updates.sorted_runs() {
+        for (tier_id, tier) in &updates.sorted_runs().runs {
             if *tier_id == new_tier_at {
                 new_tier_at_index = Some(new_sorted_runs.len());
             }
@@ -4252,9 +4157,9 @@ impl Timeline {
             self.lcache.create_new_layer(l);
         }
 
-        let new_tier_id = updates.next_tier_id();
+        let new_tier_id = updates.sorted_runs().next_tier_id();
         new_sorted_runs.insert(new_tier_at_index, (new_tier_id, new_layer_descs));
-        *updates.sorted_runs() = new_sorted_runs;
+        updates.sorted_runs().runs = new_sorted_runs;
 
         updates.flush();
         drop_wlock(guard);

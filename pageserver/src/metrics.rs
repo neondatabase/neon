@@ -53,6 +53,15 @@ pub enum StorageTimeOperation {
     CreateTenant,
 }
 
+pub static STORAGE_PHYSICAL_SIZE: Lazy<IntGaugeVec> = Lazy::new(|| {
+    register_int_gauge_vec!(
+        "pageserver_storage_physical_size_sum",
+        "Physical size of different types of storage files",
+        &["type", "tenant_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
+
 pub static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "pageserver_storage_operations_seconds_sum",
@@ -391,6 +400,8 @@ const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
 ];
 
 const STORAGE_IO_SIZE_OPERATIONS: &[&str] = &["read", "write"];
+
+pub const STORAGE_PHYSICAL_SIZE_FILE_TYPE: &[&str] = &["image", "delta", "partial-image"];
 
 pub static STORAGE_IO_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
@@ -884,6 +895,7 @@ impl Drop for TimelineMetrics {
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
         let _ = READ_NUM_FS_LAYERS.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = STORAGE_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
 
         self.evictions_with_low_residence_duration
             .write()
@@ -905,6 +917,9 @@ impl Drop for TimelineMetrics {
 
         for op in SMGR_QUERY_TIME_OPERATIONS {
             let _ = SMGR_QUERY_TIME.remove_label_values(&[op, tenant_id, timeline_id]);
+        }
+        for ty in STORAGE_PHYSICAL_SIZE_FILE_TYPE {
+            let _ = STORAGE_PHYSICAL_SIZE.remove_label_values(&[ty, tenant_id, timeline_id]);
         }
     }
 }
