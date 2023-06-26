@@ -110,6 +110,7 @@ impl InMemoryLayer {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for InMemoryLayer {
     fn get_key_range(&self) -> Range<Key> {
         Key::MIN..Key::MAX
@@ -190,13 +191,13 @@ impl Layer for InMemoryLayer {
     }
 
     /// Look up given value in the layer.
-    fn get_value_reconstruct_data(
+    fn get_value_reconstruct_data_blocking(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        _ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
+        mut reconstruct_state: ValueReconstructState,
+        _ctx: RequestContext,
+    ) -> anyhow::Result<(ValueReconstructState, ValueReconstructResult)> {
         ensure!(lsn_range.start >= self.start_lsn);
         let mut need_image = true;
 
@@ -213,7 +214,7 @@ impl Layer for InMemoryLayer {
                 match value {
                     Value::Image(img) => {
                         reconstruct_state.img = Some((*entry_lsn, img));
-                        return Ok(ValueReconstructResult::Complete);
+                        return Ok((reconstruct_state, ValueReconstructResult::Complete));
                     }
                     Value::WalRecord(rec) => {
                         let will_init = rec.will_init();
@@ -233,9 +234,9 @@ impl Layer for InMemoryLayer {
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
         if need_image {
-            Ok(ValueReconstructResult::Continue)
+            Ok((reconstruct_state, ValueReconstructResult::Continue))
         } else {
-            Ok(ValueReconstructResult::Complete)
+            Ok((reconstruct_state, ValueReconstructResult::Complete))
         }
     }
 }

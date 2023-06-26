@@ -180,7 +180,8 @@ jobs:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
-    timeout-minutes: 360 # 6h
+    # Increase timeout to 8h, default timeout is 6h
+    timeout-minutes: 480
 
     steps:
     - uses: actions/checkout@v3
@@ -321,8 +322,6 @@ jobs:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
-    timeout-minutes: 360 # 6h
-
     steps:
     - uses: actions/checkout@v3
 
@@ -414,8 +413,6 @@ jobs:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
-    timeout-minutes: 360 # 6h
-
     steps:
     - uses: actions/checkout@v3
 
@@ -500,8 +497,6 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-
-    timeout-minutes: 360 # 6h
 
     steps:
     - uses: actions/checkout@v3
