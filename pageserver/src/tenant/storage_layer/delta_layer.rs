@@ -218,6 +218,7 @@ impl std::fmt::Debug for DeltaLayerInner {
     }
 }
 
+#[async_trait::async_trait]
 impl Layer for DeltaLayer {
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
@@ -294,13 +295,13 @@ impl Layer for DeltaLayer {
         Ok(())
     }
 
-    fn get_value_reconstruct_data(
+    fn get_value_reconstruct_data_blocking(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
+        mut reconstruct_state: ValueReconstructState,
+        ctx: RequestContext,
+    ) -> anyhow::Result<(ValueReconstructState, ValueReconstructResult)> {
         ensure!(lsn_range.start >= self.desc.lsn_range.start);
         let mut need_image = true;
 
@@ -308,7 +309,7 @@ impl Layer for DeltaLayer {
 
         {
             // Open the file and lock the metadata in memory
-            let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
+            let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
 
             // Scan the page versions backwards, starting from `lsn`.
             let file = &inner.file;
@@ -374,9 +375,9 @@ impl Layer for DeltaLayer {
         // If an older page image is needed to reconstruct the page, let the
         // caller know.
         if need_image {
-            Ok(ValueReconstructResult::Continue)
+            Ok((reconstruct_state, ValueReconstructResult::Continue))
         } else {
-            Ok(ValueReconstructResult::Complete)
+            Ok((reconstruct_state, ValueReconstructResult::Complete))
         }
     }
 
