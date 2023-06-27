@@ -1,6 +1,6 @@
 use super::storage_layer::{PersistentLayer, PersistentLayerDesc, PersistentLayerKey, RemoteLayer};
 use super::Timeline;
-use crate::tenant::layer_map::{ LayerMap};
+use crate::tenant::layer_map::LayerMap;
 use crate::tenant::timeline::compare_arced_layers;
 use anyhow::Result;
 use std::sync::{Mutex, Weak};
