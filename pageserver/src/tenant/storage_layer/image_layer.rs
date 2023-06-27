@@ -183,18 +183,18 @@ impl Layer for ImageLayer {
     }
 
     /// Look up given page in the file
-    fn get_value_reconstruct_data_blocking(
+    fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        mut reconstruct_state: ValueReconstructState,
-        ctx: RequestContext,
-    ) -> anyhow::Result<(ValueReconstructState, ValueReconstructResult)> {
+        reconstruct_state: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<ValueReconstructResult> {
         assert!(self.desc.key_range.contains(&key));
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
-        let inner = self.load(LayerAccessKind::GetValueReconstructData, &ctx)?;
+        let inner = self.load(LayerAccessKind::GetValueReconstructData, ctx)?;
 
         let file = inner.file.as_ref().unwrap();
         let tree_reader = DiskBtreeReader::new(inner.index_start_blk, inner.index_root_blk, file);
@@ -212,11 +212,11 @@ impl Layer for ImageLayer {
             let value = Bytes::from(blob);
 
             reconstruct_state.img = Some((self.lsn, value));
-            Ok((reconstruct_state, ValueReconstructResult::Complete))
+            Ok(ValueReconstructResult::Complete)
         } else if self.desc.is_incremental {
-            Ok((reconstruct_state, ValueReconstructResult::Continue))
+            Ok(ValueReconstructResult::Continue)
         } else {
-            Ok((reconstruct_state, ValueReconstructResult::Missing))
+            Ok(ValueReconstructResult::Missing)
         }
     }
 

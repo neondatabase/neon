@@ -12,7 +12,7 @@ use crate::context::RequestContext;
 use crate::repository::{Key, Value};
 use crate::task_mgr::TaskKind;
 use crate::walrecord::NeonWalRecord;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use enum_map::EnumMap;
 use enumset::EnumSet;
@@ -343,8 +343,7 @@ impl LayerAccessStats {
 /// All layers should implement a minimal `std::fmt::Debug` without tenant or
 /// timeline names, because those are known in the context of which the layers
 /// are used in (timeline).
-#[async_trait::async_trait]
-pub trait Layer: std::fmt::Debug + Send + Sync + 'static {
+pub trait Layer: std::fmt::Debug + Send + Sync {
     /// Range of keys that this layer covers
     fn get_key_range(&self) -> Range<Key>;
 
@@ -374,42 +373,13 @@ pub trait Layer: std::fmt::Debug + Send + Sync + 'static {
     /// is available. If this returns ValueReconstructResult::Continue, look up
     /// the predecessor layer and call again with the same 'reconstruct_data' to
     /// collect more data.
-    fn get_value_reconstruct_data_blocking(
+    fn get_value_reconstruct_data(
         &self,
         key: Key,
         lsn_range: Range<Lsn>,
-        reconstruct_data: ValueReconstructState,
-        ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)>;
-
-    /// CANCEL SAFETY: if the returned future is dropped,
-    /// the wrapped closure still run to completion and the return value discarded.
-    /// For the case of get_value_reconstruct_data, we expect the closure to not
-    /// have any side effects, as it only attempts to read a layer (and stuff like
-    /// page cache isn't considered a real side effect).
-    /// But, ...
-    /// TRACING:
-    /// If the returned future is cancelled, the spawn_blocking span can outlive
-    /// the caller's span.
-    /// So, technically, we should be using `parent: None` and `follows_from: current`
-    /// instead. However, in practice, the advantage of maintaining the span stack
-    /// in logs outweighs the disadvantage of having a dangling span in a case that
-    /// is not expected to happen because in pageserver we generally don't drop pending futures.
-    async fn get_value_reconstruct_data(
-        self: Arc<Self>,
-        key: Key,
-        lsn_range: Range<Lsn>,
-        reconstruct_data: ValueReconstructState,
-        ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
-        let span = tracing::info_span!("get_value_reconstruct_data_spawn_blocking");
-        tokio::task::spawn_blocking(move || {
-            let _enter = span.enter();
-            self.get_value_reconstruct_data_blocking(key, lsn_range, reconstruct_data, ctx)
-        })
-        .await
-        .context("spawn_blocking")?
-    }
+        reconstruct_data: &mut ValueReconstructState,
+        ctx: &RequestContext,
+    ) -> Result<ValueReconstructResult>;
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
     fn short_id(&self) -> String;
@@ -529,7 +499,6 @@ impl LayerDescriptor {
     }
 }
 
-#[async_trait::async_trait]
 impl Layer for LayerDescriptor {
     fn get_key_range(&self) -> Range<Key> {
         self.key.clone()
@@ -543,13 +512,13 @@ impl Layer for LayerDescriptor {
         self.is_incremental
     }
 
-    fn get_value_reconstruct_data_blocking(
+    fn get_value_reconstruct_data(
         &self,
         _key: Key,
         _lsn_range: Range<Lsn>,
-        _reconstruct_data: ValueReconstructState,
-        _ctx: RequestContext,
-    ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
+        _reconstruct_data: &mut ValueReconstructState,
+        _ctx: &RequestContext,
+    ) -> Result<ValueReconstructResult> {
         todo!("This method shouldn't be part of the Layer trait")
     }
 

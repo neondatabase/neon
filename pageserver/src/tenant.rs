@@ -440,8 +440,13 @@ pub enum GetTimelineError {
 pub enum DeleteTimelineError {
     #[error("NotFound")]
     NotFound,
+
     #[error("HasChildren")]
     HasChildren(Vec<TimelineId>),
+
+    #[error("Timeline deletion is already in progress")]
+    AlreadyInProgress,
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -1755,14 +1760,11 @@ impl Tenant {
             timeline = Arc::clone(timeline_entry.get());
 
             // Prevent two tasks from trying to delete the timeline at the same time.
-            delete_lock_guard =
-                DeletionGuard(Arc::clone(&timeline.delete_lock).try_lock_owned().map_err(
-                    |_| {
-                        DeleteTimelineError::Other(anyhow::anyhow!(
-                            "timeline deletion is already in progress"
-                        ))
-                    },
-                )?);
+            delete_lock_guard = DeletionGuard(
+                Arc::clone(&timeline.delete_lock)
+                    .try_lock_owned()
+                    .map_err(|_| DeleteTimelineError::AlreadyInProgress)?,
+            );
 
             // If another task finished the deletion just before we acquired the lock,
             // return success.
