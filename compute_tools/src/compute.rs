@@ -695,11 +695,14 @@ LIMIT 100",
             }
 
             // TODO write a proper test for this
-            libs_vec.push("test_ext1".to_string());
-            info!(
-                "shared_preload_libraries extra settings set to {:?}",
-                libs_vec
-            );
+            // Currently pytest doesn't pass cluster settings to compute_ctl
+            // We need to add this to pytest.
+            //
+            // libs_vec.push("test_lib1".to_string());
+            // info!(
+            //     "shared_preload_libraries extra settings set to {:?}",
+            //     libs_vec
+            // );
 
             // download extension control files & shared_preload_libraries
             let rt = tokio::runtime::Runtime::new().unwrap();

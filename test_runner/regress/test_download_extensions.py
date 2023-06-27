@@ -9,7 +9,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     RemoteStorageKind,
-    available_remote_storages,
 )
 from fixtures.pg_version import PgVersion
 from fixtures.types import TenantId
@@ -53,7 +52,7 @@ def prepare_mock_ext_storage(
 
     PUB_LIB_ROOT = f"v{pg_version}/lib"
     PRIVATE_LIB_ROOT = f"v{pg_version}/{private_prefix}/lib"
-    LOCAL_LIB_ROOT = pg_bin.pg_lib_dir
+    LOCAL_LIB_ROOT = f"{pg_bin.pg_lib_dir}/postgresql"
 
     log.info(
         f"""
@@ -102,6 +101,7 @@ def prepare_mock_ext_storage(
     cleanup_files += [test_sql_local_path]
 
     # upload some fake library files
+    # TODO change it to test both public and private library paths
     for i in range(2):
         lib_filename = f"test_lib{i}.so"
         TEST_LIB_PATH = f"{PUB_LIB_ROOT}/{lib_filename}"
@@ -118,8 +118,7 @@ def prepare_mock_ext_storage(
             lib_public_remote_path,
         )
         log.info(f"lib_local_path: {lib_local_path}")
-        # TODO
-        # cleanup_files += [lib_local_path]
+        cleanup_files += [lib_local_path]
 
     return cleanup_files
 
@@ -130,7 +129,10 @@ def prepare_mock_ext_storage(
 # Then check that compute nodes can download them and use them
 # to CREATE EXTENSION and LOAD 'library.so'
 #
-@pytest.mark.parametrize("remote_storage_kind", available_remote_storages())
+# NOTE: you must have appropriate AWS credentials to run REAL_S3 test.
+@pytest.mark.parametrize(
+    "remote_storage_kind", [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]
+)
 def test_remote_extensions(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
@@ -226,11 +228,12 @@ def test_remote_extensions(
                 try:
                     cur.execute("LOAD 'test_lib_fail.so'")
                 except Exception as e:
-                    # expected to fail with
-                    # could not load library ... test_lib_fail.so: file too short
-                    # because test_lib_fail.so is not real library file
+                    # expected to fail because test_lib_fail.so is not found
                     log.info("LOAD test_lib_fail.so failed (expectedly): %s", e)
-                    assert "could not load library" in str(e)
+                    assert (
+                        """could not access file "test_lib_fail.so": No such file or directory"""
+                        in str(e)
+                    )
 
     finally:
         # this is important because if the files aren't cleaned up then the test can
