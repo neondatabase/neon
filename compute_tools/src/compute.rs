@@ -698,12 +698,15 @@ LIMIT 100",
             // TODO write a proper test for this
             // Currently pytest doesn't pass cluster settings to compute_ctl
             // We need to add this to pytest.
-            //
-            // libs_vec.push("test_lib1".to_string());
-            // info!(
-            //     "shared_preload_libraries extra settings set to {:?}",
-            //     libs_vec
-            // );
+            // and neon_local pass to spec
+            libs_vec.push("test_lib1".to_string());
+            libs_vec.push("private_lib1".to_string());
+            libs_vec.push("test_lib0".to_string());
+            libs_vec.push("private_lib0".to_string());
+            info!(
+                "shared_preload_libraries extra settings set to {:?}",
+                libs_vec
+            );
 
             // download extension control files & shared_preload_libraries
 
@@ -714,6 +717,7 @@ LIMIT 100",
             )
             .await?;
 
+            info!("Libraries to download: {:?}", &libs_vec);
             extension_server::get_available_libraries(
                 ext_remote_storage,
                 &self.pgbin,

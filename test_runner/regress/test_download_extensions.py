@@ -65,16 +65,12 @@ def prepare_mock_ext_storage(
 
     # Upload several test_ext{i}.control files to the bucket
     for i in range(NUM_EXT):
-        # public extensions
         public_ext = BytesIO(bytes(control_file_content("public", i), "utf-8"))
         public_remote_name = f"{bucket_prefix}/{PUB_EXT_ROOT}/test_ext{i}.control"
         public_local_name = f"{LOCAL_EXT_ROOT}/test_ext{i}.control"
-
-        # private extensions
         private_ext = BytesIO(bytes(control_file_content(str(tenant_id), i), "utf-8"))
         private_remote_name = f"{bucket_prefix}/{PRIVATE_EXT_ROOT}/private_ext{i}.control"
         private_local_name = f"{LOCAL_EXT_ROOT}/private_ext{i}.control"
-
         cleanup_files += [public_local_name, private_local_name]
 
         remote_storage_client.upload_fileobj(
@@ -97,29 +93,32 @@ def prepare_mock_ext_storage(
     cleanup_files += [test_sql_local_path]
 
     # upload some fake library files
-    # TODO change it to test both public and private library paths
     for i in range(2):
-        lib_filename = f"test_lib{i}.so"
-        TEST_LIB_PATH = f"{PUB_LIB_ROOT}/{lib_filename}"
-        lib_public_remote_path = f"{bucket_prefix}/{TEST_LIB_PATH}"
-        lib_local_path = f"{LOCAL_LIB_ROOT}/{lib_filename}"
-        test_lib_file = BytesIO(
-            b"""
-            111
-            """
+        public_library = BytesIO(bytes("\n111\n", "utf-8"))
+        public_remote_name = f"{bucket_prefix}/{PUB_LIB_ROOT}/test_lib{i}.so"
+        public_local_name = f"{LOCAL_LIB_ROOT}/test_lib{i}.so"
+        private_library = BytesIO(bytes("\n111\n", "utf-8"))
+        private_remote_name = f"{bucket_prefix}/{PRIVATE_LIB_ROOT}/private_lib{i}.so"
+        private_local_name = f"{LOCAL_EXT_ROOT}/private_lib{i}.so"
+
+        log.info(f"uploading library to {public_remote_name}")
+        log.info(f"uploading library to {private_remote_name}")
+
+        remote_storage_client.upload_fileobj(
+            public_library,
+            ext_remote_storage.bucket_name,
+            public_remote_name,
         )
         remote_storage_client.upload_fileobj(
-            test_lib_file,
+            private_library,
             ext_remote_storage.bucket_name,
-            lib_public_remote_path,
+            private_remote_name,
         )
-        log.info(f"lib_local_path: {lib_local_path}")
-        cleanup_files += [lib_local_path]
+        cleanup_files += [public_local_name, private_local_name]
 
     return cleanup_files
 
 
-#
 # Generate mock extension files and upload them to the bucket.
 #
 # Then check that compute nodes can download them and use them
@@ -200,6 +199,16 @@ def test_remote_extensions(
                     # could not load library ... test_ext.so: file too short
                     # because test_lib0.so is not real library file
                     log.info("LOAD test_lib0.so failed (expectedly): %s", e)
+                    assert "file too short" in str(e)
+
+                # Try to load private library file
+                try:
+                    cur.execute("LOAD 'private_lib0.so'")
+                except Exception as e:
+                    # expected to fail with
+                    # could not load library ... test_ext.so: file too short
+                    # because test_lib0.so is not real library file
+                    log.info("LOAD private_lib0.so failed (expectedly): %s", e)
                     assert "file too short" in str(e)
 
                 # Try to load existing library file without .so extension

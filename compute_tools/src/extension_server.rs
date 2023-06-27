@@ -1,6 +1,7 @@
 use anyhow::{self, bail, Result};
 use remote_storage::*;
 use serde_json::{self, Value};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -132,83 +133,50 @@ pub async fn get_available_libraries(
 
     let local_libdir: PathBuf = Path::new(&get_pg_config("--pkglibdir", pgbin)).into();
     let pg_version = get_pg_version(pgbin);
-    let remote_libdir = RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap();
+    // Construct a hashmap of all available libraries
+    // example (key, value) pair: test_lib0.so, v14/lib/test_lib0.so
+    let mut all_available_libraries = HashMap::new();
 
-    // 1. Download public libraries
-
-    let available_libraries = remote_storage.list_files(Some(&remote_libdir)).await?;
-    info!("list of library files {:?}", &available_libraries);
+    let remote_libdir_public = RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap();
+    for public_lib in remote_storage
+        .list_files(Some(&remote_libdir_public))
+        .await?
+    {
+        all_available_libraries.insert(
+            public_lib.object_name().expect("bad object").to_owned(),
+            public_lib.clone().to_owned(),
+        );
+    }
+    for private_prefix in private_ext_prefixes {
+        let remote_libdir_private =
+            RemotePath::new(&Path::new(&pg_version).join(private_prefix).join("lib")).unwrap();
+        for private_lib in remote_storage
+            .list_files(Some(&remote_libdir_private))
+            .await?
+        {
+            all_available_libraries.insert(
+                private_lib.object_name().expect("bad object").to_owned(),
+                private_lib.to_owned(),
+            );
+        }
+    }
 
     // download all requested libraries
-    // add file extension if it isn't in the filename
     for lib_name in preload_libraries {
+        // add file extension if it isn't in the filename
         let lib_name_with_ext = if !lib_name.ends_with(".so") {
             lib_name.to_owned() + ".so"
         } else {
             lib_name.to_string()
         };
-
         info!("looking for library {:?}", &lib_name_with_ext);
-
-        for lib in available_libraries.iter() {
-            info!("object_name {}", lib.object_name().unwrap());
-        }
-
-        let lib_path = available_libraries
-            .iter()
-            .find(|lib: &&RemotePath| lib.object_name().unwrap() == lib_name_with_ext);
-
-        match lib_path {
-            // TODO don't panic here,
-            // remember error and return it only if library is not found in any prefix
+        match all_available_libraries.get(&*lib_name_with_ext) {
+            Some(remote_path) => {
+                download_helper(remote_storage, remote_path, &local_libdir).await?
+            }
             None => bail!("Shared library file {lib_name} is not found in the extension store"),
-            Some(lib_path) => {
-                download_helper(remote_storage, lib_path, &local_libdir).await?;
-                info!("downloaded library {:?}", &lib_path);
-            }
         }
     }
-
-    // 2. Download private libraries
-    for private_prefix in private_ext_prefixes {
-        let remote_libdir_private =
-            RemotePath::new(&Path::new(&pg_version).join(private_prefix).join("lib/")).unwrap();
-        let available_libraries_private = remote_storage
-            .list_files(Some(&remote_libdir_private))
-            .await?;
-        info!("list of library files {:?}", &available_libraries_private);
-
-        // download all requested libraries
-        // add file extension if it isn't in the filename
-        //
-        // TODO refactor this code to avoid duplication
-        for lib_name in preload_libraries {
-            let lib_name_with_ext = if !lib_name.ends_with(".so") {
-                lib_name.to_owned() + ".so"
-            } else {
-                lib_name.to_string()
-            };
-
-            info!("looking for library {:?}", &lib_name_with_ext);
-
-            for lib in available_libraries_private.iter() {
-                info!("object_name {}", lib.object_name().unwrap());
-            }
-
-            let lib_path = available_libraries_private
-                .iter()
-                .find(|lib: &&RemotePath| lib.object_name().unwrap() == lib_name_with_ext);
-
-            match lib_path {
-                None => bail!("Shared library file {lib_name} is not found in the extension store"),
-                Some(lib_path) => {
-                    download_helper(remote_storage, lib_path, &local_libdir).await?;
-                    info!("downloaded library {:?}", &lib_path);
-                }
-            }
-        }
-    }
-
     Ok(())
 }
 
