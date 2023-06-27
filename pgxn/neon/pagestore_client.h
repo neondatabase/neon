@@ -157,7 +157,7 @@ extern page_server_api * page_server;
 extern char *page_server_connstring;
 extern int flush_every_n_requests;
 extern int readahead_buffer_size;
-extern int readahead_distance = 10;
+extern int readahead_distance;
 extern bool seqscan_prefetch_enabled;
 extern int seqscan_prefetch_distance;
 extern char *neon_timeline;
