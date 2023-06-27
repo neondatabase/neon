@@ -1206,7 +1206,7 @@ impl Tenant {
                     LoadLocalTimelineError::FailedToLoad { source } => {
                         // We tried to load deleted timeline, this is a bug.
                         return Err(anyhow::anyhow!(source).context(
-                            "This is a bug..We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
+                            "This is a bug. We tried to load deleted timeline which is wrong and loading failed. Timeline: {timeline_id}"
                         ));
                     }
                     LoadLocalTimelineError::FailedToResumeDeletion { source } => {
@@ -1222,6 +1222,7 @@ impl Tenant {
         Ok(())
     }
 
+    // Shortuct to create Timeline in stopping state and spawn deletion task.
     fn resume_deletion(
         self: &Arc<Self>,
         timeline_id: TimelineId,
@@ -1236,6 +1237,8 @@ impl Tenant {
                 None, // Ancestor is not needed for deletion.
                 remote_client,
                 init_order,
+                // Important. We dont pass ancestor above because it can be missing.
+                // Thus we need to skip the validation here.
                 false,
             )
             .context("create_timeline_struct")?;
@@ -1789,7 +1792,7 @@ impl Tenant {
             // NB: This need not be atomic because the deleted flag in the IndexPart
             // will be observed during tenant/timeline load. The deletion will be resumed there.
             //
-            // For configurations without remote storage, we guarantee crash-safety by persising delete mark file.tolerate that we're not crash-safe here.
+            // For configurations without remote storage, we guarantee crash-safety by persising delete mark file.
             //
             // Note that here we do not bail out on std::io::ErrorKind::NotFound.
             // This can happen if we're called a second time, e.g.,
@@ -1803,6 +1806,10 @@ impl Tenant {
             // warn! level is technically not appropriate for the
             // first case because we should expect retries to happen.
             // But the error is so rare, it seems better to get attention if it happens.
+            //
+            // Note that metadata removal is skipped, this is not technically needed,
+            // but allows to reuse timeline loading code during resumed deletion.
+            // (we always expect that metadata is in place when timeline is being loaded)
             let metadata_path = self.conf.metadata_path(timeline_id, self.tenant_id);
             for entry in walkdir::WalkDir::new(&local_timeline_directory).contents_first(true) {
                 let entry = entry?;
@@ -1833,6 +1840,7 @@ impl Tenant {
                 };
 
                 let r = if metadata.is_dir() {
+                    // There shouldnt be any directories inside timeline dir as of current layout.
                     tokio::fs::remove_dir(entry.path()).await
                 } else {
                     tokio::fs::remove_file(entry.path()).await
@@ -1912,6 +1920,8 @@ impl Tenant {
         Ok(())
     }
 
+    // This is a shortcut to remove remaining traces of a timeline on disk.
+    // Namely: metadata file, timeline directory, delete mark.
     async fn cleanup_remaining_fs_traces_after_timeline_deletion(
         &self,
         timeline_id: TimelineId,
@@ -1941,6 +1951,15 @@ impl Tenant {
     }
 
     /// Removes timeline-related in-memory data and schedules removal from remote storage.
+    /// The sequence of steps:
+    /// 1. Set deleted_at in remote index part.
+    /// 2. Create local mark file.
+    /// 3. Delete local files except metadata (it is simpler this way, to be able to reuse timeline initialization code that expects metadata)
+    /// 4. Delete remote layers
+    /// 5. Delete index part
+    /// 6. Delete meta, timeline directory
+    /// 7. Delete mark file
+    /// It is resumable from any step in case a crash/restart occurs.
     #[instrument(skip(self, _ctx))]
     pub async fn prepare_and_schedule_delete_timeline(
         self: Arc<Self>,
