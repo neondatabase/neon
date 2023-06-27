@@ -33,7 +33,7 @@ pub struct LayerInUseWrite(tokio::sync::OwnedRwLockWriteGuard<()>);
 pub struct LayerInUseRead(tokio::sync::OwnedRwLockReadGuard<()>);
 
 #[derive(Clone)]
-pub struct DeleteGuard(Arc<tokio::sync::OwnedMutexGuard<()>>);
+pub struct LayerDeletionGuard(Arc<tokio::sync::OwnedMutexGuard<()>>);
 
 impl LayerCache {
     pub fn new(timeline: Weak<Timeline>) -> Self {
@@ -63,8 +63,8 @@ impl LayerCache {
     }
 
     /// Ensures only one of compaction / gc can happen at a time.
-    pub async fn delete_guard(&self) -> DeleteGuard {
-        DeleteGuard(Arc::new(
+    pub async fn delete_guard(&self) -> LayerDeletionGuard {
+        LayerDeletionGuard(Arc::new(
             self.layers_removal_lock.clone().lock_owned().await,
         ))
     }

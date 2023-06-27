@@ -82,7 +82,7 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::layer_cache::{DeleteGuard, LayerCache};
+use super::layer_cache::{LayerCache, LayerDeletionGuard};
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -1208,7 +1208,7 @@ impl Timeline {
 
     fn evict_layer_batch_impl(
         &self,
-        _layer_removal_cs: &DeleteGuard,
+        _layer_removal_cs: &LayerDeletionGuard,
         local_layer: &Arc<dyn PersistentLayer>,
         batch_updates: &mut BatchedUpdates<'_>,
     ) -> anyhow::Result<bool> {
@@ -2307,7 +2307,7 @@ impl Timeline {
     fn delete_historic_layer(
         &self,
         // we cannot remove layers otherwise, since gc and compaction will race
-        _layer_removal_cs: DeleteGuard,
+        _layer_removal_cs: LayerDeletionGuard,
         layer: Arc<PersistentLayerDesc>,
         updates: &mut BatchedUpdates<'_>,
     ) -> anyhow::Result<()> {
@@ -3499,7 +3499,7 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 impl Timeline {
     fn compact_level0_phase1(
         self: Arc<Self>,
-        _layer_removal_cs: DeleteGuard,
+        _layer_removal_cs: LayerDeletionGuard,
         guard: tokio::sync::OwnedRwLockReadGuard<(LayerMap, LayerFileManager)>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
@@ -3872,7 +3872,7 @@ impl Timeline {
     ///
     async fn compact_level0(
         self: &Arc<Self>,
-        layer_removal_cs: DeleteGuard,
+        layer_removal_cs: LayerDeletionGuard,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
@@ -4127,7 +4127,7 @@ impl Timeline {
 
     async fn gc_timeline(
         &self,
-        layer_removal_cs: DeleteGuard,
+        layer_removal_cs: LayerDeletionGuard,
         horizon_cutoff: Lsn,
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
