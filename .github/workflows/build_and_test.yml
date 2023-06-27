@@ -659,6 +659,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
@@ -716,6 +717,7 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
+                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-node
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
@@ -736,7 +738,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.8.0
+      VM_BUILDER_VERSION: v0.11.0
 
     steps:
       - name: Checkout
@@ -914,7 +916,7 @@ jobs:
             exit 1
           fi
 
-      - name: Create tag "release-${{ needs.tag.outputs.build-tag }}"
+      - name: Create git tag
         if: github.ref_name == 'release'
         uses: actions/github-script@v6
         with:
@@ -924,7 +926,7 @@ jobs:
             github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              ref: "refs/tags/release-${{ needs.tag.outputs.build-tag }}",
+              ref: "refs/tags/${{ needs.tag.outputs.build-tag }}",
               sha: context.sha,
             })
 

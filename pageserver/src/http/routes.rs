@@ -142,7 +142,7 @@ impl From<TenantMapInsertError> for ApiError {
 impl From<TenantStateError> for ApiError {
     fn from(tse: TenantStateError) -> ApiError {
         match tse {
-            TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid)),
+            TenantStateError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
             _ => ApiError::InternalServerError(anyhow::Error::new(tse)),
         }
     }
@@ -151,7 +151,7 @@ impl From<TenantStateError> for ApiError {
 impl From<GetTenantError> for ApiError {
     fn from(tse: GetTenantError) -> ApiError {
         match tse {
-            GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid)),
+            GetTenantError::NotFound(tid) => ApiError::NotFound(anyhow!("tenant {}", tid).into()),
             e @ GetTenantError::NotActive(_) => {
                 // Why is this not `ApiError::NotFound`?
                 // Because we must be careful to never return 404 for a tenant if it does
@@ -169,7 +169,7 @@ impl From<SetNewTenantConfigError> for ApiError {
     fn from(e: SetNewTenantConfigError) -> ApiError {
         match e {
             SetNewTenantConfigError::GetTenant(tid) => {
-                ApiError::NotFound(anyhow!("tenant {}", tid))
+                ApiError::NotFound(anyhow!("tenant {}", tid).into())
             }
             e @ SetNewTenantConfigError::Persist(_) => {
                 ApiError::InternalServerError(anyhow::Error::new(e))
@@ -182,7 +182,7 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::DeleteTimelineError) -> Self {
         use crate::tenant::DeleteTimelineError::*;
         match value {
-            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found")),
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
             HasChildren(children) => ApiError::PreconditionFailed(
                 format!("Cannot delete timeline which has child timelines: {children:?}")
                     .into_boxed_str(),
@@ -397,7 +397,7 @@ async fn timeline_detail_handler(
 
         let timeline = tenant
             .get_timeline(timeline_id, false)
-            .map_err(ApiError::NotFound)?;
+            .map_err(|e| ApiError::NotFound(e.into()))?;
 
         let timeline_info = build_timeline_info(
             &timeline,
@@ -1061,7 +1061,7 @@ async fn timeline_download_remote_layers_handler_get(
     let info = timeline
         .get_download_all_remote_layers_task_info()
         .context("task never started since last pageserver process start")
-        .map_err(ApiError::NotFound)?;
+        .map_err(|e| ApiError::NotFound(e.into()))?;
     json_response(StatusCode::OK, info)
 }
 
@@ -1072,7 +1072,7 @@ async fn active_timeline_of_active_tenant(
     let tenant = mgr::get_tenant(tenant_id, true).await?;
     tenant
         .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)
+        .map_err(|e| ApiError::NotFound(e.into()))
 }
 
 async fn always_panic_handler(
