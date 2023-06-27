@@ -1560,7 +1560,7 @@ impl Tenant {
             // No timeout here, GC & Compaction should be responsive to the
             // `TimelineState::Stopping` change.
             info!("waiting for layer_removal_cs.lock()");
-            let layer_removal_guard = timeline.lcache.delete_guard().await;
+            let layer_removal_guard = timeline.lcache.delete_guard_write().await;
             info!("got layer_removal_cs.lock(), deleting layer files");
 
             // NB: storage_sync upload tasks that reference these layers have been cancelled

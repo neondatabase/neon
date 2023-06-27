@@ -13,7 +13,7 @@ pub struct LayerCache {
     /// This lock is acquired in [`Timeline::gc`], [`Timeline::compact`],
     /// and [`Tenant::delete_timeline`]. This is an `Arc<Mutex>` lock because we need an owned
     /// lock guard in functions that will be spawned to tokio I/O pool (which requires `'static`).
-    pub layers_removal_lock: Arc<tokio::sync::Mutex<()>>,
+    pub layers_removal_lock: Arc<tokio::sync::RwLock<()>>,
 
     /// We need this lock b/c we do not have any way to prevent GC/compaction from removing files in-use.
     /// We need to do reference counting on Arc to prevent this from happening, and we can safely remove this lock.
@@ -36,13 +36,16 @@ pub struct LayerInUseWrite(tokio::sync::OwnedRwLockWriteGuard<()>);
 pub struct LayerInUseRead(tokio::sync::OwnedRwLockReadGuard<()>);
 
 #[derive(Clone)]
-pub struct DeleteGuard(Arc<tokio::sync::OwnedMutexGuard<()>>);
+pub struct DeleteGuardRead(Arc<tokio::sync::OwnedRwLockReadGuard<()>>);
+
+#[derive(Clone)]
+pub struct DeleteGuardWrite(Arc<tokio::sync::OwnedRwLockWriteGuard<()>>);
 
 impl LayerCache {
     pub fn new(timeline: Weak<Timeline>, tenant_id: TenantId, timeline_id: TimelineId) -> Self {
         Self {
             layers_operation_lock: Arc::new(tokio::sync::RwLock::new(())),
-            layers_removal_lock: Arc::new(tokio::sync::Mutex::new(())),
+            layers_removal_lock: Arc::new(tokio::sync::RwLock::new(())),
             mapping: Mutex::new(HashMap::new()),
             timeline: timeline,
             tenant_id: tenant_id,
@@ -70,9 +73,16 @@ impl LayerCache {
     }
 
     /// Ensures only one of compaction / gc can happen at a time.
-    pub async fn delete_guard(&self) -> DeleteGuard {
-        DeleteGuard(Arc::new(
-            self.layers_removal_lock.clone().lock_owned().await,
+    pub async fn delete_guard_read(&self) -> DeleteGuardRead {
+        DeleteGuardRead(Arc::new(
+            self.layers_removal_lock.clone().read_owned().await,
+        ))
+    }
+
+    /// Ensures only one of compaction / gc can happen at a time.
+    pub async fn delete_guard_write(&self) -> DeleteGuardWrite {
+        DeleteGuardWrite(Arc::new(
+            self.layers_removal_lock.clone().write_owned().await,
         ))
     }
 

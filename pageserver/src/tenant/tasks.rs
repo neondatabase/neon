@@ -14,35 +14,41 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::completion;
 
+use super::timeline::ENABLE_TIERED_COMPACTION;
+
 /// Start per tenant background loops: compaction and gc.
 pub fn start_background_loops(
     tenant: &Arc<Tenant>,
     background_jobs_can_start: Option<&completion::Barrier>,
 ) {
     let tenant_id = tenant.tenant_id;
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        TaskKind::Compaction,
-        Some(tenant_id),
-        None,
-        &format!("compactor for tenant {tenant_id}"),
-        false,
-        {
-            let tenant = Arc::clone(tenant);
-            let background_jobs_can_start = background_jobs_can_start.cloned();
-            async move {
-                let cancel = task_mgr::shutdown_token();
-                tokio::select! {
-                    _ = cancel.cancelled() => { return Ok(()) },
-                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
-                };
-                compaction_loop(tenant, cancel)
-                    .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
-                    .await;
-                Ok(())
-            }
-        },
-    );
+    // start two compaction threads
+    let range = if ENABLE_TIERED_COMPACTION { 0..2 } else { 0..1 };
+    for _ in range {
+        task_mgr::spawn(
+            BACKGROUND_RUNTIME.handle(),
+            TaskKind::Compaction,
+            Some(tenant_id),
+            None,
+            &format!("compactor for tenant {tenant_id}"),
+            false,
+            {
+                let tenant = Arc::clone(tenant);
+                let background_jobs_can_start = background_jobs_can_start.cloned();
+                async move {
+                    let cancel = task_mgr::shutdown_token();
+                    tokio::select! {
+                        _ = cancel.cancelled() => { return Ok(()) },
+                        _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                    };
+                    compaction_loop(tenant, cancel)
+                        .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
+                        .await;
+                    Ok(())
+                }
+            },
+        );
+    }
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
         TaskKind::GarbageCollector,
