@@ -908,7 +908,8 @@ jobs:
           crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
-          crane tag neondatabase/extensions:${{needs.tag.outputs.build-tag}} latest
+          # TODO: Uncomment when we start to build this image in `compute-node-image`
+          # crane tag neondatabase/extensions:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
