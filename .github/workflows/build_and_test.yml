@@ -795,6 +795,9 @@ jobs:
           rm -rf ./usr-local-pgsql/share/extension/neon*
           rm -rf ./usr-local-pgsql/lib/neon*
 
+      - name: Upload postgres-extensions to S3 (debug)
+        run: aws sts get-caller-identity
+
       - name: Upload postgres-extensions to S3
         env:
           BUCKETS: |
