@@ -759,7 +759,7 @@ jobs:
     # if: |
     #   (github.ref_name == 'main' || github.ref_name == 'release') &&
     #   github.event_name != 'workflow_dispatch'
-    runs-on: [ self-hosted, gen3, small ]
+    runs-on: ${{ github.ref_name == 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
     needs: [ tag, compute-node-image ]
     strategy:
       fail-fast: false
@@ -796,8 +796,6 @@ jobs:
           rm -rf ./usr-local-pgsql/lib/neon*
 
       - name: Upload postgres-extensions to S3
-        # TODO: Remove when prod buckets are ready
-        # if: github.ref_name == 'main' && github.event_name != 'workflow_dispatch'
         env:
           BUCKETS: |
             ${{ github.ref_name == 'release' &&
