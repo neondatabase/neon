@@ -8,6 +8,7 @@ use std::sync::{Condvar, Mutex};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use postgres::{Client, NoTls};
+use tokio;
 use tokio_postgres;
 use tracing::{info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
@@ -18,7 +19,6 @@ use compute_api::spec::{ComputeMode, ComputeSpec};
 
 use remote_storage::GenericRemoteStorage;
 
-use crate::extension_server::{get_available_extensions, get_available_libraries};
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::{config, extension_server};
@@ -668,7 +668,8 @@ LIMIT 100",
     // If remote extension storage is configured,
     // download extension control files
     // and shared preload libraries.
-    pub fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
+    #[tokio::main]
+    pub async fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
         if let Some(ref ext_remote_storage) = self.ext_remote_storage {
             let pspec = compute_state.pspec.as_ref().expect("spec must be set");
             // download preload shared libraries before postgres start (if any)
@@ -705,22 +706,21 @@ LIMIT 100",
             // );
 
             // download extension control files & shared_preload_libraries
-            let rt = tokio::runtime::Runtime::new().unwrap();
 
-            let pgbin = self.pgbin.clone();
-            rt.block_on(async move {
-                get_available_extensions(ext_remote_storage, &pgbin, &private_ext_prefixes).await?;
+            extension_server::get_available_extensions(
+                ext_remote_storage,
+                &self.pgbin,
+                &private_ext_prefixes,
+            )
+            .await?;
 
-                get_available_libraries(
-                    ext_remote_storage,
-                    &pgbin,
-                    &private_ext_prefixes,
-                    &libs_vec,
-                )
-                .await?;
-
-                Ok::<(), anyhow::Error>(())
-            })?;
+            extension_server::get_available_libraries(
+                ext_remote_storage,
+                &self.pgbin,
+                &private_ext_prefixes,
+                &libs_vec,
+            )
+            .await?;
         }
 
         Ok(())

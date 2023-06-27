@@ -76,8 +76,8 @@ pub async fn get_available_extensions(
     let from_paths: Vec<RemotePath> = remote_storage.list_files(Some(&remote_sharedir)).await?;
 
     info!(
-        "get_available_extensions remote_sharedir: {:?}, local_sharedir: {:?}",
-        remote_sharedir, local_sharedir
+        "get_available_extensions remote_sharedir: {:?}, local_sharedir: {:?}, \nall_paths: {:?}",
+        remote_sharedir, local_sharedir, &from_paths
     );
 
     for remote_from_path in &from_paths {

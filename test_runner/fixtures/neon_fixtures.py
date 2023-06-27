@@ -534,6 +534,16 @@ class S3Storage:
             "AWS_SECRET_ACCESS_KEY": self.secret_key,
         }
 
+    def to_string(self) -> str:
+        return json.dumps(
+            {
+                "bucket": self.bucket_name,
+                "region": self.bucket_region,
+                "endpoint": self.endpoint,
+                "prefix": self.prefix_in_bucket,
+            }
+        )
+
 
 RemoteStorage = Union[LocalFsStorage, S3Storage]
 
@@ -600,12 +610,12 @@ class NeonEnvBuilder:
         self.rust_log_override = rust_log_override
         self.port_distributor = port_distributor
         self.remote_storage = remote_storage
-        self.ext_remote_storage: Optional[Any] = None
+        self.ext_remote_storage: Optional[S3Storage] = None
         self.remote_storage_client: Optional[Any] = None
         self.remote_storage_users = remote_storage_users
         self.broker = broker
         self.run_id = run_id
-        self.mock_s3_server = mock_s3_server
+        self.mock_s3_server: MockS3Server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
         self.num_safekeepers = num_safekeepers
         self.safekeepers_id_start = safekeepers_id_start
@@ -713,17 +723,17 @@ class NeonEnvBuilder:
             bucket_region=mock_region,
             access_key=self.mock_s3_server.access_key(),
             secret_key=self.mock_s3_server.secret_key(),
+            prefix_in_bucket="pageserver",
         )
 
         if enable_remote_extensions:
-            ext_bucket_name = f"ext_{bucket_name}"
-            self.remote_storage_client.create_bucket(Bucket=ext_bucket_name)
             self.ext_remote_storage = S3Storage(
-                bucket_name=ext_bucket_name,
+                bucket_name=bucket_name,
                 endpoint=mock_endpoint,
                 bucket_region=mock_region,
                 access_key=self.mock_s3_server.access_key(),
                 secret_key=self.mock_s3_server.secret_key(),
+                prefix_in_bucket="ext",
             )
 
     def enable_real_s3_remote_storage(
@@ -765,20 +775,16 @@ class NeonEnvBuilder:
             bucket_region=region,
             access_key=access_key,
             secret_key=secret_key,
-            prefix_in_bucket=self.remote_storage_prefix,
+            prefix_in_bucket=f"{self.remote_storage_prefix}/pageserver",
         )
 
         if enable_remote_extensions:
-            # TODO: add an env variable for EXT_REMOTE_STORAGE_S3_BUCKET
-            ext_bucket_name = os.getenv("EXT_REMOTE_STORAGE_S3_BUCKET")
-            if ext_bucket_name is None:
-                ext_bucket_name = "neon-dev-extensions"
             self.ext_remote_storage = S3Storage(
-                bucket_name=ext_bucket_name,
+                bucket_name=bucket_name,
                 bucket_region=region,
                 access_key=access_key,
                 secret_key=secret_key,
-                prefix_in_bucket=self.remote_storage_prefix,
+                prefix_in_bucket=f"{self.remote_storage_prefix}/ext",
             )
 
     def cleanup_local_storage(self):

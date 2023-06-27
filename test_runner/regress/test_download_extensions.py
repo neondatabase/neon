@@ -1,19 +1,14 @@
-import json
 import os
 from contextlib import closing
 from io import BytesIO
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import (
-    NeonEnvBuilder,
-    PgBin,
-    RemoteStorageKind,
-)
+from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, RemoteStorageKind
 from fixtures.pg_version import PgVersion
 from fixtures.types import TenantId
 
-BUCKET_PREFIX = "5314225671"  # in real setup this is the build_tag
+NUM_EXT = 3
 
 
 def control_file_content(owner, i):
@@ -45,6 +40,7 @@ def prepare_mock_ext_storage(
     ext_remote_storage,
     remote_storage_client,
 ):
+    bucket_prefix = ext_remote_storage.prefix_in_bucket
     private_prefix = str(tenant_id)
     PUB_EXT_ROOT = f"v{pg_version}/share/postgresql/extension"
     PRIVATE_EXT_ROOT = f"v{pg_version}/{private_prefix}/share/postgresql/extension"
@@ -68,15 +64,15 @@ def prepare_mock_ext_storage(
     cleanup_files = []
 
     # Upload several test_ext{i}.control files to the bucket
-    for i in range(5):
+    for i in range(NUM_EXT):
         # public extensions
         public_ext = BytesIO(bytes(control_file_content("public", i), "utf-8"))
-        public_remote_name = f"{BUCKET_PREFIX}/{PUB_EXT_ROOT}/test_ext{i}.control"
+        public_remote_name = f"{bucket_prefix}/{PUB_EXT_ROOT}/test_ext{i}.control"
         public_local_name = f"{LOCAL_EXT_ROOT}/test_ext{i}.control"
 
         # private extensions
         private_ext = BytesIO(bytes(control_file_content(str(tenant_id), i), "utf-8"))
-        private_remote_name = f"{BUCKET_PREFIX}/{PRIVATE_EXT_ROOT}/private_ext{i}.control"
+        private_remote_name = f"{bucket_prefix}/{PRIVATE_EXT_ROOT}/private_ext{i}.control"
         private_local_name = f"{LOCAL_EXT_ROOT}/private_ext{i}.control"
 
         cleanup_files += [public_local_name, private_local_name]
@@ -90,7 +86,7 @@ def prepare_mock_ext_storage(
 
     # Upload SQL file for the extension we're going to create
     sql_filename = "test_ext0--1.0.sql"
-    test_sql_public_remote_path = f"{BUCKET_PREFIX}/{PUB_EXT_ROOT}/{sql_filename}"
+    test_sql_public_remote_path = f"{bucket_prefix}/{PUB_EXT_ROOT}/{sql_filename}"
     test_sql_local_path = f"{LOCAL_EXT_ROOT}/{sql_filename}"
     test_ext_sql_file = BytesIO(bytes(sql_file_content(), "utf-8"))
     remote_storage_client.upload_fileobj(
@@ -105,7 +101,7 @@ def prepare_mock_ext_storage(
     for i in range(2):
         lib_filename = f"test_lib{i}.so"
         TEST_LIB_PATH = f"{PUB_LIB_ROOT}/{lib_filename}"
-        lib_public_remote_path = f"{BUCKET_PREFIX}/{TEST_LIB_PATH}"
+        lib_public_remote_path = f"{bucket_prefix}/{TEST_LIB_PATH}"
         lib_local_path = f"{LOCAL_LIB_ROOT}/{lib_filename}"
         test_lib_file = BytesIO(
             b"""
@@ -129,7 +125,15 @@ def prepare_mock_ext_storage(
 # Then check that compute nodes can download them and use them
 # to CREATE EXTENSION and LOAD 'library.so'
 #
-# NOTE: you must have appropriate AWS credentials to run REAL_S3 test.
+# NOTE: You must have appropriate AWS credentials to run REAL_S3 test.
+# It may also be necessary to set the following environment variables:
+#   export AWS_ACCESS_KEY_ID='test'
+#   export AWS_SECRET_ACCESS_KEY='test'
+#   export AWS_SECURITY_TOKEN='test'
+#   export AWS_SESSION_TOKEN='test'
+#   export AWS_DEFAULT_REGION='us-east-1'
+
+
 @pytest.mark.parametrize(
     "remote_storage_kind", [RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3]
 )
@@ -160,21 +164,6 @@ def test_remote_extensions(
         env.ext_remote_storage,
         env.remote_storage_client,
     )
-
-    # TODO what region should we use for the test?
-    region = "us-east-1"
-    if remote_storage_kind == RemoteStorageKind.REAL_S3:
-        region = "eu-central-1"
-
-    remote_ext_config = json.dumps(
-        {
-            "bucket": env.ext_remote_storage.bucket_name,
-            "region": region,
-            "endpoint": env.ext_remote_storage.endpoint,
-            "prefix": BUCKET_PREFIX,
-        }
-    )
-
     # Start a compute node and check that it can download the extensions
     # and use them to CREATE EXTENSION and LOAD 'library.so'
     #
@@ -184,17 +173,16 @@ def test_remote_extensions(
         endpoint = env.endpoints.create_start(
             "test_remote_extensions",
             tenant_id=tenant_id,
-            remote_ext_config=remote_ext_config,
-            config_lines=["log_min_messages=debug3"],
+            remote_ext_config=env.ext_remote_storage.to_string(),
+            # config_lines=["log_min_messages=debug3"],
         )
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
                 # Test query: check that test_ext0 was successfully downloaded
                 cur.execute("SELECT * FROM pg_available_extensions")
                 all_extensions = [x[0] for x in cur.fetchall()]
-                log.info("ALEK*" * 100)
                 log.info(all_extensions)
-                for i in range(5):
+                for i in range(NUM_EXT):
                     assert f"test_ext{i}" in all_extensions
                     assert f"private_ext{i}" in all_extensions
 
@@ -242,8 +230,8 @@ def test_remote_extensions(
         # files
         for file in cleanup_files:
             try:
-                log.info(f"Deleting {file}")
                 os.remove(file)
+                log.info(f"Deleted {file}")
             except FileNotFoundError:
                 log.info(f"{file} does not exist, so cannot be deleted")
 
