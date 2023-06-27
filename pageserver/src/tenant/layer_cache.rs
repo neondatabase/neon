@@ -178,9 +178,9 @@ impl LayerCache {
     }
 
     fn get_layer_type(layer: &dyn PersistentLayer) -> &'static str {
-        if layer.is_delta() {
+        if layer.layer_desc().is_delta() {
             &STORAGE_PHYSICAL_SIZE_FILE_TYPE[1]
-        } else if layer.is_incremental() {
+        } else if layer.layer_desc().is_incremental() {
             &STORAGE_PHYSICAL_SIZE_FILE_TYPE[2]
         } else {
             &STORAGE_PHYSICAL_SIZE_FILE_TYPE[0]

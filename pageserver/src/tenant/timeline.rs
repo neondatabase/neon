@@ -2310,7 +2310,7 @@ impl Timeline {
         layer: Arc<PersistentLayerDesc>,
         _updates: &mut BatchedUpdates<'_>,
     ) -> anyhow::Result<()> {
-        warn!("not deleting the layer {layer:?} as old GC is not supposed to run");
+        self.delete_historic_layer_new(_layer_removal_cs, layer, _updates)?;
         Ok(())
     }
 
