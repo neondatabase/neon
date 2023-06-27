@@ -486,12 +486,14 @@ struct ImageLayerWriterInner {
     path: PathBuf,
     timeline_id: TimelineId,
     tenant_id: TenantId,
-    key_range: Range<Key>,
     lsn: Lsn,
     is_incremental: bool,
 
     blob_writer: WriteBlobWriter<VirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
+
+    start_key: Key,
+    last_key: Option<Key>,
 }
 
 impl ImageLayerWriterInner {
@@ -502,8 +504,8 @@ impl ImageLayerWriterInner {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
-        key_range: &Range<Key>,
         lsn: Lsn,
+        start_key: Key,
         is_incremental: bool,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
@@ -513,7 +515,7 @@ impl ImageLayerWriterInner {
             timeline_id,
             tenant_id,
             &ImageFileName {
-                key_range: key_range.clone(),
+                key_range: start_key..start_key, // TODO(chi): use number instead of dummy range
                 lsn,
             },
         );
@@ -535,11 +537,12 @@ impl ImageLayerWriterInner {
             path,
             timeline_id,
             tenant_id,
-            key_range: key_range.clone(),
             lsn,
             tree: tree_builder,
             blob_writer,
             is_incremental,
+            start_key,
+            last_key: None,
         };
 
         Ok(writer)
@@ -551,7 +554,14 @@ impl ImageLayerWriterInner {
     /// The page versions must be appended in blknum order.
     ///
     fn put_image(&mut self, key: Key, img: &[u8]) -> anyhow::Result<()> {
-        ensure!(self.key_range.contains(&key));
+        if cfg!(debug_assertions) {
+            ensure!(key >= self.start_key);
+            if let Some(last_key) = self.last_key.as_ref() {
+                ensure!(last_key < &key);
+            }
+            self.last_key = Some(key.clone());
+        }
+
         let off = self.blob_writer.write_blob(img)?;
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
@@ -564,7 +574,7 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    fn finish(self) -> anyhow::Result<ImageLayer> {
+    fn finish(self, end_key: Key) -> anyhow::Result<ImageLayer> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -577,13 +587,15 @@ impl ImageLayerWriterInner {
             file.write_all(buf.as_ref())?;
         }
 
+        let key_range = self.start_key.clone()..end_key;
+
         // Fill in the summary on blk 0
         let summary = Summary {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
             tenant_id: self.tenant_id,
             timeline_id: self.timeline_id,
-            key_range: self.key_range.clone(),
+            key_range: key_range.clone(),
             lsn: self.lsn,
             index_start_blk,
             index_root_blk,
@@ -598,7 +610,7 @@ impl ImageLayerWriterInner {
         let desc = PersistentLayerDesc::new_img(
             self.tenant_id,
             self.timeline_id,
-            self.key_range.clone(),
+            key_range.clone(),
             self.lsn,
             self.is_incremental, // for now, image layer ALWAYS covers the full range
             metadata.len(),
@@ -632,7 +644,7 @@ impl ImageLayerWriterInner {
             self.timeline_id,
             self.tenant_id,
             &ImageFileName {
-                key_range: self.key_range.clone(),
+                key_range,
                 lsn: self.lsn,
             },
         );
@@ -641,6 +653,10 @@ impl ImageLayerWriterInner {
         trace!("created image layer {}", layer.path().display());
 
         Ok(layer)
+    }
+
+    fn size(&self) -> u64 {
+        self.blob_writer.size() + self.tree.borrow_writer().size()
     }
 }
 
@@ -678,7 +694,7 @@ impl ImageLayerWriter {
         conf: &'static PageServerConf,
         timeline_id: TimelineId,
         tenant_id: TenantId,
-        key_range: &Range<Key>,
+        start_key: Key,
         lsn: Lsn,
         is_incremental: bool,
     ) -> anyhow::Result<ImageLayerWriter> {
@@ -687,8 +703,8 @@ impl ImageLayerWriter {
                 conf,
                 timeline_id,
                 tenant_id,
-                key_range,
                 lsn,
+                start_key,
                 is_incremental,
             )?),
         })
@@ -706,8 +722,12 @@ impl ImageLayerWriter {
     ///
     /// Finish writing the image layer.
     ///
-    pub fn finish(mut self) -> anyhow::Result<ImageLayer> {
-        self.inner.take().unwrap().finish()
+    pub fn finish(mut self, end_key: Key) -> anyhow::Result<ImageLayer> {
+        self.inner.take().unwrap().finish(end_key)
+    }
+
+    pub fn size(&self) -> u64 {
+        self.inner.as_ref().unwrap().size()
     }
 }
 

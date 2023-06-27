@@ -3235,7 +3235,7 @@ impl Timeline {
                     self.conf,
                     self.timeline_id,
                     self.tenant_id,
-                    &img_range,
+                    img_range.start.clone(),
                     lsn,
                     false, // image layer always covers the full range
                 )?;
@@ -3278,7 +3278,7 @@ impl Timeline {
                         key = key.next();
                     }
                 }
-                let image_layer = image_layer_writer.finish()?;
+                let image_layer = image_layer_writer.finish(img_range.end.clone())?;
                 image_layers.push(image_layer);
             }
         }
@@ -3749,6 +3749,7 @@ impl Timeline {
     fn get_compact_task(tier_sizes: Vec<(usize, u64)>) -> Option<Vec<usize>> {
         let size_ratio = 1.25;
         let space_amplification_ratio = 2.0;
+        let max_merge_width = 20;
 
         // Trigger 1: by space amplification, do full compaction
         let total_tier_size = tier_sizes.iter().map(|(_, size)| *size).sum::<u64>();
@@ -3756,12 +3757,14 @@ impl Timeline {
         let estimated_space_amp = (total_tier_size - last_tier_size) as f64 / last_tier_size as f64;
         if estimated_space_amp > space_amplification_ratio {
             info!("full compaction triggered by space amplification");
-            return Some(
-                tier_sizes
-                    .iter()
-                    .map(|(tier_id, _)| *tier_id)
-                    .collect::<Vec<_>>(),
-            );
+            let tiers = tier_sizes
+                .iter()
+                .rev()
+                .take(max_merge_width)
+                .rev()
+                .map(|(tier_id, _)| *tier_id)
+                .collect::<Vec<_>>();
+            return Some(tiers);
         }
 
         // Trigger 2: by size ratio
@@ -3770,6 +3773,13 @@ impl Timeline {
         for (tier_id, size) in tier_sizes {
             if total_size_up_to_lvl != 0 && size as f64 / total_size_up_to_lvl as f64 > size_ratio {
                 info!("compaction triggered by size ratio");
+                let compact_tiers = compact_tiers
+                    .iter()
+                    .rev()
+                    .take(max_merge_width)
+                    .rev()
+                    .copied()
+                    .collect_vec();
                 return Some(compact_tiers);
             }
             total_size_up_to_lvl += size;
@@ -3914,6 +3924,8 @@ impl Timeline {
         let mut construct_image_for_key = false;
         let image_lsn = Lsn(lsn_range.end.0 - 1);
 
+        const PAGE_MATERIALIZE_THRESHOLD: usize = 32;
+
         for x in all_values_iter {
             let (key, lsn, value) = x?;
             let same_key = prev_key.map_or(false, |prev_key| prev_key == key);
@@ -3923,7 +3935,7 @@ impl Timeline {
                 same_key_cnt = 1;
                 construct_image_for_key = false;
             }
-            if same_key_cnt >= 20 && !construct_image_for_key {
+            if same_key_cnt >= PAGE_MATERIALIZE_THRESHOLD && !construct_image_for_key {
                 let img = match self.get(key, image_lsn, ctx).await {
                     Ok(img) => img,
                     Err(err) => {
@@ -3942,13 +3954,21 @@ impl Timeline {
                         self.timeline_id,
                         self.tenant_id,
                         // TODO(chi): should not use the full key range
-                        &(key..Key::MAX),
+                        key.clone(),
                         image_lsn,
                         true,
                     )?);
                 }
-                image_writer.as_mut().unwrap().put_image(key, &img)?;
+
+                let image_writer_mut = image_writer.as_mut().unwrap();
+                image_writer_mut.put_image(key, &img)?;
                 construct_image_for_key = true;
+
+                let written_size: u64 = image_writer_mut.size();
+                if written_size + key_values_total_size > target_file_size {
+                    new_layers.push(Arc::new(image_writer.take().unwrap().finish(key.next())?));
+                    image_writer = None;
+                }
             }
 
             // We need to check key boundaries once we reach next key or end of layer with the same key
@@ -4033,11 +4053,11 @@ impl Timeline {
             prev_key = Some(key);
         }
         if let Some(writer) = writer {
-            new_layers.push(Arc::new(writer.finish(prev_key.unwrap().next())?));
+            new_layers.push(Arc::new(writer.finish(prev_key.as_ref().unwrap().next())?));
         }
 
         if let Some(image_writer) = image_writer {
-            new_layers.push(Arc::new(image_writer.finish()?));
+            new_layers.push(Arc::new(image_writer.finish(prev_key.unwrap().next())?));
         }
 
         // Sync layers
