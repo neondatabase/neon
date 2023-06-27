@@ -3357,9 +3357,7 @@ impl Timeline {
             self.lcache.create_new_layer(l);
         }
 
-        // add this layer to the end of all sorted runs; this is only done when initializing with init_lsn
-        // for now, and therefore the sorted runs are empty.
-        assert_eq!(updates.sorted_runs().num_of_tiers(), 0);
+        // add this layer to the end of all sorted runs
         updates.sorted_runs().create_new_bottom_run(sorted_run);
         updates.flush();
         drop_wlock(guard);
