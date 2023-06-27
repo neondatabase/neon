@@ -4032,6 +4032,7 @@ impl Timeline {
                 LayerResidenceEventReason::LayerCreate,
             );
             updates.insert_historic(x.layer_desc().clone());
+            mapping.insert(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
