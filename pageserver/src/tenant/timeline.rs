@@ -3412,6 +3412,10 @@ impl Timeline {
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         let guard = self.layers.read().await;
         let (layers, _) = &*guard;
+
+        println!("before compaction:");
+        layers.dump(false, ctx)?;
+
         let mut level0_deltas = layers.get_level0_deltas()?;
 
         // Only compact if enough layers have accumulated.
@@ -3830,6 +3834,10 @@ impl Timeline {
             self.delete_historic_layer(layer_removal_cs.clone(), l, &mut updates)?;
         }
         updates.flush();
+
+        println!("after compaction:");
+        layers.dump(false, ctx)?;
+
         drop_wlock(guard);
 
         // Also schedule the deletions in remote storage
@@ -3935,7 +3943,7 @@ impl Timeline {
             let deltas_to_compact_layers = deltas_to_compact_layers
                 .into_iter()
                 .map(|l| self.lcache.get_from_desc(&l))
-                .filter(|l| l.is_delta())
+                .filter(|l| l.layer_desc().is_delta())
                 .collect_vec();
 
             let lsn_range = {
