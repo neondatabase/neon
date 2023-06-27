@@ -759,7 +759,7 @@ jobs:
     # if: |
     #   (github.ref_name == 'main' || github.ref_name == 'release') &&
     #   github.event_name != 'workflow_dispatch'
-    runs-on: ${{ github.ref_name == 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
+    runs-on: ${{ github.ref_name != 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
     needs: [ tag, compute-node-image ]
     strategy:
       fail-fast: false
@@ -798,7 +798,7 @@ jobs:
       - name: Upload postgres-extensions to S3
         env:
           BUCKETS: |
-            ${{ github.ref_name == 'release' &&
+            ${{ github.ref_name != 'release' &&
               '["neon-prod-extensions-ap-southeast-1", "neon-prod-extensions-eu-central-1", "neon-prod-extensions-us-east-1", "neon-prod-extensions-us-east-2", "neon-prod-extensions-us-west-2"]' ||
               '["neon-dev-extensions-eu-central-1", "neon-dev-extensions-eu-west-1", "neon-dev-extensions-us-east-2"]' }}
         run: |
