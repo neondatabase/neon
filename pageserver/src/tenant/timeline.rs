@@ -195,7 +195,7 @@ impl LayerFileManager {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<'_, T>) {
+fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
     drop(rlock)
 }
 
@@ -216,7 +216,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap<dyn PersistentLayer>, LayerFileManager)>>,
+    pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, LayerFileManager)>>,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -3570,40 +3570,23 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 }
 
 impl Timeline {
-    /// Level0 files first phase of compaction, explained in the [`compact_inner`] comment.
-    ///
-    /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
-    /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
-    /// start of level0 files compaction, the on-demand download should be revisited as well.
     fn compact_level0_phase1(
         self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        layers: tokio::sync::OwnedRwLockReadGuard<LayerMap<dyn PersistentLayer>>,
+        guard: tokio::sync::OwnedRwLockReadGuard<(LayerMap, LayerFileManager)>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         stats.read_lock_held_spawn_blocking_startup_micros =
             stats.read_lock_acquisition_micros.till_now(); // set by caller
-        let mut level0_deltas = layers.get_level0_deltas()?;
-
-        let mut level0_deltas = {
-            let begin = tokio::time::Instant::now();
-            let guard = self.layers.read().await;
-            let now = tokio::time::Instant::now();
-            stats.first_read_lock_acquisition_micros =
-                DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-            let (layers, mapping) = &*guard;
-            let level0_deltas = layers.get_level0_deltas()?;
-            stats.level0_deltas_count = Some(level0_deltas.len());
-            stats.get_level0_deltas_plus_drop_lock_micros =
-                stats.first_read_lock_acquisition_micros.till_now();
-            level0_deltas
-                .into_iter()
-                .map(|x| mapping.get_from_desc(&x))
-                .collect_vec()
-        };
-
+        let (layers, mapping) = &*guard;
+        let level0_deltas = layers.get_level0_deltas()?;
+        let mut level0_deltas = level0_deltas
+            .into_iter()
+            .map(|x| mapping.get_from_desc(&x))
+            .collect_vec();
+        stats.level0_deltas_count = Some(level0_deltas.len());
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
@@ -3688,9 +3671,6 @@ impl Timeline {
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
-        stats.time_spent_between_locks = stats.get_level0_deltas_plus_drop_lock_micros.till_now();
-        let guard = self.layers.read().await; // Is'n it better to hold original layers lock till here?
-        let (layers, _) = &*guard;
         let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
 
@@ -4053,7 +4033,6 @@ impl Timeline {
                 LayerResidenceEventReason::LayerCreate,
             );
             updates.insert_historic(x.layer_desc().clone());
-            mapping.insert(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
