@@ -390,7 +390,9 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = tenant.get_timeline(timeline_id, true)?;
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
@@ -911,10 +913,24 @@ where
                 None
             };
 
-            // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, None, false, ctx)
-                .await?;
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            metrics::metric_vec_duration::observe_async_block_duration_by_result(
+                &*crate::metrics::BASEBACKUP_QUERY_TIME,
+                async move {
+                    self.handle_basebackup_request(
+                        pgb,
+                        tenant_id,
+                        timeline_id,
+                        lsn,
+                        None,
+                        false,
+                        ctx,
+                    )
+                    .await?;
+                    pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                    anyhow::Ok(())
+                },
+            )
+            .await?;
         }
         // return pair of prev_lsn and last_lsn
         else if query_string.starts_with("get_last_record_rlsn ") {
@@ -1230,6 +1246,6 @@ async fn get_active_tenant_timeline(
         .map_err(GetActiveTimelineError::Tenant)?;
     let timeline = tenant
         .get_timeline(timeline_id, true)
-        .map_err(GetActiveTimelineError::Timeline)?;
+        .map_err(|e| GetActiveTimelineError::Timeline(anyhow::anyhow!(e)))?;
     Ok(timeline)
 }

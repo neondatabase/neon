@@ -1,4 +1,4 @@
-use metrics::core::{AtomicU64, GenericCounter};
+use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
     register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
@@ -95,21 +95,19 @@ static READ_NUM_FS_LAYERS: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 // Metrics collected on operations on the storage repository.
-static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
+pub static RECONSTRUCT_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_getpage_reconstruct_seconds",
-        "Time spent in reconstruct_value",
-        &["tenant_id", "timeline_id"],
+        "Time spent in reconstruct_value (reconstruct a page from deltas)",
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
 
-static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_materialized_cache_hits_direct_total",
         "Number of cache hits from materialized page cache without redo",
-        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -124,11 +122,10 @@ static GET_RECONSTRUCT_DATA_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_materialized_cache_hits_total",
         "Number of cache hits from materialized page cache",
-        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -427,6 +424,27 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+pub struct BasebackupQueryTime(HistogramVec);
+pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
+    BasebackupQueryTime({
+        register_histogram_vec!(
+            "pageserver_basebackup_query_seconds",
+            "Histogram of basebackup queries durations, by result type",
+            &["result"],
+            CRITICAL_OP_BUCKETS.into(),
+        )
+        .expect("failed to define a metric")
+    })
+});
+
+impl DurationResultObserver for BasebackupQueryTime {
+    fn observe_result<T, E>(&self, res: &Result<T, E>, duration: std::time::Duration) {
+        let label_value = if res.is_ok() { "ok" } else { "error" };
+        let metric = self.0.get_metric_with_label_values(&[label_value]).unwrap();
+        metric.observe(duration.as_secs_f64());
+    }
+}
 
 pub static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
@@ -752,10 +770,7 @@ impl StorageTimeMetrics {
 pub struct TimelineMetrics {
     tenant_id: String,
     timeline_id: String,
-    pub reconstruct_time_histo: Histogram,
     pub get_reconstruct_data_time_histo: Histogram,
-    pub materialized_page_cache_hit_counter: GenericCounter<AtomicU64>,
-    pub materialized_page_cache_hit_upon_request_counter: GenericCounter<AtomicU64>,
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
@@ -783,13 +798,7 @@ impl TimelineMetrics {
     ) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
-        let reconstruct_time_histo = RECONSTRUCT_TIME
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let get_reconstruct_data_time_histo = GET_RECONSTRUCT_DATA_TIME
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
-        let materialized_page_cache_hit_counter = MATERIALIZED_PAGE_CACHE_HIT
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
         let flush_time_histo =
@@ -833,19 +842,13 @@ impl TimelineMetrics {
         let read_num_fs_layers = READ_NUM_FS_LAYERS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let materialized_page_cache_hit_upon_request_counter = MATERIALIZED_PAGE_CACHE_HIT_DIRECT
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
         TimelineMetrics {
             tenant_id,
             timeline_id,
-            reconstruct_time_histo,
             get_reconstruct_data_time_histo,
-            materialized_page_cache_hit_counter,
-            materialized_page_cache_hit_upon_request_counter,
             flush_time_histo,
             compact_time_histo,
             create_images_time_histo,
@@ -872,10 +875,7 @@ impl Drop for TimelineMetrics {
     fn drop(&mut self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
-        let _ = RECONSTRUCT_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = GET_RECONSTRUCT_DATA_TIME.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = MATERIALIZED_PAGE_CACHE_HIT.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = MATERIALIZED_PAGE_CACHE_HIT_DIRECT.remove_label_values(&[tenant_id, timeline_id]);
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
@@ -1319,4 +1319,8 @@ pub fn preinitialize_metrics() {
 
     // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
     BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
+
+    // Python tests need these.
+    MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
+    MATERIALIZED_PAGE_CACHE_HIT.get();
 }

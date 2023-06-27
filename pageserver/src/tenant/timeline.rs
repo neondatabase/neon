@@ -15,6 +15,7 @@ use pageserver_api::models::{
     TimelineState,
 };
 use remote_storage::GenericRemoteStorage;
+use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::sync::{oneshot, watch, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
@@ -47,12 +48,14 @@ use crate::tenant::{
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace, KeySpaceRandomAccum};
-use crate::metrics::{TimelineMetrics, UNEXPECTED_ONDEMAND_DOWNLOADS};
+use crate::metrics::{
+    TimelineMetrics, MATERIALIZED_PAGE_CACHE_HIT, MATERIALIZED_PAGE_CACHE_HIT_DIRECT,
+    RECONSTRUCT_TIME, UNEXPECTED_ONDEMAND_DOWNLOADS,
+};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::pgdatadir_mapping::{is_rel_fsm_block_key, is_rel_vm_block_key};
 use crate::pgdatadir_mapping::{BlockNumber, CalculateLogicalSizeError};
 use crate::tenant::config::{EvictionPolicy, TenantConfOpt};
-use crate::tenant::layer_map;
 use pageserver_api::reltag::RelTag;
 
 use postgres_connection::PgConnectionConfig;
@@ -118,7 +121,7 @@ impl PartialOrd for Hole {
     }
 }
 
-pub struct LayerMapping(());
+pub struct LayerFileManager(());
 
 impl LayerMapping {
     pub(crate) fn new() -> Self {
@@ -128,7 +131,7 @@ impl LayerMapping {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<'_, T>) {
+fn drop_rlock<T>(rlock: tokio::sync::OwnedRwLockReadGuard<T>) {
     drop(rlock)
 }
 
@@ -558,9 +561,7 @@ impl Timeline {
                 match cached_lsn.cmp(&lsn) {
                     Ordering::Less => {} // there might be WAL between cached_lsn and lsn, we need to check
                     Ordering::Equal => {
-                        self.metrics
-                            .materialized_page_cache_hit_upon_request_counter
-                            .inc();
+                        MATERIALIZED_PAGE_CACHE_HIT_DIRECT.inc();
                         return Ok(cached_img); // exact LSN match, return the image
                     }
                     Ordering::Greater => {
@@ -582,8 +583,7 @@ impl Timeline {
             .await?;
         timer.stop_and_record();
 
-        self.metrics
-            .reconstruct_time_histo
+        RECONSTRUCT_TIME
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
     }
 
@@ -1300,7 +1300,7 @@ impl Timeline {
             }
             Err(err) => {
                 if cfg!(debug_assertions) {
-                    error!(evicted=?local_layer, "failed to replace: {err}");
+                    panic!("failed to replace: {err}, evicted: {local_layer:?}");
                 } else {
                     error!(evicted=?local_layer, "failed to replace: {err}");
                 }
@@ -1432,7 +1432,10 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: tokio::sync::RwLock::new((LayerMap::default(), LayerMapping::new())),
+                layers: Arc::new(tokio::sync::RwLock::new((
+                    LayerMap::default(),
+                    LayerFileManager::new(),
+                ))),
                 lcache: LayerCache::new(myself.clone()),
                 wanted_image_layers: Mutex::new(None),
 
@@ -2414,7 +2417,7 @@ impl Timeline {
                 ValueReconstructResult::Continue => {
                     // If we reached an earlier cached page image, we're done.
                     if cont_lsn == cached_lsn + 1 {
-                        self.metrics.materialized_page_cache_hit_counter.inc_by(1);
+                        MATERIALIZED_PAGE_CACHE_HIT.inc_by(1);
                         return Ok(());
                     }
                     if prev_lsn <= cont_lsn {
@@ -2934,7 +2937,9 @@ impl Timeline {
         fail_point!("flush-frozen-before-sync");
 
         // The new on-disk layers are now in the layer map. We can remove the
-        // in-memory layer from the map now.
+        // in-memory layer from the map now. We do not modify `LayerFileManager` because
+        // it only contains persistent layers. The flushed layer is stored in
+        // the mapping in `create_delta_layer`.
         {
             let mut layers = self.layers.write().await;
             let l = layers.0.frozen_layers.pop_front();
@@ -2942,7 +2947,7 @@ impl Timeline {
             // Only one thread may call this function at a time (for this
             // timeline). If two threads tried to flush the same frozen
             // layer to disk at the same time, that would not work.
-            assert!(layer_map::compare_arced_layers(&l.unwrap(), &frozen_layer));
+            assert!(compare_arced_layers(&l.unwrap(), &frozen_layer));
 
             // release lock on 'layers'
         }
@@ -3035,7 +3040,7 @@ impl Timeline {
         frozen_layer: &Arc<InMemoryLayer>,
     ) -> anyhow::Result<(LayerFileName, LayerFileMetadata)> {
         let span = tracing::info_span!("blocking");
-        let (new_delta, sz): (DeltaLayer, _) = tokio::task::spawn_blocking({
+        let new_delta: DeltaLayer = tokio::task::spawn_blocking({
             let _g = span.entered();
             let self_clone = Arc::clone(self);
             let frozen_layer = Arc::clone(frozen_layer);
@@ -3047,29 +3052,31 @@ impl Timeline {
                 // Sync it to disk.
                 //
                 // We must also fsync the timeline dir to ensure the directory entries for
-                // new layer files are durable
+                // new layer files are durable.
+                //
+                // NB: timeline dir must be synced _after_ the file contents are durable.
+                // So, two separate fsyncs are required, they mustn't be batched.
                 //
                 // TODO: If we're running inside 'flush_frozen_layers' and there are multiple
-                // files to flush, it might be better to first write them all, and then fsync
-                // them all in parallel.
-
-                // First sync the delta layer. We still use par_fsync here to keep everything consistent. Feel free to replace
-                // this with a single fsync in future refactors.
-                par_fsync::par_fsync(&[new_delta_path.clone()]).context("fsync of delta layer")?;
-                // Then sync the parent directory.
+                // files to flush, the fsync overhead can be reduces as follows:
+                // 1. write them all to temporary file names
+                // 2. fsync them
+                // 3. rename to the final name
+                // 4. fsync the parent directory.
+                // Note that (1),(2),(3) today happen inside write_to_disk().
+                par_fsync::par_fsync(&[new_delta_path]).context("fsync of delta layer")?;
                 par_fsync::par_fsync(&[self_clone
                     .conf
                     .timeline_path(&self_clone.timeline_id, &self_clone.tenant_id)])
                 .context("fsync of timeline dir")?;
 
-                let sz = new_delta_path.metadata()?.len();
-
-                anyhow::Ok((new_delta, sz))
+                anyhow::Ok(new_delta)
             }
         })
         .await
         .context("spawn_blocking")??;
         let new_delta_name = new_delta.filename();
+        let sz = new_delta.desc.file_size;
 
         // Add it to the layer map
         let l = Arc::new(new_delta);
@@ -3085,9 +3092,8 @@ impl Timeline {
         self.lcache.create_new_layer(l);
         batch_updates.flush();
 
-        // update the timeline's physical size
-        self.metrics.resident_physical_size_gauge.add(sz);
         // update metrics
+        self.metrics.resident_physical_size_gauge.add(sz);
         self.metrics.num_persistent_files_created.inc_by(1);
         self.metrics.persistent_bytes_written.inc_by(sz);
 
@@ -3369,22 +3375,145 @@ impl From<anyhow::Error> for CompactionError {
     }
 }
 
+#[serde_as]
+#[derive(serde::Serialize)]
+struct RecordedDuration(#[serde_as(as = "serde_with::DurationMicroSeconds")] Duration);
+
+#[derive(Default)]
+enum DurationRecorder {
+    #[default]
+    NotStarted,
+    Recorded(RecordedDuration, tokio::time::Instant),
+}
+
+impl DurationRecorder {
+    pub fn till_now(&self) -> DurationRecorder {
+        match self {
+            DurationRecorder::NotStarted => {
+                panic!("must only call on recorded measurements")
+            }
+            DurationRecorder::Recorded(_, ended) => {
+                let now = tokio::time::Instant::now();
+                DurationRecorder::Recorded(RecordedDuration(now - *ended), now)
+            }
+        }
+    }
+    pub fn into_recorded(self) -> Option<RecordedDuration> {
+        match self {
+            DurationRecorder::NotStarted => None,
+            DurationRecorder::Recorded(recorded, _) => Some(recorded),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CompactLevel0Phase1StatsBuilder {
+    version: Option<u64>,
+    tenant_id: Option<TenantId>,
+    timeline_id: Option<TimelineId>,
+    read_lock_acquisition_micros: DurationRecorder,
+    read_lock_held_spawn_blocking_startup_micros: DurationRecorder,
+    read_lock_held_prerequisites_micros: DurationRecorder,
+    read_lock_held_compute_holes_micros: DurationRecorder,
+    read_lock_drop_micros: DurationRecorder,
+    prepare_iterators_micros: DurationRecorder,
+    write_layer_files_micros: DurationRecorder,
+    level0_deltas_count: Option<usize>,
+    new_deltas_count: Option<usize>,
+    new_deltas_size: Option<u64>,
+}
+
+#[serde_as]
+#[derive(serde::Serialize)]
+struct CompactLevel0Phase1Stats {
+    version: u64,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    tenant_id: TenantId,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    timeline_id: TimelineId,
+    read_lock_acquisition_micros: RecordedDuration,
+    read_lock_held_spawn_blocking_startup_micros: RecordedDuration,
+    read_lock_held_prerequisites_micros: RecordedDuration,
+    read_lock_held_compute_holes_micros: RecordedDuration,
+    read_lock_drop_micros: RecordedDuration,
+    prepare_iterators_micros: RecordedDuration,
+    write_layer_files_micros: RecordedDuration,
+    level0_deltas_count: usize,
+    new_deltas_count: usize,
+    new_deltas_size: u64,
+}
+
+impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
+    type Error = anyhow::Error;
+
+    fn try_from(value: CompactLevel0Phase1StatsBuilder) -> Result<Self, Self::Error> {
+        Ok(Self {
+            version: value.version.ok_or_else(|| anyhow!("version not set"))?,
+            tenant_id: value
+                .tenant_id
+                .ok_or_else(|| anyhow!("tenant_id not set"))?,
+            timeline_id: value
+                .timeline_id
+                .ok_or_else(|| anyhow!("timeline_id not set"))?,
+            read_lock_acquisition_micros: value
+                .read_lock_acquisition_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_acquisition_micros not set"))?,
+            read_lock_held_spawn_blocking_startup_micros: value
+                .read_lock_held_spawn_blocking_startup_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_spawn_blocking_startup_micros not set"))?,
+            read_lock_held_prerequisites_micros: value
+                .read_lock_held_prerequisites_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_prerequisites_micros not set"))?,
+            read_lock_held_compute_holes_micros: value
+                .read_lock_held_compute_holes_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_held_compute_holes_micros not set"))?,
+            read_lock_drop_micros: value
+                .read_lock_drop_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("read_lock_drop_micros not set"))?,
+            prepare_iterators_micros: value
+                .prepare_iterators_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("prepare_iterators_micros not set"))?,
+            write_layer_files_micros: value
+                .write_layer_files_micros
+                .into_recorded()
+                .ok_or_else(|| anyhow!("write_layer_files_micros not set"))?,
+            level0_deltas_count: value
+                .level0_deltas_count
+                .ok_or_else(|| anyhow!("level0_deltas_count not set"))?,
+            new_deltas_count: value
+                .new_deltas_count
+                .ok_or_else(|| anyhow!("new_deltas_count not set"))?,
+            new_deltas_size: value
+                .new_deltas_size
+                .ok_or_else(|| anyhow!("new_deltas_size not set"))?,
+        })
+    }
+}
+
 impl Timeline {
-    /// Level0 files first phase of compaction, explained in the [`compact_inner`] comment.
-    ///
-    /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
-    /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
-    /// start of level0 files compaction, the on-demand download should be revisited as well.
-    async fn compact_level0_phase1(
-        &self,
+    fn compact_level0_phase1(
+        self: Arc<Self>,
         _layer_removal_cs: DeleteGuard,
+        guard: tokio::sync::OwnedRwLockReadGuard<(LayerMap, LayerFileManager)>,
+        mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
-        let guard = self.layers.read().await;
+        stats.read_lock_held_spawn_blocking_startup_micros =
+            stats.read_lock_acquisition_micros.till_now(); // set by caller
         let (layers, _) = &*guard;
-        let mut level0_deltas = layers.get_level0_deltas()?;
-
+        let level0_deltas = layers.get_level0_deltas()?;
+        let mut level0_deltas = level0_deltas
+            .into_iter()
+            .map(|x| self.lcache.get_from_desc(&x))
+            .collect_vec();
+        stats.level0_deltas_count = Some(level0_deltas.len());
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
@@ -3430,7 +3559,6 @@ impl Timeline {
 
         let remotes = deltas_to_compact
             .iter()
-            .map(|l| self.lcache.get_from_desc(l))
             .filter(|l| l.is_remote_layer())
             .inspect(|l| info!("compact requires download of {}", l.filename().file_name()))
             .map(|l| {
@@ -3439,13 +3567,6 @@ impl Timeline {
                     .expect("just checked it is remote layer")
             })
             .collect::<Vec<_>>();
-
-        let deltas_to_compact_layers = deltas_to_compact
-            .iter()
-            .map(|l| self.lcache.get_from_desc(l))
-            .collect_vec();
-
-        drop_rlock(guard);
 
         if !remotes.is_empty() {
             // caller is holding the lock to layer_removal_cs, and we don't want to download while
@@ -3470,50 +3591,13 @@ impl Timeline {
         // we don't accidentally use it later in the function.
         drop(level0_deltas);
 
-        // This iterator walks through all key-value pairs from all the layers
-        // we're compacting, in key, LSN order.
-        let all_values_iter = itertools::process_results(
-            deltas_to_compact_layers.iter().map(|l| l.iter(ctx)),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    if let Ok((a_key, a_lsn, _)) = a {
-                        if let Ok((b_key, b_lsn, _)) = b {
-                            match a_key.cmp(b_key) {
-                                Ordering::Less => true,
-                                Ordering::Equal => a_lsn <= b_lsn,
-                                Ordering::Greater => false,
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        true
-                    }
-                })
-            },
-        )?;
-
-        // This iterator walks through all keys and is needed to calculate size used by each key
-        let mut all_keys_iter = itertools::process_results(
-            deltas_to_compact_layers.iter().map(|l| l.key_iter(ctx)),
-            |iter_iter| {
-                iter_iter.kmerge_by(|a, b| {
-                    let (a_key, a_lsn, _) = a;
-                    let (b_key, b_lsn, _) = b;
-                    match a_key.cmp(b_key) {
-                        Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
-                        Ordering::Greater => false,
-                    }
-                })
-            },
-        )?;
+        stats.read_lock_held_prerequisites_micros = stats
+            .read_lock_held_spawn_blocking_startup_micros
+            .till_now();
 
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
-        let guard = self.layers.read().await; // Is'n it better to hold original layers lock till here?
-        let (layers, _) = &*guard;
         let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
 
@@ -3521,7 +3605,7 @@ impl Timeline {
         let mut heap: BinaryHeap<Hole> = BinaryHeap::with_capacity(max_holes + 1);
         let mut prev: Option<Key> = None;
         for (next_key, _next_lsn, _size) in itertools::process_results(
-            deltas_to_compact_layers.iter().map(|l| l.key_iter(ctx)),
+            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
             |iter_iter| iter_iter.kmerge_by(|a, b| a.0 <= b.0),
         )? {
             if let Some(prev_key) = prev {
@@ -3546,10 +3630,54 @@ impl Timeline {
             }
             prev = Some(next_key.next());
         }
+        stats.read_lock_held_compute_holes_micros =
+            stats.read_lock_held_prerequisites_micros.till_now();
         drop_rlock(guard);
+        stats.read_lock_drop_micros = stats.read_lock_held_compute_holes_micros.till_now();
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
         let mut next_hole = 0; // index of next hole in holes vector
+
+        // This iterator walks through all key-value pairs from all the layers
+        // we're compacting, in key, LSN order.
+        let all_values_iter = itertools::process_results(
+            deltas_to_compact.iter().map(|l| l.iter(ctx)),
+            |iter_iter| {
+                iter_iter.kmerge_by(|a, b| {
+                    if let Ok((a_key, a_lsn, _)) = a {
+                        if let Ok((b_key, b_lsn, _)) = b {
+                            match a_key.cmp(b_key) {
+                                Ordering::Less => true,
+                                Ordering::Equal => a_lsn <= b_lsn,
+                                Ordering::Greater => false,
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    }
+                })
+            },
+        )?;
+
+        // This iterator walks through all keys and is needed to calculate size used by each key
+        let mut all_keys_iter = itertools::process_results(
+            deltas_to_compact.iter().map(|l| l.key_iter(ctx)),
+            |iter_iter| {
+                iter_iter.kmerge_by(|a, b| {
+                    let (a_key, a_lsn, _) = a;
+                    let (b_key, b_lsn, _) = b;
+                    match a_key.cmp(b_key) {
+                        Ordering::Less => true,
+                        Ordering::Equal => a_lsn <= b_lsn,
+                        Ordering::Greater => false,
+                    }
+                })
+            },
+        )?;
+
+        stats.prepare_iterators_micros = stats.read_lock_drop_micros.till_now();
 
         // Merge the contents of all the input delta layers into a new set
         // of delta layers, based on the current partitioning.
@@ -3709,11 +3837,32 @@ impl Timeline {
             layer_paths.pop().unwrap();
         }
 
+        stats.write_layer_files_micros = stats.prepare_iterators_micros.till_now();
+        stats.new_deltas_count = Some(new_layers.len());
+        stats.new_deltas_size = Some(new_layers.iter().map(|l| l.desc.file_size).sum());
+
         drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
+
+        match TryInto::<CompactLevel0Phase1Stats>::try_into(stats)
+            .and_then(|stats| serde_json::to_string(&stats).context("serde_json::to_string"))
+        {
+            Ok(stats_json) => {
+                info!(
+                    stats_json = stats_json.as_str(),
+                    "compact_level0_phase1 stats available"
+                )
+            }
+            Err(e) => {
+                warn!("compact_level0_phase1 stats failed to serialize: {:#}", e);
+            }
+        }
 
         Ok(CompactLevel0Phase1Result {
             new_layers,
-            deltas_to_compact,
+            deltas_to_compact: deltas_to_compact
+                .into_iter()
+                .map(|x| Arc::new(x.layer_desc().clone()))
+                .collect(),
         })
     }
 
@@ -3730,9 +3879,36 @@ impl Timeline {
         let CompactLevel0Phase1Result {
             new_layers,
             deltas_to_compact,
-        } = self
-            .compact_level0_phase1(layer_removal_cs.clone(), target_file_size, ctx)
-            .await?;
+        } = {
+            let phase1_span = info_span!("compact_level0_phase1");
+            let myself = Arc::clone(self);
+            let ctx = ctx.attached_child(); // technically, the spawn_blocking can outlive this future
+            let mut stats = CompactLevel0Phase1StatsBuilder {
+                version: Some(2),
+                tenant_id: Some(self.tenant_id),
+                timeline_id: Some(self.timeline_id),
+                ..Default::default()
+            };
+
+            let begin = tokio::time::Instant::now();
+            let phase1_layers_locked = Arc::clone(&self.layers).read_owned().await;
+            let now = tokio::time::Instant::now();
+            stats.read_lock_acquisition_micros =
+                DurationRecorder::Recorded(RecordedDuration(now - begin), now);
+            let layer_removal_cs = layer_removal_cs.clone();
+            tokio::task::spawn_blocking(move || {
+                let _entered = phase1_span.enter();
+                myself.compact_level0_phase1(
+                    layer_removal_cs,
+                    phase1_layers_locked,
+                    stats,
+                    target_file_size,
+                    &ctx,
+                )
+            })
+            .await
+            .context("spawn_blocking")??
+        };
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
             // nothing to do
@@ -3839,6 +4015,7 @@ impl Timeline {
     /// for example. The caller should hold `Tenant::gc_cs` lock to ensure
     /// that.
     ///
+    #[instrument(skip_all, fields(timeline_id=%self.timeline_id))]
     pub(super) async fn update_gc_info(
         &self,
         retain_lsns: Vec<Lsn>,
@@ -4721,4 +4898,32 @@ pub(crate) fn debug_assert_current_span_has_tenant_and_timeline_id() {
             missing.into_iter().map(|e| e.name()).collect::<Vec<_>>()
         ),
     }
+}
+
+/// Similar to `Arc::ptr_eq`, but only compares the object pointers, not vtables.
+///
+/// Returns `true` if the two `Arc` point to the same layer, false otherwise.
+///
+/// If comparing persistent layers, ALWAYS compare the layer descriptor key.
+#[inline(always)]
+pub fn compare_arced_layers<L: ?Sized>(left: &Arc<L>, right: &Arc<L>) -> bool {
+    // "dyn Trait" objects are "fat pointers" in that they have two components:
+    // - pointer to the object
+    // - pointer to the vtable
+    //
+    // rust does not provide a guarantee that these vtables are unique, but however
+    // `Arc::ptr_eq` as of writing (at least up to 1.67) uses a comparison where both the
+    // pointer and the vtable need to be equal.
+    //
+    // See: https://github.com/rust-lang/rust/issues/103763
+    //
+    // A future version of rust will most likely use this form below, where we cast each
+    // pointer into a pointer to unit, which drops the inaccessible vtable pointer, making it
+    // not affect the comparison.
+    //
+    // See: https://github.com/rust-lang/rust/pull/106450
+    let left = Arc::as_ptr(left) as *const ();
+    let right = Arc::as_ptr(right) as *const ();
+
+    left == right
 }

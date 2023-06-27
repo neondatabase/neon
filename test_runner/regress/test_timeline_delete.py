@@ -17,9 +17,10 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
-    assert_timeline_detail_404,
+    timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
+    wait_timeline_detail_404,
     wait_until_tenant_active,
     wait_until_timeline_state,
 )
@@ -83,7 +84,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     wait_until(
         number_of_iterations=3,
         interval=0.2,
-        func=lambda: ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id),
+        func=lambda: timeline_delete_wait_completed(ps_http, env.initial_tenant, leaf_timeline_id),
     )
 
     assert not timeline_path.exists()
@@ -94,15 +95,15 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
         match=f"Timeline {env.initial_tenant}/{leaf_timeline_id} was not found",
     ) as exc:
         ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
-
-        # FIXME leaves tenant without timelines, should we prevent deletion of root timeline?
-        wait_until(
-            number_of_iterations=3,
-            interval=0.2,
-            func=lambda: ps_http.timeline_delete(env.initial_tenant, parent_timeline_id),
-        )
-
     assert exc.value.status_code == 404
+
+    wait_until(
+        number_of_iterations=3,
+        interval=0.2,
+        func=lambda: timeline_delete_wait_completed(
+            ps_http, env.initial_tenant, parent_timeline_id
+        ),
+    )
 
     # Check that we didn't pick up the timeline again after restart.
     # See https://github.com/neondatabase/neon/issues/3560
@@ -143,7 +144,6 @@ def test_delete_timeline_post_rm_failure(
     ps_http.configure_failpoints((failpoint_name, "return"))
 
     ps_http.timeline_delete(env.initial_tenant, env.initial_timeline)
-
     timeline_info = wait_until_timeline_state(
         pageserver_http=ps_http,
         tenant_id=env.initial_tenant,
@@ -165,13 +165,7 @@ def test_delete_timeline_post_rm_failure(
 
     # this should succeed
     # this also checks that delete can be retried even when timeline is in Broken state
-    ps_http.timeline_delete(env.initial_tenant, env.initial_timeline, timeout=2)
-    with pytest.raises(PageserverApiException) as e:
-        ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
-
-    assert e.value.status_code == 404
-
-    env.pageserver.allowed_errors.append(f".*NotFound: Timeline.*{env.initial_timeline}.*")
+    timeline_delete_wait_completed(ps_http, env.initial_tenant, env.initial_timeline)
     env.pageserver.allowed_errors.append(
         f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*"
     )
@@ -247,13 +241,7 @@ def test_timeline_resurrection_on_attach(
         pass
 
     # delete new timeline
-    ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=branch_timeline_id)
-
-    env.pageserver.allowed_errors.append(
-        f".*Timeline {tenant_id}/{branch_timeline_id} was not found.*"
-    )
-
-    wait_until(2, 0.5, lambda: assert_timeline_detail_404(ps_http, tenant_id, branch_timeline_id))
+    timeline_delete_wait_completed(ps_http, tenant_id=tenant_id, timeline_id=branch_timeline_id)
 
     ##### Stop the pageserver instance, erase all its data
     env.endpoints.stop_all()
@@ -338,7 +326,6 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
 
     ps_http.timeline_delete(env.initial_tenant, leaf_timeline_id)
-
     timeline_info = wait_until_timeline_state(
         pageserver_http=ps_http,
         tenant_id=env.initial_tenant,
@@ -357,12 +344,15 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     # Wait for tenant to finish loading.
     wait_until_tenant_active(ps_http, tenant_id=env.initial_tenant, iterations=10, period=1)
 
-    env.pageserver.allowed_errors.append(
-        f".*Timeline {env.initial_tenant}/{leaf_timeline_id} was not found.*"
-    )
-    wait_until(
-        2, 0.5, lambda: assert_timeline_detail_404(ps_http, env.initial_tenant, leaf_timeline_id)
-    )
+    try:
+        data = ps_http.timeline_detail(env.initial_tenant, leaf_timeline_id)
+        log.debug(f"detail {data}")
+    except PageserverApiException as e:
+        log.debug(e)
+        if e.status_code != 404:
+            raise
+    else:
+        raise Exception("detail succeeded (it should return 404)")
 
     assert (
         not leaf_timeline_path.exists()
@@ -389,13 +379,8 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     assert env.initial_timeline is not None
 
     for timeline_id in (intermediate_timeline_id, env.initial_timeline):
-        ps_http.timeline_delete(env.initial_tenant, timeline_id)
-
-        env.pageserver.allowed_errors.append(
-            f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
-        )
-        wait_until(
-            2, 0.5, lambda: assert_timeline_detail_404(ps_http, env.initial_tenant, timeline_id)
+        timeline_delete_wait_completed(
+            ps_http, tenant_id=env.initial_tenant, timeline_id=timeline_id
         )
 
         assert_prefix_empty(
@@ -419,23 +404,27 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     )
 
 
-def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
-    neon_env_builder: NeonEnvBuilder,
+@pytest.mark.parametrize(
+    "stuck_failpoint",
+    ["persist_deleted_index_part", "in_progress_delete"],
+)
+def test_concurrent_timeline_delete_stuck_on(
+    neon_env_builder: NeonEnvBuilder, stuck_failpoint: str
 ):
     """
-    If we're stuck uploading the index file with the is_delete flag,
-    eventually console will hand up and retry.
-    If we're still stuck at the retry time, ensure that the retry
-    fails with status 500, signalling to console that it should retry
-    later.
-    Ideally, timeline_delete should return 202 Accepted and require
-    console to poll for completion, but, that would require changing
-    the API contract.
+    If delete is stuck console will eventually retry deletion.
+    So we need to be sure that these requests wont interleave with each other.
+    In this tests we check two places where we can spend a lot of time.
+    This is a regression test because there was a bug when DeletionGuard wasnt propagated
+    to the background task.
+
+    Ensure that when retry comes if we're still stuck request will get an immediate error response,
+    signalling to console that it should retry later.
     """
 
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=RemoteStorageKind.MOCK_S3,
-        test_name="test_concurrent_timeline_delete_if_first_stuck_at_index_upload",
+        test_name=f"concurrent_timeline_delete_stuck_on_{stuck_failpoint}",
     )
 
     env = neon_env_builder.init_start()
@@ -445,13 +434,14 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
     ps_http = env.pageserver.http_client()
 
     # make the first call sleep practically forever
-    failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-    ps_http.configure_failpoints((failpoint_name, "pause"))
+    ps_http.configure_failpoints((stuck_failpoint, "pause"))
 
     def first_call(result_queue):
         try:
             log.info("first call start")
-            ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=10)
+            timeline_delete_wait_completed(
+                ps_http, env.initial_tenant, child_timeline_id, timeout=10
+            )
             log.info("first call success")
             result_queue.put("success")
         except Exception:
@@ -466,17 +456,17 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
 
         def first_call_hit_failpoint():
             assert env.pageserver.log_contains(
-                f".*{child_timeline_id}.*at failpoint {failpoint_name}"
+                f".*{child_timeline_id}.*at failpoint {stuck_failpoint}"
             )
 
         wait_until(50, 0.1, first_call_hit_failpoint)
 
         # make the second call and assert behavior
         log.info("second call start")
-        error_msg_re = "timeline deletion is already in progress"
+        error_msg_re = "Timeline deletion is already in progress"
         with pytest.raises(PageserverApiException, match=error_msg_re) as second_call_err:
             ps_http.timeline_delete(env.initial_tenant, child_timeline_id)
-        assert second_call_err.value.status_code == 500
+        assert second_call_err.value.status_code == 409
         env.pageserver.allowed_errors.append(f".*{child_timeline_id}.*{error_msg_re}.*")
         # the second call will try to transition the timeline into Stopping state as well
         env.pageserver.allowed_errors.append(
@@ -484,8 +474,12 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
         )
         log.info("second call failed as expected")
 
+        # ensure it is not 404 and stopping
+        detail = ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
+        assert detail["state"] == "Stopping"
+
         # by now we know that the second call failed, let's ensure the first call will finish
-        ps_http.configure_failpoints((failpoint_name, "off"))
+        ps_http.configure_failpoints((stuck_failpoint, "off"))
 
         result = first_call_result.get()
         assert result == "success"
@@ -498,8 +492,10 @@ def test_concurrent_timeline_delete_if_first_stuck_at_index_upload(
 
 def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     """
-    If the client hangs up before we start the index part upload but after we mark it
+    If the client hangs up before we start the index part upload but after deletion is scheduled
+    we mark it
     deleted in local memory, a subsequent delete_timeline call should be able to do
+
     another delete timeline operation.
 
     This tests cancel safety up to the given failpoint.
@@ -515,10 +511,16 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     ps_http = env.pageserver.http_client()
 
-    failpoint_name = "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
+    failpoint_name = "persist_deleted_index_part"
     ps_http.configure_failpoints((failpoint_name, "pause"))
 
     with pytest.raises(requests.exceptions.Timeout):
+        ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
+
+    env.pageserver.allowed_errors.append(
+        f".*{child_timeline_id}.*Timeline deletion is already in progress.*"
+    )
+    with pytest.raises(PageserverApiException, match="Timeline deletion is already in progress"):
         ps_http.timeline_delete(env.initial_tenant, child_timeline_id, timeout=2)
 
     # make sure the timeout was due to the failpoint
@@ -552,12 +554,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    notfound_message = f"Timeline {env.initial_tenant}/{child_timeline_id} was not found"
-    env.pageserver.allowed_errors.append(".*" + notfound_message)
-    with pytest.raises(PageserverApiException, match=notfound_message) as exc:
-        ps_http.timeline_detail(env.initial_tenant, child_timeline_id)
-
-    assert exc.value.status_code == 404
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id)
 
 
 @pytest.mark.parametrize(
@@ -616,12 +613,7 @@ def test_timeline_delete_works_for_remote_smoke(
     for timeline_id in reversed(timeline_ids):
         # note that we need to finish previous deletion before scheduling next one
         # otherwise we can get an "HasChildren" error if deletion is not fast enough (real_s3)
-        ps_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id)
-
-        env.pageserver.allowed_errors.append(
-            f".*Timeline {env.initial_tenant}/{timeline_id} was not found.*"
-        )
-        wait_until(2, 0.5, lambda: assert_timeline_detail_404(ps_http, tenant_id, timeline_id))
+        timeline_delete_wait_completed(ps_http, tenant_id=tenant_id, timeline_id=timeline_id)
 
         assert_prefix_empty(
             neon_env_builder,

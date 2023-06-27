@@ -753,22 +753,18 @@ impl RemoteTimelineClient {
 
         // Have a failpoint that can use the `pause` failpoint action.
         // We don't want to block the executor thread, hence, spawn_blocking + await.
-        #[cfg(feature = "testing")]
-        tokio::task::spawn_blocking({
-            let current = tracing::Span::current();
-            move || {
-                let _entered = current.entered();
-                tracing::info!(
-                    "at failpoint persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-                );
-                fail::fail_point!(
-                    "persist_index_part_with_deleted_flag_after_set_before_upload_pause"
-                );
-            }
-        })
-        .await
-        .expect("spawn_blocking");
-
+        if cfg!(feature = "testing") {
+            tokio::task::spawn_blocking({
+                let current = tracing::Span::current();
+                move || {
+                    let _entered = current.entered();
+                    tracing::info!("at failpoint persist_deleted_index_part");
+                    fail::fail_point!("persist_deleted_index_part");
+                }
+            })
+            .await
+            .expect("spawn_blocking");
+        }
         upload::upload_index_part(
             self.conf,
             &self.storage_impl,
@@ -866,10 +862,8 @@ impl RemoteTimelineClient {
                 "Found {} files not bound to index_file.json, proceeding with their deletion",
                 remaining.len()
             );
-            for file in remaining {
-                warn!("Removing {}", file.object_name().unwrap_or_default());
-                self.storage_impl.delete(&file).await?;
-            }
+            warn!("About to remove {} files", remaining.len());
+            self.storage_impl.delete_objects(&remaining).await?;
         }
 
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
@@ -1371,7 +1365,7 @@ mod tests {
     struct TestSetup {
         runtime: &'static tokio::runtime::Runtime,
         entered_runtime: EnterGuard<'static>,
-        harness: TenantHarness<'static>,
+        harness: TenantHarness,
         tenant: Arc<Tenant>,
         tenant_ctx: RequestContext,
         remote_fs_dir: PathBuf,

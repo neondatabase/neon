@@ -17,7 +17,7 @@ use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
 /// Escape a string for including it in a SQL literal
-fn escape_literal(s: &str) -> String {
+pub fn escape_literal(s: &str) -> String {
     s.replace('\'', "''").replace('\\', "\\\\")
 }
 

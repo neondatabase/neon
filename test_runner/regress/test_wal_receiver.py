@@ -1,3 +1,5 @@
+import time
+
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.types import Lsn, TenantId
@@ -40,7 +42,10 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
 # Kills one of the safekeepers and ensures that only the active ones are printed in the state.
 def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuilder):
     # Trigger WAL wait timeout faster
-    neon_env_builder.pageserver_config_override = "wait_lsn_timeout = '1s'"
+    neon_env_builder.pageserver_config_override = """
+        wait_lsn_timeout = "1s"
+        tenant_config={walreceiver_connect_timeout = "2s", lagging_wal_timeout = "2s"}
+    """
     # Have notable SK ids to ensure we check logs for their presence, not some other random numbers
     neon_env_builder.safekeepers_id_start = 12345
     neon_env_builder.num_safekeepers = 3
@@ -70,6 +75,8 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
     stopped_safekeeper_id = stopped_safekeeper.id
     log.info(f"Stopping safekeeper {stopped_safekeeper.id}")
     stopped_safekeeper.stop()
+    # sleep until stopped safekeeper is removed from candidates
+    time.sleep(2)
 
     # Spend some more time inserting, to ensure SKs report updated statuses and walreceiver in PS have time to update its connection stats.
     insert_test_elements(env, tenant_id, start=elements_to_insert + 1, count=elements_to_insert)

@@ -24,7 +24,13 @@ def test_basic_eviction(
         test_name="test_download_remote_layers_api",
     )
 
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            # disable gc and compaction background loops because they perform on-demand downloads
+            "gc_period": "0s",
+            "compaction_period": "0s",
+        }
+    )
     client = env.pageserver.http_client()
     endpoint = env.endpoints.create_start("main")
 
@@ -46,6 +52,11 @@ def test_basic_eviction(
     wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
     client.timeline_checkpoint(tenant_id, timeline_id)
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
+
+    # disable compute & sks to avoid on-demand downloads by walreceiver / getpage
+    endpoint.stop()
+    for sk in env.safekeepers:
+        sk.stop()
 
     timeline_path = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
     initial_local_layers = sorted(
