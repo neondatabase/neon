@@ -658,10 +658,6 @@ mod tests {
 
     mod l0_delta_layers_updated {
 
-        use crate::tenant::{
-            storage_layer::{PersistentLayer, PersistentLayerDesc},
-            timeline::LayerFileManager,
-        };
         use crate::tenant::storage_layer::{PersistentLayer, PersistentLayerDesc};
 
         use super::*;

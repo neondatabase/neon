@@ -1,6 +1,7 @@
 use super::storage_layer::{PersistentLayer, PersistentLayerDesc, PersistentLayerKey, RemoteLayer};
 use super::Timeline;
-use crate::tenant::layer_map::{self, LayerMap};
+use crate::tenant::layer_map::{ LayerMap};
+use crate::tenant::timeline::compare_arced_layers;
 use anyhow::Result;
 use std::sync::{Mutex, Weak};
 use std::{collections::HashMap, sync::Arc};
@@ -114,7 +115,7 @@ impl LayerCache {
 
         if let Some(layer) = guard.get_mut(&expected.layer_desc().key()) {
             anyhow::ensure!(
-                layer_map::compare_arced_layers(&expected, layer),
+                compare_arced_layers(&expected, layer),
                 "replacing downloaded layer into layermap failed because another layer was found instead of expected, expected={expected:?}, new={new:?}",
                 expected = Arc::as_ptr(&expected),
                 new = Arc::as_ptr(layer),

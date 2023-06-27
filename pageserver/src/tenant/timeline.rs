@@ -123,7 +123,7 @@ impl PartialOrd for Hole {
 
 pub struct LayerFileManager(());
 
-impl LayerMapping {
+impl LayerFileManager {
     pub(crate) fn new() -> Self {
         Self(())
     }
@@ -152,7 +152,7 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
-    pub(crate) layers: tokio::sync::RwLock<(LayerMap, LayerMapping)>,
+    pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, LayerFileManager)>>,
 
     pub(super) lcache: LayerCache,
 
