@@ -700,6 +700,15 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 
 #########################################################################################
 #
+# Extenstion only
+#
+#########################################################################################
+FROM scratch AS postgres-extensions
+COPY --from=postgres-cleanup-layer /usr/local/pgsql/share/extension /usr/local/pgsql/share/extension
+COPY --from=postgres-cleanup-layer /usr/local/pgsql/lib             /usr/local/pgsql/lib
+
+#########################################################################################
+#
 # Final layer
 # Put it all together into the final image
 #
