@@ -42,7 +42,6 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
-use tokio::runtime::Runtime;
 use tracing::{error, info};
 use url::Url;
 
@@ -56,8 +55,6 @@ use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
 use compute_tools::params::*;
 use compute_tools::spec::*;
-
-use compute_tools::extension_server::get_available_extensions;
 
 const BUILD_TAG_DEFAULT: &str = "local";
 
@@ -178,31 +175,10 @@ fn main() -> Result<()> {
 
     let mut new_state = ComputeState::new();
     let spec_set;
-    let tenant_id;
+
     if let Some(spec) = spec {
         let pspec = ParsedSpec::try_from(spec).map_err(|msg| anyhow::anyhow!(msg))?;
-        tenant_id = Some(pspec.tenant_id);
         new_state.pspec = Some(pspec);
-
-        // fill in list of available extensions
-        let rt = Runtime::new().unwrap();
-
-        if let Some(ref ext_remote_storage) = ext_remote_storage {
-            new_state.extensions.available_extensions =
-                rt.block_on(get_available_extensions(&ext_remote_storage, pgbin, None))?;
-
-            // append private tenant extensions
-            let private_ext_list = rt.block_on(get_available_extensions(
-                &ext_remote_storage,
-                pgbin,
-                tenant_id,
-            ))?;
-            new_state
-                .extensions
-                .available_extensions
-                .extend(private_ext_list);
-        }
-
         spec_set = true;
     } else {
         spec_set = false;

@@ -18,12 +18,10 @@ use compute_api::spec::{ComputeMode, ComputeSpec};
 
 use remote_storage::GenericRemoteStorage;
 
-use crate::extension_server::get_available_libraries;
+use crate::extension_server::{get_available_extensions, get_available_libraries};
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::{config, extension_server};
-
-use extension_server::ExtensionsState;
 
 /// Compute node info shared across several `compute_ctl` threads.
 pub struct ComputeNode {
@@ -64,7 +62,6 @@ pub struct ComputeState {
     pub error: Option<String>,
     pub pspec: Option<ParsedSpec>,
     pub metrics: ComputeMetrics,
-    pub extensions: ExtensionsState,
 }
 
 impl ComputeState {
@@ -76,7 +73,6 @@ impl ComputeState {
             error: None,
             pspec: None,
             metrics: ComputeMetrics::default(),
-            extensions: ExtensionsState::new(),
         }
     }
 }
@@ -520,7 +516,7 @@ impl ComputeNode {
 
     #[instrument(skip(self))]
     pub fn start_compute(&self, extension_server_port: u16) -> Result<std::process::Child> {
-        let mut compute_state = self.state.lock().unwrap().clone();
+        let compute_state = self.state.lock().unwrap().clone();
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
@@ -530,46 +526,7 @@ impl ComputeNode {
             pspec.timeline_id,
         );
 
-        // download preload shared libraries before postgres start (if any)
-        let spec = &pspec.spec;
-        let mut libs_vec = Vec::new();
-
-        info!("shared_preload_libraries is set to {:?}", libs_vec);
-
-        if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
-            libs_vec = libs
-                .split(',')
-                .filter(|s| *s != "neon")
-                .map(str::to_string)
-                .collect();
-        }
-
-        // TEST ONLY!
-        libs_vec.push("test_ext1".to_string());
-        info!(
-            "shared_preload_libraries extra settings set to {:?}",
-            libs_vec
-        );
-
-        // download requested shared_preload_libraries and
-        // fill in list of available libraries
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        if let Some(ref ext_remote_storage) = self.ext_remote_storage {
-            let libs = rt.block_on(get_available_libraries(
-                &ext_remote_storage,
-                &self.pgbin,
-                pspec.tenant_id,
-                &libs_vec,
-            ))?;
-
-            info!("available libs: {:?}", libs);
-            compute_state.extensions.available_libraries.extend(libs);
-            info!(
-                "cache available libraries: {:?}",
-                compute_state.extensions.available_libraries
-            );
-        }
+        self.prepare_external_extensions(&compute_state)?;
 
         self.prepare_pgdata(&compute_state, extension_server_port)?;
 
@@ -708,17 +665,71 @@ LIMIT 100",
         }
     }
 
-    pub async fn download_extension_sql_files(&self, filename: String) -> Result<()> {
-        let state = self.state.lock().unwrap().clone();
-        let available_extensions = state.extensions.available_extensions;
+    // If remote extension storage is configured,
+    // download extension control files
+    // and shared preload libraries.
+    pub fn prepare_external_extensions(&self, compute_state: &ComputeState) -> Result<()> {
+        if let Some(ref ext_remote_storage) = self.ext_remote_storage {
+            let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+            // download preload shared libraries before postgres start (if any)
+            let spec = &pspec.spec;
 
+            // 1. parse private extension paths from spec
+            // TODO
+            let mut private_ext_prefixes = Vec::new();
+
+            if let Some(tenant_id) = spec.tenant_id {
+                private_ext_prefixes.push(tenant_id.to_string());
+            }
+
+            // 2. parse shared_preload_libraries from spec
+            let mut libs_vec = Vec::new();
+            info!("shared_preload_libraries is set to {:?}", libs_vec);
+
+            if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
+                libs_vec = libs
+                    .split(',')
+                    .filter(|s| *s != "neon")
+                    .map(str::to_string)
+                    .collect();
+            }
+
+            // TODO write a proper test for this
+            libs_vec.push("test_ext1".to_string());
+            info!(
+                "shared_preload_libraries extra settings set to {:?}",
+                libs_vec
+            );
+
+            // download extension control files & shared_preload_libraries
+            let rt = tokio::runtime::Runtime::new().unwrap();
+
+            let pgbin = self.pgbin.clone();
+            rt.block_on(async move {
+                get_available_extensions(ext_remote_storage, &pgbin, &private_ext_prefixes).await?;
+
+                get_available_libraries(
+                    ext_remote_storage,
+                    &pgbin,
+                    &private_ext_prefixes,
+                    &libs_vec,
+                )
+                .await?;
+
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn download_extension_sql_files(&self, filename: String) -> Result<()> {
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
                 extension_server::download_extension_sql_files(
                     &filename,
-                    &remote_storage,
-                    &available_extensions,
+                    remote_storage,
                     &self.pgbin,
                 )
                 .await
@@ -727,19 +738,11 @@ LIMIT 100",
     }
 
     pub async fn download_library_file(&self, filename: String) -> Result<()> {
-        let state = self.state.lock().unwrap().clone();
-        let available_libraries = state.extensions.available_libraries;
-
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
-                extension_server::download_library_file(
-                    &filename,
-                    &available_libraries,
-                    &remote_storage,
-                    &self.pgbin,
-                )
-                .await
+                extension_server::download_library_file(&filename, remote_storage, &self.pgbin)
+                    .await
             }
         }
     }
