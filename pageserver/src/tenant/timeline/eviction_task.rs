@@ -201,7 +201,7 @@ impl Timeline {
             let (layers, _) = &*guard;
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
-                let hist_layer = self.lcache.get_from_desc(&hist_layer);
+                let hist_layer = self.layer_cache.get_from_desc(&hist_layer);
                 if hist_layer.is_remote_layer() {
                     continue;
                 }

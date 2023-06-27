@@ -154,7 +154,7 @@ pub struct Timeline {
 
     pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, LayerFileManager)>>,
 
-    pub(super) lcache: LayerCache,
+    pub(super) layer_cache: LayerCache,
 
     /// Set of key ranges which should be covered by image layers to
     /// allow GC to remove old layers. This set is created by GC and its cutoff LSN is also stored.
@@ -838,7 +838,7 @@ impl Timeline {
         // Below are functions compact_level0() and create_image_layers()
         // but they are a bit ad hoc and don't quite work like it's explained
         // above. Rewrite it.
-        let layer_removal_cs = self.lcache.delete_guard().await;
+        let layer_removal_cs = self.layer_cache.delete_guard().await;
         // Is the timeline being deleted?
         if self.is_stopping() {
             return Err(anyhow::anyhow!("timeline is Stopping").into());
@@ -1072,7 +1072,7 @@ impl Timeline {
 
         let mut historic_layers = Vec::new();
         for historic_layer in layer_map.iter_historic_layers() {
-            let historic_layer = self.lcache.get_from_desc(&historic_layer);
+            let historic_layer = self.layer_cache.get_from_desc(&historic_layer);
             historic_layers.push(historic_layer.info(reset));
         }
 
@@ -1170,7 +1170,7 @@ impl Timeline {
             .context("wait for layer upload ops to complete")?;
 
         // now lock out layer removal (compaction, gc, timeline deletion)
-        let layer_removal_guard = self.lcache.delete_guard().await;
+        let layer_removal_guard = self.layer_cache.delete_guard().await;
 
         {
             // to avoid racing with detach and delete_timeline
@@ -1262,7 +1262,7 @@ impl Timeline {
         assert_eq!(local_layer.layer_desc(), new_remote_layer.layer_desc());
 
         let succeed = match self
-            .lcache
+            .layer_cache
             .replace_and_verify(local_layer.clone(), new_remote_layer)
         {
             Ok(()) => {
@@ -1436,7 +1436,7 @@ impl Timeline {
                     LayerMap::default(),
                     LayerFileManager::new(),
                 ))),
-                lcache: LayerCache::new(myself.clone()),
+                layer_cache: LayerCache::new(myself.clone()),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
@@ -1671,7 +1671,7 @@ impl Timeline {
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
                 updates.insert_historic(layer.layer_desc().clone());
-                self.lcache.populate_local_when_init(Arc::new(layer));
+                self.layer_cache.populate_local_when_init(Arc::new(layer));
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1704,7 +1704,7 @@ impl Timeline {
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
                 updates.insert_historic(layer.layer_desc().clone());
-                self.lcache.populate_local_when_init(Arc::new(layer));
+                self.layer_cache.populate_local_when_init(Arc::new(layer));
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1805,7 +1805,7 @@ impl Timeline {
                     } else {
                         self.metrics.resident_physical_size_gauge.sub(local_size);
                         updates.remove_historic(local_layer.layer_desc().clone());
-                        self.lcache.remove_local_when_init(local_layer);
+                        self.layer_cache.remove_local_when_init(local_layer);
                         // fall-through to adding the remote layer
                     }
                 } else {
@@ -1845,7 +1845,7 @@ impl Timeline {
                     let remote_layer = Arc::new(remote_layer);
 
                     updates.insert_historic(remote_layer.layer_desc().clone());
-                    self.lcache.populate_remote_when_init(remote_layer);
+                    self.layer_cache.populate_remote_when_init(remote_layer);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1873,7 +1873,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
                     updates.insert_historic(remote_layer.layer_desc().clone());
-                    self.lcache.populate_remote_when_init(remote_layer);
+                    self.layer_cache.populate_remote_when_init(remote_layer);
                 }
             }
         }
@@ -1917,7 +1917,7 @@ impl Timeline {
             let (layers, _) = &*guard;
             layers
                 .iter_historic_layers()
-                .map(|l| (l.filename(), self.lcache.get_from_desc(&l)))
+                .map(|l| (l.filename(), self.layer_cache.get_from_desc(&l)))
                 .collect::<HashMap<_, _>>()
         };
 
@@ -2295,7 +2295,7 @@ impl Timeline {
         for historic_layer in layers.iter_historic_layers() {
             let historic_layer_name = historic_layer.filename().file_name();
             if layer_file_name == historic_layer_name {
-                return Some(self.lcache.get_from_desc(&historic_layer));
+                return Some(self.layer_cache.get_from_desc(&historic_layer));
             }
         }
 
@@ -2311,7 +2311,7 @@ impl Timeline {
         layer: Arc<PersistentLayerDesc>,
         updates: &mut BatchedUpdates<'_>,
     ) -> anyhow::Result<()> {
-        let layer = self.lcache.get_from_desc(&layer);
+        let layer = self.layer_cache.get_from_desc(&layer);
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
             let layer_file_size = layer.file_size();
@@ -2326,7 +2326,7 @@ impl Timeline {
         //      and mark what we can't delete yet as deleted from the layer
         //      map index without actually rebuilding the index.
         updates.remove_historic(layer.layer_desc().clone());
-        self.lcache.delete_layer(layer);
+        self.layer_cache.delete_layer(layer);
 
         Ok(())
     }
@@ -2574,7 +2574,7 @@ impl Timeline {
                     }
 
                     if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
-                        let layer = timeline.lcache.get_from_desc(&layer);
+                        let layer = timeline.layer_cache.get_from_desc(&layer);
                         // If it's a remote layer, download it and retry.
                         if let Some(remote_layer) =
                             super::storage_layer::downcast_remote_layer(&layer)
@@ -3089,7 +3089,7 @@ impl Timeline {
             LayerResidenceEventReason::LayerCreate,
         );
         batch_updates.insert_historic(l.layer_desc().clone());
-        self.lcache.create_new_layer(l);
+        self.layer_cache.create_new_layer(l);
         batch_updates.flush();
 
         // update metrics
@@ -3341,7 +3341,7 @@ impl Timeline {
                 LayerResidenceEventReason::LayerCreate,
             );
             updates.insert_historic(l.layer_desc().clone());
-            self.lcache.create_new_layer(l);
+            self.layer_cache.create_new_layer(l);
         }
         updates.flush();
         drop_wlock(guard);
@@ -3511,7 +3511,7 @@ impl Timeline {
         let level0_deltas = layers.get_level0_deltas()?;
         let mut level0_deltas = level0_deltas
             .into_iter()
-            .map(|x| self.lcache.get_from_desc(&x))
+            .map(|x| self.layer_cache.get_from_desc(&x))
             .collect_vec();
         stats.level0_deltas_count = Some(level0_deltas.len());
         // Only compact if enough layers have accumulated.
@@ -3960,7 +3960,7 @@ impl Timeline {
                 LayerResidenceEventReason::LayerCreate,
             );
             updates.insert_historic(x.layer_desc().clone());
-            self.lcache.create_new_layer(x);
+            self.layer_cache.create_new_layer(x);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
@@ -4089,7 +4089,7 @@ impl Timeline {
 
         fail_point!("before-timeline-gc");
 
-        let layer_removal_cs = self.lcache.delete_guard().await;
+        let layer_removal_cs = self.layer_cache.delete_guard().await;
         // Is the timeline being deleted?
         if self.is_stopping() {
             anyhow::bail!("timeline is Stopping");
@@ -4496,7 +4496,8 @@ impl Timeline {
                         remote_layer.create_downloaded_layer(&updates, self_clone.conf, *size);
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
-                        let failure = match self_clone.lcache.replace_and_verify(l, new_layer) {
+                        let failure = match self_clone.layer_cache.replace_and_verify(l, new_layer)
+                        {
                             Ok(()) => false,
                             Err(e) => {
                                 // this is a precondition failure, the layer filename derived
@@ -4628,7 +4629,7 @@ impl Timeline {
             let (layers, _) = &*guard;
             layers
                 .iter_historic_layers()
-                .map(|l| self.lcache.get_from_desc(&l))
+                .map(|l| self.layer_cache.get_from_desc(&l))
                 .filter_map(|l| l.downcast_remote_layer())
                 .map(|l| self.download_remote_layer(l))
                 .for_each(|dl| downloads.push(dl))
@@ -4739,7 +4740,7 @@ impl Timeline {
             let file_size = l.file_size();
             max_layer_size = max_layer_size.map_or(Some(file_size), |m| Some(m.max(file_size)));
 
-            let l = self.lcache.get_from_desc(&l);
+            let l = self.layer_cache.get_from_desc(&l);
 
             if l.is_remote_layer() {
                 continue;
