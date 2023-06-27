@@ -1,3 +1,4 @@
+use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
     register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
@@ -424,6 +425,27 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub struct BasebackupQueryTime(HistogramVec);
+pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
+    BasebackupQueryTime({
+        register_histogram_vec!(
+            "pageserver_basebackup_query_seconds",
+            "Histogram of basebackup queries durations, by result type",
+            &["result"],
+            CRITICAL_OP_BUCKETS.into(),
+        )
+        .expect("failed to define a metric")
+    })
+});
+
+impl DurationResultObserver for BasebackupQueryTime {
+    fn observe_result<T, E>(&self, res: &Result<T, E>, duration: std::time::Duration) {
+        let label_value = if res.is_ok() { "ok" } else { "error" };
+        let metric = self.0.get_metric_with_label_values(&[label_value]).unwrap();
+        metric.observe(duration.as_secs_f64());
+    }
+}
+
 pub static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
         "pageserver_live_connections",
@@ -822,11 +844,6 @@ impl TimelineMetrics {
             .unwrap();
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
-
-        // TODO(chi): remove this once we remove Lazy for all metrics. Otherwise this will not appear in the exporter
-        // and integration test will error.
-        MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
-        MATERIALIZED_PAGE_CACHE_HIT.get();
 
         TimelineMetrics {
             tenant_id,
@@ -1302,4 +1319,8 @@ pub fn preinitialize_metrics() {
 
     // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
     BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
+
+    // Python tests need these.
+    MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
+    MATERIALIZED_PAGE_CACHE_HIT.get();
 }

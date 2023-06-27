@@ -495,50 +495,50 @@ fn start_pageserver(
                 Ok(())
             },
         );
+    }
 
-        if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
-            let background_jobs_barrier = background_jobs_barrier;
-            let metrics_ctx = RequestContext::todo_child(
-                TaskKind::MetricsCollection,
-                // This task itself shouldn't download anything.
-                // The actual size calculation does need downloads, and
-                // creates a child context with the right DownloadBehavior.
-                DownloadBehavior::Error,
-            );
-            task_mgr::spawn(
-                MGMT_REQUEST_RUNTIME.handle(),
-                TaskKind::MetricsCollection,
-                None,
-                None,
-                "consumption metrics collection",
-                true,
-                async move {
-                    // first wait until background jobs are cleared to launch.
-                    //
-                    // this is because we only process active tenants and timelines, and the
-                    // Timeline::get_current_logical_size will spawn the logical size calculation,
-                    // which will not be rate-limited.
-                    let cancel = task_mgr::shutdown_token();
+    if let Some(metric_collection_endpoint) = &conf.metric_collection_endpoint {
+        let background_jobs_barrier = background_jobs_barrier;
+        let metrics_ctx = RequestContext::todo_child(
+            TaskKind::MetricsCollection,
+            // This task itself shouldn't download anything.
+            // The actual size calculation does need downloads, and
+            // creates a child context with the right DownloadBehavior.
+            DownloadBehavior::Error,
+        );
+        task_mgr::spawn(
+            crate::BACKGROUND_RUNTIME.handle(),
+            TaskKind::MetricsCollection,
+            None,
+            None,
+            "consumption metrics collection",
+            true,
+            async move {
+                // first wait until background jobs are cleared to launch.
+                //
+                // this is because we only process active tenants and timelines, and the
+                // Timeline::get_current_logical_size will spawn the logical size calculation,
+                // which will not be rate-limited.
+                let cancel = task_mgr::shutdown_token();
 
-                    tokio::select! {
-                        _ = cancel.cancelled() => { return Ok(()); },
-                        _ = background_jobs_barrier.wait() => {}
-                    };
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); },
+                    _ = background_jobs_barrier.wait() => {}
+                };
 
-                    pageserver::consumption_metrics::collect_metrics(
-                        metric_collection_endpoint,
-                        conf.metric_collection_interval,
-                        conf.cached_metric_collection_interval,
-                        conf.synthetic_size_calculation_interval,
-                        conf.id,
-                        metrics_ctx,
-                    )
-                    .instrument(info_span!("metrics_collection"))
-                    .await?;
-                    Ok(())
-                },
-            );
-        }
+                pageserver::consumption_metrics::collect_metrics(
+                    metric_collection_endpoint,
+                    conf.metric_collection_interval,
+                    conf.cached_metric_collection_interval,
+                    conf.synthetic_size_calculation_interval,
+                    conf.id,
+                    metrics_ctx,
+                )
+                .instrument(info_span!("metrics_collection"))
+                .await?;
+                Ok(())
+            },
+        );
     }
 
     // Spawn a task to listen for libpq connections. It will spawn further tasks

@@ -32,13 +32,18 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
 
     env.neon_cli.create_branch("test_startup")
 
+    endpoint = None
+
     # We do two iterations so we can see if the second startup is faster. It should
     # be because the compute node should already be configured with roles, databases,
     # extensions, etc from the first run.
     for i in range(2):
         # Start
         with zenbenchmark.record_duration(f"{i}_start_and_select"):
-            endpoint = env.endpoints.create_start("test_startup")
+            if endpoint:
+                endpoint.start()
+            else:
+                endpoint = env.endpoints.create_start("test_startup")
             endpoint.safe_psql("select 1;")
 
         # Get metrics
@@ -56,6 +61,9 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
 
         # Stop so we can restart
         endpoint.stop()
+
+        # Imitate optimizations that console would do for the second start
+        endpoint.respec(skip_pg_catalog_updates=True)
 
 
 # This test sometimes runs for longer than the global 5 minute timeout.

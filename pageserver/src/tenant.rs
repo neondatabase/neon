@@ -421,12 +421,32 @@ remote:
     }
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum GetTimelineError {
+    #[error("Timeline {tenant_id}/{timeline_id} is not active, state: {state:?}")]
+    NotActive {
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        state: TimelineState,
+    },
+    #[error("Timeline {tenant_id}/{timeline_id} was not found")]
+    NotFound {
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteTimelineError {
     #[error("NotFound")]
     NotFound,
+
     #[error("HasChildren")]
     HasChildren(Vec<TimelineId>),
+
+    #[error("Timeline deletion is already in progress")]
+    AlreadyInProgress,
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -947,6 +967,117 @@ impl Tenant {
         tenant
     }
 
+    pub fn scan_and_sort_timelines_dir(
+        self: Arc<Tenant>,
+    ) -> anyhow::Result<Vec<(TimelineId, TimelineMetadata)>> {
+        let timelines_dir = self.conf.timelines_path(&self.tenant_id);
+        let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
+
+        for entry in
+            std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
+        {
+            let entry = entry.context("read timeline dir entry")?;
+            let timeline_dir = entry.path();
+
+            if crate::is_temporary(&timeline_dir) {
+                info!(
+                    "Found temporary timeline directory, removing: {}",
+                    timeline_dir.display()
+                );
+                if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
+                    error!(
+                        "Failed to remove temporary directory '{}': {:?}",
+                        timeline_dir.display(),
+                        e
+                    );
+                }
+            } else if is_uninit_mark(&timeline_dir) {
+                if !timeline_dir.exists() {
+                    warn!(
+                        "Timeline dir entry become invalid: {}",
+                        timeline_dir.display()
+                    );
+                    continue;
+                }
+                let timeline_uninit_mark_file = &timeline_dir;
+                info!(
+                    "Found an uninit mark file {}, removing the timeline and its uninit mark",
+                    timeline_uninit_mark_file.display()
+                );
+                let timeline_id = timeline_uninit_mark_file
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or_default()
+                    .parse::<TimelineId>()
+                    .with_context(|| {
+                        format!(
+                            "Could not parse timeline id out of the timeline uninit mark name {}",
+                            timeline_uninit_mark_file.display()
+                        )
+                    })?;
+                let timeline_dir = self.conf.timeline_path(&timeline_id, &self.tenant_id);
+                if let Err(e) =
+                    remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
+                {
+                    error!("Failed to clean up uninit marked timeline: {e:?}");
+                }
+            } else {
+                if !timeline_dir.exists() {
+                    warn!(
+                        "Timeline dir entry become invalid: {}",
+                        timeline_dir.display()
+                    );
+                    continue;
+                }
+                let timeline_id = timeline_dir
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or_default()
+                    .parse::<TimelineId>()
+                    .with_context(|| {
+                        format!(
+                            "Could not parse timeline id out of the timeline dir name {}",
+                            timeline_dir.display()
+                        )
+                    })?;
+                let timeline_uninit_mark_file = self
+                    .conf
+                    .timeline_uninit_mark_file_path(self.tenant_id, timeline_id);
+                if timeline_uninit_mark_file.exists() {
+                    info!(
+                        %timeline_id,
+                        "Found an uninit mark file, removing the timeline and its uninit mark",
+                    );
+                    if let Err(e) =
+                        remove_timeline_and_uninit_mark(&timeline_dir, &timeline_uninit_mark_file)
+                    {
+                        error!("Failed to clean up uninit marked timeline: {e:?}");
+                    }
+                    continue;
+                }
+
+                let file_name = entry.file_name();
+                if let Ok(timeline_id) =
+                    file_name.to_str().unwrap_or_default().parse::<TimelineId>()
+                {
+                    let metadata = load_metadata(self.conf, timeline_id, self.tenant_id)
+                        .context("failed to load metadata")?;
+                    timelines_to_load.insert(timeline_id, metadata);
+                } else {
+                    // A file or directory that doesn't look like a timeline ID
+                    warn!(
+                        "unexpected file or directory in timelines directory: {}",
+                        file_name.to_string_lossy()
+                    );
+                }
+            }
+        }
+
+        // Sort the array of timeline IDs into tree-order, so that parent comes before
+        // all its children.
+        tree_sort_timelines(timelines_to_load)
+    }
+
     ///
     /// Background task to load in-memory data structures for this tenant, from
     /// files on disk. Used at pageserver startup.
@@ -963,110 +1094,16 @@ impl Tenant {
 
         utils::failpoint_sleep_millis_async!("before-loading-tenant");
 
-        // TODO split this into two functions, scan and actual load
-
         // Load in-memory state to reflect the local files on disk
         //
         // Scan the directory, peek into the metadata file of each timeline, and
         // collect a list of timelines and their ancestors.
-        let tenant_id = self.tenant_id;
-        let conf = self.conf;
         let span = info_span!("blocking");
+        let cloned = Arc::clone(self);
 
         let sorted_timelines: Vec<(_, _)> = tokio::task::spawn_blocking(move || {
             let _g = span.entered();
-            let mut timelines_to_load: HashMap<TimelineId, TimelineMetadata> = HashMap::new();
-            let timelines_dir = conf.timelines_path(&tenant_id);
-
-            for entry in
-                std::fs::read_dir(&timelines_dir).context("list timelines directory for tenant")?
-            {
-                let entry = entry.context("read timeline dir entry")?;
-                let timeline_dir = entry.path();
-
-                if crate::is_temporary(&timeline_dir) {
-                    info!(
-                        "Found temporary timeline directory, removing: {}",
-                        timeline_dir.display()
-                    );
-                    if let Err(e) = std::fs::remove_dir_all(&timeline_dir) {
-                        error!(
-                            "Failed to remove temporary directory '{}': {:?}",
-                            timeline_dir.display(),
-                            e
-                        );
-                    }
-                } else if is_uninit_mark(&timeline_dir) {
-                    let timeline_uninit_mark_file = &timeline_dir;
-                    info!(
-                        "Found an uninit mark file {}, removing the timeline and its uninit mark",
-                        timeline_uninit_mark_file.display()
-                    );
-                    let timeline_id = timeline_uninit_mark_file
-                        .file_stem()
-                        .and_then(OsStr::to_str)
-                        .unwrap_or_default()
-                        .parse::<TimelineId>()
-                        .with_context(|| {
-                            format!(
-                            "Could not parse timeline id out of the timeline uninit mark name {}",
-                            timeline_uninit_mark_file.display()
-                        )
-                        })?;
-                    let timeline_dir = conf.timeline_path(&timeline_id, &tenant_id);
-                    if let Err(e) =
-                        remove_timeline_and_uninit_mark(&timeline_dir, timeline_uninit_mark_file)
-                    {
-                        error!("Failed to clean up uninit marked timeline: {e:?}");
-                    }
-                } else {
-                    let timeline_id = timeline_dir
-                        .file_name()
-                        .and_then(OsStr::to_str)
-                        .unwrap_or_default()
-                        .parse::<TimelineId>()
-                        .with_context(|| {
-                            format!(
-                                "Could not parse timeline id out of the timeline dir name {}",
-                                timeline_dir.display()
-                            )
-                        })?;
-                    let timeline_uninit_mark_file =
-                        conf.timeline_uninit_mark_file_path(tenant_id, timeline_id);
-                    if timeline_uninit_mark_file.exists() {
-                        info!(
-                            %timeline_id,
-                            "Found an uninit mark file, removing the timeline and its uninit mark",
-                        );
-                        if let Err(e) = remove_timeline_and_uninit_mark(
-                            &timeline_dir,
-                            &timeline_uninit_mark_file,
-                        ) {
-                            error!("Failed to clean up uninit marked timeline: {e:?}");
-                        }
-                        continue;
-                    }
-
-                    let file_name = entry.file_name();
-                    if let Ok(timeline_id) =
-                        file_name.to_str().unwrap_or_default().parse::<TimelineId>()
-                    {
-                        let metadata = load_metadata(conf, timeline_id, tenant_id)
-                            .context("failed to load metadata")?;
-                        timelines_to_load.insert(timeline_id, metadata);
-                    } else {
-                        // A file or directory that doesn't look like a timeline ID
-                        warn!(
-                            "unexpected file or directory in timelines directory: {}",
-                            file_name.to_string_lossy()
-                        );
-                    }
-                }
-            }
-
-            // Sort the array of timeline IDs into tree-order, so that parent comes before
-            // all its children.
-            tree_sort_timelines(timelines_to_load)
+            cloned.scan_and_sort_timelines_dir()
         })
         .await
         .context("load spawn_blocking")
@@ -1214,19 +1251,21 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         active_only: bool,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, GetTimelineError> {
         let timelines_accessor = self.timelines.lock().unwrap();
-        let timeline = timelines_accessor.get(&timeline_id).with_context(|| {
-            format!("Timeline {}/{} was not found", self.tenant_id, timeline_id)
-        })?;
+        let timeline = timelines_accessor
+            .get(&timeline_id)
+            .ok_or(GetTimelineError::NotFound {
+                tenant_id: self.tenant_id,
+                timeline_id,
+            })?;
 
         if active_only && !timeline.is_active() {
-            anyhow::bail!(
-                "Timeline {}/{} is not active, state: {:?}",
-                self.tenant_id,
+            Err(GetTimelineError::NotActive {
+                tenant_id: self.tenant_id,
                 timeline_id,
-                timeline.current_state()
-            )
+                state: timeline.current_state(),
+            })
         } else {
             Ok(Arc::clone(timeline))
         }
@@ -1722,14 +1761,11 @@ impl Tenant {
             timeline = Arc::clone(timeline_entry.get());
 
             // Prevent two tasks from trying to delete the timeline at the same time.
-            delete_lock_guard =
-                DeletionGuard(Arc::clone(&timeline.delete_lock).try_lock_owned().map_err(
-                    |_| {
-                        DeleteTimelineError::Other(anyhow::anyhow!(
-                            "timeline deletion is already in progress"
-                        ))
-                    },
-                )?);
+            delete_lock_guard = DeletionGuard(
+                Arc::clone(&timeline.delete_lock)
+                    .try_lock_owned()
+                    .map_err(|_| DeleteTimelineError::AlreadyInProgress)?,
+            );
 
             // If another task finished the deletion just before we acquired the lock,
             // return success.
@@ -3376,9 +3412,8 @@ where
 #[cfg(test)]
 pub mod harness {
     use bytes::{Bytes, BytesMut};
-    use once_cell::sync::Lazy;
     use once_cell::sync::OnceCell;
-    use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+    use std::sync::Arc;
     use std::{fs, path::PathBuf};
     use utils::logging;
     use utils::lsn::Lsn;
@@ -3411,8 +3446,6 @@ pub mod harness {
         buf.freeze()
     }
 
-    static LOCK: Lazy<RwLock<()>> = Lazy::new(|| RwLock::new(()));
-
     impl From<TenantConf> for TenantConfOpt {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
@@ -3439,33 +3472,16 @@ pub mod harness {
         }
     }
 
-    pub struct TenantHarness<'a> {
+    pub struct TenantHarness {
         pub conf: &'static PageServerConf,
         pub tenant_conf: TenantConf,
         pub tenant_id: TenantId,
-
-        pub lock_guard: (
-            Option<RwLockReadGuard<'a, ()>>,
-            Option<RwLockWriteGuard<'a, ()>>,
-        ),
     }
 
     static LOG_HANDLE: OnceCell<()> = OnceCell::new();
 
-    impl<'a> TenantHarness<'a> {
+    impl TenantHarness {
         pub fn create(test_name: &'static str) -> anyhow::Result<Self> {
-            Self::create_internal(test_name, false)
-        }
-        pub fn create_exclusive(test_name: &'static str) -> anyhow::Result<Self> {
-            Self::create_internal(test_name, true)
-        }
-        fn create_internal(test_name: &'static str, exclusive: bool) -> anyhow::Result<Self> {
-            let lock_guard = if exclusive {
-                (None, Some(LOCK.write().unwrap()))
-            } else {
-                (Some(LOCK.read().unwrap()), None)
-            };
-
             LOG_HANDLE.get_or_init(|| {
                 logging::init(
                     logging::LogFormat::Test,
@@ -3501,7 +3517,6 @@ pub mod harness {
                 conf,
                 tenant_conf,
                 tenant_id,
-                lock_guard,
             })
         }
 
@@ -3526,26 +3541,12 @@ pub mod harness {
                 self.tenant_id,
                 None,
             ));
-            // populate tenant with locally available timelines
-            let mut timelines_to_load = HashMap::new();
-            for timeline_dir_entry in fs::read_dir(self.conf.timelines_path(&self.tenant_id))
-                .expect("should be able to read timelines dir")
-            {
-                let timeline_dir_entry = timeline_dir_entry?;
-                let timeline_id: TimelineId = timeline_dir_entry
-                    .path()
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .parse()?;
-
-                let timeline_metadata = load_metadata(self.conf, timeline_id, self.tenant_id)?;
-                timelines_to_load.insert(timeline_id, timeline_metadata);
-            }
             tenant
                 .load(None, ctx)
                 .instrument(info_span!("try_load", tenant_id=%self.tenant_id))
                 .await?;
+
+            // TODO reuse Tenant::activate (needs broker)
             tenant.state.send_replace(TenantState::Active);
             for timeline in tenant.timelines.lock().unwrap().values() {
                 timeline.set_state(TimelineState::Active);
@@ -4071,9 +4072,13 @@ mod tests {
         std::fs::write(metadata_path, metadata_bytes)?;
 
         let err = harness.try_load(&ctx).await.err().expect("should fail");
-        assert!(err
-            .to_string()
-            .starts_with("Failed to parse metadata bytes from path"));
+        // get all the stack with all .context, not tonly the last one
+        let message = format!("{err:#}");
+        let expected = "Failed to parse metadata bytes from path";
+        assert!(
+            message.contains(expected),
+            "message '{message}' expected to contain {expected}"
+        );
 
         let mut found_error_message = false;
         let mut err_source = err.source();
@@ -4507,6 +4512,44 @@ mod tests {
             assert!(expect_initdb_optimization);
             assert!(initdb_optimization_count > 0);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_uninit_mark_crash() -> anyhow::Result<()> {
+        let name = "test_uninit_mark_crash";
+        let harness = TenantHarness::create(name)?;
+        {
+            let (tenant, ctx) = harness.load().await;
+            let tline =
+                tenant.create_empty_timeline(TIMELINE_ID, Lsn(0), DEFAULT_PG_VERSION, &ctx)?;
+            // Keeps uninit mark in place
+            std::mem::forget(tline);
+        }
+
+        let (tenant, _) = harness.load().await;
+        match tenant.get_timeline(TIMELINE_ID, false) {
+            Ok(_) => panic!("timeline should've been removed during load"),
+            Err(e) => {
+                assert_eq!(
+                    e,
+                    GetTimelineError::NotFound {
+                        tenant_id: tenant.tenant_id,
+                        timeline_id: TIMELINE_ID,
+                    }
+                )
+            }
+        }
+
+        assert!(!harness
+            .conf
+            .timeline_path(&TIMELINE_ID, &tenant.tenant_id)
+            .exists());
+
+        assert!(!harness
+            .conf
+            .timeline_uninit_mark_file_path(tenant.tenant_id, TIMELINE_ID)
+            .exists());
 
         Ok(())
     }

@@ -96,12 +96,12 @@ pub mod defaults {
 
 #background_task_maximum_delay = '{DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY}'
 
-# [tenant_config]
+[tenant_config]
 #checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
 #checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
 #compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
 #compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
-#compaction_threshold = '{DEFAULT_COMPACTION_THRESHOLD}'
+#compaction_threshold = {DEFAULT_COMPACTION_THRESHOLD}
 
 #gc_period = '{DEFAULT_GC_PERIOD}'
 #gc_horizon = {DEFAULT_GC_HORIZON}
@@ -111,7 +111,8 @@ pub mod defaults {
 #min_resident_size_override = .. # in bytes
 #evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
 #gc_feedback = false
-# [remote_storage]
+
+[remote_storage]
 
 "###
     );
