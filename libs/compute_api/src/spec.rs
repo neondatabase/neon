@@ -33,6 +33,15 @@ pub struct ComputeSpec {
     #[serde(default)] // Default false
     pub skip_pg_catalog_updates: bool,
 
+    /// An optinal hint that can be passed to speed up startup time if we know
+    /// that safekeepers have already been synced at the given LSN.
+    ///
+    /// NOTE: If there's any possibility that the safekeepers could have advanced
+    ///       (e.g. if we started compute, and it crashed) we should stay on the
+    ///       safe side and provide None.
+    #[serde(default)]
+    pub skip_sync_safekeepers: Option<Lsn>,
+
     // Information needed to connect to the storage layer.
     //
     // `tenant_id`, `timeline_id` and `pageserver_connstring` are always needed.

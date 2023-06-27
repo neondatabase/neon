@@ -338,9 +338,13 @@ impl ComputeNode {
         let lsn = match spec.mode {
             ComputeMode::Primary => {
                 info!("starting safekeepers syncing");
-                let lsn = self
-                    .sync_safekeepers(pspec.storage_auth_token.clone())
-                    .with_context(|| "failed to sync safekeepers")?;
+                let lsn = if let Some(synced_lsn) = spec.skip_sync_safekeepers {
+                    info!("no need to sync");
+                    synced_lsn
+                } else {
+                    self.sync_safekeepers(pspec.storage_auth_token.clone())
+                        .with_context(|| "failed to sync safekeepers")?
+                };
                 info!("safekeepers synced at LSN {}", lsn);
                 lsn
             }

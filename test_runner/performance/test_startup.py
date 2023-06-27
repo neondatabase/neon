@@ -30,7 +30,18 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_startup")
+    tenant_id = env.initial_tenant
+    timeline_id = env.neon_cli.create_branch("test_startup")
+
+    def get_synced_lsn():
+        """Assert safekeepers are synced and get the LSN."""
+        commit_lsns = [
+            sk.http_client().timeline_status(tenant_id, timeline_id).commit_lsn
+            for sk in env.safekeepers
+        ]
+        assert len(commit_lsns) == 3
+        assert len(set(commit_lsns)) == 1
+        return commit_lsns[0]
 
     endpoint = None
 
@@ -63,7 +74,8 @@ def test_startup_simple(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenc
         endpoint.stop()
 
         # Imitate optimizations that console would do for the second start
-        endpoint.respec(skip_pg_catalog_updates=True)
+        lsn = get_synced_lsn()
+        endpoint.respec(skip_pg_catalog_updates=True, skip_sync_safekeepers=lsn.lsn_int)
 
 
 # This test sometimes runs for longer than the global 5 minute timeout.

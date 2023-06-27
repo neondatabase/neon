@@ -68,6 +68,7 @@ pub struct EndpointConf {
     http_port: u16,
     pg_version: u32,
     skip_pg_catalog_updates: bool,
+    skip_sync_safekeepers: Option<utils::lsn::Lsn>,
 }
 
 //
@@ -137,6 +138,7 @@ impl ComputeControlPlane {
             tenant_id,
             pg_version,
             skip_pg_catalog_updates: false,
+            skip_sync_safekeepers: None,
         });
 
         ep.create_endpoint_dir()?;
@@ -151,6 +153,7 @@ impl ComputeControlPlane {
                 pg_port,
                 pg_version,
                 skip_pg_catalog_updates: false,
+                skip_sync_safekeepers: None,
             })?,
         )?;
         std::fs::write(
@@ -189,6 +192,7 @@ pub struct Endpoint {
 
     // Optimizations
     skip_pg_catalog_updates: bool,
+    skip_sync_safekeepers: Option<utils::lsn::Lsn>,
 }
 
 impl Endpoint {
@@ -223,6 +227,7 @@ impl Endpoint {
             tenant_id: conf.tenant_id,
             pg_version: conf.pg_version,
             skip_pg_catalog_updates: conf.skip_pg_catalog_updates,
+            skip_sync_safekeepers: conf.skip_sync_safekeepers,
         })
     }
 
@@ -457,6 +462,7 @@ impl Endpoint {
 
         // Create spec file
         let spec = ComputeSpec {
+            skip_sync_safekeepers: self.skip_sync_safekeepers,
             skip_pg_catalog_updates: self.skip_pg_catalog_updates,
             format_version: 1.0,
             operation_uuid: None,
