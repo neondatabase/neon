@@ -6,6 +6,9 @@ use anyhow::Result;
 use std::sync::{Mutex, Weak};
 use std::{collections::HashMap, sync::Arc};
 
+/// LayerCache is meant to facilitate mapping to/from whatever `PersistentLayerDesc` to an actual in-memory layer
+/// object. In the future, operations that do not modify layer map (i.e., eviction and download) will be implemented
+/// here.
 pub struct LayerCache {
     /// Layer removal lock.
     /// A lock to ensure that no layer of the timeline is removed concurrently by other tasks.
