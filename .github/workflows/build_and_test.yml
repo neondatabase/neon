@@ -774,6 +774,8 @@ jobs:
       # This variable can be inlined after
       # USR_LOCAL_PGSQL_PATH: /usr/local/pgsql
       USR_LOCAL_PGSQL_PATH: /usr/local
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_PROD }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_PROD }}
 
     steps:
       - name: Pull postgres-extensions image
