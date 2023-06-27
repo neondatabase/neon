@@ -1504,7 +1504,10 @@ impl Timeline {
                 timeline_id,
                 tenant_id,
                 pg_version,
-                layers: Arc::new(tokio::sync::RwLock::new((LayerMap::default()), LayerFileManager::new())),
+                layers: Arc::new(tokio::sync::RwLock::new((
+                    LayerMap::default(),
+                    LayerFileManager::new(),
+                ))),
                 wanted_image_layers: Mutex::new(None),
 
                 walredo_mgr,
