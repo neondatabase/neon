@@ -726,7 +726,9 @@ class NeonEnvBuilder:
                 secret_key=self.mock_s3_server.secret_key(),
             )
 
-    def enable_real_s3_remote_storage(self, test_name: str, force_enable: bool = True, enable_remote_extensions: bool = False):
+    def enable_real_s3_remote_storage(
+        self, test_name: str, force_enable: bool = True, enable_remote_extensions: bool = False
+    ):
         """
         Sets up configuration to use real s3 endpoint without mock server
         """
