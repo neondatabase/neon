@@ -67,15 +67,9 @@ pub async fn collect_metrics(
         "synthetic size calculation",
         false,
         async move {
-            let started_at = Instant::now();
             calculate_synthetic_size_worker(synthetic_size_calculation_interval, &worker_ctx)
                 .instrument(info_span!("synthetic_size_worker"))
                 .await?;
-            crate::tenant::tasks::warn_when_period_overrun(
-                started_at.elapsed(),
-                synthetic_size_calculation_interval,
-                "synthetic_size_worker",
-            );
             Ok(())
         },
     );
@@ -361,6 +355,7 @@ pub async fn calculate_synthetic_size_worker(
                         continue;
                     }
 
+                    let started_at = Instant::now();
                     if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await
                     {
                         if let Err(e) = tenant.calculate_synthetic_size(
@@ -369,7 +364,11 @@ pub async fn calculate_synthetic_size_worker(
                             error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
                         }
                     }
-
+                    crate::tenant::tasks::warn_when_period_overrun(
+                        started_at.elapsed(),
+                        synthetic_size_calculation_interval,
+                        "synthetic_size_worker",
+                    );
                 }
             }
         }
