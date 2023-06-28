@@ -1,6 +1,5 @@
 //! Production console backend.
 
-use std::net::SocketAddr;
 use super::{
     super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
@@ -9,6 +8,7 @@ use super::{
 use crate::{auth::ClientCredentials, compute, http, scram};
 use async_trait::async_trait;
 use futures::TryFutureExt;
+use std::net::SocketAddr;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info, info_span, warn, Instrument};
 

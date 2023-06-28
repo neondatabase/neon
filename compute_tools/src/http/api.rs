@@ -1,7 +1,7 @@
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 
