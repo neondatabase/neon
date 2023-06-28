@@ -420,7 +420,7 @@ def test_tenant_relocation(
 
             # wait for tenant to finish attaching
             tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
-            assert tenant_status["state"]["slug"] in ["Attaching", "Active"]
+            assert tenant_status["state"]["slug"] in ["Attaching", "Activating", "Active"]
             wait_until(
                 number_of_iterations=10,
                 interval=1,
