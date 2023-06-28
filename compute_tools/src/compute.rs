@@ -763,16 +763,6 @@ LIMIT 100",
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
                 let available_libraries_lock = self.available_libraries.lock().unwrap().clone();
-                let compute_state = self.state.lock().unwrap().clone();
-                let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-
-                let private_ext_prefixes = match &pspec.spec.private_extensions {
-                    Some(private_extensions) => private_extensions.clone(),
-                    None => Vec::new(),
-                };
-
-                info!("private_ext_prefixes: {:?}", &private_ext_prefixes);
-
                 extension_server::download_library_file(
                     &filename,
                     remote_storage,
