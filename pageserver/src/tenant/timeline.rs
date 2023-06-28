@@ -87,7 +87,7 @@ use super::storage_layer::{
     DeltaLayer, ImageLayer, Layer, LayerAccessStatsReset, PersistentLayerDesc,
 };
 
-pub const ENABLE_TIERED_COMPACTION: bool = false;
+pub const ENABLE_TIERED_COMPACTION: bool = true;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum FlushLoopState {
