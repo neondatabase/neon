@@ -308,17 +308,16 @@ pub async fn collect_metrics_iteration(
                     break;
                 }
                 Err(err) if err.is_timeout() => {
-                    error!(attempt=attempt, err=?err, "timeout sending metrics, retrying immediately");
+                    error!(attempt, "timeout sending metrics, retrying immediately");
                     crate::tenant::tasks::warn_when_period_overrun(
                         started_at.elapsed(),
                         DEFAULT_HTTP_REPORTING_TIMEOUT,
                         "consumption_metrics",
                     );
-                    // TODO: random sleep?
                     continue;
                 }
                 Err(err) => {
-                    error!("failed to send metrics: {err:?}");
+                    error!(attempt, ?err, "failed to send metrics");
                     break;
                 }
             }
