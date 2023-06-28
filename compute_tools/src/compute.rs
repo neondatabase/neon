@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -17,7 +18,7 @@ use utils::lsn::Lsn;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeMode, ComputeSpec};
 
-use remote_storage::GenericRemoteStorage;
+use remote_storage::{GenericRemoteStorage, RemotePath};
 
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -29,6 +30,7 @@ pub struct ComputeNode {
     pub connstr: url::Url,
     pub pgdata: String,
     pub pgbin: String,
+    pub pgversion: String,
     /// We should only allow live re- / configuration of the compute node if
     /// it uses 'pull model', i.e. it can go to control-plane and fetch
     /// the latest configuration. Otherwise, there could be a case:
@@ -50,6 +52,7 @@ pub struct ComputeNode {
     pub state_changed: Condvar,
     ///  S3 extensions configuration variables
     pub ext_remote_storage: Option<GenericRemoteStorage>,
+    pub available_libraries: Mutex<HashMap<String, RemotePath>>,
 }
 
 #[derive(Clone, Debug)]
@@ -699,10 +702,6 @@ LIMIT 100",
             // Currently pytest doesn't pass cluster settings to compute_ctl
             // We need to add this to pytest.
             // and neon_local pass to spec
-            // libs_vec.push("test_lib1".to_string());
-            // libs_vec.push("private_lib1".to_string());
-            // libs_vec.push("test_lib0".to_string());
-            // libs_vec.push("private_lib0".to_string());
             // info!(
             //     "shared_preload_libraries extra settings set to {:?}",
             //     libs_vec
@@ -713,14 +712,17 @@ LIMIT 100",
             extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
+                &self.pgversion,
                 &private_ext_prefixes,
             )
             .await?;
 
             info!("Libraries to download: {:?}", &libs_vec);
-            extension_server::get_available_libraries(
+            let mut available_libraries_lock = self.available_libraries.lock().unwrap();
+            *available_libraries_lock = extension_server::get_available_libraries(
                 ext_remote_storage,
                 &self.pgbin,
+                &self.pgversion,
                 &private_ext_prefixes,
                 &libs_vec,
             )
@@ -745,6 +747,7 @@ LIMIT 100",
                     &filename,
                     remote_storage,
                     &self.pgbin,
+                    &self.pgversion,
                     &private_ext_prefixes,
                 )
                 .await
@@ -756,18 +759,12 @@ LIMIT 100",
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
-                let compute_state = self.state.lock().unwrap().clone();
-                let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-
-                // TODO parse private extension paths from spec instead of tenant_id
-                let tenant_id = pspec.tenant_id.to_string();
-                let private_ext_prefixes: Vec<String> = vec![tenant_id];
-
+                let available_libraries_lock = self.available_libraries.lock().unwrap().clone();
                 extension_server::download_library_file(
                     &filename,
                     remote_storage,
                     &self.pgbin,
-                    &private_ext_prefixes,
+                    &available_libraries_lock,
                 )
                 .await
             }

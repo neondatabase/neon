@@ -99,7 +99,7 @@ def prepare_mock_ext_storage(
         public_local_name = f"{LOCAL_LIB_ROOT}/test_lib{i}.so"
         private_library = BytesIO(bytes("\n111\n", "utf-8"))
         private_remote_name = f"{bucket_prefix}/{PRIVATE_LIB_ROOT}/private_lib{i}.so"
-        private_local_name = f"{LOCAL_EXT_ROOT}/private_lib{i}.so"
+        private_local_name = f"{LOCAL_LIB_ROOT}/private_lib{i}.so"
 
         log.info(f"uploading library to {public_remote_name}")
         log.info(f"uploading library to {private_remote_name}")

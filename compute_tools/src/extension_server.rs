@@ -26,7 +26,7 @@ fn get_pg_config(argument: &str, pgbin: &str) -> String {
         .to_string()
 }
 
-fn get_pg_version(pgbin: &str) -> String {
+pub fn get_pg_version(pgbin: &str) -> String {
     // pg_config --version returns a (platform specific) human readable string
     // such as "PostgreSQL 15.4". We parse this to v14/v15
     let human_version = get_pg_config("--version", pgbin);
@@ -99,21 +99,20 @@ async fn download_helper(
 pub async fn get_available_extensions(
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
+    pg_version: &str,
     private_ext_prefixes: &Vec<String>,
 ) -> anyhow::Result<()> {
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-    let pg_version = get_pg_version(pgbin);
 
     let mut paths: Vec<RemotePath> = Vec::new();
     // public extensions
     paths.push(RemotePath::new(
-        &Path::new(&pg_version).join("share/postgresql/extension"),
+        &Path::new(pg_version).join("share/postgresql/extension"),
     )?);
-
     // private extensions
     for private_prefix in private_ext_prefixes {
         paths.push(RemotePath::new(
-            &Path::new(&pg_version)
+            &Path::new(pg_version)
                 .join(private_prefix)
                 .join("share/postgresql/extension"),
         )?);
@@ -145,23 +144,17 @@ pub async fn get_available_extensions(
 pub async fn get_available_libraries(
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
+    pg_version: &str,
     private_ext_prefixes: &Vec<String>,
     preload_libraries: &Vec<String>,
-) -> anyhow::Result<()> {
-    // Return early if there are no libraries to download
-    if preload_libraries.is_empty() {
-        return Ok(());
-    }
-
+) -> anyhow::Result<HashMap<String, RemotePath>> {
     let local_libdir: PathBuf = Path::new(&get_pg_config("--pkglibdir", pgbin)).into();
-    let pg_version = get_pg_version(pgbin);
     // Construct a hashmap of all available libraries
     // example (key, value) pair: test_lib0.so, v14/lib/test_lib0.so
 
     let mut paths: Vec<RemotePath> = Vec::new();
     // public libraries
     paths.push(RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap());
-
     // private libraries
     for private_prefix in private_ext_prefixes {
         paths.push(
@@ -176,11 +169,7 @@ pub async fn get_available_libraries(
     // download all requested libraries
     for lib_name in preload_libraries {
         // add file extension if it isn't in the filename
-        let lib_name_with_ext = if !lib_name.ends_with(".so") {
-            lib_name.to_owned() + ".so"
-        } else {
-            lib_name.to_string()
-        };
+        let lib_name_with_ext = enforce_so_end(&lib_name);
         info!("looking for library {:?}", &lib_name_with_ext);
         match all_available_libraries.get(&*lib_name_with_ext) {
             Some(remote_path) => {
@@ -189,7 +178,8 @@ pub async fn get_available_libraries(
             None => bail!("Shared library file {lib_name} is not found in the extension store"),
         }
     }
-    Ok(())
+
+    Ok(all_available_libraries)
 }
 
 // download all sqlfiles (and possibly data files) for a given extension name
@@ -198,18 +188,16 @@ pub async fn download_extension_sql_files(
     ext_name: &str,
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
+    pg_version: &str,
     private_ext_prefixes: &Vec<String>,
 ) -> Result<()> {
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
-
-    let pg_version = get_pg_version(pgbin);
 
     let mut paths: Vec<RemotePath> = Vec::new();
     // public extensions
     paths.push(RemotePath::new(
         &Path::new(&pg_version).join("share/postgresql/extension"),
     )?);
-
     // private extensions
     for private_prefix in private_ext_prefixes {
         paths.push(RemotePath::new(
@@ -271,37 +259,24 @@ pub async fn download_extension_sql_files(
     Ok(())
 }
 
+// appends an .so suffix to libname if it does not already have one
+fn enforce_so_end(libname: &str) -> String {
+    if !libname.ends_with(".so") {
+        format!("{}.so", libname)
+    } else {
+        libname.to_string()
+    }
+}
+
 // download shared library file
 pub async fn download_library_file(
     lib_name: &str,
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
-    private_ext_prefixes: &Vec<String>,
+    all_available_libraries: &HashMap<String, RemotePath>,
 ) -> Result<()> {
     let local_libdir: PathBuf = Path::new(&get_pg_config("--pkglibdir", pgbin)).into();
-
-    let pg_version = get_pg_version(pgbin);
-
-    let mut paths: Vec<RemotePath> = Vec::new();
-    // public libraries
-    paths.push(RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap());
-
-    // private libraries
-    for private_prefix in private_ext_prefixes {
-        paths.push(
-            RemotePath::new(&Path::new(&pg_version).join(private_prefix).join("lib")).unwrap(),
-        );
-    }
-
-    let all_available_libraries = list_files_in_prefixes(remote_storage, &paths).await?;
-
-    info!("list of library files {:?}", &all_available_libraries);
-
-    let lib_name_with_ext = if !lib_name.ends_with(".so") {
-        lib_name.to_owned() + ".so"
-    } else {
-        lib_name.to_string()
-    };
+    let lib_name_with_ext = enforce_so_end(lib_name);
     info!("looking for library {:?}", &lib_name_with_ext);
     match all_available_libraries.get(&*lib_name_with_ext) {
         Some(remote_path) => {
@@ -309,7 +284,6 @@ pub async fn download_library_file(
         }
         None => bail!("Shared library file {lib_name} is not found in the extension store"),
     }
-
     Ok(())
 }
 

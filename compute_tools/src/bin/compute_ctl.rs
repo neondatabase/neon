@@ -49,7 +49,7 @@ use compute_api::responses::ComputeStatus;
 
 use compute_tools::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::init_remote_storage;
+use compute_tools::extension_server::{get_pg_version, init_remote_storage};
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -187,10 +187,12 @@ fn main() -> Result<()> {
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
         pgbin: pgbin.to_string(),
+        pgversion: get_pg_version(pgbin),
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
         ext_remote_storage,
+        available_libraries: Mutex::new(HashMap::new()),
     };
     let compute = Arc::new(compute_node);
 
