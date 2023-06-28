@@ -66,6 +66,11 @@ async fn download_helper(
         None => download_location.join(remote_from_path.object_name().expect("bad object")),
     };
 
+    if local_path.exists() {
+        info!("File {:?} already exists. Skipping download", &local_path);
+        return Ok(());
+    }
+
     info!(
         "Downloading {:?} to location {:?}",
         &remote_from_path, &local_path
@@ -171,11 +176,19 @@ pub async fn get_available_libraries(
         // add file extension if it isn't in the filename
         let lib_name_with_ext = enforce_so_end(&lib_name);
         info!("looking for library {:?}", &lib_name_with_ext);
+
         match all_available_libraries.get(&*lib_name_with_ext) {
             Some(remote_path) => {
                 download_helper(remote_storage, remote_path, None, &local_libdir).await?
             }
-            None => bail!("Shared library file {lib_name} is not found in the extension store"),
+            None => {
+                let file_path = local_libdir.join(&lib_name_with_ext);
+                if file_path.exists() {
+                    info!("File {:?} already exists. Skipping download", &file_path);
+                } else {
+                    bail!("Shared library file {lib_name} is not found in the extension store")
+                }
+            }
         }
     }
 

@@ -688,24 +688,48 @@ LIMIT 100",
 
             // 2. parse shared_preload_libraries from spec
             let mut libs_vec = Vec::new();
-            info!("shared_preload_libraries is set to {:?}", libs_vec);
 
             if let Some(libs) = spec.cluster.settings.find("shared_preload_libraries") {
                 libs_vec = libs
-                    .split(',')
-                    .filter(|s| *s != "neon")
+                    .split(&[',', '\'', ' '])
+                    .filter(|s| *s != "neon" && !s.is_empty())
                     .map(str::to_string)
                     .collect();
             }
 
-            // TODO write a proper test for this
-            // Currently pytest doesn't pass cluster settings to compute_ctl
-            // We need to add this to pytest.
-            // and neon_local pass to spec
-            // info!(
-            //     "shared_preload_libraries extra settings set to {:?}",
-            //     libs_vec
-            // );
+            info!(
+                "shared_preload_libraries parsed from spec.cluster.settings: {:?}",
+                libs_vec
+            );
+
+            // also parse shared_preload_libraries from provided postgresql.conf
+            // that is used in neon_local and python tests
+            if let Some(conf) = &spec.cluster.postgresql_conf {
+                let conf_lines = conf.split('\n').collect::<Vec<&str>>();
+
+                let mut shared_preload_libraries_line = "";
+                for line in conf_lines {
+                    if line.starts_with("shared_preload_libraries") {
+                        shared_preload_libraries_line = line;
+                    }
+                }
+
+                let mut preload_libs_vec = Vec::new();
+                if let Some(libs) = shared_preload_libraries_line.split("='").nth(1) {
+                    preload_libs_vec = libs
+                        .split(&[',', '\'', ' '])
+                        .filter(|s| *s != "neon" && !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
+
+                info!(
+                    "shared_preload_libraries parsed from spec.cluster.postgresql_conf: {:?}",
+                    preload_libs_vec
+                );
+
+                libs_vec.extend(preload_libs_vec.clone());
+            }
 
             // download extension control files & shared_preload_libraries
 
