@@ -60,6 +60,8 @@ pub struct ComputeSpec {
     /// If set, 'storage_auth_token' is used as the password to authenticate to
     /// the pageserver and safekeepers.
     pub storage_auth_token: Option<String>,
+
+    pub private_extensions: Option<Vec<String>>,
 }
 
 #[serde_as]
