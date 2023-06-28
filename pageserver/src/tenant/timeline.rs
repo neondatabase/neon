@@ -3867,7 +3867,7 @@ impl Timeline {
         let (_, last_tier_size) = *tier_sizes.last().unwrap();
         let estimated_space_amp = (total_tier_size - last_tier_size) as f64 / last_tier_size as f64;
         if estimated_space_amp > space_amplification_ratio {
-            if tier_sizes.is_empty() {
+            if !tier_sizes.is_empty() {
                 info!("full compaction cannot be triggered as some layers are being compacted");
             } else {
                 info!("full compaction triggered by space amplification");
