@@ -4074,7 +4074,7 @@ impl Timeline {
         let mut construct_image_for_key = false;
         let image_lsn = Lsn(lsn_range.end.0 - 1);
 
-        const PAGE_MATERIALIZE_THRESHOLD: usize = 32;
+        const PAGE_MATERIALIZE_THRESHOLD: usize = 64;
 
         for x in all_values_iter {
             let (key, lsn, value) = x?;
