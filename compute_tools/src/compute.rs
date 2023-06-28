@@ -679,12 +679,12 @@ LIMIT 100",
             let spec = &pspec.spec;
 
             // 1. parse private extension paths from spec
-            // TODO parse private extension paths from spec instead of tenant_id
-            let mut private_ext_prefixes = Vec::new();
+            let private_ext_prefixes = match &spec.private_extensions {
+                Some(private_extensions) => private_extensions.clone(),
+                None => Vec::new(),
+            };
 
-            if let Some(tenant_id) = spec.tenant_id {
-                private_ext_prefixes.push(tenant_id.to_string());
-            }
+            info!("private_ext_prefixes: {:?}", &private_ext_prefixes);
 
             // 2. parse shared_preload_libraries from spec
             let mut libs_vec = Vec::new();
@@ -739,9 +739,12 @@ LIMIT 100",
                 let compute_state = self.state.lock().unwrap().clone();
                 let pspec = compute_state.pspec.as_ref().expect("spec must be set");
 
-                // TODO parse private extension paths from spec instead of tenant_id
-                let tenant_id = pspec.tenant_id.to_string();
-                let private_ext_prefixes: Vec<String> = vec![tenant_id];
+                let private_ext_prefixes = match &pspec.spec.private_extensions {
+                    Some(private_extensions) => private_extensions.clone(),
+                    None => Vec::new(),
+                };
+
+                info!("private_ext_prefixes: {:?}", &private_ext_prefixes);
 
                 extension_server::download_extension_sql_files(
                     &filename,
@@ -760,6 +763,16 @@ LIMIT 100",
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
                 let available_libraries_lock = self.available_libraries.lock().unwrap().clone();
+                let compute_state = self.state.lock().unwrap().clone();
+                let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+
+                let private_ext_prefixes = match &pspec.spec.private_extensions {
+                    Some(private_extensions) => private_extensions.clone(),
+                    None => Vec::new(),
+                };
+
+                info!("private_ext_prefixes: {:?}", &private_ext_prefixes);
+
                 extension_server::download_library_file(
                     &filename,
                     remote_storage,

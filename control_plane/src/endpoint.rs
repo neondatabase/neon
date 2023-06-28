@@ -481,6 +481,7 @@ impl Endpoint {
             pageserver_connstring: Some(pageserver_connstring),
             safekeeper_connstrings,
             storage_auth_token: auth_token.clone(),
+            private_extensions: Some(vec![self.tenant_id.to_string()]), //DEBUG ONLY
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
