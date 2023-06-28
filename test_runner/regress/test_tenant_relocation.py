@@ -419,7 +419,6 @@ def test_tenant_relocation(
             new_pageserver_http.tenant_attach(tenant_id)
 
             # wait for tenant to finish attaching
-            tenant_status = new_pageserver_http.tenant_status(tenant_id=tenant_id)
             wait_until(
                 number_of_iterations=10,
                 interval=1,
