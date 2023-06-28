@@ -734,7 +734,6 @@ LIMIT 100",
 
             // download extension control files & shared_preload_libraries
 
-            // let mut available_extensions_lock = self.available_extensions.lock().unwrap();
             let available_extensions = extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
@@ -767,15 +766,6 @@ LIMIT 100",
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
-                let compute_state = self.state.lock().unwrap().clone();
-                let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-
-                let private_ext_prefixes = match &pspec.spec.private_extensions {
-                    Some(private_extensions) => private_extensions.clone(),
-                    None => Vec::new(),
-                };
-
-                info!("private_ext_prefixes: {:?}", &private_ext_prefixes);
                 extension_server::download_extension_sql_files(
                     &filename,
                     remote_storage,

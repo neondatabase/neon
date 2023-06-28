@@ -64,7 +64,6 @@ async fn download_helper(
 
             download_location.join(p)
         }
-
         None => download_location.join(remote_from_path.object_name().expect("bad object")),
     };
 
@@ -86,7 +85,7 @@ async fn download_helper(
     if remote_from_prefix.is_some() {
         if let Some(prefix) = local_path.parent() {
             info!(
-                "Downloading file with prefix. create directory {:?}",
+                "Downloading file with prefix. Create directory {:?}",
                 prefix
             );
             std::fs::create_dir_all(prefix)?;
@@ -162,11 +161,15 @@ pub async fn get_available_libraries(
 
     let mut paths: Vec<RemotePath> = Vec::new();
     // public libraries
-    paths.push(RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap());
+    paths.push(
+        RemotePath::new(&Path::new(&pg_version).join("lib/"))
+            .expect("The hard coded path here is valid"),
+    );
     // private libraries
     for private_prefix in private_ext_prefixes {
         paths.push(
-            RemotePath::new(&Path::new(&pg_version).join(private_prefix).join("lib")).unwrap(),
+            RemotePath::new(&Path::new(&pg_version).join(private_prefix).join("lib"))
+                .expect("The hard coded path here is valid"),
         );
     }
 
