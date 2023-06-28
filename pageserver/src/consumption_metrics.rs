@@ -14,7 +14,7 @@ use reqwest::Url;
 use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::*;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -88,7 +88,7 @@ pub async fn collect_metrics(
                 info!("collect_metrics received cancellation request");
                 return Ok(());
             },
-            _ = ticker.tick() => {
+            tick_at = ticker.tick() => {
 
                 // send cached metrics every cached_metric_collection_interval
                 let send_cached = prev_iteration_time.elapsed() >= cached_metric_collection_interval;
@@ -97,12 +97,12 @@ pub async fn collect_metrics(
                     prev_iteration_time = std::time::Instant::now();
                 }
 
-                let started_at = Instant::now();
                 collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
+
                 crate::tenant::tasks::warn_when_period_overrun(
-                    started_at.elapsed(),
+                    tick_at.elapsed(),
                     metric_collection_interval,
-                    "collect_metrics",
+                    "consumption_metrics_collect_metrics",
                 );
             }
         }
@@ -339,7 +339,7 @@ pub async fn calculate_synthetic_size_worker(
             _ = task_mgr::shutdown_watcher() => {
                 return Ok(());
             },
-        _ = ticker.tick() => {
+        tick_at = ticker.tick() => {
 
                 let tenants = match mgr::list_tenants().await {
                     Ok(tenants) => tenants,
@@ -355,7 +355,6 @@ pub async fn calculate_synthetic_size_worker(
                         continue;
                     }
 
-                    let started_at = Instant::now();
                     if let Ok(tenant) = mgr::get_tenant(tenant_id, true).await
                     {
                         if let Err(e) = tenant.calculate_synthetic_size(
@@ -364,12 +363,14 @@ pub async fn calculate_synthetic_size_worker(
                             error!("failed to calculate synthetic size for tenant {}: {}", tenant_id, e);
                         }
                     }
-                    crate::tenant::tasks::warn_when_period_overrun(
-                        started_at.elapsed(),
-                        synthetic_size_calculation_interval,
-                        "synthetic_size_worker",
-                    );
+
                 }
+
+                crate::tenant::tasks::warn_when_period_overrun(
+                    tick_at.elapsed(),
+                    synthetic_size_calculation_interval,
+                    "consumption_metrics_synthetic_size_worker",
+                );
             }
         }
     }
