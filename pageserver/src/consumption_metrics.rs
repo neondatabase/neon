@@ -67,9 +67,15 @@ pub async fn collect_metrics(
         "synthetic size calculation",
         false,
         async move {
+            let started_at = Instant::now();
             calculate_synthetic_size_worker(synthetic_size_calculation_interval, &worker_ctx)
                 .instrument(info_span!("synthetic_size_worker"))
                 .await?;
+            crate::tenant::tasks::warn_when_period_overrun(
+                started_at.elapsed(),
+                synthetic_size_calculation_interval,
+                "synthetic_size_worker",
+            );
             Ok(())
         },
     );
@@ -97,7 +103,13 @@ pub async fn collect_metrics(
                     prev_iteration_time = std::time::Instant::now();
                 }
 
+                let started_at = Instant::now();
                 collect_metrics_iteration(&client, &mut cached_metrics, metric_collection_endpoint, node_id, &ctx, send_cached).await;
+                crate::tenant::tasks::warn_when_period_overrun(
+                    started_at.elapsed(),
+                    metric_collection_interval,
+                    "collect_metrics",
+                );
             }
         }
     }
@@ -281,7 +293,6 @@ pub async fn collect_metrics_iteration(
         const MAX_RETRIES: u32 = 3;
 
         for attempt in 0..MAX_RETRIES {
-            let started_at = Instant::now();
             let res = client
                 .post(metric_collection_endpoint.clone())
                 .json(&chunk_json)
@@ -309,11 +320,6 @@ pub async fn collect_metrics_iteration(
                 }
                 Err(err) if err.is_timeout() => {
                     error!(attempt, "timeout sending metrics, retrying immediately");
-                    crate::tenant::tasks::warn_when_period_overrun(
-                        started_at.elapsed(),
-                        DEFAULT_HTTP_REPORTING_TIMEOUT,
-                        "consumption_metrics",
-                    );
                     continue;
                 }
                 Err(err) => {
