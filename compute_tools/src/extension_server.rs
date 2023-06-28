@@ -1,3 +1,5 @@
+// Download extension files from the extension store
+// and put them in the right place in the postgres directory
 use anyhow::{self, bail, Result};
 use remote_storage::*;
 use serde_json::{self, Value};
@@ -39,10 +41,31 @@ fn get_pg_version(pgbin: &str) -> String {
 async fn download_helper(
     remote_storage: &GenericRemoteStorage,
     remote_from_path: &RemotePath,
+    remote_from_prefix: Option<&Path>,
     download_location: &Path,
 ) -> anyhow::Result<()> {
     // downloads file at remote_from_path to download_location/[file_name]
-    let local_path = download_location.join(remote_from_path.object_name().expect("bad object"));
+
+    // we cannot use remote_from_path.object_name() here
+    // because extension files can be in subdirectories of the extension store.
+    //
+    // To handle this, we use remote_from_prefix to strip the prefix from the path
+    // this gives us the relative path of the file in the extension store,
+    // and we use this relative path to construct the local path.
+    //
+    let local_path = match remote_from_prefix {
+        Some(prefix) => {
+            let p = remote_from_path
+                .get_path()
+                .strip_prefix(prefix)
+                .expect("bad prefix");
+
+            download_location.join(p)
+        }
+
+        None => download_location.join(remote_from_path.object_name().expect("bad object")),
+    };
+
     info!(
         "Downloading {:?} to location {:?}",
         &remote_from_path, &local_path
@@ -53,7 +76,17 @@ async fn download_helper(
         .download_stream
         .read_to_end(&mut write_data_buffer)
         .await?;
-    dbg!(str::from_utf8(&write_data_buffer)?);
+    //dbg!(str::from_utf8(&write_data_buffer)?);
+    if remote_from_prefix.is_some() {
+        if let Some(prefix) = local_path.parent() {
+            info!(
+                "Downloading file with prefix. create directory {:?}",
+                prefix
+            );
+            std::fs::create_dir_all(prefix)?;
+        }
+    }
+
     let mut output_file = BufWriter::new(File::create(local_path)?);
     output_file.write_all(&write_data_buffer)?;
     Ok(())
@@ -71,43 +104,32 @@ pub async fn get_available_extensions(
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
     let pg_version = get_pg_version(pgbin);
 
-    // 1. Download public extension control files
-    let remote_sharedir =
-        RemotePath::new(&Path::new(&pg_version).join("share/postgresql/extension"))?;
-    let from_paths: Vec<RemotePath> = remote_storage.list_files(Some(&remote_sharedir)).await?;
+    let mut paths: Vec<RemotePath> = Vec::new();
+    // public extensions
+    paths.push(RemotePath::new(
+        &Path::new(&pg_version).join("share/postgresql/extension"),
+    )?);
 
-    info!(
-        "get_available_extensions remote_sharedir: {:?}, local_sharedir: {:?}, \nall_paths: {:?}",
-        remote_sharedir, local_sharedir, &from_paths
-    );
-
-    for remote_from_path in &from_paths {
-        if remote_from_path.extension() == Some("control") {
-            download_helper(remote_storage, remote_from_path, &local_sharedir).await?;
-        }
-    }
-
-    // 2. Download private extension control files
+    // private extensions
     for private_prefix in private_ext_prefixes {
-        let remote_sharedir_private = RemotePath::new(
+        paths.push(RemotePath::new(
             &Path::new(&pg_version)
                 .join(private_prefix)
                 .join("share/postgresql/extension"),
-        )?;
-        let from_paths_private: Vec<RemotePath> = remote_storage
-            .list_files(Some(&remote_sharedir_private))
-            .await?;
+        )?);
+    }
 
-        info!(
-            "get_available_extensions remote_sharedir_private: {:?}, local_sharedir: {:?}",
-            remote_sharedir_private, local_sharedir
-        );
+    let all_available_files = list_files_in_prefixes(remote_storage, &paths).await?;
 
-        // download all found private control files
-        for remote_from_path in &from_paths_private {
-            if remote_from_path.extension() == Some("control") {
-                download_helper(remote_storage, remote_from_path, &local_sharedir).await?;
-            }
+    info!(
+        "list of available_extension files {:?}",
+        &all_available_files
+    );
+
+    // download all control files
+    for (obj_name, obj_path) in &all_available_files {
+        if obj_name.ends_with("control") {
+            download_helper(remote_storage, obj_path, None, &local_sharedir).await?;
         }
     }
 
@@ -135,31 +157,21 @@ pub async fn get_available_libraries(
     let pg_version = get_pg_version(pgbin);
     // Construct a hashmap of all available libraries
     // example (key, value) pair: test_lib0.so, v14/lib/test_lib0.so
-    let mut all_available_libraries = HashMap::new();
 
-    let remote_libdir_public = RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap();
-    for public_lib in remote_storage
-        .list_files(Some(&remote_libdir_public))
-        .await?
-    {
-        all_available_libraries.insert(
-            public_lib.object_name().expect("bad object").to_owned(),
-            public_lib.clone().to_owned(),
+    let mut paths: Vec<RemotePath> = Vec::new();
+    // public libraries
+    paths.push(RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap());
+
+    // private libraries
+    for private_prefix in private_ext_prefixes {
+        paths.push(
+            RemotePath::new(&Path::new(&pg_version).join(private_prefix).join("lib")).unwrap(),
         );
     }
-    for private_prefix in private_ext_prefixes {
-        let remote_libdir_private =
-            RemotePath::new(&Path::new(&pg_version).join(private_prefix).join("lib")).unwrap();
-        for private_lib in remote_storage
-            .list_files(Some(&remote_libdir_private))
-            .await?
-        {
-            all_available_libraries.insert(
-                private_lib.object_name().expect("bad object").to_owned(),
-                private_lib.to_owned(),
-            );
-        }
-    }
+
+    let all_available_libraries = list_files_in_prefixes(remote_storage, &paths).await?;
+
+    info!("list of library files {:?}", &all_available_libraries);
 
     // download all requested libraries
     for lib_name in preload_libraries {
@@ -172,7 +184,7 @@ pub async fn get_available_libraries(
         info!("looking for library {:?}", &lib_name_with_ext);
         match all_available_libraries.get(&*lib_name_with_ext) {
             Some(remote_path) => {
-                download_helper(remote_storage, remote_path, &local_libdir).await?
+                download_helper(remote_storage, remote_path, None, &local_libdir).await?
             }
             None => bail!("Shared library file {lib_name} is not found in the extension store"),
         }
@@ -180,39 +192,80 @@ pub async fn get_available_libraries(
     Ok(())
 }
 
-// download all sql files for a given extension name
+// download all sqlfiles (and possibly data files) for a given extension name
 //
 pub async fn download_extension_sql_files(
     ext_name: &str,
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
+    private_ext_prefixes: &Vec<String>,
 ) -> Result<()> {
     let local_sharedir = Path::new(&get_pg_config("--sharedir", pgbin)).join("extension");
 
     let pg_version = get_pg_version(pgbin);
-    let remote_sharedir: RemotePath =
-        RemotePath::new(&Path::new(&pg_version).join("share/postgresql/extension"))?;
-    let available_extensions = remote_storage.list_files(Some(&remote_sharedir)).await?;
+
+    let mut paths: Vec<RemotePath> = Vec::new();
+    // public extensions
+    paths.push(RemotePath::new(
+        &Path::new(&pg_version).join("share/postgresql/extension"),
+    )?);
+
+    // private extensions
+    for private_prefix in private_ext_prefixes {
+        paths.push(RemotePath::new(
+            &Path::new(&pg_version)
+                .join(private_prefix)
+                .join("share/postgresql/extension"),
+        )?);
+    }
+
+    let all_available_files: HashMap<String, RemotePath> =
+        list_files_in_prefixes(remote_storage, &paths).await?;
 
     info!(
         "list of available_extension files {:?}",
-        &available_extensions
+        &all_available_files
     );
 
     // check if extension files exist
-    let files_to_download: Vec<&RemotePath> = available_extensions
-        .iter()
-        .filter(|ext| {
-            ext.extension() == Some("sql") && ext.object_name().unwrap().starts_with(ext_name)
-        })
-        .collect();
+    let mut files_to_download: Vec<(&RemotePath, Option<&Path>)> = Vec::new();
+
+    for (obj_name, obj_path) in &all_available_files {
+        // ignore control files
+        if !obj_name.ends_with("control") {
+            // We can't use just ext.object_name() here
+            // because extension files can be in subdirectories of the extension store.
+            // examples of layout:
+            //
+            // share/postgresql/extension/extension_name--1.0.sql
+            //
+            // or
+            //
+            // share/postgresql/extension/extension_name/extension_name--1.0.sql
+            // share/postgresql/extension/extension_name/extra_data.csv
+            //
+            for prefix in paths.iter() {
+                if let Ok(full_object_name) = obj_path.get_path().strip_prefix(prefix.get_path()) {
+                    if full_object_name.to_str().unwrap().starts_with(ext_name) {
+                        files_to_download.push((obj_path, Some(prefix.get_path())));
+                    }
+                }
+            }
+        }
+    }
 
     if files_to_download.is_empty() {
         bail!("Files for extension {ext_name} are not found in the extension store");
     }
 
-    for remote_from_path in files_to_download {
-        download_helper(remote_storage, remote_from_path, &local_sharedir).await?;
+    for (remote_from_path, remote_from_prefix) in files_to_download {
+        download_helper(
+            remote_storage,
+            remote_from_path,
+            remote_from_prefix,
+            &local_sharedir,
+        )
+        .await?;
     }
 
     Ok(())
@@ -223,26 +276,38 @@ pub async fn download_library_file(
     lib_name: &str,
     remote_storage: &GenericRemoteStorage,
     pgbin: &str,
+    private_ext_prefixes: &Vec<String>,
 ) -> Result<()> {
     let local_libdir: PathBuf = Path::new(&get_pg_config("--pkglibdir", pgbin)).into();
 
     let pg_version = get_pg_version(pgbin);
-    let remote_libdir = RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap();
 
-    let available_libraries = remote_storage.list_files(Some(&remote_libdir)).await?;
+    let mut paths: Vec<RemotePath> = Vec::new();
+    // public libraries
+    paths.push(RemotePath::new(&Path::new(&pg_version).join("lib/")).unwrap());
 
-    info!("list of library files {:?}", &available_libraries);
+    // private libraries
+    for private_prefix in private_ext_prefixes {
+        paths.push(
+            RemotePath::new(&Path::new(&pg_version).join(private_prefix).join("lib")).unwrap(),
+        );
+    }
 
-    // check if the library file exists
-    let lib = available_libraries
-        .iter()
-        .find(|lib: &&RemotePath| lib.object_name().unwrap() == lib_name);
+    let all_available_libraries = list_files_in_prefixes(remote_storage, &paths).await?;
 
-    match lib {
-        None => bail!("Shared library file {lib_name} is not found in the extension store"),
-        Some(lib) => {
-            download_helper(remote_storage, lib, &local_libdir).await?;
+    info!("list of library files {:?}", &all_available_libraries);
+
+    let lib_name_with_ext = if !lib_name.ends_with(".so") {
+        lib_name.to_owned() + ".so"
+    } else {
+        lib_name.to_string()
+    };
+    info!("looking for library {:?}", &lib_name_with_ext);
+    match all_available_libraries.get(&*lib_name_with_ext) {
+        Some(remote_path) => {
+            download_helper(remote_storage, remote_path, None, &local_libdir).await?
         }
+        None => bail!("Shared library file {lib_name} is not found in the extension store"),
     }
 
     Ok(())
@@ -282,4 +347,24 @@ pub fn init_remote_storage(remote_ext_config: &str) -> anyhow::Result<GenericRem
         storage: RemoteStorageKind::AwsS3(config),
     };
     GenericRemoteStorage::from_config(&config)
+}
+
+// helper to collect all files in the given prefixes
+// returns hashmap of (file_name, file_remote_path)
+async fn list_files_in_prefixes(
+    remote_storage: &GenericRemoteStorage,
+    paths: &Vec<RemotePath>,
+) -> Result<HashMap<String, RemotePath>> {
+    let mut res = HashMap::new();
+
+    for path in paths {
+        for file in remote_storage.list_files(Some(&path)).await? {
+            res.insert(
+                file.object_name().expect("bad object").to_owned(),
+                file.to_owned(),
+            );
+        }
+    }
+
+    Ok(res)
 }

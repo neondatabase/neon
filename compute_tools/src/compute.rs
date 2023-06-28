@@ -676,7 +676,7 @@ LIMIT 100",
             let spec = &pspec.spec;
 
             // 1. parse private extension paths from spec
-            // TODO
+            // TODO parse private extension paths from spec instead of tenant_id
             let mut private_ext_prefixes = Vec::new();
 
             if let Some(tenant_id) = spec.tenant_id {
@@ -699,14 +699,14 @@ LIMIT 100",
             // Currently pytest doesn't pass cluster settings to compute_ctl
             // We need to add this to pytest.
             // and neon_local pass to spec
-            libs_vec.push("test_lib1".to_string());
-            libs_vec.push("private_lib1".to_string());
-            libs_vec.push("test_lib0".to_string());
-            libs_vec.push("private_lib0".to_string());
-            info!(
-                "shared_preload_libraries extra settings set to {:?}",
-                libs_vec
-            );
+            // libs_vec.push("test_lib1".to_string());
+            // libs_vec.push("private_lib1".to_string());
+            // libs_vec.push("test_lib0".to_string());
+            // libs_vec.push("private_lib0".to_string());
+            // info!(
+            //     "shared_preload_libraries extra settings set to {:?}",
+            //     libs_vec
+            // );
 
             // download extension control files & shared_preload_libraries
 
@@ -734,10 +734,18 @@ LIMIT 100",
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
+                let compute_state = self.state.lock().unwrap().clone();
+                let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+
+                // TODO parse private extension paths from spec instead of tenant_id
+                let tenant_id = pspec.tenant_id.to_string();
+                let private_ext_prefixes: Vec<String> = vec![tenant_id];
+
                 extension_server::download_extension_sql_files(
                     &filename,
                     remote_storage,
                     &self.pgbin,
+                    &private_ext_prefixes,
                 )
                 .await
             }
@@ -748,8 +756,20 @@ LIMIT 100",
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
-                extension_server::download_library_file(&filename, remote_storage, &self.pgbin)
-                    .await
+                let compute_state = self.state.lock().unwrap().clone();
+                let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+
+                // TODO parse private extension paths from spec instead of tenant_id
+                let tenant_id = pspec.tenant_id.to_string();
+                let private_ext_prefixes: Vec<String> = vec![tenant_id];
+
+                extension_server::download_library_file(
+                    &filename,
+                    remote_storage,
+                    &self.pgbin,
+                    &private_ext_prefixes,
+                )
+                .await
             }
         }
     }
