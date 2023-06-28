@@ -193,6 +193,7 @@ fn main() -> Result<()> {
         state_changed: Condvar::new(),
         ext_remote_storage,
         available_libraries: Mutex::new(HashMap::new()),
+        available_extensions: Mutex::new(HashMap::new()),
     };
     let compute = Arc::new(compute_node);
 

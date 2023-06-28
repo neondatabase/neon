@@ -53,6 +53,7 @@ pub struct ComputeNode {
     ///  S3 extensions configuration variables
     pub ext_remote_storage: Option<GenericRemoteStorage>,
     pub available_libraries: Mutex<HashMap<String, RemotePath>>,
+    pub available_extensions: Mutex<HashMap<String, Vec<RemotePath>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -733,7 +734,8 @@ LIMIT 100",
 
             // download extension control files & shared_preload_libraries
 
-            extension_server::get_available_extensions(
+            let mut available_extensions_lock = self.available_extensions.lock().unwrap();
+            *available_extensions_lock = extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
                 &self.pgversion,
@@ -769,13 +771,12 @@ LIMIT 100",
                 };
 
                 info!("private_ext_prefixes: {:?}", &private_ext_prefixes);
-
+                let available_extensions_lock = self.available_extensions.lock().unwrap().clone();
                 extension_server::download_extension_sql_files(
                     &filename,
                     remote_storage,
                     &self.pgbin,
-                    &self.pgversion,
-                    &private_ext_prefixes,
+                    &available_extensions_lock,
                 )
                 .await
             }
