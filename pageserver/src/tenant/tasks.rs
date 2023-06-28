@@ -23,8 +23,8 @@ pub fn start_background_loops(
 ) {
     let tenant_id = tenant.tenant_id;
     // start two compaction threads
-    let range = if ENABLE_TIERED_COMPACTION { 0..2 } else { 0..1 };
-    for _ in range {
+    let range = if ENABLE_TIERED_COMPACTION { 0..4 } else { 0..1 };
+    for cpt_id in range {
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Compaction,
@@ -42,7 +42,9 @@ pub fn start_background_loops(
                         _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
                     };
                     compaction_loop(tenant, cancel)
-                        .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
+                        .instrument(
+                            info_span!("compaction_loop", tenant_id = %tenant_id, cpt_id = %cpt_id),
+                        )
                         .await;
                     Ok(())
                 }

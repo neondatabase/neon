@@ -79,7 +79,7 @@ use self::eviction_task::EvictionTaskTimelineState;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::config::TenantConf;
-use super::layer_cache::{DeleteGuardRead, LayerCache, DeleteGuardWrite};
+use super::layer_cache::{DeleteGuardRead, DeleteGuardWrite, LayerCache};
 use super::layer_map::BatchedUpdates;
 use super::remote_timeline_client::index::IndexPart;
 use super::remote_timeline_client::RemoteTimelineClient;
@@ -4200,11 +4200,6 @@ impl Timeline {
 
         drop(all_keys_iter); // So that deltas_to_compact is no longer borrowed
 
-        let mut compacting_tiers = self.compacting.lock().unwrap();
-        for &tier in &tier_to_compact {
-            compacting_tiers.remove(&tier);
-        }
-
         Ok(Some(CompactTieredPhase1Result {
             new_layers,
             new_tier_at: *tier_to_compact.last().unwrap(),
@@ -4317,6 +4312,13 @@ impl Timeline {
 
         println!("after compaction:");
         layers.dump(false, ctx)?;
+
+        let mut compacting_tiers = self.compacting.lock().unwrap();
+        for &tier in &removed_tiers {
+            compacting_tiers.remove(&tier);
+        }
+
+        info!("compaction complete, removed_tiers = {removed_tiers:?}, new_tier_at = {new_tier_at}");
 
         drop_wlock(guard);
 
