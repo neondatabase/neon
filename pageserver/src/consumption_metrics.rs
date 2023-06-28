@@ -14,7 +14,7 @@ use reqwest::Url;
 use serde::Serialize;
 use serde_with::{serde_as, DisplayFromStr};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::*;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -281,6 +281,7 @@ pub async fn collect_metrics_iteration(
         const MAX_RETRIES: u32 = 3;
 
         for attempt in 0..MAX_RETRIES {
+            let started_at = Instant::now();
             let res = client
                 .post(metric_collection_endpoint.clone())
                 .json(&chunk_json)
@@ -308,6 +309,11 @@ pub async fn collect_metrics_iteration(
                 }
                 Err(err) if err.is_timeout() => {
                     error!(attempt=attempt, err=?err, "timeout sending metrics, retrying immediately");
+                    crate::tenant::tasks::warn_when_period_overrun(
+                        started_at.elapsed(),
+                        DEFAULT_HTTP_REPORTING_TIMEOUT,
+                        "consumption_metrics",
+                    );
                     // TODO: random sleep?
                     continue;
                 }

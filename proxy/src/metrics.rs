@@ -211,11 +211,9 @@ async fn collect_metrics_iteration(
             }
         } else {
             error!("metrics endpoint refused the sent metrics: {:?}", res);
-            for metric in chunk.iter() {
+            for metric in chunk.iter().filter(|metric| metric.value > (1u64 << 40)) {
                 // Report if the metric value is suspiciously large
-                if metric.value > (1u64 << 40) {
-                    error!("potentially abnormal metric value: {:?}", metric);
-                }
+                error!("potentially abnormal metric value: {:?}", metric);
             }
         }
     }
