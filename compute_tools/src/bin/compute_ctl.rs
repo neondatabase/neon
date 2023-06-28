@@ -256,6 +256,12 @@ fn main() -> Result<()> {
         exit_code = ecode.code()
     }
 
+    info!("syncing safekeepers on shutdown");
+    let compute_state = compute.state.lock().unwrap().clone();
+    let pspec = compute_state.pspec.as_ref().expect("spec must be set");
+    let storage_auth_token = pspec.storage_auth_token.clone();
+    compute.sync_safekeepers(storage_auth_token)?;
+
     if let Err(err) = compute.check_for_core_dumps() {
         error!("error while checking for core dumps: {err:?}");
     }

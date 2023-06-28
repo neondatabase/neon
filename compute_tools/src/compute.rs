@@ -278,7 +278,7 @@ impl ComputeNode {
     // Run `postgres` in a special mode with `--sync-safekeepers` argument
     // and return the reported LSN back to the caller.
     #[instrument(skip(self, storage_auth_token))]
-    fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
+    pub fn sync_safekeepers(&self, storage_auth_token: Option<String>) -> Result<Lsn> {
         let start_time = Utc::now();
 
         let sync_handle = Command::new(&self.pgbin)
