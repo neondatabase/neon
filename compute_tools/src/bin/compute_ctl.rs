@@ -71,7 +71,13 @@ fn main() -> Result<()> {
 
     let remote_ext_config = matches.get_one::<String>("remote-ext-config");
     let ext_remote_storage = match remote_ext_config {
-        Some(x) => Some(init_remote_storage(x)?),
+        Some(x) => match init_remote_storage(x) {
+            Ok(y) => Some(y),
+            Err(e) => {
+                dbg!("Error {:?}, setting remote storage to None", e);
+                None
+            }
+        },
         None => None,
     };
 
