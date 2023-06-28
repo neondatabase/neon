@@ -12,9 +12,12 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    PgBin,
     RemoteStorageKind,
     S3Storage,
     available_remote_storages,
+    last_flush_lsn_upload,
+    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
@@ -123,68 +126,155 @@ class Check(enum.Enum):
     RETRY_WITH_RESTART = enum.auto()
 
 
+DELETE_FAILPOINTS = [
+    "timeline-delete-before-index-deleted-at",
+    "timeline-delete-before-schedule",
+    "timeline-delete-before-rm",
+    "timeline-delete-during-rm",
+    "timeline-delete-after-rm",
+    "timeline-delete-before-index-delete",
+    "timeline-delete-after-index-delete",
+    "timeline-delete-after-rm-metadata",
+    "timeline-delete-after-rm-dir",
+]
+
+
+def combinations():
+    result = []
+    for remote_storage_kind in [RemoteStorageKind.NOOP, RemoteStorageKind.MOCK_S3]:
+        for delete_failpoint in DELETE_FAILPOINTS:
+            if remote_storage_kind == RemoteStorageKind.NOOP and delete_failpoint in (
+                "timeline-delete-before-index-delete",
+                "timeline-delete-after-index-delete",
+            ):
+                # the above failpoints are not relevant for config without remote storage
+                continue
+
+            result.append((remote_storage_kind, delete_failpoint))
+    return result
+
+
 # cover the two cases: remote storage configured vs not configured
-@pytest.mark.parametrize("remote_storage_kind", [None, RemoteStorageKind.LOCAL_FS])
+@pytest.mark.parametrize("remote_storage_kind, failpoint", combinations())
 @pytest.mark.parametrize("check", list(Check))
-def test_delete_timeline_post_rm_failure(
+def test_delete_timeline_excersize_crash_safety_failpoints(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
+    failpoint: str,
     check: Check,
+    pg_bin: PgBin,
 ):
     """
-    If there is a failure after removing the timeline directory, the delete operation
-    should be retryable.
+    If there is a failure during deletion in one of the associated failpoints (or crash restart happens at this point) the delete operation
+    should be retryable and should be successfully resumed.
+
+    We iterate over failpoints list, changing failpoint to the next one.
+
+    1. Set settings to generate many layers
+    2. Create branch.
+    3. Insert something
+    4. Go with the test.
+    5. Iterate over failpoints
+    6. Execute delete for each failpoint
+    7. Ensure failpoint is hit
+    8. Retry or restart without the failpoint and check the result.
     """
 
     if remote_storage_kind is not None:
         neon_env_builder.enable_remote_storage(
-            remote_storage_kind, "test_delete_timeline_post_rm_failure"
+            remote_storage_kind, "test_delete_timeline_excersize_crash_safety_failpoints"
         )
 
-    env = neon_env_builder.init_start()
-    assert env.initial_timeline
-
-    env.pageserver.allowed_errors.append(".*Error: failpoint: timeline-delete-after-rm")
-    env.pageserver.allowed_errors.append(".*Ignoring state update Stopping for broken timeline")
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{1024 ** 2}",
+            "image_creation_threshold": "100",
+        }
+    )
 
     ps_http = env.pageserver.http_client()
 
-    failpoint_name = "timeline-delete-after-rm"
-    ps_http.configure_failpoints((failpoint_name, "return"))
+    timeline_id = env.neon_cli.create_timeline("delete")
+    with env.endpoints.create_start("delete") as endpoint:
+        # generate enough layers
+        pg_bin.run(["pgbench", "-i", "-I dtGvp", "-s1", endpoint.connstr()])
+        if remote_storage_kind is RemoteStorageKind.NOOP:
+            wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, timeline_id)
+        else:
+            last_flush_lsn_upload(env, endpoint, env.initial_tenant, timeline_id)
 
-    ps_http.timeline_delete(env.initial_tenant, env.initial_timeline)
-    timeline_info = wait_until_timeline_state(
-        pageserver_http=ps_http,
-        tenant_id=env.initial_tenant,
-        timeline_id=env.initial_timeline,
-        expected_state="Broken",
-        iterations=2,  # effectively try immediately and retry once in one second
-    )
-
-    timeline_info["state"]["Broken"]["reason"] == "failpoint: timeline-delete-after-rm"
-
-    at_failpoint_log_message = f".*{env.initial_timeline}.*at failpoint {failpoint_name}.*"
-    env.pageserver.allowed_errors.append(at_failpoint_log_message)
+    env.pageserver.allowed_errors.append(f".*{timeline_id}.*failpoint: {failpoint}")
+    # It appears when we stopped flush loop during deletion and then pageserver is stopped
     env.pageserver.allowed_errors.append(
-        f".*DELETE.*{env.initial_timeline}.*InternalServerError.*{failpoint_name}"
+        ".*freeze_and_flush_on_shutdown.*failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited"
     )
+    # This happens when we fail before scheduling background operation.
+    # Timeline is left in stopping state and retry tries to stop it again.
+    env.pageserver.allowed_errors.append(
+        ".*Ignoring new state, equal to the existing one: Stopping"
+    )
+    # This happens when we retry delete requests for broken timelines
+    env.pageserver.allowed_errors.append(".*Ignoring state update Stopping for broken timeline")
+
+    ps_http.configure_failpoints((failpoint, "return"))
+
+    # These failpoints are earlier than background task is spawned.
+    # so they result in api request failure.
+    if failpoint in (
+        "timeline-delete-before-index-deleted-at",
+        "timeline-delete-before-schedule",
+    ):
+        with pytest.raises(PageserverApiException, match=failpoint):
+            ps_http.timeline_delete(env.initial_tenant, timeline_id)
+
+    else:
+        ps_http.timeline_delete(env.initial_tenant, timeline_id)
+        timeline_info = wait_until_timeline_state(
+            pageserver_http=ps_http,
+            tenant_id=env.initial_tenant,
+            timeline_id=timeline_id,
+            expected_state="Broken",
+            iterations=2,  # effectively try immediately and retry once in one second
+        )
+
+        timeline_info["state"]["Broken"]["reason"] == failpoint
 
     if check is Check.RETRY_WITH_RESTART:
         env.pageserver.stop()
         env.pageserver.start()
-        env.pageserver.allowed_errors.append(".*flush_loop is not running, state is Exited.*")
-
-        # Pageserver should've resumed deletion after restart.
-        wait_timeline_detail_404(ps_http, env.initial_tenant, env.initial_timeline)
+        if failpoint == "timeline-delete-before-index-deleted-at":
+            # We crashed before persisting this to remote storage, need to retry delete request
+            timeline_delete_wait_completed(ps_http, env.initial_tenant, timeline_id)
+        else:
+            # Pageserver should've resumed deletion after restart.
+            wait_timeline_detail_404(ps_http, env.initial_tenant, timeline_id)
     elif check is Check.RETRY_WITHOUT_RESTART:
         # this should succeed
         # this also checks that delete can be retried even when timeline is in Broken state
-        ps_http.configure_failpoints((failpoint_name, "off"))
-        timeline_delete_wait_completed(ps_http, env.initial_tenant, env.initial_timeline)
+        ps_http.configure_failpoints((failpoint, "off"))
+        timeline_delete_wait_completed(ps_http, env.initial_tenant, timeline_id)
 
-    env.pageserver.allowed_errors.append(
-        f".*{env.initial_timeline}.*timeline directory not found, proceeding anyway.*"
-    )
+    # Check remote is impty
+    if remote_storage_kind is RemoteStorageKind.MOCK_S3:
+        assert_prefix_empty(
+            neon_env_builder,
+            prefix="/".join(
+                (
+                    "tenants",
+                    str(env.initial_tenant),
+                    "timelines",
+                    str(timeline_id),
+                )
+            ),
+        )
+
+    timeline_dir = env.timeline_dir(env.initial_tenant, timeline_id)
+    # Check local is empty
+    assert not timeline_dir.exists()
+    # Check no delete mark present
+    assert not (timeline_dir.parent / f"{timeline_id}.___deleted").exists()
 
 
 @pytest.mark.parametrize("remote_storage_kind", available_remote_storages())

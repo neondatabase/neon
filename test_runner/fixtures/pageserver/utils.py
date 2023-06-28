@@ -201,7 +201,7 @@ def wait_timeline_detail_404(
         time.sleep(0.250)
         try:
             data = pageserver_http.timeline_detail(tenant_id, timeline_id)
-            log.error(f"detail {data}")
+            log.info(f"detail {data}")
         except PageserverApiException as e:
             log.debug(e)
             if e.status_code == 404:

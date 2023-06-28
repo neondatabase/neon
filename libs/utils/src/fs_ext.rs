@@ -24,17 +24,19 @@ pub async fn is_directory_empty(path: impl AsRef<Path>) -> anyhow::Result<bool> 
     Ok(dir.next_entry().await?.is_none())
 }
 
+pub fn ignore_not_found(e: io::Error) -> io::Result<()> {
+    if e.kind() == io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(e)
+    }
+}
+
 pub fn ignore_absent_files<F>(fs_operation: F) -> io::Result<()>
 where
     F: Fn() -> io::Result<()>,
 {
-    fs_operation().or_else(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })
+    fs_operation().or_else(ignore_not_found)
 }
 
 #[cfg(test)]

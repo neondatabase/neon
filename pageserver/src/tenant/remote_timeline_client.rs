@@ -868,10 +868,22 @@ impl RemoteTimelineClient {
             }
         }
 
+        fail::fail_point!("timeline-delete-before-index-delete", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-before-index-delete"
+            ))?
+        });
+
         let index_file_path = timeline_storage_path.join(Path::new(IndexPart::FILE_NAME));
 
         debug!("deleting index part");
         self.storage_impl.delete(&index_file_path).await?;
+
+        fail::fail_point!("timeline-delete-after-index-delete", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-after-index-delete"
+            ))?
+        });
 
         info!(deletions_queued, "done deleting, including index_part.json");
 

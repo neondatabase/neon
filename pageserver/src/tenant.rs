@@ -1071,10 +1071,10 @@ impl Tenant {
                     fs::remove_dir(self.conf.timeline_path(&timeline_id, &self.tenant_id))
                 })
                 .context("remove deleted timeline dir")
-                .and_then(|_| fs::remove_dir(&timeline_dir).context("remove delete mark"))
+                .and_then(|_| fs::remove_file(&timeline_dir).context("remove delete mark"))
                 {
                     warn!(
-                        "cannot clean up deleted timeline dir at: {} error: {}",
+                        "cannot clean up deleted timeline dir at: {} error: {:#}",
                         timeline_dir.display(),
                         e
                     );
@@ -1345,10 +1345,11 @@ impl Tenant {
                     if found_delete_mark {
                         // We could've resumed at a point where remote index was deleted, but metadata file wasnt.
                         // Cleanup:
-                        self.cleanup_remaining_fs_traces_after_timeline_deletion(timeline_id)
+                        return self
+                            .cleanup_remaining_fs_traces_after_timeline_deletion(timeline_id)
                             .await
                             .context("cleanup_remaining_fs_traces_after_timeline_deletion")
-                            .map_err(LoadLocalTimelineError::resume_delete)?;
+                            .map_err(LoadLocalTimelineError::resume_delete);
                     }
 
                     // We're loading fresh timeline that didnt yet make it into remote.
@@ -1810,24 +1811,60 @@ impl Tenant {
             // Note that metadata removal is skipped, this is not technically needed,
             // but allows to reuse timeline loading code during resumed deletion.
             // (we always expect that metadata is in place when timeline is being loaded)
-            let metadata_path = self.conf.metadata_path(timeline_id, self.tenant_id);
-            for entry in walkdir::WalkDir::new(&local_timeline_directory).contents_first(true) {
-                let entry = entry?;
-                if entry.path() == metadata_path {
-                    debug!("found metadata, skipping");
-                    continue;
-                }
 
-                if entry.path() == local_timeline_directory {
-                    // Keeping directory because metedata file is still there
-                    debug!("found timeline dir itself, skipping");
-                    continue;
-                }
+            #[cfg(feature = "testing")]
+            let mut counter = 0;
 
-                let metadata = match entry.metadata() {
-                    Ok(metadata) => metadata,
-                    Err(e) => {
-                        if crate::is_walkdir_io_not_found(&e) {
+            // Timeline directory may not exist if we failed to delete mark file and request was retried.
+            // TODO refactor to different function.
+            if local_timeline_directory.exists() {
+                let metadata_path = self.conf.metadata_path(timeline_id, self.tenant_id);
+                for entry in walkdir::WalkDir::new(&local_timeline_directory).contents_first(true) {
+                    if cfg!(feature = "testing") {
+                        counter += 1;
+                        if counter == 2 {
+                            fail::fail_point!("timeline-delete-during-rm", |_| {
+                                Err(anyhow::anyhow!("failpoint: timeline-delete-during-rm"))?
+                            });
+                        }
+                    }
+
+                    let entry = entry?;
+                    if entry.path() == metadata_path {
+                        debug!("found metadata, skipping");
+                        continue;
+                    }
+
+                    if entry.path() == local_timeline_directory {
+                        // Keeping directory because metedata file is still there
+                        debug!("found timeline dir itself, skipping");
+                        continue;
+                    }
+
+                    let metadata = match entry.metadata() {
+                        Ok(metadata) => metadata,
+                        Err(e) => {
+                            if crate::is_walkdir_io_not_found(&e) {
+                                warn!(
+                                    timeline_dir=?local_timeline_directory,
+                                    path=?entry.path().display(),
+                                    "got not found err while removing timeline dir, proceeding anyway"
+                                );
+                                continue;
+                            }
+                            anyhow::bail!(e);
+                        }
+                    };
+
+                    let r = if metadata.is_dir() {
+                        // There shouldnt be any directories inside timeline dir as of current layout.
+                        tokio::fs::remove_dir(entry.path()).await
+                    } else {
+                        tokio::fs::remove_file(entry.path()).await
+                    };
+
+                    if let Err(e) = r {
+                        if e.kind() == std::io::ErrorKind::NotFound {
                             warn!(
                                 timeline_dir=?local_timeline_directory,
                                 path=?entry.path().display(),
@@ -1835,35 +1872,16 @@ impl Tenant {
                             );
                             continue;
                         }
-                        anyhow::bail!(e);
+                        anyhow::bail!(anyhow::anyhow!(
+                            "Failed to remove: {}. Error: {e}",
+                            entry.path().display()
+                        ));
                     }
-                };
-
-                let r = if metadata.is_dir() {
-                    // There shouldnt be any directories inside timeline dir as of current layout.
-                    tokio::fs::remove_dir(entry.path()).await
-                } else {
-                    tokio::fs::remove_file(entry.path()).await
-                };
-
-                if let Err(e) = r {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        warn!(
-                            timeline_dir=?local_timeline_directory,
-                            path=?entry.path().display(),
-                            "got not found err while removing timeline dir, proceeding anyway"
-                        );
-                        continue;
-                    }
-                    anyhow::bail!(anyhow::anyhow!(
-                        "Failed to remove: {}. Error: {e}",
-                        entry.path().display()
-                    ));
                 }
-            }
 
-            info!("finished deleting layer files, releasing layer_removal_cs.lock()");
-            drop(layer_removal_guard);
+                info!("finished deleting layer files, releasing layer_removal_cs.lock()");
+                drop(layer_removal_guard);
+            }
         }
 
         fail::fail_point!("timeline-delete-after-rm", |_| {
@@ -1889,6 +1907,10 @@ impl Tenant {
             .expect("spawn_blocking");
         }
 
+        self.cleanup_remaining_fs_traces_after_timeline_deletion(timeline_id)
+            .await
+            .context("cleanup_remaining_fs_traces_after_timeline_deletion")?;
+
         {
             // Remove the timeline from the map.
             let mut timelines = self.timelines.lock().unwrap();
@@ -1911,34 +1933,41 @@ impl Tenant {
 
         drop(guard);
 
-        // TODO failpoint here
-
-        self.cleanup_remaining_fs_traces_after_timeline_deletion(timeline_id)
-            .await
-            .context("cleanup_remaining_fs_traces_after_timeline_deletion")?;
-
         Ok(())
     }
 
     // This is a shortcut to remove remaining traces of a timeline on disk.
     // Namely: metadata file, timeline directory, delete mark.
+    // Note: io::ErrorKind::NotFound are ignored for metadata and timeline dir.
+    // delete mark should be present because it is the last step during deletion.
+    // (nothing can fail after its deletion)
     async fn cleanup_remaining_fs_traces_after_timeline_deletion(
         &self,
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
-        // TODO: failpoints there.
-
         // Remove local metadata
         tokio::fs::remove_file(self.conf.metadata_path(timeline_id, self.tenant_id))
             .await
+            .or_else(fs_ext::ignore_not_found)
             .context("remove metadata")
             .map_err(LoadLocalTimelineError::resume_delete)?;
+
+        fail::fail_point!("timeline-delete-after-rm-metadata", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-after-rm-metadata"
+            ))?
+        });
 
         // Remove timeline dir
         tokio::fs::remove_dir(self.conf.timeline_path(&timeline_id, &self.tenant_id))
             .await
+            .or_else(fs_ext::ignore_not_found)
             .context("timeline dir")
             .map_err(LoadLocalTimelineError::resume_delete)?;
+
+        fail::fail_point!("timeline-delete-after-rm-dir", |_| {
+            Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm-dir"))?
+        });
 
         // Remove delete mark
         tokio::fs::remove_file(
@@ -2060,6 +2089,12 @@ impl Tenant {
         info!("waiting for timeline tasks to shutdown");
         task_mgr::shutdown_tasks(None, Some(self.tenant_id), Some(timeline_id)).await;
 
+        fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-before-index-deleted-at"
+            ))?
+        });
+
         // Mark timeline as deleted in S3 so we won't pick it up next time
         // during attach or pageserver restart.
         // See comment in persist_index_part_with_deleted_flag.
@@ -2085,9 +2120,18 @@ impl Tenant {
         // and "this timeline is deleted we should continue with removal of local state". So to avoid the ambiguity we use a mark file.
         // After index part is deleted presence of this mark file indentifies that it was a deletion intention.
         // So we can just remove the mark file.
+        fail::fail_point!("timeline-delete-before-delete-mark", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-before-delete-mark"
+            ))?
+        });
         self.create_timeline_delete_mark(timeline_id)?;
 
-        // TODO failpoint here.
+        fail::fail_point!("timeline-delete-before-schedule", |_| {
+            Err(anyhow::anyhow!(
+                "failpoint: timeline-delete-before-schedule"
+            ))?
+        });
 
         self.schedule_delete_timeline(timeline_id, timeline, delete_lock_guard);
 
