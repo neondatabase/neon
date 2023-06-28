@@ -10,6 +10,7 @@ use tracing::{error, info, instrument, trace, warn};
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
 const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_REPORTING_CLIENT_RETRIES: u32 = 3;
 
 ///
 /// Key that uniquely identifies the object, this metric describes.
@@ -32,7 +33,10 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<()> {
         info!("metrics collector has shut down");
     }
 
-    let http_client = http::new_client_with_timeout(DEFAULT_HTTP_REPORTING_TIMEOUT);
+    let http_client = http::new_client_with_timeout_and_retries(
+        DEFAULT_HTTP_REPORTING_TIMEOUT,
+        MAX_REPORTING_CLIENT_RETRIES,
+    );
     let mut cached_metrics: HashMap<Ids, (u64, DateTime<Utc>)> = HashMap::new();
     let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
 

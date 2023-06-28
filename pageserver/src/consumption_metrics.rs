@@ -311,8 +311,8 @@ pub async fn collect_metrics_iteration(
                     // TODO: random sleep?
                     continue;
                 }
-                Err(err) {
-                    error!(attempt=attemt,"failed to send metrics: {err:?}");
+                Err(err) => {
+                    error!("failed to send metrics: {err:?}");
                     break;
                 }
             }

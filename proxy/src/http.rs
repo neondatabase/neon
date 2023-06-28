@@ -10,6 +10,7 @@ use std::time::Duration;
 
 pub use reqwest::{Request, Response, StatusCode};
 pub use reqwest_middleware::{ClientWithMiddleware, Error};
+pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 
 use crate::url::ApiUrl;
 use reqwest_middleware::RequestBuilder;
@@ -23,14 +24,20 @@ pub fn new_client() -> ClientWithMiddleware {
         .build()
 }
 
-pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
+pub fn new_client_with_timeout_and_retries(
+    default_timout: Duration,
+    total_retries: u32,
+) -> ClientWithMiddleware {
     let timeout_client = reqwest::ClientBuilder::new()
         .timeout(default_timout)
         .build()
         .expect("Failed to create http client with timeout");
 
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(total_retries);
+
     reqwest_middleware::ClientBuilder::new(timeout_client)
         .with(reqwest_tracing::TracingMiddleware::default())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
         .build()
 }
 
