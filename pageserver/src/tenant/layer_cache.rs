@@ -102,9 +102,7 @@ impl LayerCache {
         let expected_l0 = LayerMap::is_l0(expected.layer_desc());
         let new_l0 = LayerMap::is_l0(new.layer_desc());
 
-        fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!(
-            "replacing downloaded layer into layermap failed because layer was not found"
-        ));
+        fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!("layermap-replace-notfound"));
 
         anyhow::ensure!(
             key == other,
