@@ -214,9 +214,7 @@ def switch_pg_to_new_pageserver(
 
     endpoint.start()
 
-    timeline_to_detach_local_path = (
-        env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-    )
+    timeline_to_detach_local_path = env.timeline_dir(tenant_id, timeline_id)
     files_before_detach = os.listdir(timeline_to_detach_local_path)
     assert (
         "metadata" in files_before_detach

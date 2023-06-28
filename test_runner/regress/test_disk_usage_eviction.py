@@ -1,7 +1,6 @@
 import shutil
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, Tuple
 
 import pytest
@@ -428,14 +427,14 @@ def poor_mans_du(
     largest_layer = 0
     smallest_layer = None
     for tenant_id, timeline_id in timelines:
-        dir = Path(env.repo_dir) / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
-        assert dir.exists(), f"timeline dir does not exist: {dir}"
-        sum = 0
-        for file in dir.iterdir():
+        timeline_dir = env.timeline_dir(tenant_id, timeline_id)
+        assert timeline_dir.exists(), f"timeline dir does not exist: {timeline_dir}"
+        total = 0
+        for file in timeline_dir.iterdir():
             if "__" not in file.name:
                 continue
             size = file.stat().st_size
-            sum += size
+            total += size
             largest_layer = max(largest_layer, size)
             if smallest_layer:
                 smallest_layer = min(smallest_layer, size)
@@ -443,8 +442,8 @@ def poor_mans_du(
                 smallest_layer = size
             log.info(f"{tenant_id}/{timeline_id} => {file.name} {size}")
 
-        log.info(f"{tenant_id}/{timeline_id}: sum {sum}")
-        total_on_disk += sum
+        log.info(f"{tenant_id}/{timeline_id}: sum {total}")
+        total_on_disk += total
 
     assert smallest_layer is not None or total_on_disk == 0 and largest_layer == 0
     return (total_on_disk, largest_layer, smallest_layer or 0)
