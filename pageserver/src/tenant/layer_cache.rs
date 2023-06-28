@@ -95,14 +95,15 @@ impl LayerCache {
     ) -> Result<()> {
         let mut guard = self.mapping.lock().unwrap();
 
-        use super::layer_map::LayerKey;
-        let key = LayerKey::from(&*expected);
-        let other = LayerKey::from(&*new);
+        let key = expected.layer_desc().key();
+        let other = new.layer_desc().key();
 
         let expected_l0 = LayerMap::is_l0(expected.layer_desc());
         let new_l0 = LayerMap::is_l0(new.layer_desc());
 
-        fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!("layermap-replace-notfound"));
+        fail::fail_point!("layermap-replace-notfound", |_| anyhow::bail!(
+            "layermap-replace-notfound"
+        ));
 
         anyhow::ensure!(
             key == other,
