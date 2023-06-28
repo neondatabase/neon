@@ -410,7 +410,9 @@ impl LocalEnv {
             }
         }
 
-        fs::create_dir_all(base_path)?;
+        if !base_path.exists() {
+            fs::create_dir(base_path)?;
+        }
 
         // Generate keypair for JWT.
         //
