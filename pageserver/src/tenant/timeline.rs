@@ -2379,11 +2379,11 @@ impl Timeline {
         &self,
         // we cannot remove layers otherwise, since gc and compaction will race
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
-        layer: Arc<PersistentLayerDesc>,
+        layer: &PersistentLayerDesc,
         updates: &mut BatchedUpdates<'_>,
         mapping: &mut LayerFileManager,
     ) -> anyhow::Result<()> {
-        let layer = mapping.get_from_desc(&layer);
+        let layer = mapping.get_from_desc(layer);
         if !layer.is_remote_layer() {
             layer.delete_resident_layer_file()?;
             let layer_file_size = layer.file_size();
@@ -4040,7 +4040,7 @@ impl Timeline {
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
             layer_names_to_delete.push(l.filename());
-            self.delete_historic_layer(layer_removal_cs.clone(), l, &mut updates, mapping)?;
+            self.delete_historic_layer(layer_removal_cs.clone(), &l, &mut updates, mapping)?;
         }
         updates.flush();
         drop_wlock(guard);
@@ -4353,7 +4353,8 @@ impl Timeline {
                 l.filename().file_name(),
                 l.is_incremental(),
             );
-            layers_to_remove.push(Arc::clone(&l));
+            let l = mapping.get_from_desc(&l);
+            layers_to_remove.push(l);
         }
         self.wanted_image_layers
             .lock()
@@ -4375,7 +4376,7 @@ impl Timeline {
                     layer_names_to_delete.push(doomed_layer.filename());
                     self.delete_historic_layer(
                         layer_removal_cs.clone(),
-                        doomed_layer,
+                        doomed_layer.layer_desc(),
                         &mut updates,
                         mapping,
                     )?; // FIXME: schedule succeeded deletions before returning?

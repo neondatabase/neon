@@ -53,6 +53,7 @@ use crate::tenant::storage_layer::InMemoryLayer;
 use crate::tenant::storage_layer::Layer;
 use anyhow::Result;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::Arc;
 use utils::lsn::Lsn;
@@ -145,9 +146,32 @@ impl Drop for BatchedUpdates<'_> {
     }
 }
 
+/// Helper struct to keep layer desc being used within the scope of layer map.
+pub struct PersistentLayerDescGuard<'a> {
+    layer_desc: Arc<PersistentLayerDesc>,
+    marker: PhantomData<&'a PersistentLayerDesc>,
+}
+
+impl std::ops::Deref for PersistentLayerDescGuard<'_> {
+    type Target = PersistentLayerDesc;
+
+    fn deref(&self) -> &Self::Target {
+        &self.layer_desc
+    }
+}
+
+impl PersistentLayerDescGuard<'_> {
+    fn new(layer_desc: Arc<PersistentLayerDesc>) -> Self {
+        Self {
+            layer_desc,
+            marker: PhantomData,
+        }
+    }
+}
+
 /// Return value of LayerMap::search
-pub struct SearchResult {
-    pub layer: Arc<PersistentLayerDesc>,
+pub struct SearchResult<'a> {
+    pub layer: PersistentLayerDescGuard<'a>,
     pub lsn_floor: Lsn,
 }
 
@@ -193,14 +217,14 @@ impl LayerMap {
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
                 Some(SearchResult {
-                    layer: image,
+                    layer: PersistentLayerDescGuard::new(image),
                     lsn_floor,
                 })
             }
             (Some(delta), None) => {
                 let lsn_floor = delta.get_lsn_range().start;
                 Some(SearchResult {
-                    layer: delta,
+                    layer: PersistentLayerDescGuard::new(delta),
                     lsn_floor,
                 })
             }
@@ -210,14 +234,14 @@ impl LayerMap {
                 let image_exact_match = img_lsn + 1 == end_lsn;
                 if image_is_newer || image_exact_match {
                     Some(SearchResult {
-                        layer: image,
+                        layer: PersistentLayerDescGuard::new(image),
                         lsn_floor: img_lsn,
                     })
                 } else {
                     let lsn_floor =
                         std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
                     Some(SearchResult {
-                        layer: delta,
+                        layer: PersistentLayerDescGuard::new(delta),
                         lsn_floor,
                     })
                 }
@@ -319,8 +343,8 @@ impl LayerMap {
         Ok(true)
     }
 
-    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = Arc<PersistentLayerDesc>> {
-        self.historic.iter()
+    pub fn iter_historic_layers(&self) -> impl '_ + Iterator<Item = PersistentLayerDescGuard<'_>> {
+        self.historic.iter().map(PersistentLayerDescGuard::new)
     }
 
     ///
