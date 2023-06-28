@@ -1820,7 +1820,8 @@ impl Tenant {
             if local_timeline_directory.exists() {
                 let metadata_path = self.conf.metadata_path(timeline_id, self.tenant_id);
                 for entry in walkdir::WalkDir::new(&local_timeline_directory).contents_first(true) {
-                    if cfg!(feature = "testing") {
+                    #[cfg(feature = "testing")]
+                    {
                         counter += 1;
                         if counter == 2 {
                             fail::fail_point!("timeline-delete-during-rm", |_| {
