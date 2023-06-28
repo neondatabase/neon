@@ -21,24 +21,24 @@ use postgres_types::PgLsn;
 use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn, Instrument};
 
 use super::TaskStateUpdate;
-use crate::context::RequestContext;
-use crate::metrics::LIVE_CONNECTIONS_COUNT;
 use crate::{
+    context::RequestContext,
+    metrics::{LIVE_CONNECTIONS_COUNT, WALRECEIVER_STARTED_CONNECTIONS},
     task_mgr,
     task_mgr::TaskKind,
     task_mgr::WALRECEIVER_RUNTIME,
-    tenant::{Timeline, WalReceiverInfo},
+    tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
     walrecord::DecodedWALRecord,
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::lsn::Lsn;
 use utils::pageserver_feedback::PageserverFeedback;
+use utils::{id::NodeId, lsn::Lsn};
 
 /// Status of the connection.
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +56,8 @@ pub(super) struct WalConnectionStatus {
     pub streaming_lsn: Option<Lsn>,
     /// Latest commit_lsn received from the safekeeper. Can be zero if no message has been received yet.
     pub commit_lsn: Option<Lsn>,
+    /// The node it is connected to
+    pub node: NodeId,
 }
 
 /// Open a connection to the given safekeeper and receive WAL, sending back progress
@@ -67,7 +69,10 @@ pub(super) async fn handle_walreceiver_connection(
     cancellation: CancellationToken,
     connect_timeout: Duration,
     ctx: RequestContext,
+    node: NodeId,
 ) -> anyhow::Result<()> {
+    WALRECEIVER_STARTED_CONNECTIONS.inc();
+
     // Connect to the database in replication mode.
     info!("connecting to {wal_source_connconf:?}");
 
@@ -76,13 +81,8 @@ pub(super) async fn handle_walreceiver_connection(
         config.application_name("pageserver");
         config.replication_mode(tokio_postgres::config::ReplicationMode::Physical);
         match time::timeout(connect_timeout, config.connect(postgres::NoTls)).await {
-            Ok(Ok(client_and_conn)) => client_and_conn,
-            Ok(Err(conn_err)) => {
-                let expected_error = ignore_expected_errors(conn_err)?;
-                info!("DB connection stream finished: {expected_error}");
-                return Ok(());
-            }
-            Err(_) => {
+            Ok(client_and_conn) => client_and_conn?,
+            Err(_elapsed) => {
                 // Timing out to connect to a safekeeper node could happen long time, due to
                 // many reasons that pageserver cannot control.
                 // Do not produce an error, but make it visible, that timeouts happen by logging the `event.
@@ -92,7 +92,7 @@ pub(super) async fn handle_walreceiver_connection(
         }
     };
 
-    info!("connected!");
+    debug!("connected!");
     let mut connection_status = WalConnectionStatus {
         is_connected: true,
         has_processed_wal: false,
@@ -100,6 +100,7 @@ pub(super) async fn handle_walreceiver_connection(
         latest_wal_update: Utc::now().naive_utc(),
         streaming_lsn: None,
         commit_lsn: None,
+        node,
     };
     if let Err(e) = events_sender.send(TaskStateUpdate::Progress(connection_status)) {
         warn!("Wal connection event listener dropped right after connection init, aborting the connection: {e}");
@@ -121,20 +122,25 @@ pub(super) async fn handle_walreceiver_connection(
         "walreceiver connection",
         false,
         async move {
+            debug_assert_current_span_has_tenant_and_timeline_id();
+
             select! {
-                connection_result = connection => match connection_result{
-                    Ok(()) => info!("Walreceiver db connection closed"),
+                connection_result = connection => match connection_result {
+                    Ok(()) => debug!("Walreceiver db connection closed"),
                     Err(connection_error) => {
-                        if let Err(e) = ignore_expected_errors(connection_error) {
-                            warn!("Connection aborted: {e:#}")
+                        if connection_error.is_expected() {
+                            // silence, because most likely we've already exited the outer call
+                            // with a similar error.
+                        } else {
+                            warn!("Connection aborted: {connection_error:#}")
                         }
                     }
                 },
-                // Future: replace connection_cancellation with connection_ctx cancellation
-                _ = connection_cancellation.cancelled() => info!("Connection cancelled"),
+                _ = connection_cancellation.cancelled() => debug!("Connection cancelled"),
             }
             Ok(())
-        },
+        }
+        .instrument(tracing::info_span!("poller")),
     );
 
     // Immediately increment the gauge, then create a job to decrement it on task exit.
@@ -197,20 +203,13 @@ pub(super) async fn handle_walreceiver_connection(
     while let Some(replication_message) = {
         select! {
             _ = cancellation.cancelled() => {
-                info!("walreceiver interrupted");
+                debug!("walreceiver interrupted");
                 None
             }
             replication_message = physical_stream.next() => replication_message,
         }
     } {
-        let replication_message = match replication_message {
-            Ok(message) => message,
-            Err(replication_error) => {
-                let expected_error = ignore_expected_errors(replication_error)?;
-                info!("Replication stream finished: {expected_error}");
-                return Ok(());
-            }
-        };
+        let replication_message = replication_message?;
 
         let now = Utc::now().naive_utc();
         let last_rec_lsn_before_msg = last_rec_lsn;
@@ -255,8 +254,6 @@ pub(super) async fn handle_walreceiver_connection(
                     let mut decoded = DecodedWALRecord::default();
                     let mut modification = timeline.begin_modification(endlsn);
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                        // let _enter = info_span!("processing record", lsn = %lsn).entered();
-
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
                         // at risk of hitting a deadlock.
@@ -307,12 +304,15 @@ pub(super) async fn handle_walreceiver_connection(
             }
         }
 
-        timeline.check_checkpoint_distance().with_context(|| {
-            format!(
-                "Failed to check checkpoint distance for timeline {}",
-                timeline.timeline_id
-            )
-        })?;
+        timeline
+            .check_checkpoint_distance()
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to check checkpoint distance for timeline {}",
+                    timeline.timeline_id
+                )
+            })?;
 
         if let Some(last_lsn) = status_update {
             let timeline_remote_consistent_lsn =
@@ -415,31 +415,50 @@ async fn identify_system(client: &mut Client) -> anyhow::Result<IdentifySystem> 
     }
 }
 
-/// We don't want to report connectivity problems as real errors towards connection manager because
-/// 1. they happen frequently enough to make server logs hard to read and
-/// 2. the connection manager can retry other safekeeper.
-///
-/// If this function returns `Ok(pg_error)`, it's such an error.
-/// The caller should log it at info level and then report to connection manager that we're done handling this connection.
-/// Connection manager will then handle reconnections.
-///
-/// If this function returns an `Err()`, the caller can bubble it up using `?`.
-/// The connection manager will log the error at ERROR level.
-fn ignore_expected_errors(pg_error: postgres::Error) -> anyhow::Result<postgres::Error> {
-    if pg_error.is_closed()
-        || pg_error
-            .source()
-            .and_then(|source| source.downcast_ref::<std::io::Error>())
-            .map(is_expected_io_error)
-            .unwrap_or(false)
-    {
-        return Ok(pg_error);
-    } else if let Some(db_error) = pg_error.as_db_error() {
-        if db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
-            && db_error.message().contains("ending streaming")
-        {
-            return Ok(pg_error);
-        }
+/// Trait for avoid reporting walreceiver specific expected or "normal" or "ok" errors.
+pub(super) trait ExpectedError {
+    /// Test if this error is an ok error.
+    ///
+    /// We don't want to report connectivity problems as real errors towards connection manager because
+    /// 1. they happen frequently enough to make server logs hard to read and
+    /// 2. the connection manager can retry other safekeeper.
+    ///
+    /// If this function returns `true`, it's such an error.
+    /// The caller should log it at info level and then report to connection manager that we're done handling this connection.
+    /// Connection manager will then handle reconnections.
+    ///
+    /// If this function returns an `false` the error should be propagated and the connection manager
+    /// will log the error at ERROR level.
+    fn is_expected(&self) -> bool;
+}
+
+impl ExpectedError for postgres::Error {
+    fn is_expected(&self) -> bool {
+        self.is_closed()
+            || self
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(is_expected_io_error)
+                .unwrap_or(false)
+            || self
+                .as_db_error()
+                .filter(|db_error| {
+                    db_error.code() == &SqlState::SUCCESSFUL_COMPLETION
+                        && db_error.message().contains("ending streaming")
+                })
+                .is_some()
     }
-    Err(pg_error).context("connection error")
+}
+
+impl ExpectedError for anyhow::Error {
+    fn is_expected(&self) -> bool {
+        let head = self.downcast_ref::<postgres::Error>();
+
+        let tail = self
+            .chain()
+            .filter_map(|e| e.downcast_ref::<postgres::Error>());
+
+        // check if self or any of the chained/sourced errors are expected
+        head.into_iter().chain(tail).any(|e| e.is_expected())
+    }
 }

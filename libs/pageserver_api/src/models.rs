@@ -18,7 +18,29 @@ use crate::reltag::RelTag;
 use anyhow::bail;
 use bytes::{BufMut, Bytes, BytesMut};
 
-/// A state of a tenant in pageserver's memory.
+/// The state of a tenant in this pageserver.
+///
+/// ```mermaid
+/// stateDiagram-v2
+///
+///     [*] --> Loading: spawn_load()
+///     [*] --> Attaching: spawn_attach()
+///
+///     Loading --> Activating: activate()
+///     Attaching --> Activating: activate()
+///     Activating --> Active: infallible
+///
+///     Loading --> Broken: load() failure
+///     Attaching --> Broken: attach() failure
+///
+///     Active --> Stopping: set_stopping(), part of shutdown & detach
+///     Stopping --> Broken: late error in remove_tenant_from_memory
+///
+///     Broken --> [*]: ignore / detach / shutdown
+///     Stopping --> [*]: remove_from_memory complete
+///
+///     Active --> Broken: cfg(testing)-only tenant break point
+/// ```
 #[derive(
     Clone,
     PartialEq,
@@ -26,35 +48,77 @@ use bytes::{BufMut, Bytes, BytesMut};
     serde::Serialize,
     serde::Deserialize,
     strum_macros::Display,
-    strum_macros::EnumString,
     strum_macros::EnumVariantNames,
     strum_macros::AsRefStr,
     strum_macros::IntoStaticStr,
 )]
 #[serde(tag = "slug", content = "data")]
 pub enum TenantState {
-    /// This tenant is being loaded from local disk
+    /// This tenant is being loaded from local disk.
+    ///
+    /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
     Loading,
-    /// This tenant is being downloaded from cloud storage.
+    /// This tenant is being attached to the pageserver.
+    ///
+    /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
     Attaching,
-    /// Tenant is fully operational
+    /// The tenant is transitioning from Loading/Attaching to Active.
+    ///
+    /// While in this state, the individual timelines are being activated.
+    ///
+    /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
+    Activating(ActivatingFrom),
+    /// The tenant has finished activating and is open for business.
+    ///
+    /// Transitions out of this state are possible through `set_stopping()` and `set_broken()`.
     Active,
-    /// A tenant is recognized by pageserver, but it is being detached or the
+    /// The tenant is recognized by pageserver, but it is being detached or the
     /// system is being shut down.
+    ///
+    /// Transitions out of this state are possible through `set_broken()`.
     Stopping,
-    /// A tenant is recognized by the pageserver, but can no longer be used for
-    /// any operations, because it failed to be activated.
+    /// The tenant is recognized by the pageserver, but can no longer be used for
+    /// any operations.
+    ///
+    /// If the tenant fails to load or attach, it will transition to this state
+    /// and it is guaranteed that no background tasks are running in its name.
+    ///
+    /// The other way to transition into this state is from `Stopping` state
+    /// through `set_broken()` called from `remove_tenant_from_memory()`. That happens
+    /// if the cleanup future executed by `remove_tenant_from_memory()` fails.
     Broken { reason: String, backtrace: String },
 }
 
 impl TenantState {
-    pub fn has_in_progress_downloads(&self) -> bool {
+    pub fn attachment_status(&self) -> TenantAttachmentStatus {
+        use TenantAttachmentStatus::*;
+
+        // Below TenantState::Activating is used as "transient" or "transparent" state for
+        // attachment_status determining.
         match self {
-            Self::Loading => true,
-            Self::Attaching => true,
-            Self::Active => false,
-            Self::Stopping => false,
-            Self::Broken { .. } => false,
+            // The attach procedure writes the marker file before adding the Attaching tenant to the tenants map.
+            // So, technically, we can return Attached here.
+            // However, as soon as Console observes Attached, it will proceed with the Postgres-level health check.
+            // But, our attach task might still be fetching the remote timelines, etc.
+            // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
+            Self::Attaching | Self::Activating(ActivatingFrom::Attaching) => Maybe,
+            // tenant mgr startup distinguishes attaching from loading via marker file.
+            // If it's loading, there is no attach marker file, i.e., attach had finished in the past.
+            Self::Loading | Self::Activating(ActivatingFrom::Loading) => Attached,
+            // We only reach Active after successful load / attach.
+            // So, call atttachment status Attached.
+            Self::Active => Attached,
+            // If the (initial or resumed) attach procedure fails, the tenant becomes Broken.
+            // However, it also becomes Broken if the regular load fails.
+            // From Console's perspective there's no practical difference
+            // because attachment_status is polled by console only during attach operation execution.
+            Self::Broken { reason, .. } => Failed {
+                reason: reason.to_owned(),
+            },
+            // Why is Stopping a Maybe case? Because, during pageserver shutdown,
+            // we set the Stopping state irrespective of whether the tenant
+            // has finished attaching or not.
+            Self::Stopping => Maybe,
         }
     }
 
@@ -78,8 +142,17 @@ impl std::fmt::Debug for TenantState {
     }
 }
 
+/// The only [`TenantState`] variants we could be `TenantState::Activating` from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ActivatingFrom {
+    /// Arrived to [`TenantState::Activating`] from [`TenantState::Loading`]
+    Loading,
+    /// Arrived to [`TenantState::Activating`] from [`TenantState::Attaching`]
+    Attaching,
+}
+
 /// A state of a timeline in pageserver's memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TimelineState {
     /// The timeline is recognized by the pageserver but is not yet operational.
     /// In particular, the walreceiver connection loop is not running for this timeline.
@@ -92,15 +165,14 @@ pub enum TimelineState {
     /// It cannot transition back into any other state.
     Stopping,
     /// The timeline is broken and not operational (previous states: Loading or Active).
-    Broken,
+    Broken { reason: String, backtrace: String },
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct TimelineCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_timeline_id: Option<TimelineId>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub new_timeline_id: TimelineId,
     #[serde(default)]
     #[serde_as(as = "Option<DisplayFromStr>")]
     pub ancestor_timeline_id: Option<TimelineId>,
@@ -111,11 +183,25 @@ pub struct TimelineCreateRequest {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct TenantCreateRequest {
-    #[serde(default)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub new_tenant_id: Option<TenantId>,
+    #[serde_as(as = "DisplayFromStr")]
+    pub new_tenant_id: TenantId,
+    #[serde(flatten)]
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+impl std::ops::Deref for TenantCreateRequest {
+    type Target = TenantConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct TenantConfig {
     pub checkpoint_distance: Option<u64>,
     pub checkpoint_timeout: Option<String>,
     pub compaction_target_size: Option<u64>,
@@ -136,6 +222,7 @@ pub struct TenantCreateRequest {
     pub eviction_policy: Option<serde_json::Value>,
     pub min_resident_size_override: Option<u64>,
     pub evictions_low_residence_duration_metric_threshold: Option<String>,
+    pub gc_feedback: Option<bool>,
 }
 
 #[serde_as]
@@ -149,46 +236,35 @@ pub struct StatusResponse {
 }
 
 impl TenantCreateRequest {
-    pub fn new(new_tenant_id: Option<TenantId>) -> TenantCreateRequest {
+    pub fn new(new_tenant_id: TenantId) -> TenantCreateRequest {
         TenantCreateRequest {
             new_tenant_id,
-            ..Default::default()
+            config: TenantConfig::default(),
         }
     }
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct TenantConfigRequest {
     #[serde_as(as = "DisplayFromStr")]
     pub tenant_id: TenantId,
-    #[serde(default)]
-    pub checkpoint_distance: Option<u64>,
-    pub checkpoint_timeout: Option<String>,
-    pub compaction_target_size: Option<u64>,
-    pub compaction_period: Option<String>,
-    pub compaction_threshold: Option<usize>,
-    pub gc_horizon: Option<u64>,
-    pub gc_period: Option<String>,
-    pub image_creation_threshold: Option<usize>,
-    pub pitr_interval: Option<String>,
-    pub walreceiver_connect_timeout: Option<String>,
-    pub lagging_wal_timeout: Option<String>,
-    pub max_lsn_wal_lag: Option<NonZeroU64>,
-    pub trace_read_requests: Option<bool>,
-    // We defer the parsing of the eviction_policy field to the request handler.
-    // Otherwise we'd have to move the types for eviction policy into this package.
-    // We might do that once the eviction feature has stabilizied.
-    // For now, this field is not even documented in the openapi_spec.yml.
-    pub eviction_policy: Option<serde_json::Value>,
-    pub min_resident_size_override: Option<u64>,
-    pub evictions_low_residence_duration_metric_threshold: Option<String>,
+    #[serde(flatten)]
+    pub config: TenantConfig, // as we have a flattened field, we should reject all unknown fields in it
+}
+
+impl std::ops::Deref for TenantConfigRequest {
+    type Target = TenantConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
 }
 
 impl TenantConfigRequest {
     pub fn new(tenant_id: TenantId) -> TenantConfigRequest {
-        TenantConfigRequest {
-            tenant_id,
+        let config = TenantConfig {
             checkpoint_distance: None,
             checkpoint_timeout: None,
             compaction_target_size: None,
@@ -205,8 +281,41 @@ impl TenantConfigRequest {
             eviction_policy: None,
             min_resident_size_override: None,
             evictions_low_residence_duration_metric_threshold: None,
-        }
+            gc_feedback: None,
+        };
+        TenantConfigRequest { tenant_id, config }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TenantAttachRequest {
+    pub config: TenantAttachConfig,
+}
+
+/// Newtype to enforce deny_unknown_fields on TenantConfig for
+/// its usage inside `TenantAttachRequest`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantAttachConfig {
+    #[serde(flatten)]
+    allowing_unknown_fields: TenantConfig,
+}
+
+impl std::ops::Deref for TenantAttachConfig {
+    type Target = TenantConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.allowing_unknown_fields
+    }
+}
+
+/// See [`TenantState::attachment_status`] and the OpenAPI docs for context.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "slug", content = "data", rename_all = "snake_case")]
+pub enum TenantAttachmentStatus {
+    Maybe,
+    Attached,
+    Failed { reason: String },
 }
 
 #[serde_as]
@@ -214,11 +323,12 @@ impl TenantConfigRequest {
 pub struct TenantInfo {
     #[serde_as(as = "DisplayFromStr")]
     pub id: TenantId,
+    // NB: intentionally not part of OpenAPI, we don't want to commit to a specific set of TenantState's
     pub state: TenantState,
     /// Sum of the size of all layer files.
     /// If a layer is present in both local FS and S3, it counts only once.
     pub current_physical_size: Option<u64>, // physical size is only included in `tenant_status` endpoint
-    pub has_in_progress_downloads: Option<bool>,
+    pub attachment_status: TenantAttachmentStatus,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
@@ -691,7 +801,7 @@ mod tests {
             id: TenantId::generate(),
             state: TenantState::Active,
             current_physical_size: Some(42),
-            has_in_progress_downloads: Some(false),
+            attachment_status: TenantAttachmentStatus::Attached,
         };
         let expected_active = json!({
             "id": original_active.id.to_string(),
@@ -699,7 +809,9 @@ mod tests {
                 "slug": "Active",
             },
             "current_physical_size": 42,
-            "has_in_progress_downloads": false,
+            "attachment_status": {
+                "slug":"attached",
+            }
         });
 
         let original_broken = TenantInfo {
@@ -709,7 +821,7 @@ mod tests {
                 backtrace: "backtrace info".into(),
             },
             current_physical_size: Some(42),
-            has_in_progress_downloads: Some(false),
+            attachment_status: TenantAttachmentStatus::Attached,
         };
         let expected_broken = json!({
             "id": original_broken.id.to_string(),
@@ -721,7 +833,9 @@ mod tests {
                 }
             },
             "current_physical_size": 42,
-            "has_in_progress_downloads": false,
+            "attachment_status": {
+                "slug":"attached",
+            }
         });
 
         assert_eq!(
@@ -735,5 +849,95 @@ mod tests {
         );
         assert!(format!("{:?}", &original_broken.state).contains("reason"));
         assert!(format!("{:?}", &original_broken.state).contains("backtrace info"));
+    }
+
+    #[test]
+    fn test_reject_unknown_field() {
+        let id = TenantId::generate();
+        let create_request = json!({
+            "new_tenant_id": id.to_string(),
+            "unknown_field": "unknown_value".to_string(),
+        });
+        let err = serde_json::from_value::<TenantCreateRequest>(create_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
+
+        let id = TenantId::generate();
+        let config_request = json!({
+            "tenant_id": id.to_string(),
+            "unknown_field": "unknown_value".to_string(),
+        });
+        let err = serde_json::from_value::<TenantConfigRequest>(config_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
+
+        let attach_request = json!({
+            "config": {
+                "unknown_field": "unknown_value".to_string(),
+            },
+        });
+        let err = serde_json::from_value::<TenantAttachRequest>(attach_request).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `unknown_field`"),
+            "expect unknown field `unknown_field` error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn tenantstatus_activating_serde() {
+        let states = [
+            TenantState::Activating(ActivatingFrom::Loading),
+            TenantState::Activating(ActivatingFrom::Attaching),
+        ];
+        let expected = "[{\"slug\":\"Activating\",\"data\":\"Loading\"},{\"slug\":\"Activating\",\"data\":\"Attaching\"}]";
+
+        let actual = serde_json::to_string(&states).unwrap();
+
+        assert_eq!(actual, expected);
+
+        let parsed = serde_json::from_str::<Vec<TenantState>>(&actual).unwrap();
+
+        assert_eq!(states.as_slice(), &parsed);
+    }
+
+    #[test]
+    fn tenantstatus_activating_strum() {
+        // tests added, because we use these for metrics
+        let examples = [
+            (line!(), TenantState::Loading, "Loading"),
+            (line!(), TenantState::Attaching, "Attaching"),
+            (
+                line!(),
+                TenantState::Activating(ActivatingFrom::Loading),
+                "Activating",
+            ),
+            (
+                line!(),
+                TenantState::Activating(ActivatingFrom::Attaching),
+                "Activating",
+            ),
+            (line!(), TenantState::Active, "Active"),
+            (line!(), TenantState::Stopping, "Stopping"),
+            (
+                line!(),
+                TenantState::Broken {
+                    reason: "Example".into(),
+                    backtrace: "Looooong backtrace".into(),
+                },
+                "Broken",
+            ),
+        ];
+
+        for (line, rendered, expected) in examples {
+            let actual: &'static str = rendered.into();
+            assert_eq!(actual, expected, "example on {line}");
+        }
     }
 }

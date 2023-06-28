@@ -1,13 +1,14 @@
-use metrics::core::{AtomicU64, GenericCounter};
+use metrics::metric_vec_duration::DurationResultObserver;
 use metrics::{
     register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge_vec, register_uint_gauge_vec, Counter, CounterVec,
-    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, UIntGauge,
-    UIntGaugeVec,
+    register_int_counter_vec, register_int_gauge, register_int_gauge_vec, register_uint_gauge_vec,
+    Counter, CounterVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    UIntGauge, UIntGaugeVec,
 };
 use once_cell::sync::Lazy;
 use pageserver_api::models::TenantState;
 use strum::VariantNames;
+use strum_macros::{EnumVariantNames, IntoStaticStr};
 use utils::id::{TenantId, TimelineId};
 
 /// Prometheus histogram buckets (in seconds) for operations in the critical
@@ -24,15 +25,33 @@ const CRITICAL_OP_BUCKETS: &[f64] = &[
 ];
 
 // Metrics collected on operations on the storage repository.
-const STORAGE_TIME_OPERATIONS: &[&str] = &[
-    "layer flush",
-    "compact",
-    "create images",
-    "init logical size",
-    "logical size",
-    "load layer map",
-    "gc",
-];
+#[derive(Debug, EnumVariantNames, IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+pub enum StorageTimeOperation {
+    #[strum(serialize = "layer flush")]
+    LayerFlush,
+
+    #[strum(serialize = "compact")]
+    Compact,
+
+    #[strum(serialize = "create images")]
+    CreateImages,
+
+    #[strum(serialize = "logical size")]
+    LogicalSize,
+
+    #[strum(serialize = "imitate logical size")]
+    ImitateLogicalSize,
+
+    #[strum(serialize = "load layer map")]
+    LoadLayerMap,
+
+    #[strum(serialize = "gc")]
+    Gc,
+
+    #[strum(serialize = "create tenant")]
+    CreateTenant,
+}
 
 pub static STORAGE_TIME_SUM_PER_TIMELINE: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
@@ -65,22 +84,48 @@ pub static STORAGE_TIME_GLOBAL: Lazy<HistogramVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
-// Metrics collected on operations on the storage repository.
-static RECONSTRUCT_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+static READ_NUM_FS_LAYERS: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
+        "pageserver_read_num_fs_layers",
+        "Number of persistent layers accessed for processing a read request, including those in the cache",
+        &["tenant_id", "timeline_id"],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 10.0, 20.0, 50.0, 100.0],
+    )
+    .expect("failed to define a metric")
+});
+
+// Metrics collected on operations on the storage repository.
+pub static RECONSTRUCT_TIME: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
         "pageserver_getpage_reconstruct_seconds",
-        "Time spent in reconstruct_value",
+        "Time spent in reconstruct_value (reconstruct a page from deltas)",
+        CRITICAL_OP_BUCKETS.into(),
+    )
+    .expect("failed to define a metric")
+});
+
+pub static MATERIALIZED_PAGE_CACHE_HIT_DIRECT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_materialized_cache_hits_direct_total",
+        "Number of cache hits from materialized page cache without redo",
+    )
+    .expect("failed to define a metric")
+});
+
+static GET_RECONSTRUCT_DATA_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_getpage_get_reconstruct_data_seconds",
+        "Time spent in get_reconstruct_value_data",
         &["tenant_id", "timeline_id"],
         CRITICAL_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
 
-static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
+pub static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
         "pageserver_materialized_cache_hits_total",
         "Number of cache hits from materialized page cache",
-        &["tenant_id", "timeline_id"]
     )
     .expect("failed to define a metric")
 });
@@ -182,6 +227,16 @@ static PERSISTENT_BYTES_WRITTEN: Lazy<IntCounterVec> = Lazy::new(|| {
         "pageserver_written_persistent_bytes_total",
         "Total bytes written that are meant to be uploaded to cloud storage",
         &["tenant_id", "timeline_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static EVICTION_ITERATION_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_eviction_iteration_duration_seconds_global",
+        "Time spent on a single eviction iteration",
+        &["period_secs", "threshold_secs"],
+        STORAGE_OP_BUCKETS.into(),
     )
     .expect("failed to define a metric")
 });
@@ -325,6 +380,7 @@ const STORAGE_IO_TIME_BUCKETS: &[f64] = &[
     0.001000, // 1000 usec
     0.030,    // 30 ms
     1.000,    // 1000 ms
+    30.000,   // 30000 ms
 ];
 
 const STORAGE_IO_TIME_OPERATIONS: &[&str] = &[
@@ -368,6 +424,27 @@ pub static SMGR_QUERY_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     )
     .expect("failed to define a metric")
 });
+
+pub struct BasebackupQueryTime(HistogramVec);
+pub static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
+    BasebackupQueryTime({
+        register_histogram_vec!(
+            "pageserver_basebackup_query_seconds",
+            "Histogram of basebackup queries durations, by result type",
+            &["result"],
+            CRITICAL_OP_BUCKETS.into(),
+        )
+        .expect("failed to define a metric")
+    })
+});
+
+impl DurationResultObserver for BasebackupQueryTime {
+    fn observe_result<T, E>(&self, res: &Result<T, E>, duration: std::time::Duration) {
+        let label_value = if res.is_ok() { "ok" } else { "error" };
+        let metric = self.0.get_metric_with_label_values(&[label_value]).unwrap();
+        metric.observe(duration.as_secs_f64());
+    }
+}
 
 pub static LIVE_CONNECTIONS_COUNT: Lazy<IntGaugeVec> = Lazy::new(|| {
     register_int_gauge_vec!(
@@ -478,6 +555,65 @@ pub static TENANT_TASK_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register tenant_task_events metric")
 });
 
+pub static BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_background_loop_period_overrun_count",
+        "Incremented whenever warn_when_period_overrun() logs a warning.",
+        &["task", "period"],
+    )
+    .expect("failed to define a metric")
+});
+
+// walreceiver metrics
+
+pub static WALRECEIVER_STARTED_CONNECTIONS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_walreceiver_started_connections_total",
+        "Number of started walreceiver connections"
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_ACTIVE_MANAGERS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "pageserver_walreceiver_active_managers",
+        "Number of active walreceiver managers"
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_SWITCHES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_walreceiver_switches_total",
+        "Number of walreceiver manager change_connection calls",
+        &["reason"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_BROKER_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "pageserver_walreceiver_broker_updates_total",
+        "Number of received broker updates in walreceiver"
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_CANDIDATES_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_walreceiver_candidates_events_total",
+        "Number of walreceiver candidate events",
+        &["event"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static WALRECEIVER_CANDIDATES_ADDED: Lazy<IntCounter> =
+    Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["add"]));
+
+pub static WALRECEIVER_CANDIDATES_REMOVED: Lazy<IntCounter> =
+    Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["remove"]));
+
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting
@@ -534,7 +670,7 @@ pub static WAL_REDO_TIME: Lazy<Histogram> = Lazy::new(|| {
 pub static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_wait_seconds",
-        "Time spent waiting for access to the WAL redo process",
+        "Time spent waiting for access to the Postgres WAL redo process",
         redo_histogram_time_buckets!(),
     )
     .expect("failed to define a metric")
@@ -543,7 +679,7 @@ pub static WAL_REDO_WAIT_TIME: Lazy<Histogram> = Lazy::new(|| {
 pub static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_records_histogram",
-        "Histogram of number of records replayed per redo",
+        "Histogram of number of records replayed per redo in the Postgres WAL redo process",
         redo_histogram_count_buckets!(),
     )
     .expect("failed to define a metric")
@@ -552,7 +688,7 @@ pub static WAL_REDO_RECORDS_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
 pub static WAL_REDO_BYTES_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "pageserver_wal_redo_bytes_histogram",
-        "Histogram of number of records replayed per redo",
+        "Histogram of number of records replayed per redo sent to Postgres",
         redo_bytes_histogram_count_buckets!(),
     )
     .expect("failed to define a metric")
@@ -602,7 +738,9 @@ pub struct StorageTimeMetrics {
 }
 
 impl StorageTimeMetrics {
-    pub fn new(operation: &str, tenant_id: &str, timeline_id: &str) -> Self {
+    pub fn new(operation: StorageTimeOperation, tenant_id: &str, timeline_id: &str) -> Self {
+        let operation: &'static str = operation.into();
+
         let timeline_sum = STORAGE_TIME_SUM_PER_TIMELINE
             .get_metric_with_label_values(&[operation, tenant_id, timeline_id])
             .unwrap();
@@ -632,17 +770,18 @@ impl StorageTimeMetrics {
 pub struct TimelineMetrics {
     tenant_id: String,
     timeline_id: String,
-    pub reconstruct_time_histo: Histogram,
-    pub materialized_page_cache_hit_counter: GenericCounter<AtomicU64>,
+    pub get_reconstruct_data_time_histo: Histogram,
     pub flush_time_histo: StorageTimeMetrics,
     pub compact_time_histo: StorageTimeMetrics,
     pub create_images_time_histo: StorageTimeMetrics,
     pub logical_size_histo: StorageTimeMetrics,
+    pub imitate_logical_size_histo: StorageTimeMetrics,
     pub load_layer_map_histo: StorageTimeMetrics,
     pub garbage_collect_histo: StorageTimeMetrics,
     pub last_record_gauge: IntGauge,
     pub wait_lsn_time_histo: Histogram,
     pub resident_physical_size_gauge: UIntGauge,
+    pub read_num_fs_layers: Histogram,
     /// copy of LayeredTimeline.current_logical_size
     pub current_logical_size_gauge: UIntGauge,
     pub num_persistent_files_created: IntCounter,
@@ -659,20 +798,26 @@ impl TimelineMetrics {
     ) -> Self {
         let tenant_id = tenant_id.to_string();
         let timeline_id = timeline_id.to_string();
-        let reconstruct_time_histo = RECONSTRUCT_TIME
+        let get_reconstruct_data_time_histo = GET_RECONSTRUCT_DATA_TIME
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
-        let materialized_page_cache_hit_counter = MATERIALIZED_PAGE_CACHE_HIT
-            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
-            .unwrap();
-        let flush_time_histo = StorageTimeMetrics::new("layer flush", &tenant_id, &timeline_id);
-        let compact_time_histo = StorageTimeMetrics::new("compact", &tenant_id, &timeline_id);
+        let flush_time_histo =
+            StorageTimeMetrics::new(StorageTimeOperation::LayerFlush, &tenant_id, &timeline_id);
+        let compact_time_histo =
+            StorageTimeMetrics::new(StorageTimeOperation::Compact, &tenant_id, &timeline_id);
         let create_images_time_histo =
-            StorageTimeMetrics::new("create images", &tenant_id, &timeline_id);
-        let logical_size_histo = StorageTimeMetrics::new("logical size", &tenant_id, &timeline_id);
+            StorageTimeMetrics::new(StorageTimeOperation::CreateImages, &tenant_id, &timeline_id);
+        let logical_size_histo =
+            StorageTimeMetrics::new(StorageTimeOperation::LogicalSize, &tenant_id, &timeline_id);
+        let imitate_logical_size_histo = StorageTimeMetrics::new(
+            StorageTimeOperation::ImitateLogicalSize,
+            &tenant_id,
+            &timeline_id,
+        );
         let load_layer_map_histo =
-            StorageTimeMetrics::new("load layer map", &tenant_id, &timeline_id);
-        let garbage_collect_histo = StorageTimeMetrics::new("gc", &tenant_id, &timeline_id);
+            StorageTimeMetrics::new(StorageTimeOperation::LoadLayerMap, &tenant_id, &timeline_id);
+        let garbage_collect_histo =
+            StorageTimeMetrics::new(StorageTimeOperation::Gc, &tenant_id, &timeline_id);
         let last_record_gauge = LAST_RECORD_LSN
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
@@ -694,18 +839,21 @@ impl TimelineMetrics {
         let evictions = EVICTIONS
             .get_metric_with_label_values(&[&tenant_id, &timeline_id])
             .unwrap();
+        let read_num_fs_layers = READ_NUM_FS_LAYERS
+            .get_metric_with_label_values(&[&tenant_id, &timeline_id])
+            .unwrap();
         let evictions_with_low_residence_duration =
             evictions_with_low_residence_duration_builder.build(&tenant_id, &timeline_id);
 
         TimelineMetrics {
             tenant_id,
             timeline_id,
-            reconstruct_time_histo,
-            materialized_page_cache_hit_counter,
+            get_reconstruct_data_time_histo,
             flush_time_histo,
             compact_time_histo,
             create_images_time_histo,
             logical_size_histo,
+            imitate_logical_size_histo,
             garbage_collect_histo,
             load_layer_map_histo,
             last_record_gauge,
@@ -718,6 +866,7 @@ impl TimelineMetrics {
             evictions_with_low_residence_duration: std::sync::RwLock::new(
                 evictions_with_low_residence_duration,
             ),
+            read_num_fs_layers,
         }
     }
 }
@@ -726,8 +875,7 @@ impl Drop for TimelineMetrics {
     fn drop(&mut self) {
         let tenant_id = &self.tenant_id;
         let timeline_id = &self.timeline_id;
-        let _ = RECONSTRUCT_TIME.remove_label_values(&[tenant_id, timeline_id]);
-        let _ = MATERIALIZED_PAGE_CACHE_HIT.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = GET_RECONSTRUCT_DATA_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = LAST_RECORD_LSN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = WAIT_LSN_TIME.remove_label_values(&[tenant_id, timeline_id]);
         let _ = RESIDENT_PHYSICAL_SIZE.remove_label_values(&[tenant_id, timeline_id]);
@@ -735,11 +883,13 @@ impl Drop for TimelineMetrics {
         let _ = NUM_PERSISTENT_FILES_CREATED.remove_label_values(&[tenant_id, timeline_id]);
         let _ = PERSISTENT_BYTES_WRITTEN.remove_label_values(&[tenant_id, timeline_id]);
         let _ = EVICTIONS.remove_label_values(&[tenant_id, timeline_id]);
+        let _ = READ_NUM_FS_LAYERS.remove_label_values(&[tenant_id, timeline_id]);
+
         self.evictions_with_low_residence_duration
             .write()
             .unwrap()
             .remove(tenant_id, timeline_id);
-        for op in STORAGE_TIME_OPERATIONS {
+        for op in StorageTimeOperation::VARIANTS {
             let _ =
                 STORAGE_TIME_SUM_PER_TIMELINE.remove_label_values(&[op, tenant_id, timeline_id]);
             let _ =
@@ -1166,4 +1316,11 @@ pub fn preinitialize_metrics() {
     // Initialize it eagerly, so that our alert rule can distinguish absence of the metric from metric value 0.
     assert_eq!(UNEXPECTED_ONDEMAND_DOWNLOADS.get(), 0);
     UNEXPECTED_ONDEMAND_DOWNLOADS.reset();
+
+    // Same as above for this metric, but, it's a Vec-type metric for which we don't know all the labels.
+    BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT.reset();
+
+    // Python tests need these.
+    MATERIALIZED_PAGE_CACHE_HIT_DIRECT.get();
+    MATERIALIZED_PAGE_CACHE_HIT.get();
 }

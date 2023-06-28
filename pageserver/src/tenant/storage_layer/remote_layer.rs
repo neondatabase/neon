@@ -4,6 +4,7 @@
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::repository::Key;
+use crate::tenant::layer_map::BatchedUpdates;
 use crate::tenant::remote_timeline_client::index::LayerFileMetadata;
 use crate::tenant::storage_layer::{Layer, ValueReconstructResult, ValueReconstructState};
 use anyhow::{bail, Result};
@@ -17,11 +18,10 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::{DeltaFileName, ImageFileName, LayerFileName};
-use super::image_layer::ImageLayer;
+use super::filename::{DeltaFileName, ImageFileName};
 use super::{
-    DeltaLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
-    LayerResidenceStatus, PersistentLayer,
+    DeltaLayer, ImageLayer, LayerAccessStats, LayerAccessStatsReset, LayerIter, LayerKeyIter,
+    LayerResidenceStatus, PersistentLayer, PersistentLayerDesc,
 };
 
 /// RemoteLayer is a not yet downloaded [`ImageLayer`] or
@@ -33,18 +33,9 @@ use super::{
 ///
 /// See: [`crate::context::RequestContext`] for authorization to download
 pub struct RemoteLayer {
-    tenantid: TenantId,
-    timelineid: TimelineId,
-    key_range: Range<Key>,
-    lsn_range: Range<Lsn>,
-
-    pub file_name: LayerFileName,
+    pub desc: PersistentLayerDesc,
 
     pub layer_metadata: LayerFileMetadata,
-
-    is_delta: bool,
-
-    is_incremental: bool,
 
     access_stats: LayerAccessStats,
 
@@ -65,22 +56,14 @@ pub struct RemoteLayer {
 impl std::fmt::Debug for RemoteLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteLayer")
-            .field("file_name", &self.file_name)
+            .field("file_name", &self.desc.filename())
             .field("layer_metadata", &self.layer_metadata)
-            .field("is_incremental", &self.is_incremental)
+            .field("is_incremental", &self.desc.is_incremental)
             .finish()
     }
 }
 
 impl Layer for RemoteLayer {
-    fn get_key_range(&self) -> Range<Key> {
-        self.key_range.clone()
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        self.lsn_range.clone()
-    }
-
     fn get_value_reconstruct_data(
         &self,
         _key: Key,
@@ -94,53 +77,45 @@ impl Layer for RemoteLayer {
         );
     }
 
-    fn is_incremental(&self) -> bool {
-        self.is_incremental
-    }
-
     /// debugging function to print out the contents of the layer
     fn dump(&self, _verbose: bool, _ctx: &RequestContext) -> Result<()> {
         println!(
             "----- remote layer for ten {} tli {} keys {}-{} lsn {}-{} ----",
-            self.tenantid,
-            self.timelineid,
-            self.key_range.start,
-            self.key_range.end,
-            self.lsn_range.start,
-            self.lsn_range.end
+            self.desc.tenant_id,
+            self.desc.timeline_id,
+            self.desc.key_range.start,
+            self.desc.key_range.end,
+            self.desc.lsn_range.start,
+            self.desc.lsn_range.end
         );
 
         Ok(())
     }
 
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+    fn get_key_range(&self) -> Range<Key> {
+        self.layer_desc().key_range.clone()
+    }
+
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+    fn get_lsn_range(&self) -> Range<Lsn> {
+        self.layer_desc().lsn_range.clone()
+    }
+
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+    fn is_incremental(&self) -> bool {
+        self.layer_desc().is_incremental
+    }
+
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
     fn short_id(&self) -> String {
-        self.filename().file_name()
+        self.layer_desc().short_id()
     }
 }
 
 impl PersistentLayer for RemoteLayer {
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenantid
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timelineid
-    }
-
-    fn filename(&self) -> LayerFileName {
-        if self.is_delta {
-            DeltaFileName {
-                key_range: self.key_range.clone(),
-                lsn_range: self.lsn_range.clone(),
-            }
-            .into()
-        } else {
-            ImageFileName {
-                key_range: self.key_range.clone(),
-                lsn: self.lsn_range.start,
-            }
-            .into()
-        }
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
     }
 
     fn local_path(&self) -> Option<PathBuf> {
@@ -167,15 +142,11 @@ impl PersistentLayer for RemoteLayer {
         true
     }
 
-    fn file_size(&self) -> u64 {
-        self.layer_metadata.file_size()
-    }
-
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let lsn_range = self.get_lsn_range();
 
-        if self.is_delta {
+        if self.desc.is_delta {
             HistoricLayerInfo::Delta {
                 layer_file_name,
                 layer_file_size: self.layer_metadata.file_size(),
@@ -209,13 +180,14 @@ impl RemoteLayer {
         access_stats: LayerAccessStats,
     ) -> RemoteLayer {
         RemoteLayer {
-            tenantid,
-            timelineid,
-            key_range: fname.key_range.clone(),
-            lsn_range: fname.lsn_as_range(),
-            is_delta: false,
-            is_incremental: false,
-            file_name: fname.to_owned().into(),
+            desc: PersistentLayerDesc::new_img(
+                tenantid,
+                timelineid,
+                fname.key_range.clone(),
+                fname.lsn,
+                false,
+                layer_metadata.file_size(),
+            ),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
             download_replacement_failure: std::sync::atomic::AtomicBool::default(),
@@ -231,13 +203,13 @@ impl RemoteLayer {
         access_stats: LayerAccessStats,
     ) -> RemoteLayer {
         RemoteLayer {
-            tenantid,
-            timelineid,
-            key_range: fname.key_range.clone(),
-            lsn_range: fname.lsn_range.clone(),
-            is_delta: true,
-            is_incremental: true,
-            file_name: fname.to_owned().into(),
+            desc: PersistentLayerDesc::new_delta(
+                tenantid,
+                timelineid,
+                fname.key_range.clone(),
+                fname.lsn_range.clone(),
+                layer_metadata.file_size(),
+            ),
             layer_metadata: layer_metadata.clone(),
             ongoing_download: Arc::new(tokio::sync::Semaphore::new(1)),
             download_replacement_failure: std::sync::atomic::AtomicBool::default(),
@@ -246,38 +218,40 @@ impl RemoteLayer {
     }
 
     /// Create a Layer struct representing this layer, after it has been downloaded.
-    pub fn create_downloaded_layer(
+    pub fn create_downloaded_layer<L>(
         &self,
+        layer_map_lock_held_witness: &BatchedUpdates<'_, L>,
         conf: &'static PageServerConf,
         file_size: u64,
-    ) -> Arc<dyn PersistentLayer> {
-        if self.is_delta {
-            let fname = DeltaFileName {
-                key_range: self.key_range.clone(),
-                lsn_range: self.lsn_range.clone(),
-            };
+    ) -> Arc<dyn PersistentLayer>
+    where
+        L: ?Sized + Layer,
+    {
+        if self.desc.is_delta {
+            let fname = self.desc.delta_file_name();
             Arc::new(DeltaLayer::new(
                 conf,
-                self.timelineid,
-                self.tenantid,
+                self.desc.timeline_id,
+                self.desc.tenant_id,
                 &fname,
                 file_size,
-                self.access_stats
-                    .clone_for_residence_change(LayerResidenceStatus::Resident),
+                self.access_stats.clone_for_residence_change(
+                    layer_map_lock_held_witness,
+                    LayerResidenceStatus::Resident,
+                ),
             ))
         } else {
-            let fname = ImageFileName {
-                key_range: self.key_range.clone(),
-                lsn: self.lsn_range.start,
-            };
+            let fname = self.desc.image_file_name();
             Arc::new(ImageLayer::new(
                 conf,
-                self.timelineid,
-                self.tenantid,
+                self.desc.timeline_id,
+                self.desc.tenant_id,
                 &fname,
                 file_size,
-                self.access_stats
-                    .clone_for_residence_change(LayerResidenceStatus::Resident),
+                self.access_stats.clone_for_residence_change(
+                    layer_map_lock_held_witness,
+                    LayerResidenceStatus::Resident,
+                ),
             ))
         }
     }

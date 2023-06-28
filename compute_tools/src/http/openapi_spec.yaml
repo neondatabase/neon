@@ -181,8 +181,8 @@ components:
     ComputeState:
       type: object
       required:
+        - start_time
         - status
-        - last_active
       properties:
         start_time:
           type: string
@@ -195,11 +195,13 @@ components:
           $ref: '#/components/schemas/ComputeStatus'
         last_active:
           type: string
-          description: The last detected compute activity timestamp in UTC and RFC3339 format.
+          description: |
+            The last detected compute activity timestamp in UTC and RFC3339 format.
+            It could be empty if compute was never used by user since start.
           example: "2022-10-12T07:20:50.52Z"
         error:
           type: string
-          description: Text of the error during compute startup, if any.
+          description: Text of the error during compute startup or reconfiguration, if any.
           example: ""
         tenant:
           type: string
@@ -222,9 +224,12 @@ components:
     ComputeStatus:
       type: string
       enum:
+        - empty
         - init
         - failed
         - running
+        - configuration_pending
+        - configuration
       example: running
 
     #

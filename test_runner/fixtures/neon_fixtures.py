@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Type, Union, cast
 from urllib.parse import urlparse
 
 import asyncpg
-import backoff  # type: ignore
+import backoff
 import boto3
 import jwt
 import psycopg2
@@ -45,6 +45,7 @@ from typing_extensions import Literal
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
+from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
@@ -75,7 +76,6 @@ Env = Dict[str, str]
 
 DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
-DEFAULT_PG_VERSION_DEFAULT: str = "14"
 
 BASE_PORT: int = 15000
 WORKER_PORT_NUM: int = 1000
@@ -148,19 +148,8 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def pg_version() -> Iterator[str]:
-    if env_default_pg_version := os.environ.get("DEFAULT_PG_VERSION"):
-        version = env_default_pg_version
-    else:
-        version = DEFAULT_PG_VERSION_DEFAULT
-
-    log.info(f"pg_version is {version}")
-    yield version
-
-
-@pytest.fixture(scope="session")
-def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: str) -> Iterator[Path]:
-    versioned_dir = pg_distrib_dir / f"v{pg_version}"
+def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
+    versioned_dir = pg_distrib_dir / pg_version.v_prefixed
 
     psql_bin_path = versioned_dir / "bin/psql"
     postgres_bin_path = versioned_dir / "bin/postgres"
@@ -292,6 +281,12 @@ def port_distributor(worker_base_port: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=WORKER_PORT_NUM)
 
 
+@pytest.fixture(scope="session")
+def httpserver_listen_address(port_distributor: PortDistributor):
+    port = port_distributor.get_port()
+    return ("localhost", port)
+
+
 @pytest.fixture(scope="function")
 def default_broker(
     port_distributor: PortDistributor,
@@ -359,7 +354,7 @@ class PgProtocol:
         Returns psycopg2's connection object.
         This method passes all extra params to connstr.
         """
-        conn = psycopg2.connect(**self.conn_options(**kwargs))
+        conn: PgConnection = psycopg2.connect(**self.conn_options(**kwargs))
 
         # WARNING: this setting affects *all* tests!
         conn.autocommit = autocommit
@@ -586,7 +581,7 @@ class NeonEnvBuilder:
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
         pg_distrib_dir: Path,
-        pg_version: str,
+        pg_version: PgVersion,
         remote_storage: Optional[RemoteStorage] = None,
         remote_storage_users: RemoteStorageUsers = RemoteStorageUsers.PAGESERVER,
         pageserver_config_override: Optional[str] = None,
@@ -634,7 +629,7 @@ class NeonEnvBuilder:
         assert self.env is not None, "environment is not already initialized, call init() first"
         self.env.start()
 
-    def init_start(self) -> NeonEnv:
+    def init_start(self, initial_tenant_conf: Optional[Dict[str, str]] = None) -> NeonEnv:
         env = self.init_configs()
         self.start()
 
@@ -643,7 +638,9 @@ class NeonEnvBuilder:
         log.info(
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
-        initial_tenant, initial_timeline = env.neon_cli.create_tenant(tenant_id=env.initial_tenant)
+        initial_tenant, initial_timeline = env.neon_cli.create_tenant(
+            tenant_id=env.initial_tenant, conf=initial_tenant_conf
+        )
         env.initial_timeline = initial_timeline
         log.info(f"Initial timeline {initial_tenant}/{initial_timeline} created successfully")
 
@@ -665,6 +662,8 @@ class NeonEnvBuilder:
             self.enable_real_s3_remote_storage(test_name=test_name, force_enable=force_enable)
         else:
             raise RuntimeError(f"Unknown storage type: {remote_storage_kind}")
+
+        self.remote_storage_kind = remote_storage_kind
 
     def enable_local_fs_remote_storage(self, force_enable: bool = True):
         """
@@ -1035,7 +1034,7 @@ def _shared_simple_env(
     top_output_dir: Path,
     neon_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
 ) -> Iterator[NeonEnv]:
     """
     # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
@@ -1092,7 +1091,7 @@ def neon_env_builder(
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
     default_broker: NeonBroker,
     run_id: uuid.UUID,
 ) -> Iterator[NeonEnvBuilder]:
@@ -1449,11 +1448,12 @@ class NeonCli(AbstractNeonCli):
     def endpoint_create(
         self,
         branch_name: str,
+        pg_port: int,
+        http_port: int,
         endpoint_id: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
-        port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1467,8 +1467,10 @@ class NeonCli(AbstractNeonCli):
         ]
         if lsn is not None:
             args.extend(["--lsn", str(lsn)])
-        if port is not None:
-            args.extend(["--port", str(port)])
+        if pg_port is not None:
+            args.extend(["--pg-port", str(pg_port)])
+        if http_port is not None:
+            args.extend(["--http-port", str(http_port)])
         if endpoint_id is not None:
             args.append(endpoint_id)
         if hot_standby:
@@ -1481,9 +1483,11 @@ class NeonCli(AbstractNeonCli):
     def endpoint_start(
         self,
         endpoint_id: str,
+        pg_port: int,
+        http_port: int,
+        safekeepers: Optional[List[int]] = None,
         tenant_id: Optional[TenantId] = None,
         lsn: Optional[Lsn] = None,
-        port: Optional[int] = None,
     ) -> "subprocess.CompletedProcess[str]":
         args = [
             "endpoint",
@@ -1495,8 +1499,10 @@ class NeonCli(AbstractNeonCli):
         ]
         if lsn is not None:
             args.append(f"--lsn={lsn}")
-        if port is not None:
-            args.append(f"--port={port}")
+        args.extend(["--pg-port", str(pg_port)])
+        args.extend(["--http-port", str(http_port)])
+        if safekeepers is not None:
+            args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         if endpoint_id is not None:
             args.append(endpoint_id)
 
@@ -1588,13 +1594,11 @@ class NeonPageserver(PgProtocol):
             ".*serving compute connection task.*exited with error: Postgres connection error.*",
             ".*serving compute connection task.*exited with error: Connection reset by peer.*",
             ".*serving compute connection task.*exited with error: Postgres query error.*",
-            ".*Connection aborted: connection error: error communicating with the server: Broken pipe.*",
-            ".*Connection aborted: connection error: error communicating with the server: Transport endpoint is not connected.*",
-            ".*Connection aborted: connection error: error communicating with the server: Connection reset by peer.*",
+            ".*Connection aborted: error communicating with the server: Transport endpoint is not connected.*",
             # FIXME: replication patch for tokio_postgres regards  any but CopyDone/CopyData message in CopyBoth stream as unexpected
-            ".*Connection aborted: connection error: unexpected message from server*",
+            ".*Connection aborted: unexpected message from server*",
             ".*kill_and_wait_impl.*: wait successful.*",
-            ".*Replication stream finished: db error:.*ending streaming to Some*",
+            ".*: db error:.*ending streaming to Some.*",
             ".*query handler for 'pagestream.*failed: Broken pipe.*",  # pageserver notices compute shut down
             ".*query handler for 'pagestream.*failed: Connection reset by peer.*",  # pageserver notices compute shut down
             # safekeeper connection can fail with this, in the window between timeline creation
@@ -1608,24 +1612,27 @@ class NeonPageserver(PgProtocol):
             # https://github.com/neondatabase/neon/issues/2442
             ".*could not remove ephemeral file.*No such file or directory.*",
             # FIXME: These need investigation
-            ".*gc_loop.*Failed to get a tenant .* Tenant .* not found.*",
-            ".*compaction_loop.*Failed to get a tenant .* Tenant .* not found.*",
             ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
             ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
             ".*Removing intermediate uninit mark file.*",
-            # FIXME: known race condition in TaskHandle: https://github.com/neondatabase/neon/issues/2885
-            ".*sender is dropped while join handle is still alive.*",
             # Tenant::delete_timeline() can cause any of the four following errors.
             # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
             ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
             ".*wait for layer upload ops to complete.*",  # .*Caused by:.*wait_completion aborted because upload queue was stopped
             ".*gc_loop.*Gc failed, retrying in.*timeline is Stopping",  # When gc checks timeline state after acquiring layer_removal_cs
+            ".*gc_loop.*Gc failed, retrying in.*: Cannot run GC iteration on inactive tenant",  # Tenant::gc precondition
             ".*compaction_loop.*Compaction failed, retrying in.*timeline is Stopping",  # When compaction checks timeline state after acquiring layer_removal_cs
             ".*query handler for 'pagestream.*failed: Timeline .* was not found",  # postgres reconnects while timeline_delete doesn't hold the tenant's timelines.lock()
             ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
             ".*task iteration took longer than the configured period.*",
             # this is until #3501
             ".*Compaction failed, retrying in [^:]+: Cannot run compaction iteration on inactive tenant",
+            # these can happen anytime we do compactions from background task and shutdown pageserver
+            r".*ERROR.*ancestor timeline \S+ is being stopped",
+            # this is expected given our collaborative shutdown approach for the UploadQueue
+            ".*Compaction failed, retrying in .*: queue is in state Stopped.*",
+            # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
+            ".*Error processing HTTP request: NotFound: Timeline .* was not found",
         ]
 
     def start(
@@ -1693,6 +1700,9 @@ class NeonPageserver(PgProtocol):
                 else:
                     errors.append(line)
 
+        for error in errors:
+            log.info(f"not allowed error: {error.strip()}")
+
         assert not errors
 
     def log_contains(self, pattern: str) -> Optional[str]:
@@ -1747,11 +1757,11 @@ def append_pageserver_param_overrides(
 class PgBin:
     """A helper class for executing postgres binaries"""
 
-    def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: str):
+    def __init__(self, log_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion):
         self.log_dir = log_dir
         self.pg_version = pg_version
-        self.pg_bin_path = pg_distrib_dir / f"v{pg_version}" / "bin"
-        self.pg_lib_dir = pg_distrib_dir / f"v{pg_version}" / "lib"
+        self.pg_bin_path = pg_distrib_dir / pg_version.v_prefixed / "bin"
+        self.pg_lib_dir = pg_distrib_dir / pg_version.v_prefixed / "lib"
         self.env = os.environ.copy()
         self.env["LD_LIBRARY_PATH"] = str(self.pg_lib_dir)
 
@@ -1806,7 +1816,7 @@ class PgBin:
 
 
 @pytest.fixture(scope="function")
-def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: str) -> PgBin:
+def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -> PgBin:
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
@@ -1894,7 +1904,7 @@ def vanilla_pg(
     test_output_dir: Path,
     port_distributor: PortDistributor,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
 ) -> Iterator[VanillaPostgres]:
     pgdatadir = test_output_dir / "pgdata-vanilla"
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
@@ -1939,7 +1949,7 @@ class RemotePostgres(PgProtocol):
 
 @pytest.fixture(scope="function")
 def remote_pg(
-    test_output_dir: Path, pg_distrib_dir: Path, pg_version: str
+    test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion
 ) -> Iterator[RemotePostgres]:
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
@@ -2047,15 +2057,19 @@ class NeonProxy(PgProtocol):
         proxy_port: int,
         http_port: int,
         mgmt_port: int,
+        external_http_port: int,
         auth_backend: NeonProxy.AuthBackend,
         metric_collection_endpoint: Optional[str] = None,
         metric_collection_interval: Optional[str] = None,
     ):
         host = "127.0.0.1"
-        super().__init__(dsn=auth_backend.default_conn_url, host=host, port=proxy_port)
+        domain = "proxy.localtest.me"  # resolves to 127.0.0.1
+        super().__init__(dsn=auth_backend.default_conn_url, host=domain, port=proxy_port)
 
+        self.domain = domain
         self.host = host
         self.http_port = http_port
+        self.external_http_port = external_http_port
         self.neon_binpath = neon_binpath
         self.test_output_dir = test_output_dir
         self.proxy_port = proxy_port
@@ -2067,11 +2081,42 @@ class NeonProxy(PgProtocol):
 
     def start(self) -> NeonProxy:
         assert self._popen is None
+
+        # generate key of it doesn't exist
+        crt_path = self.test_output_dir / "proxy.crt"
+        key_path = self.test_output_dir / "proxy.key"
+
+        if not key_path.exists():
+            r = subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-new",
+                    "-x509",
+                    "-days",
+                    "365",
+                    "-nodes",
+                    "-text",
+                    "-out",
+                    str(crt_path),
+                    "-keyout",
+                    str(key_path),
+                    "-subj",
+                    "/CN=*.localtest.me",
+                    "-addext",
+                    "subjectAltName = DNS:*.localtest.me",
+                ]
+            )
+            assert r.returncode == 0
+
         args = [
             str(self.neon_binpath / "proxy"),
             *["--http", f"{self.host}:{self.http_port}"],
             *["--proxy", f"{self.host}:{self.proxy_port}"],
             *["--mgmt", f"{self.host}:{self.mgmt_port}"],
+            *["--wss", f"{self.host}:{self.external_http_port}"],
+            *["-c", str(crt_path)],
+            *["-k", str(key_path)],
             *self.auth_backend.extra_args(),
         ]
 
@@ -2195,6 +2240,7 @@ def link_proxy(
     http_port = port_distributor.get_port()
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
+    external_http_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
@@ -2202,6 +2248,7 @@ def link_proxy(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        external_http_port=external_http_port,
         auth_backend=NeonProxy.Link(),
     ) as proxy:
         proxy.start()
@@ -2229,6 +2276,7 @@ def static_proxy(
     proxy_port = port_distributor.get_port()
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
+    external_http_port = port_distributor.get_port()
 
     with NeonProxy(
         neon_binpath=neon_binpath,
@@ -2236,6 +2284,7 @@ def static_proxy(
         proxy_port=proxy_port,
         http_port=http_port,
         mgmt_port=mgmt_port,
+        external_http_port=external_http_port,
         auth_backend=NeonProxy.Postgres(auth_endpoint),
     ) as proxy:
         proxy.start()
@@ -2246,17 +2295,24 @@ class Endpoint(PgProtocol):
     """An object representing a Postgres compute endpoint managed by the control plane."""
 
     def __init__(
-        self, env: NeonEnv, tenant_id: TenantId, port: int, check_stop_result: bool = True
+        self,
+        env: NeonEnv,
+        tenant_id: TenantId,
+        pg_port: int,
+        http_port: int,
+        check_stop_result: bool = True,
     ):
-        super().__init__(host="localhost", port=port, user="cloud_admin", dbname="postgres")
+        super().__init__(host="localhost", port=pg_port, user="cloud_admin", dbname="postgres")
         self.env = env
         self.running = False
         self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
         self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
-        self.port = port
+        self.pg_port = pg_port
+        self.http_port = http_port
         self.check_stop_result = check_stop_result
+        self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
 
     def create(
@@ -2286,7 +2342,8 @@ class Endpoint(PgProtocol):
             tenant_id=self.tenant_id,
             lsn=lsn,
             hot_standby=hot_standby,
-            port=self.port,
+            pg_port=self.pg_port,
+            http_port=self.http_port,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
@@ -2311,7 +2368,13 @@ class Endpoint(PgProtocol):
 
         log.info(f"Starting postgres endpoint {self.endpoint_id}")
 
-        self.env.neon_cli.endpoint_start(self.endpoint_id, tenant_id=self.tenant_id, port=self.port)
+        self.env.neon_cli.endpoint_start(
+            self.endpoint_id,
+            pg_port=self.pg_port,
+            http_port=self.http_port,
+            tenant_id=self.tenant_id,
+            safekeepers=self.active_safekeepers,
+        )
         self.running = True
 
         return self
@@ -2335,32 +2398,8 @@ class Endpoint(PgProtocol):
         return os.path.join(self.pg_data_dir_path(), "pg_twophase")
 
     def config_file_path(self) -> str:
-        """Path to postgresql.conf"""
-        return os.path.join(self.pg_data_dir_path(), "postgresql.conf")
-
-    def adjust_for_safekeepers(self, safekeepers: str) -> "Endpoint":
-        """
-        Adjust instance config for working with wal acceptors instead of
-        pageserver (pre-configured by CLI) directly.
-        """
-
-        # TODO: reuse config()
-        with open(self.config_file_path(), "r") as f:
-            cfg_lines = f.readlines()
-        with open(self.config_file_path(), "w") as f:
-            for cfg_line in cfg_lines:
-                # walproposer uses different application_name
-                if (
-                    "synchronous_standby_names" in cfg_line
-                    or
-                    # don't repeat safekeepers/wal_acceptors multiple times
-                    "neon.safekeepers" in cfg_line
-                ):
-                    continue
-                f.write(cfg_line)
-            f.write("synchronous_standby_names = 'walproposer'\n")
-            f.write("neon.safekeepers = '{}'\n".format(safekeepers))
-        return self
+        """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
+        return os.path.join(self.endpoint_path(), "postgresql.conf")
 
     def config(self, lines: List[str]) -> "Endpoint":
         """
@@ -2375,6 +2414,17 @@ class Endpoint(PgProtocol):
                 conf.write("\n")
 
         return self
+
+    def respec(self, **kwargs):
+        """Update the endpoint.json file used by control_plane."""
+        # Read config
+        config_path = os.path.join(self.endpoint_path(), "endpoint.json")
+        with open(config_path, "r") as f:
+            data_dict = json.load(f)
+
+        # Write it back updated
+        with open(config_path, "w") as file:
+            json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     def stop(self) -> "Endpoint":
         """
@@ -2465,7 +2515,8 @@ class EndpointFactory:
         ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
-            port=self.env.port_distributor.get_port(),
+            pg_port=self.env.port_distributor.get_port(),
+            http_port=self.env.port_distributor.get_port(),
         )
         self.num_instances += 1
         self.endpoints.append(ep)
@@ -2490,7 +2541,8 @@ class EndpointFactory:
         ep = Endpoint(
             self.env,
             tenant_id=tenant_id or self.env.initial_tenant,
-            port=self.env.port_distributor.get_port(),
+            pg_port=self.env.port_distributor.get_port(),
+            http_port=self.env.port_distributor.get_port(),
         )
 
         if endpoint_id is None:
@@ -2623,7 +2675,7 @@ class Safekeeper:
 @dataclass
 class SafekeeperTimelineStatus:
     acceptor_epoch: int
-    pg_version: int
+    pg_version: int  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
     flush_lsn: Lsn
     commit_lsn: Lsn
     timeline_start_lsn: Lsn
@@ -2669,7 +2721,11 @@ class SafekeeperHttpClient(requests.Session):
         return res_json
 
     def timeline_create(
-        self, tenant_id: TenantId, timeline_id: TimelineId, pg_version: int, commit_lsn: Lsn
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        pg_version: int,  # Not exactly a PgVersion, safekeeper returns version as int, for example 150002 for 15.2
+        commit_lsn: Lsn,
     ):
         body = {
             "tenant_id": str(tenant_id),
@@ -2869,6 +2925,7 @@ SKIP_FILES = frozenset(
         "pg_internal.init",
         "pg.log",
         "zenith.signal",
+        "pg_hba.conf",
         "postgresql.conf",
         "postmaster.opts",
         "postmaster.pid",

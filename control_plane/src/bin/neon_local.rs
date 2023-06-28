@@ -7,8 +7,8 @@
 //!
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command};
+use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
-use control_plane::endpoint::Replication;
 use control_plane::local_env::LocalEnv;
 use control_plane::pageserver::PageServerNode;
 use control_plane::safekeeper::SafekeeperNode;
@@ -41,7 +41,7 @@ const DEFAULT_PAGESERVER_ID: NodeId = NodeId(1);
 const DEFAULT_BRANCH_NAME: &str = "main";
 project_git_version!(GIT_VERSION);
 
-const DEFAULT_PG_VERSION: &str = "14";
+const DEFAULT_PG_VERSION: &str = "15";
 
 fn default_conf() -> String {
     format!(
@@ -476,12 +476,13 @@ fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::LocalEnv) -
 
             println!("Creating endpoint for imported timeline ...");
             cplane.new_endpoint(
-                tenant_id,
                 name,
+                tenant_id,
                 timeline_id,
                 None,
+                None,
                 pg_version,
-                Replication::Primary,
+                ComputeMode::Primary,
             )?;
             println!("Done");
         }
@@ -568,8 +569,8 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .iter()
                 .filter(|(_, endpoint)| endpoint.tenant_id == tenant_id)
             {
-                let lsn_str = match endpoint.replication {
-                    Replication::Static(lsn) => {
+                let lsn_str = match endpoint.mode {
+                    ComputeMode::Static(lsn) => {
                         // -> read-only endpoint
                         // Use the node's LSN.
                         lsn.to_string()
@@ -591,7 +592,7 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
 
                 table.add_row([
                     endpoint_id.as_str(),
-                    &endpoint.address.to_string(),
+                    &endpoint.pg_address.to_string(),
                     &endpoint.timeline_id.to_string(),
                     branch_name,
                     lsn_str.as_str(),
@@ -620,8 +621,8 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .get_branch_timeline_id(branch_name, tenant_id)
                 .ok_or_else(|| anyhow!("Found no timeline id for branch name '{branch_name}'"))?;
 
-            let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
-
+            let pg_port: Option<u16> = sub_args.get_one::<u16>("pg-port").copied();
+            let http_port: Option<u16> = sub_args.get_one::<u16>("http-port").copied();
             let pg_version = sub_args
                 .get_one::<u32>("pg-version")
                 .copied()
@@ -632,27 +633,44 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .copied()
                 .unwrap_or(false);
 
-            let replication = match (lsn, hot_standby) {
-                (Some(lsn), false) => Replication::Static(lsn),
-                (None, true) => Replication::Replica,
-                (None, false) => Replication::Primary,
+            let mode = match (lsn, hot_standby) {
+                (Some(lsn), false) => ComputeMode::Static(lsn),
+                (None, true) => ComputeMode::Replica,
+                (None, false) => ComputeMode::Primary,
                 (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
             };
 
             cplane.new_endpoint(
-                tenant_id,
                 &endpoint_id,
+                tenant_id,
                 timeline_id,
-                port,
+                pg_port,
+                http_port,
                 pg_version,
-                replication,
+                mode,
             )?;
         }
         "start" => {
-            let port: Option<u16> = sub_args.get_one::<u16>("port").copied();
+            let pg_port: Option<u16> = sub_args.get_one::<u16>("pg-port").copied();
+            let http_port: Option<u16> = sub_args.get_one::<u16>("http-port").copied();
             let endpoint_id = sub_args
                 .get_one::<String>("endpoint_id")
                 .ok_or_else(|| anyhow!("No endpoint ID was provided to start"))?;
+
+            // If --safekeepers argument is given, use only the listed safekeeper nodes.
+            let safekeepers =
+                if let Some(safekeepers_str) = sub_args.get_one::<String>("safekeepers") {
+                    let mut safekeepers: Vec<NodeId> = Vec::new();
+                    for sk_id in safekeepers_str.split(',').map(str::trim) {
+                        let sk_id = NodeId(u64::from_str(sk_id).map_err(|_| {
+                            anyhow!("invalid node ID \"{sk_id}\" in --safekeepers list")
+                        })?);
+                        safekeepers.push(sk_id);
+                    }
+                    safekeepers
+                } else {
+                    env.safekeepers.iter().map(|sk| sk.id).collect()
+                };
 
             let endpoint = cplane.endpoints.get(endpoint_id.as_str());
 
@@ -670,17 +688,17 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 .unwrap_or(false);
 
             if let Some(endpoint) = endpoint {
-                match (&endpoint.replication, hot_standby) {
-                    (Replication::Static(_), true) => {
+                match (&endpoint.mode, hot_standby) {
+                    (ComputeMode::Static(_), true) => {
                         bail!("Cannot start a node in hot standby mode when it is already configured as a static replica")
                     }
-                    (Replication::Primary, true) => {
+                    (ComputeMode::Primary, true) => {
                         bail!("Cannot start a node as a hot standby replica, it is already configured as primary node")
                     }
                     _ => {}
                 }
                 println!("Starting existing endpoint {endpoint_id}...");
-                endpoint.start(&auth_token)?;
+                endpoint.start(&auth_token, safekeepers)?;
             } else {
                 let branch_name = sub_args
                     .get_one::<String>("branch-name")
@@ -701,10 +719,10 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                     .copied()
                     .context("Failed to `pg-version` from the argument string")?;
 
-                let replication = match (lsn, hot_standby) {
-                    (Some(lsn), false) => Replication::Static(lsn),
-                    (None, true) => Replication::Replica,
-                    (None, false) => Replication::Primary,
+                let mode = match (lsn, hot_standby) {
+                    (Some(lsn), false) => ComputeMode::Static(lsn),
+                    (None, true) => ComputeMode::Replica,
+                    (None, false) => ComputeMode::Primary,
                     (Some(_), true) => anyhow::bail!("cannot specify both lsn and hot-standby"),
                 };
 
@@ -716,14 +734,15 @@ fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<(
                 println!("Starting new endpoint {endpoint_id} (PostgreSQL v{pg_version}) on timeline {timeline_id} ...");
 
                 let ep = cplane.new_endpoint(
-                    tenant_id,
                     endpoint_id,
+                    tenant_id,
                     timeline_id,
-                    port,
+                    pg_port,
+                    http_port,
                     pg_version,
-                    replication,
+                    mode,
                 )?;
-                ep.start(&auth_token)?;
+                ep.start(&auth_token, safekeepers)?;
             }
         }
         "stop" => {
@@ -951,11 +970,22 @@ fn cli() -> Command {
         .value_parser(value_parser!(u32))
         .default_value(DEFAULT_PG_VERSION);
 
-    let port_arg = Arg::new("port")
-        .long("port")
+    let pg_port_arg = Arg::new("pg-port")
+        .long("pg-port")
         .required(false)
         .value_parser(value_parser!(u16))
-        .value_name("port");
+        .value_name("pg-port");
+
+    let http_port_arg = Arg::new("http-port")
+        .long("http-port")
+        .required(false)
+        .value_parser(value_parser!(u16))
+        .value_name("http-port");
+
+    let safekeepers_arg = Arg::new("safekeepers")
+        .long("safekeepers")
+        .required(false)
+        .value_name("safekeepers");
 
     let stop_mode_arg = Arg::new("stop-mode")
         .short('m')
@@ -1100,7 +1130,8 @@ fn cli() -> Command {
                     .arg(branch_name_arg.clone())
                     .arg(tenant_id_arg.clone())
                     .arg(lsn_arg.clone())
-                    .arg(port_arg.clone())
+                    .arg(pg_port_arg.clone())
+                    .arg(http_port_arg.clone())
                     .arg(
                         Arg::new("config-only")
                             .help("Don't do basebackup, create endpoint directory with only config files")
@@ -1116,9 +1147,11 @@ fn cli() -> Command {
                     .arg(branch_name_arg)
                     .arg(timeline_id_arg)
                     .arg(lsn_arg)
-                    .arg(port_arg)
+                    .arg(pg_port_arg)
+                    .arg(http_port_arg)
                     .arg(pg_version_arg)
                     .arg(hot_standby_arg)
+                    .arg(safekeepers_arg)
                 )
                 .subcommand(
                     Command::new("stop")

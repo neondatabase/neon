@@ -222,8 +222,8 @@ fn render_json_error(e: &str, status: StatusCode) -> Response<Body> {
 
 // Main Hyper HTTP server function that runs it and blocks waiting on it forever.
 #[tokio::main]
-async fn serve(state: Arc<ComputeNode>) {
-    let addr = SocketAddr::new(IpAddr::from(Ipv6Addr::UNSPECIFIED), 3080);
+async fn serve(port: u16, state: Arc<ComputeNode>) {
+    let addr = SocketAddr::new(IpAddr::from(Ipv6Addr::UNSPECIFIED), port);
 
     let make_service = make_service_fn(move |_conn| {
         let state = state.clone();
@@ -258,10 +258,10 @@ async fn serve(state: Arc<ComputeNode>) {
 }
 
 /// Launch a separate Hyper HTTP API server thread and return its `JoinHandle`.
-pub fn launch_http_server(state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
+pub fn launch_http_server(port: u16, state: &Arc<ComputeNode>) -> Result<thread::JoinHandle<()>> {
     let state = Arc::clone(state);
 
     Ok(thread::Builder::new()
         .name("http-endpoint".into())
-        .spawn(move || serve(state))?)
+        .spawn(move || serve(port, state))?)
 }

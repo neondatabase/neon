@@ -1,3 +1,9 @@
+//! Code to manage pageservers
+//!
+//! In the local test environment, the pageserver stores its data directly in
+//!
+//!   .neon/
+//!
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
@@ -8,9 +14,7 @@ use std::process::{Child, Command};
 use std::{io, result};
 
 use anyhow::{bail, Context};
-use pageserver_api::models::{
-    TenantConfigRequest, TenantCreateRequest, TenantInfo, TimelineCreateRequest, TimelineInfo,
-};
+use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use postgres_backend::AuthType;
 use postgres_connection::{parse_host_port, PgConnectionConfig};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -316,8 +320,8 @@ impl PageServerNode {
         settings: HashMap<&str, &str>,
     ) -> anyhow::Result<TenantId> {
         let mut settings = settings.clone();
-        let request = TenantCreateRequest {
-            new_tenant_id,
+
+        let config = models::TenantConfig {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
@@ -371,6 +375,19 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
+            gc_feedback: settings
+                .remove("gc_feedback")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_feedback' as bool")?,
+        };
+
+        // If tenant ID was not specified, generate one
+        let new_tenant_id = new_tenant_id.unwrap_or(TenantId::generate());
+
+        let request = models::TenantCreateRequest {
+            new_tenant_id,
+            config,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -391,67 +408,86 @@ impl PageServerNode {
             })
     }
 
-    pub fn tenant_config(&self, tenant_id: TenantId, settings: HashMap<&str, &str>) -> Result<()> {
-        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
-            .json(&TenantConfigRequest {
-                tenant_id,
+    pub fn tenant_config(
+        &self,
+        tenant_id: TenantId,
+        mut settings: HashMap<&str, &str>,
+    ) -> anyhow::Result<()> {
+        let config = {
+            // Braces to make the diff easier to read
+            models::TenantConfig {
                 checkpoint_distance: settings
-                    .get("checkpoint_distance")
+                    .remove("checkpoint_distance")
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'checkpoint_distance' as an integer")?,
-                checkpoint_timeout: settings.get("checkpoint_timeout").map(|x| x.to_string()),
+                checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
                 compaction_target_size: settings
-                    .get("compaction_target_size")
+                    .remove("compaction_target_size")
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'compaction_target_size' as an integer")?,
-                compaction_period: settings.get("compaction_period").map(|x| x.to_string()),
+                compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
                 compaction_threshold: settings
-                    .get("compaction_threshold")
+                    .remove("compaction_threshold")
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'compaction_threshold' as an integer")?,
                 gc_horizon: settings
-                    .get("gc_horizon")
+                    .remove("gc_horizon")
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'gc_horizon' as an integer")?,
-                gc_period: settings.get("gc_period").map(|x| x.to_string()),
+                gc_period: settings.remove("gc_period").map(|x| x.to_string()),
                 image_creation_threshold: settings
-                    .get("image_creation_threshold")
+                    .remove("image_creation_threshold")
                     .map(|x| x.parse::<usize>())
                     .transpose()
                     .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
-                pitr_interval: settings.get("pitr_interval").map(|x| x.to_string()),
+                pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
                 walreceiver_connect_timeout: settings
-                    .get("walreceiver_connect_timeout")
+                    .remove("walreceiver_connect_timeout")
                     .map(|x| x.to_string()),
-                lagging_wal_timeout: settings.get("lagging_wal_timeout").map(|x| x.to_string()),
+                lagging_wal_timeout: settings
+                    .remove("lagging_wal_timeout")
+                    .map(|x| x.to_string()),
                 max_lsn_wal_lag: settings
-                    .get("max_lsn_wal_lag")
+                    .remove("max_lsn_wal_lag")
                     .map(|x| x.parse::<NonZeroU64>())
                     .transpose()
                     .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
                 trace_read_requests: settings
-                    .get("trace_read_requests")
+                    .remove("trace_read_requests")
                     .map(|x| x.parse::<bool>())
                     .transpose()
                     .context("Failed to parse 'trace_read_requests' as bool")?,
                 eviction_policy: settings
-                    .get("eviction_policy")
-                    .map(|x| serde_json::from_str(x))
+                    .remove("eviction_policy")
+                    .map(serde_json::from_str)
                     .transpose()
                     .context("Failed to parse 'eviction_policy' json")?,
                 min_resident_size_override: settings
-                    .get("min_resident_size_override")
+                    .remove("min_resident_size_override")
                     .map(|x| x.parse::<u64>())
                     .transpose()
                     .context("Failed to parse 'min_resident_size_override' as an integer")?,
                 evictions_low_residence_duration_metric_threshold: settings
-                    .get("evictions_low_residence_duration_metric_threshold")
+                    .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
-            })
+                gc_feedback: settings
+                    .remove("gc_feedback")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'gc_feedback' as bool")?,
+            }
+        };
+
+        if !settings.is_empty() {
+            bail!("Unrecognized tenant settings: {settings:?}")
+        }
+
+        self.http_request(Method::PUT, format!("{}/tenant/config", self.http_base_url))?
+            .json(&models::TenantConfigRequest { tenant_id, config })
             .send()?
             .error_from_body()?;
 
@@ -479,11 +515,14 @@ impl PageServerNode {
         ancestor_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
     ) -> anyhow::Result<TimelineInfo> {
+        // If timeline ID was not specified, generate one
+        let new_timeline_id = new_timeline_id.unwrap_or(TimelineId::generate());
+
         self.http_request(
             Method::POST,
             format!("{}/tenant/{}/timeline", self.http_base_url, tenant_id),
         )?
-        .json(&TimelineCreateRequest {
+        .json(&models::TimelineCreateRequest {
             new_timeline_id,
             ancestor_start_lsn,
             ancestor_timeline_id,

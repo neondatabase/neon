@@ -32,6 +32,7 @@ pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
 pub const DEFAULT_ENDPOINT: &str = const_format::formatcp!("http://{DEFAULT_LISTEN_ADDR}");
 
 pub const DEFAULT_KEEPALIVE_INTERVAL: &str = "5000 ms";
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 // BrokerServiceClient charged with tonic provided Channel transport; helps to
 // avoid depending on tonic directly in user crates.
@@ -40,6 +41,9 @@ pub type BrokerClientChannel = BrokerServiceClient<Channel>;
 // Create connection object configured to run TLS if schema starts with https://
 // and plain text otherwise. Connection is lazy, only endpoint sanity is
 // validated here.
+//
+// NB: this function is not async, but still must be run on a tokio runtime thread
+// because that's a requirement of tonic_endpoint.connect_lazy()'s Channel::new call.
 pub fn connect<U>(endpoint: U, keepalive_interval: Duration) -> anyhow::Result<BrokerClientChannel>
 where
     U: std::convert::TryInto<Uri>,
@@ -55,7 +59,8 @@ where
     }
     tonic_endpoint = tonic_endpoint
         .http2_keep_alive_interval(keepalive_interval)
-        .keep_alive_while_idle(true);
+        .keep_alive_while_idle(true)
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT);
     //  keep_alive_timeout is 20s by default on both client and server side
     let channel = tonic_endpoint.connect_lazy();
     Ok(BrokerClientChannel::new(channel))

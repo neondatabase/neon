@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 
+use futures::stream::FuturesOrdered;
+use futures::StreamExt;
 use tokio::task::JoinHandle;
 use utils::id::NodeId;
 
@@ -15,7 +17,6 @@ use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
 use remote_storage::{GenericRemoteStorage, RemotePath};
 use tokio::fs::File;
-use tokio::runtime::Builder;
 
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -25,6 +26,7 @@ use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
+use crate::metrics::{BACKED_UP_SEGMENTS, BACKUP_ERRORS};
 use crate::timeline::{PeerInfo, Timeline};
 use crate::{GlobalTimelines, SafeKeeperConf};
 
@@ -33,30 +35,16 @@ use once_cell::sync::OnceCell;
 const UPLOAD_FAILURE_RETRY_MIN_MS: u64 = 10;
 const UPLOAD_FAILURE_RETRY_MAX_MS: u64 = 5000;
 
-pub fn wal_backup_launcher_thread_main(
-    conf: SafeKeeperConf,
-    wal_backup_launcher_rx: Receiver<TenantTimelineId>,
-) {
-    let mut builder = Builder::new_multi_thread();
-    if let Some(num_threads) = conf.backup_runtime_threads {
-        builder.worker_threads(num_threads);
-    }
-    let rt = builder
-        .enable_all()
-        .build()
-        .expect("failed to create wal backup runtime");
-
-    rt.block_on(async {
-        wal_backup_launcher_main_loop(conf, wal_backup_launcher_rx).await;
-    });
-}
-
 /// Check whether wal backup is required for timeline. If yes, mark that launcher is
 /// aware of current status and return the timeline.
-fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
-    GlobalTimelines::get(ttid)
-        .ok()
-        .filter(|tli| tli.wal_backup_attend())
+async fn is_wal_backup_required(ttid: TenantTimelineId) -> Option<Arc<Timeline>> {
+    match GlobalTimelines::get(ttid).ok() {
+        Some(tli) => {
+            tli.wal_backup_attend().await;
+            Some(tli)
+        }
+        None => None,
+    }
 }
 
 struct WalBackupTaskHandle {
@@ -140,8 +128,8 @@ async fn update_task(
     ttid: TenantTimelineId,
     entry: &mut WalBackupTimelineEntry,
 ) {
-    let alive_peers = entry.timeline.get_peers(conf);
-    let wal_backup_lsn = entry.timeline.get_wal_backup_lsn();
+    let alive_peers = entry.timeline.get_peers(conf).await;
+    let wal_backup_lsn = entry.timeline.get_wal_backup_lsn().await;
     let (offloader, election_dbg_str) =
         determine_offloader(&alive_peers, wal_backup_lsn, ttid, conf);
     let elected_me = Some(conf.my_id) == offloader;
@@ -154,8 +142,14 @@ async fn update_task(
             let timeline_dir = conf.timeline_dir(&ttid);
 
             let handle = tokio::spawn(
-                backup_task_main(ttid, timeline_dir, conf.workdir.clone(), shutdown_rx)
-                    .instrument(info_span!("WAL backup task", ttid = %ttid)),
+                backup_task_main(
+                    ttid,
+                    timeline_dir,
+                    conf.workdir.clone(),
+                    conf.backup_parallel_jobs,
+                    shutdown_rx,
+                )
+                .instrument(info_span!("WAL backup task", ttid = %ttid)),
             );
 
             entry.handle = Some(WalBackupTaskHandle {
@@ -174,10 +168,10 @@ const CHECK_TASKS_INTERVAL_MSEC: u64 = 1000;
 /// Sits on wal_backup_launcher_rx and starts/stops per timeline wal backup
 /// tasks. Having this in separate task simplifies locking, allows to reap
 /// panics and separate elections from offloading itself.
-async fn wal_backup_launcher_main_loop(
+pub async fn wal_backup_launcher_task_main(
     conf: SafeKeeperConf,
     mut wal_backup_launcher_rx: Receiver<TenantTimelineId>,
-) {
+) -> anyhow::Result<()> {
     info!(
         "WAL backup launcher started, remote config {:?}",
         conf.remote_storage
@@ -205,7 +199,7 @@ async fn wal_backup_launcher_main_loop(
                 if conf.remote_storage.is_none() || !conf.wal_backup_enabled {
                     continue; /* just drain the channel and do nothing */
                 }
-                let timeline = is_wal_backup_required(ttid);
+                let timeline = is_wal_backup_required(ttid).await;
                 // do we need to do anything at all?
                 if timeline.is_some() != tasks.contains_key(&ttid) {
                     if let Some(timeline) = timeline {
@@ -239,6 +233,7 @@ struct WalBackupTask {
     timeline_dir: PathBuf,
     workspace_dir: PathBuf,
     wal_seg_size: usize,
+    parallel_jobs: usize,
     commit_lsn_watch_rx: watch::Receiver<Lsn>,
 }
 
@@ -247,6 +242,7 @@ async fn backup_task_main(
     ttid: TenantTimelineId,
     timeline_dir: PathBuf,
     workspace_dir: PathBuf,
+    parallel_jobs: usize,
     mut shutdown_rx: Receiver<()>,
 ) {
     info!("started");
@@ -258,11 +254,12 @@ async fn backup_task_main(
     let tli = res.unwrap();
 
     let mut wb = WalBackupTask {
-        wal_seg_size: tli.get_wal_seg_size(),
+        wal_seg_size: tli.get_wal_seg_size().await,
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
         timeline: tli,
         timeline_dir,
         workspace_dir,
+        parallel_jobs,
     };
 
     // task is spinned up only when wal_seg_size already initialized
@@ -314,7 +311,7 @@ impl WalBackupTask {
                 continue; /* nothing to do, common case as we wake up on every commit_lsn bump */
             }
             // Perhaps peers advanced the position, check shmem value.
-            backup_lsn = self.timeline.get_wal_backup_lsn();
+            backup_lsn = self.timeline.get_wal_backup_lsn().await;
             if backup_lsn.segment_number(self.wal_seg_size)
                 >= commit_lsn.segment_number(self.wal_seg_size)
             {
@@ -329,6 +326,7 @@ impl WalBackupTask {
                 self.wal_seg_size,
                 &self.timeline_dir,
                 &self.workspace_dir,
+                self.parallel_jobs,
             )
             .await
             {
@@ -355,20 +353,50 @@ pub async fn backup_lsn_range(
     wal_seg_size: usize,
     timeline_dir: &Path,
     workspace_dir: &Path,
+    parallel_jobs: usize,
 ) -> Result<()> {
+    if parallel_jobs < 1 {
+        anyhow::bail!("parallel_jobs must be >= 1");
+    }
+
     let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
-    for s in &segments {
-        backup_single_segment(s, timeline_dir, workspace_dir)
-            .await
-            .with_context(|| format!("offloading segno {}", s.seg_no))?;
 
-        let new_backup_lsn = s.end_lsn;
-        timeline
-            .set_wal_backup_lsn(new_backup_lsn)
-            .context("setting wal_backup_lsn")?;
-        *backup_lsn = new_backup_lsn;
+    // Pool of concurrent upload tasks. We use `FuturesOrdered` to
+    // preserve order of uploads, and update `backup_lsn` only after
+    // all previous uploads are finished.
+    let mut uploads = FuturesOrdered::new();
+    let mut iter = segments.iter();
+
+    loop {
+        let added_task = match iter.next() {
+            Some(s) => {
+                uploads.push_back(backup_single_segment(s, timeline_dir, workspace_dir));
+                true
+            }
+            None => false,
+        };
+
+        // Wait for the next segment to upload if we don't have any more segments,
+        // or if we have too many concurrent uploads.
+        if !added_task || uploads.len() >= parallel_jobs {
+            let next = uploads.next().await;
+            if let Some(res) = next {
+                // next segment uploaded
+                let segment = res?;
+                let new_backup_lsn = segment.end_lsn;
+                timeline
+                    .set_wal_backup_lsn(new_backup_lsn)
+                    .await
+                    .context("setting wal_backup_lsn")?;
+                *backup_lsn = new_backup_lsn;
+            } else {
+                // no more segments to upload
+                break;
+            }
+        }
     }
+
     info!(
         "offloaded segnos {:?} up to {}, previous backup_lsn {}",
         segments.iter().map(|&s| s.seg_no).collect::<Vec<_>>(),
@@ -382,7 +410,7 @@ async fn backup_single_segment(
     seg: &Segment,
     timeline_dir: &Path,
     workspace_dir: &Path,
-) -> Result<()> {
+) -> Result<Segment> {
     let segment_file_path = seg.file_path(timeline_dir)?;
     let remote_segment_path = segment_file_path
         .strip_prefix(workspace_dir)
@@ -394,10 +422,16 @@ async fn backup_single_segment(
             )
         })?;
 
-    backup_object(&segment_file_path, &remote_segment_path, seg.size()).await?;
+    let res = backup_object(&segment_file_path, &remote_segment_path, seg.size()).await;
+    if res.is_ok() {
+        BACKED_UP_SEGMENTS.inc();
+    } else {
+        BACKUP_ERRORS.inc();
+    }
+    res?;
     debug!("Backup of {} done", segment_file_path.display());
 
-    Ok(())
+    Ok(*seg)
 }
 
 #[derive(Debug, Copy, Clone)]

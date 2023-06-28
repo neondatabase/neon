@@ -3,21 +3,22 @@ import Foundation
 import PostgresClientKit
 
 do {
-    var configuration = PostgresClientKit.ConnectionConfiguration()
-
     let env = ProcessInfo.processInfo.environment
-    if let host = env["NEON_HOST"] {
-        configuration.host = host
-    }
-    if let database = env["NEON_DATABASE"] {
-        configuration.database = database
-    }
-    if let user = env["NEON_USER"] {
-        configuration.user = user
-    }
-    if let password = env["NEON_PASSWORD"] {
-        configuration.credential = .cleartextPassword(password: password)
-    }
+
+    var configuration = PostgresClientKit.ConnectionConfiguration()
+    let host = env["NEON_HOST"] ?? ""
+    configuration.host = host
+    configuration.port = 5432
+    configuration.database = env["NEON_DATABASE"] ?? ""
+    configuration.user = env["NEON_USER"] ?? ""
+
+    // PostgresClientKit uses Kitura/BlueSSLService which doesn't support SNI
+    // PostgresClientKit doesn't support setting connection options, so we use "Workaround D"
+    // See https://neon.tech/sni
+    let password = env["NEON_PASSWORD"] ?? ""
+    let endpoint_id = host.split(separator: ".")[0]
+    let workaroundD = "project=\(endpoint_id);\(password)"
+    configuration.credential = .cleartextPassword(password: workaroundD)
 
     let connection = try PostgresClientKit.Connection(configuration: configuration)
     defer { connection.close() }

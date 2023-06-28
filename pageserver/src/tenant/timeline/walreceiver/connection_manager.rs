@@ -13,8 +13,12 @@ use std::{collections::HashMap, num::NonZeroU64, ops::ControlFlow, sync::Arc, ti
 
 use super::{TaskStateUpdate, WalReceiverConf};
 use crate::context::{DownloadBehavior, RequestContext};
+use crate::metrics::{
+    WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
+    WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
+};
 use crate::task_mgr::TaskKind;
-use crate::tenant::Timeline;
+use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
@@ -24,7 +28,7 @@ use storage_broker::proto::SubscribeSafekeeperInfoRequest;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 use storage_broker::BrokerClientChannel;
 use storage_broker::Streaming;
-use tokio::{select, sync::watch};
+use tokio::select;
 use tracing::*;
 
 use crate::{exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
@@ -43,17 +47,26 @@ pub(super) async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     connection_manager_state: &mut ConnectionManagerState,
     ctx: &RequestContext,
+    manager_status: &std::sync::RwLock<Option<ConnectionManagerStatus>>,
 ) -> ControlFlow<(), ()> {
-    let mut timeline_state_updates = connection_manager_state
+    match connection_manager_state
         .timeline
-        .subscribe_for_state_updates();
-
-    match wait_for_active_timeline(&mut timeline_state_updates).await {
-        ControlFlow::Continue(()) => {}
-        ControlFlow::Break(()) => {
-            info!("Timeline dropped state updates sender before becoming active, stopping wal connection manager loop");
+        .wait_to_become_active(ctx)
+        .await
+    {
+        Ok(()) => {}
+        Err(new_state) => {
+            debug!(
+                ?new_state,
+                "state changed, stopping wal connection manager loop"
+            );
             return ControlFlow::Break(());
         }
+    }
+
+    WALRECEIVER_ACTIVE_MANAGERS.inc();
+    scopeguard::defer! {
+        WALRECEIVER_ACTIVE_MANAGERS.dec();
     }
 
     let id = TenantTimelineId {
@@ -61,11 +74,15 @@ pub(super) async fn connection_manager_loop_step(
         timeline_id: connection_manager_state.timeline.timeline_id,
     };
 
+    let mut timeline_state_updates = connection_manager_state
+        .timeline
+        .subscribe_for_state_updates();
+
     // Subscribe to the broker updates. Stream shares underlying TCP connection
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
     let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id).await;
-    info!("Subscribed for broker timeline updates");
+    debug!("Subscribed for broker timeline updates");
 
     loop {
         let time_until_next_retry = connection_manager_state.time_until_next_retry();
@@ -136,13 +153,13 @@ pub(super) async fn connection_manager_loop_step(
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
-                                TimelineState::Broken | TimelineState::Stopping => {
-                                    info!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
+                                TimelineState::Broken { .. } | TimelineState::Stopping => {
+                                    debug!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
                                     return ControlFlow::Break(());
                                 }
                                 TimelineState::Loading => {
                                     warn!("timeline transitioned back to Loading state, that should not happen");
-                                    return ControlFlow::Continue(new_state);
+                                    return ControlFlow::Continue(());
                                 }
                             }
                         }
@@ -150,12 +167,11 @@ pub(super) async fn connection_manager_loop_step(
                     }
                 }
             } => match new_event {
-                ControlFlow::Continue(new_state) => {
-                    info!("observed timeline state change, new state is {new_state:?}");
+                ControlFlow::Continue(()) => {
                     return ControlFlow::Continue(());
                 }
                 ControlFlow::Break(()) => {
-                    info!("Timeline dropped state updates sender, stopping wal connection manager loop");
+                    debug!("Timeline is no longer active, stopping wal connection manager loop");
                     return ControlFlow::Break(());
                 }
             },
@@ -180,34 +196,7 @@ pub(super) async fn connection_manager_loop_step(
                 .change_connection(new_candidate, ctx)
                 .await
         }
-    }
-}
-
-async fn wait_for_active_timeline(
-    timeline_state_updates: &mut watch::Receiver<TimelineState>,
-) -> ControlFlow<(), ()> {
-    let current_state = *timeline_state_updates.borrow();
-    if current_state == TimelineState::Active {
-        return ControlFlow::Continue(());
-    }
-
-    loop {
-        match timeline_state_updates.changed().await {
-            Ok(()) => {
-                let new_state = *timeline_state_updates.borrow();
-                match new_state {
-                    TimelineState::Active => {
-                        debug!("Timeline state changed to active, continuing the walreceiver connection manager");
-                        return ControlFlow::Continue(());
-                    }
-                    state => {
-                        debug!("Not running the walreceiver connection manager, timeline is not active: {state:?}");
-                        continue;
-                    }
-                }
-            }
-            Err(_sender_dropped_error) => return ControlFlow::Break(()),
-        }
+        *manager_status.write().unwrap() = Some(connection_manager_state.manager_status());
     }
 }
 
@@ -267,6 +256,78 @@ pub(super) struct ConnectionManagerState {
     wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
 }
 
+/// An information about connection manager's current connection and connection candidates.
+#[derive(Debug, Clone)]
+pub struct ConnectionManagerStatus {
+    existing_connection: Option<WalConnectionStatus>,
+    wal_stream_candidates: HashMap<NodeId, BrokerSkTimeline>,
+}
+
+impl ConnectionManagerStatus {
+    /// Generates a string, describing current connection status in a form, suitable for logging.
+    pub fn to_human_readable_string(&self) -> String {
+        let mut resulting_string = "WalReceiver status".to_string();
+        match &self.existing_connection {
+            Some(connection) => {
+                if connection.has_processed_wal {
+                    resulting_string.push_str(&format!(
+                        " (update {}): streaming WAL from node {}, ",
+                        connection.latest_wal_update.format("%Y-%m-%d %H:%M:%S"),
+                        connection.node,
+                    ));
+
+                    match (connection.streaming_lsn, connection.commit_lsn) {
+                        (None, None) => resulting_string.push_str("no streaming data"),
+                        (None, Some(commit_lsn)) => {
+                            resulting_string.push_str(&format!("commit Lsn: {commit_lsn}"))
+                        }
+                        (Some(streaming_lsn), None) => {
+                            resulting_string.push_str(&format!("streaming Lsn: {streaming_lsn}"))
+                        }
+                        (Some(streaming_lsn), Some(commit_lsn)) => resulting_string.push_str(
+                            &format!("commit|streaming Lsn: {commit_lsn}|{streaming_lsn}"),
+                        ),
+                    }
+                } else if connection.is_connected {
+                    resulting_string.push_str(&format!(
+                        " (update {}): connecting to node {}",
+                        connection
+                            .latest_connection_update
+                            .format("%Y-%m-%d %H:%M:%S"),
+                        connection.node,
+                    ));
+                } else {
+                    resulting_string.push_str(&format!(
+                        " (update {}): initializing node {} connection",
+                        connection
+                            .latest_connection_update
+                            .format("%Y-%m-%d %H:%M:%S"),
+                        connection.node,
+                    ));
+                }
+            }
+            None => resulting_string.push_str(": disconnected"),
+        }
+
+        resulting_string.push_str(", safekeeper candidates (id|update_time|commit_lsn): [");
+        let mut candidates = self.wal_stream_candidates.iter().peekable();
+        while let Some((node_id, candidate_info)) = candidates.next() {
+            resulting_string.push_str(&format!(
+                "({}|{}|{})",
+                node_id,
+                candidate_info.latest_update.format("%H:%M:%S"),
+                Lsn(candidate_info.timeline.commit_lsn)
+            ));
+            if candidates.peek().is_some() {
+                resulting_string.push_str(", ");
+            }
+        }
+        resulting_string.push(']');
+
+        resulting_string
+    }
+}
+
 /// Current connection data.
 #[derive(Debug)]
 struct WalConnection {
@@ -293,14 +354,14 @@ struct NewCommittedWAL {
     discovered_at: NaiveDateTime,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct RetryInfo {
     next_retry_at: Option<NaiveDateTime>,
     retry_duration_seconds: f64,
 }
 
 /// Data about the timeline to connect to, received from the broker.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BrokerSkTimeline {
     timeline: SafekeeperTimelineInfo,
     /// Time at which the data was fetched from the broker last time, to track the stale data.
@@ -325,31 +386,51 @@ impl ConnectionManagerState {
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
     async fn change_connection(&mut self, new_sk: NewWalConnectionCandidate, ctx: &RequestContext) {
+        WALRECEIVER_SWITCHES
+            .with_label_values(&[new_sk.reason.name()])
+            .inc();
+
         self.drop_old_connection(true).await;
 
-        let id = self.id;
+        let node_id = new_sk.safekeeper_id;
         let connect_timeout = self.conf.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
         let ctx = ctx.detached_child(
             TaskKind::WalReceiverConnectionHandler,
             DownloadBehavior::Download,
         );
+
+        let span = info_span!("connection", %node_id);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
-                super::walreceiver_connection::handle_walreceiver_connection(
+                debug_assert_current_span_has_tenant_and_timeline_id();
+
+                let res = super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
                     new_sk.wal_source_connconf,
                     events_sender,
                     cancellation,
                     connect_timeout,
                     ctx,
+                    node_id,
                 )
-                .await
-                .context("walreceiver connection handling failure")
+                .await;
+
+                match res {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        use super::walreceiver_connection::ExpectedError;
+                        if e.is_expected() {
+                            info!("walreceiver connection handling ended: {e:#}");
+                            Ok(())
+                        } else {
+                            // give out an error to have task_mgr give it a really verbose logging
+                            Err(e).context("walreceiver connection handling failure")
+                        }
+                    }
+                }
             }
-            .instrument(
-                info_span!("walreceiver_connection", tenant_id = %id.tenant_id, timeline_id = %id.timeline_id, node_id = %new_sk.safekeeper_id),
-            )
+            .instrument(span)
         });
 
         let now = Utc::now().naive_utc();
@@ -364,6 +445,7 @@ impl ConnectionManagerState {
                 latest_wal_update: now,
                 streaming_lsn: None,
                 commit_lsn: None,
+                node: node_id,
             },
             connection_task: connection_handle,
             discovered_new_wal: None,
@@ -437,6 +519,8 @@ impl ConnectionManagerState {
 
     /// Adds another broker timeline into the state, if its more recent than the one already added there for the same key.
     fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
+        WALRECEIVER_BROKER_UPDATES.inc();
+
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
         let old_entry = self.wal_stream_candidates.insert(
             new_safekeeper_id,
@@ -448,6 +532,7 @@ impl ConnectionManagerState {
 
         if old_entry.is_none() {
             info!("New SK node was added: {new_safekeeper_id}");
+            WALRECEIVER_CANDIDATES_ADDED.inc();
         }
     }
 
@@ -716,6 +801,7 @@ impl ConnectionManagerState {
             for node_id in node_ids_to_remove {
                 info!("Safekeeper node {node_id} did not send events for over {lagging_wal_timeout:?}, not retrying the connections");
                 self.wal_connection_retries.remove(&node_id);
+                WALRECEIVER_CANDIDATES_REMOVED.inc();
             }
         }
     }
@@ -725,6 +811,13 @@ impl ConnectionManagerState {
             wal_connection.connection_task.shutdown().await;
         }
     }
+
+    fn manager_status(&self) -> ConnectionManagerStatus {
+        ConnectionManagerStatus {
+            existing_connection: self.wal_connection.as_ref().map(|conn| conn.status),
+            wal_stream_candidates: self.wal_stream_candidates.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -732,8 +825,6 @@ struct NewWalConnectionCandidate {
     safekeeper_id: NodeId,
     wal_source_connconf: PgConnectionConfig,
     availability_zone: Option<String>,
-    // This field is used in `derive(Debug)` only.
-    #[allow(dead_code)]
     reason: ReconnectReason,
 }
 
@@ -760,6 +851,18 @@ enum ReconnectReason {
         check_time: NaiveDateTime,
         threshold: Duration,
     },
+}
+
+impl ReconnectReason {
+    fn name(&self) -> &str {
+        match self {
+            ReconnectReason::NoExistingConnection => "NoExistingConnection",
+            ReconnectReason::LaggingWal { .. } => "LaggingWal",
+            ReconnectReason::SwitchAvailabilityZone => "SwitchAvailabilityZone",
+            ReconnectReason::NoWalTimeout { .. } => "NoWalTimeout",
+            ReconnectReason::NoKeepAlives { .. } => "NoKeepAlives",
+        }
+    }
 }
 
 fn wal_stream_connection_config(
@@ -867,6 +970,7 @@ mod tests {
             latest_wal_update: now,
             commit_lsn: Some(Lsn(current_lsn)),
             streaming_lsn: Some(Lsn(current_lsn)),
+            node: NodeId(1),
         };
 
         state.conf.max_lsn_wal_lag = NonZeroU64::new(100).unwrap();
@@ -1035,6 +1139,7 @@ mod tests {
             latest_wal_update: now,
             commit_lsn: Some(current_lsn),
             streaming_lsn: Some(current_lsn),
+            node: connected_sk_id,
         };
 
         state.wal_connection = Some(WalConnection {
@@ -1101,6 +1206,7 @@ mod tests {
             latest_wal_update: time_over_threshold,
             commit_lsn: Some(current_lsn),
             streaming_lsn: Some(current_lsn),
+            node: NodeId(1),
         };
 
         state.wal_connection = Some(WalConnection {
@@ -1164,6 +1270,7 @@ mod tests {
             latest_wal_update: time_over_threshold,
             commit_lsn: Some(current_lsn),
             streaming_lsn: Some(current_lsn),
+            node: NodeId(1),
         };
 
         state.wal_connection = Some(WalConnection {
@@ -1214,12 +1321,12 @@ mod tests {
 
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
-    async fn dummy_state(harness: &TenantHarness<'_>) -> ConnectionManagerState {
+    async fn dummy_state(harness: &TenantHarness) -> ConnectionManagerState {
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
-            .create_empty_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x8), crate::DEFAULT_PG_VERSION, &ctx)
+            .await
             .expect("Failed to create an empty timeline for dummy wal connection manager");
-        let timeline = timeline.initialize(&ctx).unwrap();
 
         ConnectionManagerState {
             id: TenantTimelineId {
@@ -1261,6 +1368,7 @@ mod tests {
             latest_wal_update: now,
             commit_lsn: Some(current_lsn),
             streaming_lsn: Some(current_lsn),
+            node: connected_sk_id,
         };
 
         state.wal_connection = Some(WalConnection {

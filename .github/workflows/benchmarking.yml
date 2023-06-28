@@ -16,12 +16,12 @@ on:
   workflow_dispatch: # adds ability to run this manually
     inputs:
       region_id:
-        description: 'Use a particular region. If not set the default region will be used'
+        description: 'Project region id. If not set, the default region will be used'
         required: false
         default: 'aws-us-east-2'
       save_perf_report:
         type: boolean
-        description: 'Publish perf report or not. If not set, the report is published only for the main branch'
+        description: 'Publish perf report. If not set, the report will be published only for the main branch'
         required: false
 
 defaults:
@@ -93,10 +93,7 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -128,13 +125,14 @@ jobs:
         matrix='{
           "platform": [
             "neon-captest-new",
-            "neon-captest-reuse"
+            "neon-captest-reuse",
+            "neonvm-captest-new"
           ],
           "db_size": [ "10gb" ],
-          "include": [
-            { "platform": "neon-captest-freetier", "db_size": "3gb"  },
-            { "platform": "neon-captest-new",      "db_size": "50gb" }
-          ]
+          "include": [{ "platform": "neon-captest-freetier",   "db_size": "3gb"  },
+                      { "platform": "neon-captest-new",        "db_size": "50gb" },
+                      { "platform": "neonvm-captest-freetier", "db_size": "3gb"  },
+                      { "platform": "neonvm-captest-new",      "db_size": "50gb" }]
         }'
 
         if [ "$(date +%A)" = "Saturday" ]; then
@@ -182,7 +180,8 @@ jobs:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
 
-    timeout-minutes: 360 # 6h
+    # Increase timeout to 8h, default timeout is 6h
+    timeout-minutes: 480
 
     steps:
     - uses: actions/checkout@v3
@@ -200,7 +199,7 @@ jobs:
         echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
 
     - name: Create Neon Project
-      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier"]'), matrix.platform)
+      if: contains(fromJson('["neon-captest-new", "neon-captest-freetier", "neonvm-captest-new", "neonvm-captest-freetier"]'), matrix.platform)
       id: create-neon-project
       uses: ./.github/actions/neon-project-create
       with:
@@ -208,6 +207,7 @@ jobs:
         postgres_version: ${{ env.DEFAULT_PG_VERSION }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
         compute_units: ${{ (matrix.platform == 'neon-captest-freetier' && '[0.25, 0.25]') || '[1, 1]' }}
+        provisioner: ${{ (contains(matrix.platform, 'neonvm-') && 'k8s-neonvm') || 'k8s-pod' }}
 
     - name: Set up Connection String
       id: set-up-connstr
@@ -216,7 +216,7 @@ jobs:
           neon-captest-reuse)
             CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
-          neon-captest-new | neon-captest-freetier)
+          neon-captest-new | neon-captest-freetier | neonvm-captest-new | neonvm-captest-freetier)
             CONNSTR=${{ steps.create-neon-project.outputs.dsn }}
             ;;
           rds-aurora)
@@ -226,7 +226,7 @@ jobs:
             CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }}
             ;;
           *)
-            echo >&2 "Unknown PLATFORM=${PLATFORM}. Allowed only 'neon-captest-reuse', 'neon-captest-new', 'neon-captest-freetier', 'rds-aurora', or 'rds-postgres'"
+            echo >&2 "Unknown PLATFORM=${PLATFORM}"
             exit 1
             ;;
         esac
@@ -283,10 +283,7 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -324,8 +321,6 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-
-    timeout-minutes: 360 # 6h
 
     steps:
     - uses: actions/checkout@v3
@@ -380,10 +375,7 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -420,8 +412,6 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-
-    timeout-minutes: 360 # 6h
 
     steps:
     - uses: actions/checkout@v3
@@ -476,10 +466,7 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
@@ -510,8 +497,6 @@ jobs:
     container:
       image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
       options: --init
-
-    timeout-minutes: 360 # 6h
 
     steps:
     - uses: actions/checkout@v3
@@ -566,16 +551,13 @@ jobs:
 
     - name: Create Allure report
       if: ${{ !cancelled() }}
-      uses: ./.github/actions/allure-report
-      with:
-        action: generate
-        build_type: ${{ env.BUILD_TYPE }}
+      uses: ./.github/actions/allure-report-generate
 
     - name: Post to a Slack channel
       if: ${{ github.event.schedule && failure() }}
       uses: slackapi/slack-github-action@v1
       with:
         channel-id: "C033QLM5P7D" # dev-staging-stream
-        slack-message: "Periodic TPC-H perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        slack-message: "Periodic User example perf testing ${{ matrix.platform }}: ${{ job.status }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       env:
         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

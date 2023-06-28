@@ -33,5 +33,7 @@ pub fn init_tracing_and_logging(default_log_level: &str) -> anyhow::Result<()> {
         .init();
     tracing::info!("logging and tracing started");
 
+    utils::logging::replace_panic_hook_with_tracing_panic_hook().forget();
+
     Ok(())
 }

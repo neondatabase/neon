@@ -2,11 +2,12 @@
 # env NEON_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
 import os
+import queue
 import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pytest
 from fixtures.log_helper import log
@@ -19,6 +20,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
+    timeline_delete_wait_completed,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_until_tenant_active,
@@ -26,6 +28,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import print_gc_result, query_scalar, wait_until
+from requests import ReadTimeout
 
 
 #
@@ -81,9 +84,7 @@ def test_remote_storage_backup_and_restore(
     env.pageserver.allowed_errors.append(".*failed to load remote timeline.*")
     # we have a bunch of pytest.raises for these below
     env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
     env.pageserver.allowed_errors.append(".*simulated failure of remote operation.*")
 
     pageserver_http = env.pageserver.http_client()
@@ -140,14 +141,19 @@ def test_remote_storage_backup_and_restore(
     # This is before the failures injected by test_remote_failures, so it's a permanent error.
     pageserver_http.configure_failpoints(("storage-sync-list-remote-timelines", "return"))
     env.pageserver.allowed_errors.append(
-        ".*error attaching tenant: storage-sync-list-remote-timelines",
+        ".*attach failed.*: storage-sync-list-remote-timelines",
     )
     # Attach it. This HTTP request will succeed and launch a
     # background task to load the tenant. In that background task,
     # listing the remote timelines will fail because of the failpoint,
     # and the tenant will be marked as Broken.
     client.tenant_attach(tenant_id)
-    wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+
+    tenant_info = wait_until_tenant_state(pageserver_http, tenant_id, "Broken", 15)
+    assert tenant_info["attachment_status"] == {
+        "slug": "failed",
+        "data": {"reason": "storage-sync-list-remote-timelines"},
+    }
 
     # Ensure that even though the tenant is broken, we can't attach it again.
     with pytest.raises(Exception, match=f"tenant {tenant_id} already exists, state: Broken"):
@@ -177,7 +183,7 @@ def test_remote_storage_backup_and_restore(
     wait_until_tenant_active(
         pageserver_http=client,
         tenant_id=tenant_id,
-        iterations=5,
+        iterations=10,  # make it longer for real_s3 tests when unreliable wrapper is involved
     )
 
     detail = client.timeline_detail(tenant_id, timeline_id)
@@ -591,9 +597,21 @@ def test_timeline_deletion_with_files_stuck_in_upload_queue(
     env.pageserver.allowed_errors.append(
         ".* ERROR .*Error processing HTTP request: InternalServerError\\(timeline is Stopping"
     )
-    client.timeline_delete(tenant_id, timeline_id)
+
+    env.pageserver.allowed_errors.append(
+        ".*files not bound to index_file.json, proceeding with their deletion.*"
+    )
+    timeline_delete_wait_completed(client, tenant_id, timeline_id)
 
     assert not timeline_path.exists()
+
+    # to please mypy
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    remote_timeline_path = (
+        env.remote_storage.root / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
+    )
+
+    assert not list(remote_timeline_path.iterdir())
 
     # timeline deletion should kill ongoing uploads, so, the metric will be gone
     assert get_queued_count(file_kind="index", op_kind="upload") is None
@@ -626,10 +644,7 @@ def test_empty_branch_remote_storage_upload(
 
     new_branch_name = "new_branch"
     new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
-
-    with env.endpoints.create_start(new_branch_name, tenant_id=env.initial_tenant) as endpoint:
-        wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_branch_timeline_id)
-    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
+    assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
     timelines_before_detach = set(
         map(
@@ -658,13 +673,19 @@ def test_empty_branch_remote_storage_upload(
     ), f"Expected to have same timelines after reattach, but got {timelines_after_detach}"
 
 
-# Branches off a root branch, but does not write anything to the new branch, so it has a metadata file only.
-# Ensures the branch is not on the remote storage and restarts the pageserver — the branch should be uploaded after the restart.
 @pytest.mark.parametrize("remote_storage_kind", [RemoteStorageKind.LOCAL_FS])
 def test_empty_branch_remote_storage_upload_on_restart(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
+    """
+    Branches off a root branch, but does not write anything to the new branch, so
+    it has a metadata file only.
+
+    Ensures the branch is not on the remote storage and restarts the pageserver
+    — the upload should be scheduled by load, and create_timeline should await
+    for it even though it gets 409 Conflict.
+    """
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_empty_branch_remote_storage_upload_on_restart",
@@ -673,35 +694,87 @@ def test_empty_branch_remote_storage_upload_on_restart(
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
-    new_branch_name = "new_branch"
-    new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+    client.configure_failpoints(("before-upload-index", "return"))
 
-    with env.endpoints.create_start(new_branch_name, tenant_id=env.initial_tenant) as endpoint:
-        wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, new_branch_timeline_id)
-    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
+    new_branch_timeline_id = TimelineId.generate()
 
-    env.pageserver.stop()
+    with pytest.raises(ReadTimeout):
+        client.timeline_create(
+            tenant_id=env.initial_tenant,
+            ancestor_timeline_id=env.initial_timeline,
+            new_timeline_id=new_branch_timeline_id,
+            pg_version=env.pg_version,
+            timeout=4,
+        )
 
-    # Remove new branch from the remote storage
-    assert isinstance(env.remote_storage, LocalFsStorage)
-    new_branch_on_remote_storage = (
-        env.remote_storage.root
-        / "tenants"
-        / str(env.initial_tenant)
-        / "timelines"
-        / str(new_branch_timeline_id)
+    env.pageserver.allowed_errors.append(
+        f".*POST.* path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
     )
-    assert (
-        new_branch_on_remote_storage.is_dir()
-    ), f"'{new_branch_on_remote_storage}' path does not exist on the remote storage"
-    shutil.rmtree(new_branch_on_remote_storage)
 
-    env.pageserver.start()
+    # index upload is now hitting the failpoint, it should block the shutdown
+    env.pageserver.stop(immediate=True)
 
-    wait_upload_queue_empty(client, env.initial_tenant, new_branch_timeline_id)
+    timeline_path = (
+        Path("tenants") / str(env.initial_tenant) / "timelines" / str(new_branch_timeline_id)
+    )
+
+    local_metadata = env.repo_dir / timeline_path / "metadata"
+    assert local_metadata.is_file()
+
+    assert isinstance(env.remote_storage, LocalFsStorage)
+    new_branch_on_remote_storage = env.remote_storage.root / timeline_path
     assert (
-        new_branch_on_remote_storage.is_dir()
-    ), f"New branch should have been reuploaded on pageserver restart to the remote storage path '{new_branch_on_remote_storage}'"
+        not new_branch_on_remote_storage.exists()
+    ), "failpoint should had prohibited index_part.json upload"
+
+    # during reconciliation we should had scheduled the uploads and on the
+    # retried create_timeline, we will await for those to complete on next
+    # client.timeline_create
+    env.pageserver.start(extra_env_vars={"FAILPOINTS": "before-upload-index=return"})
+
+    # sleep a bit to force the upload task go into exponential backoff
+    time.sleep(1)
+
+    q: queue.Queue[Optional[PageserverApiException]] = queue.Queue()
+    barrier = threading.Barrier(2)
+
+    def create_in_background():
+        barrier.wait()
+        try:
+            client.timeline_create(
+                tenant_id=env.initial_tenant,
+                ancestor_timeline_id=env.initial_timeline,
+                new_timeline_id=new_branch_timeline_id,
+                pg_version=env.pg_version,
+            )
+            q.put(None)
+        except PageserverApiException as e:
+            q.put(e)
+
+    create_thread = threading.Thread(target=create_in_background)
+    create_thread.start()
+
+    try:
+        # maximize chances of actually waiting for the uploads by create_timeline
+        barrier.wait()
+
+        assert not new_branch_on_remote_storage.exists(), "failpoint should had stopped uploading"
+
+        client.configure_failpoints(("before-upload-index", "off"))
+        conflict = q.get()
+
+        assert conflict, "create_timeline should not have succeeded"
+        assert (
+            conflict.status_code == 409
+        ), "timeline was created before restart, and uploads scheduled during initial load, so we expect 409 conflict"
+
+        assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
+
+        assert (
+            new_branch_on_remote_storage / "index_part.json"
+        ).is_file(), "uploads scheduled during initial load should had been awaited for"
+    finally:
+        create_thread.join()
 
 
 def wait_upload_queue_empty(
@@ -750,6 +823,19 @@ def get_queued_count(
     if val is None:
         return val
     return int(val)
+
+
+def assert_nothing_to_upload(
+    client: PageserverHttpClient,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+):
+    """
+    Check last_record_lsn == remote_consistent_lsn. Assert works only for empty timelines, which
+    do not have anything to compact or gc.
+    """
+    detail = client.timeline_detail(tenant_id, timeline_id)
+    assert Lsn(detail["last_record_lsn"]) == Lsn(detail["remote_consistent_lsn"])
 
 
 # TODO Test that we correctly handle GC of files that are stuck in upload queue.

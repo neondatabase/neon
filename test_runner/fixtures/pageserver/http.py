@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ import requests
 
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, parse_metrics
+from fixtures.pg_version import PgVersion
 from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import Fn
 
@@ -108,6 +110,10 @@ class PageserverHttpClient(requests.Session):
         if auth_token is not None:
             self.headers["Authorization"] = f"Bearer {auth_token}"
 
+    @property
+    def base_url(self) -> str:
+        return f"http://localhost:{self.port}"
+
     def verbose_error(self, res: requests.Response):
         try:
             res.raise_for_status()
@@ -148,11 +154,16 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, list)
         return res_json
 
-    def tenant_create(self, new_tenant_id: Optional[TenantId] = None) -> TenantId:
+    def tenant_create(
+        self, new_tenant_id: TenantId, conf: Optional[Dict[str, Any]] = None
+    ) -> TenantId:
+        if conf is not None:
+            assert "new_tenant_id" not in conf.keys()
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant",
             json={
-                "new_tenant_id": str(new_tenant_id) if new_tenant_id else None,
+                "new_tenant_id": str(new_tenant_id),
+                **(conf or {}),
             },
         )
         self.verbose_error(res)
@@ -162,8 +173,22 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(new_tenant_id, str)
         return TenantId(new_tenant_id)
 
-    def tenant_attach(self, tenant_id: TenantId):
-        res = self.post(f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach")
+    def tenant_attach(
+        self, tenant_id: TenantId, config: None | Dict[str, Any] = None, config_null: bool = False
+    ):
+        if config_null:
+            assert config is None
+            body = "null"
+        else:
+            # null-config is prohibited by the API
+            if config is None:
+                config = {}
+            body = json.dumps({"config": config})
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/attach",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
         self.verbose_error(res)
 
     def tenant_detach(self, tenant_id: TenantId, detach_ignored=False):
@@ -266,18 +291,23 @@ class PageserverHttpClient(requests.Session):
 
     def timeline_create(
         self,
+        pg_version: PgVersion,
         tenant_id: TenantId,
-        new_timeline_id: Optional[TimelineId] = None,
+        new_timeline_id: TimelineId,
         ancestor_timeline_id: Optional[TimelineId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
+        **kwargs,
     ) -> Dict[Any, Any]:
+        body: Dict[str, Any] = {
+            "new_timeline_id": str(new_timeline_id),
+            "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
+            "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
+        }
+        if pg_version != PgVersion.NOT_SET:
+            body["pg_version"] = int(pg_version)
+
         res = self.post(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline",
-            json={
-                "new_timeline_id": str(new_timeline_id) if new_timeline_id else None,
-                "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
-                "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
-            },
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline", json=body, **kwargs
         )
         self.verbose_error(res)
         if res.status_code == 409:
@@ -311,9 +341,14 @@ class PageserverHttpClient(requests.Session):
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId):
+    def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId, **kwargs):
+        """
+        Note that deletion is not instant, it is scheduled and performed mostly in the background.
+        So if you need to wait for it to complete use `timeline_delete_wait_completed`.
+        For longer description consult with pageserver openapi spec.
+        """
         res = self.delete(
-            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}"
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}", **kwargs
         )
         self.verbose_error(res)
         res_json = res.json()

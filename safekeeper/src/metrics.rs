@@ -7,10 +7,11 @@ use std::{
 
 use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_WRITE_SECONDS_BUCKETS};
 use anyhow::Result;
+use futures::Future;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
-    register_int_counter_vec, Gauge, IntCounterVec, IntGaugeVec,
+    register_int_counter, register_int_counter_vec, Gauge, IntCounter, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
@@ -72,6 +73,77 @@ pub static PG_IO_BYTES: Lazy<IntCounterVec> = Lazy::new(|| {
         &["client_az", "sk_az", "app_name", "dir", "same_az"]
     )
     .expect("Failed to register safekeeper_pg_io_bytes gauge")
+});
+pub static BROKER_PUSHED_UPDATES: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_broker_pushed_updates_total",
+        "Number of timeline updates pushed to the broker"
+    )
+    .expect("Failed to register safekeeper_broker_pushed_updates_total counter")
+});
+pub static BROKER_PULLED_UPDATES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_broker_pulled_updates_total",
+        "Number of timeline updates pulled and processed from the broker",
+        &["result"]
+    )
+    .expect("Failed to register safekeeper_broker_pulled_updates_total counter")
+});
+pub static PG_QUERIES_RECEIVED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_queries_received_total",
+        "Number of queries received through pg protocol",
+        &["query"]
+    )
+    .expect("Failed to register safekeeper_pg_queries_received_total counter")
+});
+pub static PG_QUERIES_FINISHED: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "safekeeper_pg_queries_finished_total",
+        "Number of queries finished through pg protocol",
+        &["query"]
+    )
+    .expect("Failed to register safekeeper_pg_queries_finished_total counter")
+});
+pub static REMOVED_WAL_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_removed_wal_segments_total",
+        "Number of WAL segments removed from the disk"
+    )
+    .expect("Failed to register safekeeper_removed_wal_segments_total counter")
+});
+pub static BACKED_UP_SEGMENTS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backed_up_segments_total",
+        "Number of WAL segments backed up to the broker"
+    )
+    .expect("Failed to register safekeeper_backed_up_segments_total counter")
+});
+pub static BACKUP_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "safekeeper_backup_errors_total",
+        "Number of errors during backup"
+    )
+    .expect("Failed to register safekeeper_backup_errors_total counter")
+});
+pub static BROKER_PUSH_ALL_UPDATES_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_broker_push_update_seconds",
+        "Seconds to push all timeline updates to the broker",
+        DISK_WRITE_SECONDS_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_broker_push_update_seconds histogram vec")
+});
+pub const TIMELINES_COUNT_BUCKETS: &[f64] = &[
+    1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0, 50000.0,
+];
+pub static BROKER_ITERATION_TIMELINES: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_broker_iteration_timelines",
+        "Count of timelines pushed to the broker in a single iteration",
+        TIMELINES_COUNT_BUCKETS.to_vec()
+    )
+    .expect("Failed to register safekeeper_broker_iteration_timelines histogram vec")
 });
 
 pub const LABEL_UNKNOWN: &str = "unknown";
@@ -221,14 +293,17 @@ impl WalStorageMetrics {
     }
 }
 
-/// Accepts a closure that returns a result, and returns the duration of the closure.
-pub fn time_io_closure(closure: impl FnOnce() -> Result<()>) -> Result<f64> {
+/// Accepts async function that returns empty anyhow result, and returns the duration of its execution.
+pub async fn time_io_closure<E: Into<anyhow::Error>>(
+    closure: impl Future<Output = Result<(), E>>,
+) -> Result<f64> {
     let start = std::time::Instant::now();
-    closure()?;
+    closure.await.map_err(|e| e.into())?;
     Ok(start.elapsed().as_secs_f64())
 }
 
 /// Metrics for a single timeline.
+#[derive(Clone)]
 pub struct FullTimelineInfo {
     pub ttid: TenantTimelineId,
     pub ps_feedback: PageserverFeedback,
@@ -504,13 +579,19 @@ impl Collector for TimelineCollector {
         let timelines = GlobalTimelines::get_all();
         let timelines_count = timelines.len();
 
-        for arc_tli in timelines {
-            let tli = arc_tli.info_for_metrics();
-            if tli.is_none() {
-                continue;
-            }
-            let tli = tli.unwrap();
+        // Prometheus Collector is sync, and data is stored under async lock. To
+        // bridge the gap with a crutch, collect data in spawned thread with
+        // local tokio runtime.
+        let infos = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("failed to create rt");
+            rt.block_on(collect_timeline_metrics())
+        })
+        .join()
+        .expect("collect_timeline_metrics thread panicked");
 
+        for tli in &infos {
             let tenant_id = tli.ttid.tenant_id.to_string();
             let timeline_id = tli.ttid.timeline_id.to_string();
             let labels = &[tenant_id.as_str(), timeline_id.as_str()];
@@ -610,4 +691,16 @@ impl Collector for TimelineCollector {
 
         mfs
     }
+}
+
+async fn collect_timeline_metrics() -> Vec<FullTimelineInfo> {
+    let mut res = vec![];
+    let timelines = GlobalTimelines::get_all();
+
+    for tli in timelines {
+        if let Some(info) = tli.info_for_metrics().await {
+            res.push(info);
+        }
+    }
+    res
 }

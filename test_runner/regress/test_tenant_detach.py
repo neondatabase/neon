@@ -59,6 +59,13 @@ def test_tenant_reattach(
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
 
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
+    )
+
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         with endpoint.cursor() as cur:
             cur.execute("CREATE TABLE t(key int primary key, value text)")
@@ -223,19 +230,19 @@ def test_tenant_reattach_while_busy(
     )
     env = neon_env_builder.init_start()
 
-    # Attempts to connect from compute to pageserver while the tenant is
-    # temporarily detached produces these errors in the pageserver log.
-    env.pageserver.allowed_errors.append(".*Tenant .* not found.*")
-    env.pageserver.allowed_errors.append(
-        ".*Tenant .* will not become active\\. Current state: Stopping.*"
-    )
-
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant(
         # Create layers aggressively
         conf={"checkpoint_distance": "100000"}
+    )
+
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
     )
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
@@ -274,6 +281,13 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
 
     # create new nenant
     tenant_id, timeline_id = env.neon_cli.create_tenant()
+
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
+    )
 
     # assert tenant exists on disk
     assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
@@ -336,6 +350,13 @@ def test_tenant_detach_ignored_tenant(neon_simple_env: NeonEnv):
     # create a new tenant
     tenant_id, _ = env.neon_cli.create_tenant()
 
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
+    )
+
     # assert tenant exists on disk
     assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
@@ -385,6 +406,13 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
     # create a new tenant
     tenant_id, _ = env.neon_cli.create_tenant()
 
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
+    )
+
     # assert tenant exists on disk
     assert (env.repo_dir / "tenants" / str(tenant_id)).exists()
 
@@ -399,6 +427,7 @@ def test_tenant_detach_regular_tenant(neon_simple_env: NeonEnv):
 
     log.info("detaching regular tenant with detach ignored flag")
     client.tenant_detach(tenant_id, True)
+
     log.info("regular tenant detached without error")
 
     # check that nothing is left on disk for deleted tenant
@@ -431,6 +460,13 @@ def test_detach_while_attaching(
 
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
+
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
+    )
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
@@ -496,7 +532,7 @@ def test_ignored_tenant_reattach(
 ):
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
-        test_name="test_remote_storage_backup_and_restore",
+        test_name="test_ignored_tenant_reattach",
     )
     env = neon_env_builder.init_start()
     pageserver_http = env.pageserver.http_client()
@@ -577,6 +613,13 @@ def test_ignored_tenant_download_missing_layers(
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
+    )
+
     data_id = 1
     data_secret = "very secret secret"
     insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, endpoint)
@@ -636,6 +679,13 @@ def test_ignored_tenant_stays_broken_without_metadata(
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Broken.*"
+    )
+
     # ignore the tenant and remove its metadata
     pageserver_http.tenant_ignore(tenant_id)
     tenant_timeline_dir = env.repo_dir / "tenants" / str(tenant_id) / "timelines" / str(timeline_id)
@@ -647,7 +697,9 @@ def test_ignored_tenant_stays_broken_without_metadata(
             metadata_removed = True
     assert metadata_removed, f"Failed to find metadata file in {tenant_timeline_dir}"
 
-    env.pageserver.allowed_errors.append(".*could not load tenant .*?: failed to load metadata.*")
+    env.pageserver.allowed_errors.append(
+        f".*{tenant_id}.*: load failed.*: failed to load metadata.*"
+    )
 
     # now, load it from the local files and expect it to be broken due to inability to load tenant files into memory
     pageserver_http.tenant_load(tenant_id=tenant_id)
@@ -670,6 +722,13 @@ def test_load_attach_negatives(
 
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
 
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
+    )
+
     env.pageserver.allowed_errors.append(".*tenant .*? already exists, state:.*")
     with pytest.raises(
         expected_exception=PageserverApiException,
@@ -685,12 +744,10 @@ def test_load_attach_negatives(
 
     pageserver_http.tenant_ignore(tenant_id)
 
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Cannot attach tenant {tenant_id}, local tenant directory already exists",
+        match="tenant directory already exists",
     ):
         pageserver_http.tenant_attach(tenant_id)
 
@@ -714,6 +771,13 @@ def test_ignore_while_attaching(
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
     timeline_id = TimelineId(endpoint.safe_psql("show neon.timeline_id")[0][0])
 
+    # Attempts to connect from compute to pageserver while the tenant is
+    # temporarily detached produces these errors in the pageserver log.
+    env.pageserver.allowed_errors.append(f".*Tenant {tenant_id} not found.*")
+    env.pageserver.allowed_errors.append(
+        f".*Tenant {tenant_id} will not become active\\. Current state: Stopping.*"
+    )
+
     data_id = 1
     data_secret = "very secret secret"
     insert_test_data(pageserver_http, tenant_id, timeline_id, data_id, data_secret, endpoint)
@@ -734,12 +798,10 @@ def test_ignore_while_attaching(
     pageserver_http.tenant_ignore(tenant_id)
 
     # Cannot attach it due to some local files existing
-    env.pageserver.allowed_errors.append(
-        ".*Cannot attach tenant .*?, local tenant directory already exists.*"
-    )
+    env.pageserver.allowed_errors.append(".*tenant directory already exists.*")
     with pytest.raises(
         expected_exception=PageserverApiException,
-        match=f"Cannot attach tenant {tenant_id}, local tenant directory already exists",
+        match="tenant directory already exists",
     ):
         pageserver_http.tenant_attach(tenant_id)
 

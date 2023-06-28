@@ -451,13 +451,17 @@ def pytest_terminal_summary(
     revision = os.getenv("GITHUB_SHA", "local")
     platform = os.getenv("PLATFORM", "local")
 
-    terminalreporter.section("Benchmark results", "-")
+    is_header_printed = False
 
     result = []
     for test_report in terminalreporter.stats.get("passed", []):
         result_entry = []
 
         for _, recorded_property in test_report.user_properties:
+            if not is_header_printed:
+                terminalreporter.section("Benchmark results", "-")
+                is_header_printed = True
+
             terminalreporter.write(
                 "{}.{}: ".format(test_report.head_line, recorded_property["name"])
             )
@@ -485,7 +489,6 @@ def pytest_terminal_summary(
 
     out_dir = config.getoption("out_dir")
     if out_dir is None:
-        warnings.warn("no out dir provided to store performance test results")
         return
 
     if not result:

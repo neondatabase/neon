@@ -3,12 +3,26 @@ members = [
     "compute_tools",
     "control_plane",
     "pageserver",
+    "pageserver/ctl",
     "proxy",
     "safekeeper",
     "storage_broker",
     "workspace_hack",
     "trace",
-    "libs/*",
+    "libs/compute_api",
+    "libs/pageserver_api",
+    "libs/postgres_ffi",
+    "libs/safekeeper_api",
+    "libs/utils",
+    "libs/consumption_metrics",
+    "libs/postgres_backend",
+    "libs/pq_proto",
+    "libs/tenant_size_model",
+    "libs/metrics",
+    "libs/postgres_connection",
+    "libs/remote_storage",
+    "libs/tracing-utils",
+    "libs/postgres_ffi/wal_craft",
 ]
 
 [workspace.package]
@@ -21,9 +35,10 @@ anyhow = { version = "1.0", features = ["backtrace"] }
 async-stream = "0.3"
 async-trait = "0.1"
 atty = "0.2.14"
-aws-config = { version = "0.51.0", default-features = false, features=["rustls"] }
-aws-sdk-s3 = "0.21.0"
-aws-smithy-http = "0.51.0"
+aws-config = { version = "0.55", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "0.27"
+aws-smithy-http = "0.55"
+aws-credential-types = "0.55"
 aws-types = "0.55"
 base64 = "0.13.0"
 bincode = "1.3"
@@ -125,11 +140,11 @@ env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
-postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
+postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
 tokio-tar = { git = "https://github.com/neondatabase/tokio-tar.git", rev="404df61437de0feef49ba2ccdbdd94eb8ad6e142" }
 
 ## Other git libraries
@@ -165,7 +180,7 @@ tonic-build = "0.9"
 
 # This is only needed for proxy's tests.
 # TODO: we should probably fork `tokio-postgres-rustls` instead.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="0bc41d8503c092b040142214aac3cf7d11d0c19f" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev="1aaedab101b23f7612042850d8f2036810fa7c7f" }
 
 # Changes the MAX_THREADS limit from 4096 to 32768.
 # This is a temporary workaround for using tracing from many threads in safekeepers code,

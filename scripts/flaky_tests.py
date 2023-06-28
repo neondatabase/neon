@@ -21,6 +21,7 @@ FLAKY_TESTS_QUERY = """
                 jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'name' as suite,
                 jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'name' as test,
                 jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'status' as status,
+                jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'retriesStatusChange' as retries_status_change,
                 to_timestamp((jsonb_array_elements(jsonb_array_elements(jsonb_array_elements(data -> 'children') -> 'children') -> 'children') -> 'time' -> 'start')::bigint / 1000)::date as timestamp
             FROM
                 regress_test_results
@@ -29,7 +30,7 @@ FLAKY_TESTS_QUERY = """
         ) data
     WHERE
         timestamp > CURRENT_DATE - INTERVAL '%s' day
-        AND status::text IN ('"failed"', '"broken"')
+        AND (status::text IN ('"failed"', '"broken"') OR retries_status_change::boolean)
     ;
 """
 

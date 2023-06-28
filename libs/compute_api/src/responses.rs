@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::spec::ComputeSpec;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
     pub error: String,
 }
 
 /// Response of the /status API
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeStatusResponse {
     pub start_time: DateTime<Utc>,
@@ -19,21 +19,21 @@ pub struct ComputeStatusResponse {
     pub timeline: Option<String>,
     pub status: ComputeStatus,
     #[serde(serialize_with = "rfc3339_serialize")]
-    pub last_active: DateTime<Utc>,
+    pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComputeState {
     pub status: ComputeStatus,
     /// Timestamp of the last Postgres activity
     #[serde(serialize_with = "rfc3339_serialize")]
-    pub last_active: DateTime<Utc>,
+    pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeStatus {
     // Spec wasn't provided at start, waiting for it to be
@@ -54,11 +54,15 @@ pub enum ComputeStatus {
     Failed,
 }
 
-fn rfc3339_serialize<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
+fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    x.to_rfc3339().serialize(s)
+    if let Some(x) = x {
+        x.to_rfc3339().serialize(s)
+    } else {
+        s.serialize_none()
+    }
 }
 
 /// Response of the /metrics.json API

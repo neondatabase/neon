@@ -96,6 +96,8 @@ static shmem_request_hook_type prev_shmem_request_hook;
 #endif
 static int   lfc_shrinking_factor; /* power of two by which local cache size will be shrinked when lfc_free_space_watermark is reached */
 
+void FileCacheMonitorMain(Datum main_arg);
+
 static void
 lfc_shmem_startup(void)
 {
@@ -378,7 +380,6 @@ lfc_evict(RelFileNode rnode, ForkNumber forkNum, BlockNumber blkno)
 {
 	BufferTag tag;
 	FileCacheEntry* entry;
-	ssize_t rc;
 	bool found;
 	int chunk_offs = blkno & (BLOCKS_PER_CHUNK-1);
 	uint32 hash;

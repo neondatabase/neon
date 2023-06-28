@@ -25,16 +25,15 @@ mod walreceiver_connection;
 
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
+use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::timeline::walreceiver::connection_manager::{
     connection_manager_loop_step, ConnectionManagerState,
 };
 
-use anyhow::Context;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::ops::ControlFlow;
-use std::sync::atomic::{self, AtomicBool};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::BrokerClientChannel;
 use tokio::select;
@@ -43,6 +42,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use utils::id::TenantTimelineId;
+
+use self::connection_manager::ConnectionManagerStatus;
 
 use super::Timeline;
 
@@ -60,44 +61,23 @@ pub struct WalReceiverConf {
 
 pub struct WalReceiver {
     timeline: TenantTimelineId,
-    timeline_ref: Weak<Timeline>,
-    conf: WalReceiverConf,
-    started: AtomicBool,
+    manager_status: Arc<std::sync::RwLock<Option<ConnectionManagerStatus>>>,
 }
 
 impl WalReceiver {
-    pub fn new(
-        timeline: TenantTimelineId,
-        timeline_ref: Weak<Timeline>,
-        conf: WalReceiverConf,
-    ) -> Self {
-        Self {
-            timeline,
-            timeline_ref,
-            conf,
-            started: AtomicBool::new(false),
-        }
-    }
-
     pub fn start(
-        &self,
-        ctx: &RequestContext,
+        timeline: Arc<Timeline>,
+        conf: WalReceiverConf,
         mut broker_client: BrokerClientChannel,
-    ) -> anyhow::Result<()> {
-        if self.started.load(atomic::Ordering::Acquire) {
-            anyhow::bail!("Wal receiver is already started");
-        }
-
-        let timeline = self.timeline_ref.upgrade().with_context(|| {
-            format!("walreceiver start on a dropped timeline {}", self.timeline)
-        })?;
-
+        ctx: &RequestContext,
+    ) -> Self {
         let tenant_id = timeline.tenant_id;
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
 
-        let wal_receiver_conf = self.conf.clone();
+        let loop_status = Arc::new(std::sync::RwLock::new(None));
+        let manager_status = Arc::clone(&loop_status);
         task_mgr::spawn(
             WALRECEIVER_RUNTIME.handle(),
             TaskKind::WalReceiverManager,
@@ -106,48 +86,57 @@ impl WalReceiver {
             &format!("walreceiver for timeline {tenant_id}/{timeline_id}"),
             false,
             async move {
-                info!("WAL receiver manager started, connecting to broker");
+                debug_assert_current_span_has_tenant_and_timeline_id();
+                debug!("WAL receiver manager started, connecting to broker");
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
-                    wal_receiver_conf,
+                    conf,
                 );
                 loop {
                     select! {
                         _ = task_mgr::shutdown_watcher() => {
-                            info!("WAL receiver shutdown requested, shutting down");
-                            connection_manager_state.shutdown().await;
-                            return Ok(());
+                            trace!("WAL receiver shutdown requested, shutting down");
+                            break;
                         },
                         loop_step_result = connection_manager_loop_step(
                             &mut broker_client,
                             &mut connection_manager_state,
                             &walreceiver_ctx,
+                            &loop_status,
                         ) => match loop_step_result {
                             ControlFlow::Continue(()) => continue,
                             ControlFlow::Break(()) => {
-                                info!("Connection manager loop ended, shutting down");
-                                connection_manager_state.shutdown().await;
-                                return Ok(());
+                                trace!("Connection manager loop ended, shutting down");
+                                break;
                             }
                         },
                     }
                 }
-            }.instrument(info_span!(parent: None, "wal_connection_manager", tenant = %tenant_id, timeline = %timeline_id))
+
+                connection_manager_state.shutdown().await;
+                *loop_status.write().unwrap() = None;
+                Ok(())
+            }
+            .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_id, timeline_id = %timeline_id))
         );
 
-        self.started.store(true, atomic::Ordering::Release);
-
-        Ok(())
+        Self {
+            timeline: TenantTimelineId::new(tenant_id, timeline_id),
+            manager_status,
+        }
     }
 
-    pub async fn stop(&self) {
+    pub async fn stop(self) {
         task_mgr::shutdown_tasks(
             Some(TaskKind::WalReceiverManager),
             Some(self.timeline.tenant_id),
             Some(self.timeline.timeline_id),
         )
         .await;
-        self.started.store(false, atomic::Ordering::Release);
+    }
+
+    pub(super) fn status(&self) -> Option<ConnectionManagerStatus> {
+        self.manager_status.read().unwrap().clone()
     }
 }
 
@@ -211,29 +200,19 @@ impl<E: Clone> TaskHandle<E> {
                 TaskEvent::End(match self.join_handle.as_mut() {
                     Some(jh) => {
                         if !jh.is_finished() {
-                            // Barring any implementation errors in this module, we can
-                            // only arrive here while the task that executes the future
-                            // passed to `Self::spawn()` is still execution. Cf the comment
-                            // in Self::spawn().
-                            //
-                            // This was logging at warning level in earlier versions, presumably
-                            // to leave some breadcrumbs in case we had an implementation
-                            // error that would would make us get stuck in `jh.await`.
-                            //
-                            // There hasn't been such a bug so far.
-                            // But in a busy system, e.g., during pageserver restart,
-                            // we arrive here often enough that the warning-level logs
-                            // became a distraction.
-                            // So, tone them down to info-level.
-                            //
-                            // XXX: rewrite this module to eliminate the race condition.
-                            info!("sender is dropped while join handle is still alive");
+                            // See: https://github.com/neondatabase/neon/issues/2885
+                            trace!("sender is dropped while join handle is still alive");
                         }
 
-                        let res = jh
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to join task: {e}"))
-                            .and_then(|x| x);
+                        let res = match jh.await {
+                            Ok(res) => res,
+                            Err(je) if je.is_cancelled() => unreachable!("not used"),
+                            Err(je) if je.is_panic() => {
+                                // already logged
+                                Ok(())
+                            }
+                            Err(je) => Err(anyhow::Error::new(je).context("join walreceiver task")),
+                        };
 
                         // For cancellation-safety, drop join_handle only after successful .await.
                         self.join_handle = None;
@@ -256,12 +235,12 @@ impl<E: Clone> TaskHandle<E> {
             match jh.await {
                 Ok(Ok(())) => debug!("Shutdown success"),
                 Ok(Err(e)) => error!("Shutdown task error: {e:?}"),
-                Err(join_error) => {
-                    if join_error.is_cancelled() {
-                        error!("Shutdown task was cancelled");
-                    } else {
-                        error!("Shutdown task join error: {join_error}")
-                    }
+                Err(je) if je.is_cancelled() => unreachable!("not used"),
+                Err(je) if je.is_panic() => {
+                    // already logged
+                }
+                Err(je) => {
+                    error!("Shutdown task join error: {je}")
                 }
             }
         }

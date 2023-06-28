@@ -4,11 +4,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use utils::bin_ser::SerializeError;
 
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::upload_queue::UploadQueueInitialized;
 
 use utils::lsn::Lsn;
 
@@ -55,6 +58,10 @@ pub struct IndexPart {
     #[serde(default)]
     version: usize,
 
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<NaiveDateTime>,
+
     /// Layer names, which are stored on the remote storage.
     ///
     /// Additional metadata can might exist in `layer_metadata`.
@@ -78,7 +85,7 @@ impl IndexPart {
     /// used to understand later versions.
     ///
     /// Version is currently informative only.
-    const LATEST_VERSION: usize = 1;
+    const LATEST_VERSION: usize = 2;
     pub const FILE_NAME: &'static str = "index_part.json";
 
     pub fn new(
@@ -101,11 +108,27 @@ impl IndexPart {
             layer_metadata,
             disk_consistent_lsn,
             metadata_bytes,
+            deleted_at: None,
         }
     }
 
     pub fn parse_metadata(&self) -> anyhow::Result<TimelineMetadata> {
         TimelineMetadata::from_bytes(&self.metadata_bytes)
+    }
+}
+
+impl TryFrom<&UploadQueueInitialized> for IndexPart {
+    type Error = SerializeError;
+
+    fn try_from(upload_queue: &UploadQueueInitialized) -> Result<Self, Self::Error> {
+        let disk_consistent_lsn = upload_queue.latest_metadata.disk_consistent_lsn();
+        let metadata_bytes = upload_queue.latest_metadata.to_bytes()?;
+
+        Ok(Self::new(
+            upload_queue.latest_files.clone(),
+            disk_consistent_lsn,
+            metadata_bytes,
+        ))
     }
 }
 
@@ -156,6 +179,7 @@ mod tests {
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: [113,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
+            deleted_at: None,
         };
 
         let part = serde_json::from_str::<IndexPart>(example).unwrap();
@@ -192,6 +216,7 @@ mod tests {
             ]),
             disk_consistent_lsn: "0/16960E8".parse::<Lsn>().unwrap(),
             metadata_bytes: [112,11,159,210,0,54,0,4,0,0,0,0,1,105,96,232,1,0,0,0,0,1,105,96,112,0,0,0,0,0,0,0,0,0,0,0,0,0,1,105,96,112,0,0,0,0,1,105,96,112,0,0,0,14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0].to_vec(),
+            deleted_at: None,
         };
 
         let part = serde_json::from_str::<IndexPart>(example).unwrap();
@@ -236,6 +261,7 @@ mod tests {
                 0, 0,
             ]
             .to_vec(),
+            deleted_at: None,
         };
 
         let empty_layers_parsed = serde_json::from_str::<IndexPart>(empty_layers_json).unwrap();

@@ -186,10 +186,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
     delete:
-      description: "Attempts to delete specified timeline. On 500 errors should be retried"
+      description: "Attempts to delete specified timeline. 500 and 409 errors should be retried"
       responses:
-        "200":
-          description: Ok
         "400":
           description: Error when no tenant id found in path or no timeline id
           content:
@@ -214,8 +212,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Deletion is already in progress, continue polling
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
         "412":
-          description: Tenant is missing
+          description: Tenant is missing, or timeline has children
           content:
             application/json:
               schema:
@@ -340,12 +344,53 @@ paths:
           format: hex
 
     post:
-      description: Schedules attach operation to happen in the background for given tenant
+      description: |
+        Schedules attach operation to happen in the background for the given tenant.
+        As soon as the caller sends this request, it must assume the pageserver
+        starts writing to the tenant's S3 state unless it receives one of the
+        distinguished errors below that state otherwise.
+
+        If a client receives a not-distinguished response, e.g., a network timeout,
+        it MUST retry the /attach request and poll again for the tenant's
+        attachment status.
+
+        After the client has received a 202, it MUST poll the tenant's
+        attachment status (field `attachment_status`) to reach state `attached`.
+        If the `attachment_status` is missing, the client MUST retry the `/attach`
+        request (goto previous paragraph). This is a robustness measure in case the tenant
+        status endpoint is buggy, but the attach operation is ongoing.
+
+        There is no way to cancel an in-flight request.
+
+        In any case, the client
+        * MUST NOT ASSUME that the /attach request has been lost in the network,
+        * MUST NOT ASSUME that the request has been lost, based on the observation
+          that a subsequent tenant status request returns 404. The request may
+          still be in flight. It must be retried.
+
+        The client SHOULD supply a `TenantConfig` for the tenant in the request body.
+        Settings specified in the config override the pageserver's defaults.
+        It is guaranteed that the config settings are applied before the pageserver
+        starts operating on the tenant. E.g., if the config specifies a specific
+        PITR interval for a tenant, then that setting will be in effect before the
+        pageserver starts the garbage collection loop. This enables a client to
+        guarantee a specific PITR setting across detach/attach cycles.
+        The pageserver will reject the request if it cannot parse the config, or
+        if there are any unknown fields in it.
+
+        If the client does not supply a config, the pageserver will use its defaults.
+        This behavior is deprecated: https://github.com/neondatabase/neon/issues/4282
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantAttachRequest"
       responses:
         "202":
           description: Tenant attaching scheduled
         "400":
-          description: Error when no tenant id found in path parameters
+          description: Bad Request
           content:
             application/json:
               schema:
@@ -638,6 +683,8 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+                - new_timeline_id
               properties:
                 new_timeline_id:
                   type: string
@@ -719,13 +766,16 @@ paths:
                 $ref: "#/components/schemas/Error"
     post:
       description: |
-        Create a tenant. Returns new tenant id on success.\
+        Create a tenant. Returns new tenant id on success.
+
         If no new tenant id is specified in parameters, it would be generated. It's an error to recreate the same tenant.
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantCreateInfo"
+              $ref: "#/components/schemas/TenantCreateRequest"
       responses:
         "201":
           description: New tenant created successfully
@@ -768,11 +818,13 @@ paths:
     put:
       description: |
         Update tenant's config.
+
+        Invalid fields in the tenant config will cause the request to be rejected with status 400.
       requestBody:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/TenantConfigInfo"
+              $ref: "#/components/schemas/TenantConfigRequest"
       responses:
         "200":
           description: OK
@@ -824,7 +876,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TenantConfig"
+                $ref: "#/components/schemas/TenantConfigResponse"
         "400":
           description: Malformed get tenanant config request
           content:
@@ -866,42 +918,73 @@ components:
       type: object
       required:
         - id
+        - attachment_status
       properties:
         id:
           type: string
         current_physical_size:
           type: integer
-        has_in_progress_downloads:
-          type: boolean
-    TenantCreateInfo:
+        attachment_status:
+          description: |
+            Status of this tenant's attachment to this pageserver.
+
+            - `maybe` means almost nothing, don't read anything into it
+              except for the fact that the pageserver _might_ be already
+              writing to the tenant's S3 state, so, DO NOT ATTACH the
+              tenant to any other pageserver, or we risk split-brain.
+            - `attached` means that the attach operation has completed,
+              successfully
+            - `failed` means that attach has failed. For reason check corresponding `reason` failed.
+              `failed` is the terminal state, retrying attach call wont resolve the issue.
+              For example this can be caused by s3 being unreachable. The retry may be implemented
+              with call to detach, though it would be better to not automate it and inspec failed state
+              manually before proceeding with a retry.
+
+            See the tenant `/attach` endpoint for more information.
+          type: object
+          required:
+            - slug
+            - data
+          properties:
+            slug:
+              type: string
+              enum: [ "maybe", "attached", "failed" ]
+            data:
+              type: object
+              properties:
+                reason:
+                  type: string
+
+    TenantCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/TenantConfig'
+        - type: object
+          required:
+            - new_tenant_id
+          properties:
+            new_tenant_id:
+              type: string
+              format: hex
+    TenantAttachRequest:
+      type: object
+      required:
+        - config
+      properties:
+        config:
+          $ref: '#/components/schemas/TenantConfig'
+    TenantConfigRequest:
+      allOf:
+        - $ref: '#/components/schemas/TenantConfig'
+        - type: object
+          required:
+            - tenant_id
+          properties:
+            tenant_id:
+              type: string
+              format: hex
+    TenantConfig:
       type: object
       properties:
-        new_tenant_id:
-          type: string
-          format: hex
-        tenant_id:
-          type: string
-          format: hex
-        gc_period:
-          type: string
-        gc_horizon:
-          type: integer
-        pitr_interval:
-          type: string
-        checkpoint_distance:
-          type: integer
-        checkpoint_timeout:
-          type: string
-        compaction_period:
-          type: string
-        compaction_threshold:
-          type: string
-    TenantConfigInfo:
-      type: object
-      properties:
-        tenant_id:
-          type: string
-          format: hex
         gc_period:
           type: string
         gc_horizon:
@@ -928,13 +1011,13 @@ components:
           type: integer
         trace_read_requests:
           type: boolean
-    TenantConfig:
+    TenantConfigResponse:
       type: object
       properties:
         tenant_specific_overrides:
-          $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfig"
         effective_config:
-          $ref: "#/components/schemas/TenantConfigInfo"
+          $ref: "#/components/schemas/TenantConfig"
     TimelineInfo:
       type: object
       required:

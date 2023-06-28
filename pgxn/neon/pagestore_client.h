@@ -52,7 +52,7 @@ typedef struct
 #define NEON_TAG "[NEON_SMGR] "
 #define neon_log(tag, fmt, ...) ereport(tag,                                  \
 										(errmsg(NEON_TAG fmt, ##__VA_ARGS__), \
-										 errhidestmt(true), errhidecontext(true), internalerrposition(0)))
+										 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
 
 /*
  * supertype of all the Neon*Request structs below

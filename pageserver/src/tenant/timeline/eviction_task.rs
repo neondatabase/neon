@@ -22,7 +22,7 @@ use std::{
 
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, info_span, instrument, warn, Instrument};
 
 use crate::{
     context::{DownloadBehavior, RequestContext},
@@ -30,9 +30,11 @@ use crate::{
     tenant::{
         config::{EvictionPolicy, EvictionPolicyLayerAccessThreshold},
         storage_layer::PersistentLayer,
-        Tenant,
+        LogicalSizeCalculationCause, Tenant,
     },
 };
+
+use utils::completion;
 
 use super::Timeline;
 
@@ -47,8 +49,12 @@ pub struct EvictionTaskTenantState {
 }
 
 impl Timeline {
-    pub(super) fn launch_eviction_task(self: &Arc<Self>) {
+    pub(super) fn launch_eviction_task(
+        self: &Arc<Self>,
+        background_tasks_can_start: Option<&completion::Barrier>,
+    ) {
         let self_clone = Arc::clone(self);
+        let background_tasks_can_start = background_tasks_can_start.cloned();
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
@@ -57,7 +63,13 @@ impl Timeline {
             &format!("layer eviction for {}/{}", self.tenant_id, self.timeline_id),
             false,
             async move {
-                self_clone.eviction_task(task_mgr::shutdown_token()).await;
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()); }
+                    _ = completion::Barrier::maybe_wait(background_tasks_can_start) => {}
+                };
+
+                self_clone.eviction_task(cancel).await;
                 info!("eviction task finishing");
                 Ok(())
             },
@@ -120,6 +132,13 @@ impl Timeline {
                 }
                 let elapsed = start.elapsed();
                 crate::tenant::tasks::warn_when_period_overrun(elapsed, p.period, "eviction");
+                crate::metrics::EVICTION_ITERATION_DURATION
+                    .get_metric_with_label_values(&[
+                        &format!("{}", p.period.as_secs()),
+                        &format!("{}", p.threshold.as_secs()),
+                    ])
+                    .unwrap()
+                    .observe(elapsed.as_secs_f64());
                 ControlFlow::Continue(start + p.period)
             }
         }
@@ -178,13 +197,20 @@ impl Timeline {
         // We don't want to hold the layer map lock during eviction.
         // So, we just need to deal with this.
         let candidates: Vec<Arc<dyn PersistentLayer>> = {
-            let layers = self.layers.read().unwrap();
+            let layers = self.layers.read().await;
             let mut candidates = Vec::new();
             for hist_layer in layers.iter_historic_layers() {
                 if hist_layer.is_remote_layer() {
                     continue;
                 }
-                let last_activity_ts = hist_layer.access_stats().latest_activity();
+
+                let last_activity_ts = hist_layer.access_stats().latest_activity().unwrap_or_else(|| {
+                    // We only use this fallback if there's an implementation error.
+                    // `latest_activity` already does rate-limited warn!() log.
+                    debug!(layer=%hist_layer.filename().file_name(), "last_activity returns None, using SystemTime::now");
+                    SystemTime::now()
+                });
+
                 let no_activity_for = match now.duration_since(last_activity_ts) {
                     Ok(d) => d,
                     Err(_e) => {
@@ -269,6 +295,7 @@ impl Timeline {
         ControlFlow::Continue(())
     }
 
+    #[instrument(skip_all)]
     async fn imitate_layer_accesses(
         &self,
         p: &EvictionPolicyLayerAccessThreshold,
@@ -317,6 +344,7 @@ impl Timeline {
     }
 
     /// Recompute the values which would cause on-demand downloads during restart.
+    #[instrument(skip_all)]
     async fn imitate_timeline_cached_layer_accesses(
         &self,
         cancel: &CancellationToken,
@@ -325,7 +353,15 @@ impl Timeline {
         let lsn = self.get_last_record_lsn();
 
         // imitiate on-restart initial logical size
-        let size = self.calculate_logical_size(lsn, cancel.clone(), ctx).await;
+        let size = self
+            .calculate_logical_size(
+                lsn,
+                LogicalSizeCalculationCause::EvictionTaskImitation,
+                cancel.clone(),
+                ctx,
+            )
+            .instrument(info_span!("calculate_logical_size"))
+            .await;
 
         match &size {
             Ok(_size) => {
@@ -340,7 +376,11 @@ impl Timeline {
         }
 
         // imitiate repartiting on first compactation
-        if let Err(e) = self.collect_keyspace(lsn, ctx).await {
+        if let Err(e) = self
+            .collect_keyspace(lsn, ctx)
+            .instrument(info_span!("collect_keyspace"))
+            .await
+        {
             // if this failed, we probably failed logical size because these use the same keys
             if size.is_err() {
                 // ignore, see above comment
@@ -353,6 +393,7 @@ impl Timeline {
     }
 
     // Imitate the synthetic size calculation done by the consumption_metrics module.
+    #[instrument(skip_all)]
     async fn imitate_synthetic_size_calculation_worker(
         &self,
         tenant: &Arc<Tenant>,
@@ -390,8 +431,15 @@ impl Timeline {
             .inner();
 
         let mut throwaway_cache = HashMap::new();
-        let gather =
-            crate::tenant::size::gather_inputs(tenant, limit, None, &mut throwaway_cache, ctx);
+        let gather = crate::tenant::size::gather_inputs(
+            tenant,
+            limit,
+            None,
+            &mut throwaway_cache,
+            LogicalSizeCalculationCause::EvictionTaskImitation,
+            ctx,
+        )
+        .instrument(info_span!("gather_inputs"));
 
         tokio::select! {
             _ = cancel.cancelled() => {}

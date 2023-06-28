@@ -50,7 +50,9 @@ use crate::import_datadir::import_wal_from_tar;
 use crate::metrics::{LIVE_CONNECTIONS_COUNT, SMGR_QUERY_TIME};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant;
 use crate::tenant::mgr;
+use crate::tenant::mgr::GetTenantError;
 use crate::tenant::{Tenant, Timeline};
 use crate::trace::Tracer;
 
@@ -172,6 +174,7 @@ async fn read_tar_eof(mut reader: (impl AsyncRead + Unpin)) -> anyhow::Result<()
 ///
 pub async fn libpq_listener_main(
     conf: &'static PageServerConf,
+    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     listener: TcpListener,
     auth_type: AuthType,
@@ -213,7 +216,14 @@ pub async fn libpq_listener_main(
                     None,
                     "serving compute connection task",
                     false,
-                    page_service_conn_main(conf, local_auth, socket, auth_type, connection_ctx),
+                    page_service_conn_main(
+                        conf,
+                        broker_client.clone(),
+                        local_auth,
+                        socket,
+                        auth_type,
+                        connection_ctx,
+                    ),
                 );
             }
             Err(err) => {
@@ -230,6 +240,7 @@ pub async fn libpq_listener_main(
 
 async fn page_service_conn_main(
     conf: &'static PageServerConf,
+    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
@@ -256,14 +267,17 @@ async fn page_service_conn_main(
     //
     // no write timeout is used, because the kernel is assumed to error writes after some time.
     let mut socket = tokio_io_timeout::TimeoutReader::new(socket);
-    socket.set_timeout(Some(std::time::Duration::from_secs(60 * 10)));
+
+    // timeout should be lower, but trying out multiple days for
+    // <https://github.com/neondatabase/neon/issues/4205>
+    socket.set_timeout(Some(std::time::Duration::from_secs(60 * 60 * 24 * 3)));
     let socket = std::pin::pin!(socket);
 
     // XXX: pgbackend.run() should take the connection_ctx,
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler = PageServerHandler::new(conf, auth, connection_ctx);
+    let mut conn_handler = PageServerHandler::new(conf, broker_client, auth, connection_ctx);
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend
@@ -321,6 +335,7 @@ impl PageRequestMetrics {
 
 struct PageServerHandler {
     _conf: &'static PageServerConf,
+    broker_client: storage_broker::BrokerClientChannel,
     auth: Option<Arc<JwtAuth>>,
     claims: Option<Claims>,
 
@@ -334,11 +349,13 @@ struct PageServerHandler {
 impl PageServerHandler {
     pub fn new(
         conf: &'static PageServerConf,
+        broker_client: storage_broker::BrokerClientChannel,
         auth: Option<Arc<JwtAuth>>,
         connection_ctx: RequestContext,
     ) -> Self {
         PageServerHandler {
             _conf: conf,
+            broker_client,
             auth,
             claims: None,
             connection_ctx,
@@ -373,7 +390,9 @@ impl PageServerHandler {
         };
 
         // Check that the timeline exists
-        let timeline = tenant.get_timeline(timeline_id, true)?;
+        let timeline = tenant
+            .get_timeline(timeline_id, true)
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         // switch client to COPYBOTH
         pgb.write_message_noflush(&BeMessage::CopyBothResponse)?;
@@ -491,7 +510,12 @@ impl PageServerHandler {
 
         let mut copyin_reader = pin!(StreamReader::new(copyin_stream(pgb)));
         timeline
-            .import_basebackup_from_tar(&mut copyin_reader, base_lsn, &ctx)
+            .import_basebackup_from_tar(
+                &mut copyin_reader,
+                base_lsn,
+                self.broker_client.clone(),
+                &ctx,
+            )
             .await?;
 
         // Read the end of the tar archive.
@@ -880,7 +904,7 @@ where
 
             self.check_permission(Some(tenant_id))?;
 
-            let lsn = if params.len() == 3 {
+            let lsn = if params.len() >= 3 {
                 Some(
                     Lsn::from_str(params[2])
                         .with_context(|| format!("Failed to parse Lsn from {}", params[2]))?,
@@ -889,10 +913,24 @@ where
                 None
             };
 
-            // Check that the timeline exists
-            self.handle_basebackup_request(pgb, tenant_id, timeline_id, lsn, None, false, ctx)
-                .await?;
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            metrics::metric_vec_duration::observe_async_block_duration_by_result(
+                &*crate::metrics::BASEBACKUP_QUERY_TIME,
+                async move {
+                    self.handle_basebackup_request(
+                        pgb,
+                        tenant_id,
+                        timeline_id,
+                        lsn,
+                        None,
+                        false,
+                        ctx,
+                    )
+                    .await?;
+                    pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                    anyhow::Ok(())
+                },
+            )
+            .await?;
         }
         // return pair of prev_lsn and last_lsn
         else if query_string.starts_with("get_last_record_rlsn ") {
@@ -1128,7 +1166,9 @@ enum GetActiveTenantError {
         wait_time: Duration,
     },
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    NotFound(GetTenantError),
+    #[error(transparent)]
+    WaitTenantActive(tenant::WaitToBecomeActiveError),
 }
 
 impl From<GetActiveTenantError> for QueryError {
@@ -1137,7 +1177,8 @@ impl From<GetActiveTenantError> for QueryError {
             GetActiveTenantError::WaitForActiveTimeout { .. } => QueryError::Disconnected(
                 ConnectionError::Io(io::Error::new(io::ErrorKind::TimedOut, e.to_string())),
             ),
-            GetActiveTenantError::Other(e) => QueryError::Other(e),
+            GetActiveTenantError::WaitTenantActive(e) => QueryError::Other(anyhow::Error::new(e)),
+            GetActiveTenantError::NotFound(e) => QueryError::Other(anyhow::Error::new(e)),
         }
     }
 }
@@ -1153,13 +1194,16 @@ async fn get_active_tenant_with_timeout(
 ) -> Result<Arc<Tenant>, GetActiveTenantError> {
     let tenant = match mgr::get_tenant(tenant_id, false).await {
         Ok(tenant) => tenant,
-        Err(e) => return Err(GetActiveTenantError::Other(e.into())),
+        Err(e @ GetTenantError::NotFound(_)) => return Err(GetActiveTenantError::NotFound(e)),
+        Err(GetTenantError::NotActive(_)) => {
+            unreachable!("we're calling get_tenant with active=false")
+        }
     };
     let wait_time = Duration::from_secs(30);
     match tokio::time::timeout(wait_time, tenant.wait_to_become_active()).await {
         Ok(Ok(())) => Ok(tenant),
         // no .context(), the error message is good enough and some tests depend on it
-        Ok(Err(wait_error)) => Err(GetActiveTenantError::Other(wait_error)),
+        Ok(Err(e)) => Err(GetActiveTenantError::WaitTenantActive(e)),
         Err(_) => {
             let latest_state = tenant.current_state();
             if latest_state == TenantState::Active {
@@ -1174,13 +1218,34 @@ async fn get_active_tenant_with_timeout(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum GetActiveTimelineError {
+    #[error(transparent)]
+    Tenant(GetActiveTenantError),
+    #[error(transparent)]
+    Timeline(anyhow::Error),
+}
+
+impl From<GetActiveTimelineError> for QueryError {
+    fn from(e: GetActiveTimelineError) -> Self {
+        match e {
+            GetActiveTimelineError::Tenant(e) => e.into(),
+            GetActiveTimelineError::Timeline(e) => QueryError::Other(e),
+        }
+    }
+}
+
 /// Shorthand for getting a reference to a Timeline of an Active tenant.
 async fn get_active_tenant_timeline(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     ctx: &RequestContext,
-) -> Result<Arc<Timeline>, GetActiveTenantError> {
-    let tenant = get_active_tenant_with_timeout(tenant_id, ctx).await?;
-    let timeline = tenant.get_timeline(timeline_id, true)?;
+) -> Result<Arc<Timeline>, GetActiveTimelineError> {
+    let tenant = get_active_tenant_with_timeout(tenant_id, ctx)
+        .await
+        .map_err(GetActiveTimelineError::Tenant)?;
+    let timeline = tenant
+        .get_timeline(timeline_id, true)
+        .map_err(|e| GetActiveTimelineError::Timeline(anyhow::anyhow!(e)))?;
     Ok(timeline)
 }

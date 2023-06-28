@@ -1,19 +1,3 @@
-//
-// XXX: This starts to be scarry similar to the `PostgresNode` from `control_plane`,
-// but there are several things that makes `PostgresNode` usage inconvenient in the
-// cloud:
-// - it inherits from `LocalEnv`, which contains **all-all** the information about
-//   a complete service running
-// - it uses `PageServerNode` with information about http endpoint, which we do not
-//   need in the cloud again
-// - many tiny pieces like, for example, we do not use `pg_ctl` in the cloud
-//
-// Thus, to use `PostgresNode` in the cloud, we need to 'mock' a bunch of required
-// attributes (not required for the cloud). Yet, it is still tempting to unify these
-// `PostgresNode` and `ComputeNode` and use one in both places.
-//
-// TODO: stabilize `ComputeNode` and think about using it in the `control_plane`.
-//
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -30,7 +14,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::ComputeSpec;
+use compute_api::spec::{ComputeMode, ComputeSpec};
 
 use crate::config;
 use crate::pg_helpers::*;
@@ -67,8 +51,9 @@ pub struct ComputeNode {
 pub struct ComputeState {
     pub start_time: DateTime<Utc>,
     pub status: ComputeStatus,
-    /// Timestamp of the last Postgres activity
-    pub last_active: DateTime<Utc>,
+    /// Timestamp of the last Postgres activity. It could be `None` if
+    /// compute wasn't used since start.
+    pub last_active: Option<DateTime<Utc>>,
     pub error: Option<String>,
     pub pspec: Option<ParsedSpec>,
     pub metrics: ComputeMetrics,
@@ -79,7 +64,7 @@ impl ComputeState {
         Self {
             start_time: Utc::now(),
             status: ComputeStatus::Empty,
-            last_active: Utc::now(),
+            last_active: None,
             error: None,
             pspec: None,
             metrics: ComputeMetrics::default(),
@@ -105,26 +90,38 @@ pub struct ParsedSpec {
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
+        // Extract the options from the spec file that are needed to connect to
+        // the storage system.
+        //
+        // For backwards-compatibility, the top-level fields in the spec file
+        // may be empty. In that case, we need to dig them from the GUCs in the
+        // cluster.settings field.
         let pageserver_connstr = spec
-            .cluster
-            .settings
-            .find("neon.pageserver_connstring")
+            .pageserver_connstring
+            .clone()
+            .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
             .ok_or("pageserver connstr should be provided")?;
         let storage_auth_token = spec.storage_auth_token.clone();
-        let tenant_id: TenantId = spec
-            .cluster
-            .settings
-            .find("neon.tenant_id")
-            .ok_or("tenant id should be provided")
-            .map(|s| TenantId::from_str(&s))?
-            .or(Err("invalid tenant id"))?;
-        let timeline_id: TimelineId = spec
-            .cluster
-            .settings
-            .find("neon.timeline_id")
-            .ok_or("timeline id should be provided")
-            .map(|s| TimelineId::from_str(&s))?
-            .or(Err("invalid timeline id"))?;
+        let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
+            tenant_id
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.tenant_id")
+                .ok_or("tenant id should be provided")
+                .map(|s| TenantId::from_str(&s))?
+                .or(Err("invalid tenant id"))?
+        };
+        let timeline_id: TimelineId = if let Some(timeline_id) = spec.timeline_id {
+            timeline_id
+        } else {
+            spec.cluster
+                .settings
+                .find("neon.timeline_id")
+                .ok_or("timeline id should be provided")
+                .map(|s| TimelineId::from_str(&s))?
+                .or(Err("invalid timeline id"))?
+        };
 
         Ok(ParsedSpec {
             spec,
@@ -134,6 +131,84 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
             timeline_id,
         })
     }
+}
+
+/// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
+/// that we give to customers
+fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
+    let roles = spec
+        .cluster
+        .roles
+        .iter()
+        .map(|r| format!("'{}'", escape_literal(&r.name)))
+        .collect::<Vec<_>>();
+
+    let dbs = spec
+        .cluster
+        .databases
+        .iter()
+        .map(|db| format!("'{}'", escape_literal(&db.name)))
+        .collect::<Vec<_>>();
+
+    let roles_decl = if roles.is_empty() {
+        String::from("roles text[] := NULL;")
+    } else {
+        format!(
+            r#"
+               roles text[] := ARRAY(SELECT rolname
+                                     FROM pg_catalog.pg_roles
+                                     WHERE rolname IN ({}));"#,
+            roles.join(", ")
+        )
+    };
+
+    let database_decl = if dbs.is_empty() {
+        String::from("dbs text[] := NULL;")
+    } else {
+        format!(
+            r#"
+               dbs text[] := ARRAY(SELECT datname
+                                   FROM pg_catalog.pg_database
+                                   WHERE datname IN ({}));"#,
+            dbs.join(", ")
+        )
+    };
+
+    // ALL PRIVILEGES grants CREATE, CONNECT, and TEMPORARY on all databases
+    // (see https://www.postgresql.org/docs/current/ddl-priv.html)
+    let query = format!(
+        r#"
+            DO $$
+                DECLARE
+                    r text;
+                    {}
+                    {}
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT FROM pg_catalog.pg_roles WHERE rolname = 'neon_superuser')
+                    THEN
+                        CREATE ROLE neon_superuser CREATEDB CREATEROLE NOLOGIN IN ROLE pg_read_all_data, pg_write_all_data;
+                        IF array_length(roles, 1) IS NOT NULL THEN
+                            EXECUTE format('GRANT neon_superuser TO %s',
+                                           array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(roles) as x), ', '));
+                            FOREACH r IN ARRAY roles LOOP
+                                EXECUTE format('ALTER ROLE %s CREATEROLE CREATEDB', quote_ident(r));
+                            END LOOP;
+                        END IF;
+                        IF array_length(dbs, 1) IS NOT NULL THEN
+                            EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %s TO neon_superuser',
+                                           array_to_string(ARRAY(SELECT quote_ident(x) FROM unnest(dbs) as x), ', '));
+                        END IF;
+                    END IF;
+                END
+            $$;"#,
+        roles_decl, database_decl,
+    );
+    info!("Neon superuser created:\n{}", &query);
+    client
+        .simple_query(&query)
+        .map_err(|e| anyhow::anyhow!(e).context(query))?;
+    Ok(())
 }
 
 impl ComputeNode {
@@ -249,37 +324,9 @@ impl ComputeNode {
     /// safekeepers sync, basebackup, etc.
     #[instrument(skip(self, compute_state))]
     pub fn prepare_pgdata(&self, compute_state: &ComputeState) -> Result<()> {
-        #[derive(Clone)]
-        enum Replication {
-            Primary,
-            Static { lsn: Lsn },
-            HotStandby,
-        }
-
         let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
-
-        let hot_replica = if let Some(option) = spec.cluster.settings.find_ref("hot_standby") {
-            if let Some(value) = &option.value {
-                anyhow::ensure!(option.vartype == "bool");
-                matches!(value.as_str(), "on" | "yes" | "true")
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        let replication = if hot_replica {
-            Replication::HotStandby
-        } else if let Some(lsn) = spec.cluster.settings.find("recovery_target_lsn") {
-            Replication::Static {
-                lsn: Lsn::from_str(&lsn)?,
-            }
-        } else {
-            Replication::Primary
-        };
 
         // Remove/create an empty pgdata directory and put configuration there.
         self.create_pgdata()?;
@@ -288,8 +335,8 @@ impl ComputeNode {
         // Syncing safekeepers is only safe with primary nodes: if a primary
         // is already connected it will be kicked out, so a secondary (standby)
         // cannot sync safekeepers.
-        let lsn = match &replication {
-            Replication::Primary => {
+        let lsn = match spec.mode {
+            ComputeMode::Primary => {
                 info!("starting safekeepers syncing");
                 let lsn = self
                     .sync_safekeepers(pspec.storage_auth_token.clone())
@@ -297,11 +344,11 @@ impl ComputeNode {
                 info!("safekeepers synced at LSN {}", lsn);
                 lsn
             }
-            Replication::Static { lsn } => {
+            ComputeMode::Static(lsn) => {
                 info!("Starting read-only node at static LSN {}", lsn);
-                *lsn
+                lsn
             }
-            Replication::HotStandby => {
+            ComputeMode::Replica => {
                 info!("Initializing standby from latest Pageserver LSN");
                 Lsn(0)
             }
@@ -321,9 +368,9 @@ impl ComputeNode {
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
 
-        match &replication {
-            Replication::Primary | Replication::Static { .. } => {}
-            Replication::HotStandby => {
+        match spec.mode {
+            ComputeMode::Primary => {}
+            ComputeMode::Replica | ComputeMode::Static(..) => {
                 add_standby_signal(pgdata_path)?;
             }
         }
@@ -378,6 +425,8 @@ impl ComputeNode {
                     .map_err(|_| anyhow::anyhow!("invalid connstr"))?;
 
                 let mut client = Client::connect(zenith_admin_connstr.as_str(), NoTls)?;
+                // Disable forwarding so that users don't get a cloud_admin role
+                client.simple_query("SET neon.forward_ddl = false")?;
                 client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
                 client.simple_query("GRANT zenith_admin TO cloud_admin")?;
                 drop(client);
@@ -388,21 +437,20 @@ impl ComputeNode {
             Ok(client) => client,
         };
 
+        // Disable DDL forwarding because control plane already knows about these roles/databases.
+        client.simple_query("SET neon.forward_ddl = false")?;
+
         // Proceed with post-startup configuration. Note, that order of operations is important.
         let spec = &compute_state.pspec.as_ref().expect("spec must be set").spec;
+        create_neon_superuser(spec, &mut client)?;
         handle_roles(spec, &mut client)?;
         handle_databases(spec, &mut client)?;
         handle_role_deletions(spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(spec, self.connstr.as_str(), &mut client)?;
+        handle_grants(spec, self.connstr.as_str())?;
         handle_extensions(spec, &mut client)?;
 
         // 'Close' connection
         drop(client);
-
-        info!(
-            "finished configuration of compute for project {}",
-            spec.cluster.cluster_id
-        );
 
         Ok(())
     }
@@ -430,11 +478,15 @@ impl ComputeNode {
         self.pg_reload_conf(&mut client)?;
 
         // Proceed with post-startup configuration. Note, that order of operations is important.
-        handle_roles(&spec, &mut client)?;
-        handle_databases(&spec, &mut client)?;
-        handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-        handle_grants(&spec, self.connstr.as_str(), &mut client)?;
-        handle_extensions(&spec, &mut client)?;
+        // Disable DDL forwarding because control plane already knows about these roles/databases.
+        if spec.mode == ComputeMode::Primary {
+            client.simple_query("SET neon.forward_ddl = false")?;
+            handle_roles(&spec, &mut client)?;
+            handle_databases(&spec, &mut client)?;
+            handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
+            handle_grants(&spec, self.connstr.as_str())?;
+            handle_extensions(&spec, &mut client)?;
+        }
 
         // 'Close' connection
         drop(client);
@@ -452,22 +504,24 @@ impl ComputeNode {
     #[instrument(skip(self))]
     pub fn start_compute(&self) -> Result<std::process::Child> {
         let compute_state = self.state.lock().unwrap().clone();
-        let spec = compute_state.pspec.as_ref().expect("spec must be set");
+        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
         info!(
             "starting compute for project {}, operation {}, tenant {}, timeline {}",
-            spec.spec.cluster.cluster_id,
-            spec.spec.operation_uuid.as_deref().unwrap_or("None"),
-            spec.tenant_id,
-            spec.timeline_id,
+            pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None"),
+            pspec.spec.operation_uuid.as_deref().unwrap_or("None"),
+            pspec.tenant_id,
+            pspec.timeline_id,
         );
 
         self.prepare_pgdata(&compute_state)?;
 
         let start_time = Utc::now();
 
-        let pg = self.start_postgres(spec.storage_auth_token.clone())?;
+        let pg = self.start_postgres(pspec.storage_auth_token.clone())?;
 
-        self.apply_config(&compute_state)?;
+        if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
+            self.apply_config(&compute_state)?;
+        }
 
         let startup_end_time = Utc::now();
         {
@@ -484,6 +538,11 @@ impl ComputeNode {
                 .as_millis() as u64;
         }
         self.set_status(ComputeStatus::Running);
+
+        info!(
+            "finished configuration of compute for project {}",
+            pspec.spec.cluster.cluster_id.as_deref().unwrap_or("None")
+        );
 
         Ok(pg)
     }

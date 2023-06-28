@@ -2675,7 +2675,6 @@ bool
 neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 {
 	XLogRecPtr	end_recptr = record->EndRecPtr;
-	XLogRecPtr	prev_end_recptr = record->ReadRecPtr - 1;
 	RelFileNode	rnode;
 	ForkNumber	forknum;
 	BlockNumber	blkno;
@@ -2719,16 +2718,15 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 
 	no_redo_needed = buffer < 0;
 
-	/* we don't have the buffer in memory, update lwLsn past this record */
+	/* In both cases st lwlsn past this WAL record */
+	SetLastWrittenLSNForBlock(end_recptr, rnode, forknum, blkno);
+
+	/* we don't have the buffer in memory, update lwLsn past this record,
+	 * also evict page fro file cache
+	 */
 	if (no_redo_needed)
-	{
-		SetLastWrittenLSNForBlock(end_recptr, rnode, forknum, blkno);
 		lfc_evict(rnode, forknum, blkno);
-	}
-	else
-	{
-		SetLastWrittenLSNForBlock(prev_end_recptr, rnode, forknum, blkno);
-	}
+
 
 	LWLockRelease(partitionLock);
 
@@ -2736,7 +2734,10 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 	if (get_cached_relsize(rnode, forknum, &relsize))
 	{
 		if (relsize < blkno + 1)
+		{
 			update_cached_relsize(rnode, forknum, blkno + 1);
+			SetLastWrittenLSNForRelation(end_recptr, rnode, forknum);
+		}
 	}
 	else
 	{
@@ -2768,6 +2769,7 @@ neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id)
 		Assert(nbresponse->n_blocks > blkno);
 
 		set_cached_relsize(rnode, forknum, nbresponse->n_blocks);
+		SetLastWrittenLSNForRelation(end_recptr, rnode, forknum);
 
 		elog(SmgrTrace, "Set length to %d", nbresponse->n_blocks);
 	}

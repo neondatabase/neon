@@ -24,9 +24,11 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
+    timeline_delete_wait_completed,
     wait_for_upload_queue_empty,
     wait_until_tenant_active,
 )
+from fixtures.pg_version import PgVersion
 from fixtures.types import TenantId, TimelineId
 from fixtures.utils import get_timeline_dir_size, wait_until
 
@@ -271,7 +273,7 @@ def test_timeline_initial_logical_size_calculation_cancellation(
             if deletion_method == "tenant_detach":
                 client.tenant_detach(tenant_id)
             elif deletion_method == "timeline_delete":
-                client.timeline_delete(tenant_id, timeline_id)
+                timeline_delete_wait_completed(client, tenant_id, timeline_id)
             delete_timeline_success.put(True)
         except PageserverApiException:
             delete_timeline_success.put(False)
@@ -489,7 +491,7 @@ def test_timeline_size_metrics(
     test_output_dir: Path,
     port_distributor: PortDistributor,
     pg_distrib_dir: Path,
-    pg_version: str,
+    pg_version: PgVersion,
 ):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()

@@ -10,7 +10,7 @@ use tracing::{info, info_span, Instrument};
 use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
-use crate::metrics::TrafficMetrics;
+use crate::metrics::{TrafficMetrics, PG_QUERIES_FINISHED, PG_QUERIES_RECEIVED};
 use crate::wal_service::ConnectionId;
 use crate::{GlobalTimelines, SafeKeeperConf};
 use postgres_backend::QueryError;
@@ -69,6 +69,15 @@ fn parse_cmd(cmd: &str) -> anyhow::Result<SafekeeperPostgresCommand> {
         })
     } else {
         anyhow::bail!("unsupported command {cmd}");
+    }
+}
+
+fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
+    match cmd {
+        SafekeeperPostgresCommand::StartWalPush => "START_WAL_PUSH",
+        SafekeeperPostgresCommand::StartReplication { .. } => "START_REPLICATION",
+        SafekeeperPostgresCommand::IdentifySystem => "IDENTIFY_SYSTEM",
+        SafekeeperPostgresCommand::JSONCtrl { .. } => "JSON_CTRL",
     }
 }
 
@@ -168,6 +177,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         }
 
         let cmd = parse_cmd(query_string)?;
+        let cmd_str = cmd_to_string(&cmd);
+
+        PG_QUERIES_RECEIVED.with_label_values(&[cmd_str]).inc();
+        scopeguard::defer! {
+            PG_QUERIES_FINISHED.with_label_values(&[cmd_str]).inc();
+        }
 
         info!(
             "got query {:?} in timeline {:?}",
@@ -241,14 +256,14 @@ impl SafekeeperPostgresHandler {
 
         let lsn = if self.is_walproposer_recovery() {
             // walproposer should get all local WAL until flush_lsn
-            tli.get_flush_lsn()
+            tli.get_flush_lsn().await
         } else {
             // other clients shouldn't get any uncommitted WAL
-            tli.get_state().0.commit_lsn
+            tli.get_state().await.0.commit_lsn
         }
         .to_string();
 
-        let sysid = tli.get_state().1.server.system_id.to_string();
+        let sysid = tli.get_state().await.1.server.system_id.to_string();
         let lsn_bytes = lsn.as_bytes();
         let tli = PG_TLI.to_string();
         let tli_bytes = tli.as_bytes();

@@ -4,7 +4,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Optional, Type
 
-import backoff  # type: ignore
+import backoff
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import PgProtocol, PortDistributor, VanillaPostgres
 
@@ -37,6 +37,7 @@ class PgSniRouter(PgProtocol):
         destination: str,
         tls_cert: Path,
         tls_key: Path,
+        test_output_dir: Path,
     ):
         # Must use a hostname rather than IP here, for SNI to work
         host = "localhost"
@@ -49,6 +50,7 @@ class PgSniRouter(PgProtocol):
         self.tls_cert = tls_cert
         self.tls_key = tls_key
         self._popen: Optional[subprocess.Popen[bytes]] = None
+        self.test_output_dir = test_output_dir
 
     def start(self) -> "PgSniRouter":
         assert self._popen is None
@@ -60,8 +62,12 @@ class PgSniRouter(PgProtocol):
             *["--destination", self.destination],
         ]
 
-        self._popen = subprocess.Popen(args)
+        router_log_path = self.test_output_dir / "pg_sni_router.log"
+        router_log = open(router_log_path, "w")
+
+        self._popen = subprocess.Popen(args, stderr=router_log)
         self._wait_until_ready()
+        log.info(f"pg_sni_router started, log file: {router_log_path}")
         return self
 
     @backoff.on_exception(backoff.expo, OSError, max_time=10)
@@ -121,6 +127,7 @@ def test_pg_sni_router(
         destination="localtest.me",
         tls_cert=test_output_dir / "router.crt",
         tls_key=test_output_dir / "router.key",
+        test_output_dir=test_output_dir,
     ) as router:
         router.start()
 

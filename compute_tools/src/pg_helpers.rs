@@ -17,13 +17,13 @@ use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
 /// Escape a string for including it in a SQL literal
-fn escape_literal(s: &str) -> String {
+pub fn escape_literal(s: &str) -> String {
     s.replace('\'', "''").replace('\\', "\\\\")
 }
 
 /// Escape a string so that it can be used in postgresql.conf.
 /// Same as escape_literal, currently.
-fn escape_conf_value(s: &str) -> String {
+pub fn escape_conf_value(s: &str) -> String {
     s.replace('\'', "''").replace('\\', "\\\\")
 }
 
@@ -121,9 +121,8 @@ impl RoleExt for Role {
     /// string of arguments.
     fn to_pg_options(&self) -> String {
         // XXX: consider putting LOGIN as a default option somewhere higher, e.g. in control-plane.
-        // For now, we do not use generic `options` for roles. Once used, add
-        // `self.options.as_pg_options()` somewhere here.
-        let mut params: String = "LOGIN".to_string();
+        let mut params: String = self.options.as_pg_options();
+        params.push_str(" LOGIN");
 
         if let Some(pass) = &self.encrypted_password {
             // Some time ago we supported only md5 and treated all encrypted_password as md5.

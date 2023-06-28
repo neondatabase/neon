@@ -14,15 +14,11 @@ await Task {
     let sslContext = try! NIOSSLContext(configuration: .makeClientConfiguration())
 
     let config = PostgresConnection.Configuration(
-      connection: .init(
-        host: env["NEON_HOST"] ?? "",
-        port: 5432
-      ),
-      authentication: .init(
-        username: env["NEON_USER"] ?? "",
-        database: env["NEON_DATABASE"] ?? "",
-        password: env["NEON_PASSWORD"] ?? ""
-      ),
+      host: env["NEON_HOST"] ?? "",
+      port: 5432,
+      username: env["NEON_USER"] ?? "",
+      password: env["NEON_PASSWORD"] ?? "",
+      database: env["NEON_DATABASE"] ?? "",
       tls: .require(sslContext)
     )
 
@@ -42,7 +38,7 @@ await Task {
     try await connection.close()
 
     // Shutdown the EventLoopGroup, once all connections are closed.
-    try eventLoopGroup.syncShutdownGracefully()
+    try await eventLoopGroup.shutdownGracefully()
   } catch {
       print(error)
   }
