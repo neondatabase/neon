@@ -729,7 +729,7 @@ LIMIT 100",
                     preload_libs_vec
                 );
 
-                libs_vec.extend(preload_libs_vec.clone());
+                libs_vec.extend(preload_libs_vec);
             }
 
             // download extension control files & shared_preload_libraries

@@ -177,7 +177,7 @@ pub async fn get_available_libraries(
     // download all requested libraries
     for lib_name in preload_libraries {
         // add file extension if it isn't in the filename
-        let lib_name_with_ext = enforce_so_end(&lib_name);
+        let lib_name_with_ext = enforce_so_end(lib_name);
         info!("looking for library {:?}", &lib_name_with_ext);
 
         match all_available_libraries.get(&*lib_name_with_ext) {
@@ -296,7 +296,7 @@ async fn list_files_in_prefixes(
     let mut res = HashMap::new();
 
     for path in paths {
-        for file in remote_storage.list_files(Some(&path)).await? {
+        for file in remote_storage.list_files(Some(path)).await? {
             res.insert(
                 file.object_name().expect("bad object").to_owned(),
                 file.to_owned(),
@@ -340,7 +340,7 @@ async fn list_files_in_prefixes_for_extensions(
 ) -> Result<HashMap<String, Vec<RemotePath>>> {
     let mut result = HashMap::new();
     for path in paths {
-        for file in remote_storage.list_files(Some(&path)).await? {
+        for file in remote_storage.list_files(Some(path)).await? {
             let file_ext_name = get_ext_name(file.get_path().to_str().context("invalid path")?)?;
             let ext_file_list = result
                 .entry(file_ext_name.to_string())
