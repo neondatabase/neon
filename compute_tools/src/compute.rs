@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -52,8 +52,8 @@ pub struct ComputeNode {
     pub state_changed: Condvar,
     ///  S3 extensions configuration variables
     pub ext_remote_storage: Option<GenericRemoteStorage>,
-    pub available_libraries: Mutex<HashMap<String, RemotePath>>,
-    pub available_extensions: Mutex<HashMap<String, Vec<RemotePath>>>,
+    pub available_libraries: OnceLock<HashMap<String, RemotePath>>,
+    pub available_extensions: OnceLock<HashMap<String, Vec<RemotePath>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -734,18 +734,20 @@ LIMIT 100",
 
             // download extension control files & shared_preload_libraries
 
-            let mut available_extensions_lock = self.available_extensions.lock().unwrap();
-            *available_extensions_lock = extension_server::get_available_extensions(
+            // let mut available_extensions_lock = self.available_extensions.lock().unwrap();
+            let available_extensions = extension_server::get_available_extensions(
                 ext_remote_storage,
                 &self.pgbin,
                 &self.pgversion,
                 &private_ext_prefixes,
             )
             .await?;
+            self.available_extensions
+                .set(available_extensions)
+                .expect("available_extensions.set error");
 
             info!("Libraries to download: {:?}", &libs_vec);
-            let mut available_libraries_lock = self.available_libraries.lock().unwrap();
-            *available_libraries_lock = extension_server::get_available_libraries(
+            let available_libraries = extension_server::get_available_libraries(
                 ext_remote_storage,
                 &self.pgbin,
                 &self.pgversion,
@@ -753,6 +755,9 @@ LIMIT 100",
                 &libs_vec,
             )
             .await?;
+            self.available_libraries
+                .set(available_libraries)
+                .expect("available_libraries.set error");
         }
 
         Ok(())
@@ -771,12 +776,13 @@ LIMIT 100",
                 };
 
                 info!("private_ext_prefixes: {:?}", &private_ext_prefixes);
-                let available_extensions_lock = self.available_extensions.lock().unwrap().clone();
                 extension_server::download_extension_sql_files(
                     &filename,
                     remote_storage,
                     &self.pgbin,
-                    &available_extensions_lock,
+                    self.available_extensions
+                        .get()
+                        .context("available_extensions broke")?,
                 )
                 .await
             }
@@ -787,12 +793,13 @@ LIMIT 100",
         match &self.ext_remote_storage {
             None => anyhow::bail!("No remote extension storage"),
             Some(remote_storage) => {
-                let available_libraries_lock = self.available_libraries.lock().unwrap().clone();
                 extension_server::download_library_file(
                     &filename,
                     remote_storage,
                     &self.pgbin,
-                    &available_libraries_lock,
+                    self.available_libraries
+                        .get()
+                        .context("available_libraries broke")?,
                 )
                 .await
             }

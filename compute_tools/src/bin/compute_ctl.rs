@@ -36,7 +36,7 @@ use std::fs::File;
 use std::panic;
 use std::path::Path;
 use std::process::exit;
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
@@ -192,8 +192,8 @@ fn main() -> Result<()> {
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
         ext_remote_storage,
-        available_libraries: Mutex::new(HashMap::new()),
-        available_extensions: Mutex::new(HashMap::new()),
+        available_libraries: OnceLock::new(),
+        available_extensions: OnceLock::new(),
     };
     let compute = Arc::new(compute_node);
 
