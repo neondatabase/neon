@@ -306,8 +306,14 @@ pub async fn collect_metrics_iteration(
                     }
                     break;
                 }
-                Err(err) => {
-                    error!("failed to send metrics attempt:{attempt}: error: {:?}", err);
+                Err(err) if err.is_timeout() => {
+                    error!(attempt=attempt, err=?err, "timeout sending metrics, retrying immediately");
+                    // TODO: random sleep?
+                    continue;
+                }
+                Err(err) {
+                    error!(attempt=attemt,"failed to send metrics: {err:?}");
+                    break;
                 }
             }
         }
