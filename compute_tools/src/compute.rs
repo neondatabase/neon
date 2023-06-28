@@ -380,7 +380,7 @@ impl ComputeNode {
 
     /// Start Postgres as a child process and manage DBs/roles.
     /// After that this will hang waiting on the postmaster process to exit.
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub fn start_postgres(
         &self,
         storage_auth_token: Option<String>,
