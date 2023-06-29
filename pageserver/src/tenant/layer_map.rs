@@ -247,6 +247,29 @@ impl LayerMap {
     /// 'open' and 'frozen' layers!
     ///
     pub fn search(&self, key: Key, end_lsn: Lsn) -> Option<SearchResult> {
+        self.search_incremental_inner(key, end_lsn).map(|(x, _)| x)
+    }
+
+    pub fn search_incremental(
+        &self,
+        key: Key,
+        end_lsn: Lsn,
+        force_incremental: bool,
+    ) -> Option<(SearchResult, Option<SearchResult>)> {
+        self.search_incremental_inner(key, end_lsn).map(|(x, y)| {
+            if force_incremental {
+                (y.unwrap(), None)
+            } else {
+                (x, y)
+            }
+        })
+    }
+
+    pub fn search_incremental_inner(
+        &self,
+        key: Key,
+        end_lsn: Lsn,
+    ) -> Option<(SearchResult, Option<SearchResult>)> {
         let version = self.historic.get().unwrap().get_version(end_lsn.0 - 1)?;
         let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
@@ -255,34 +278,59 @@ impl LayerMap {
             (None, None) => None,
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
-                Some(SearchResult {
-                    layer: image,
-                    lsn_floor,
-                })
+                Some((
+                    SearchResult {
+                        layer: image,
+                        lsn_floor,
+                    },
+                    None,
+                ))
             }
             (Some(delta), None) => {
                 let lsn_floor = delta.get_lsn_range().start;
-                Some(SearchResult {
-                    layer: delta,
-                    lsn_floor,
-                })
+                Some((
+                    SearchResult {
+                        layer: delta,
+                        lsn_floor,
+                    },
+                    None,
+                ))
             }
             (Some(delta), Some(image)) => {
                 let img_lsn = image.get_lsn_range().start;
                 let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
                 let image_exact_match = img_lsn + 1 == end_lsn;
-                if image_is_newer || image_exact_match {
-                    Some(SearchResult {
-                        layer: image,
-                        lsn_floor: img_lsn,
-                    })
+                if image_is_newer {
+                    Some((
+                        SearchResult {
+                            layer: image,
+                            lsn_floor: img_lsn,
+                        },
+                        None,
+                    ))
                 } else {
                     let lsn_floor =
                         std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
-                    Some(SearchResult {
-                        layer: delta,
-                        lsn_floor,
-                    })
+                    if image_exact_match {
+                        Some((
+                            SearchResult {
+                                layer: image,
+                                lsn_floor: img_lsn,
+                            },
+                            Some(SearchResult {
+                                layer: delta,
+                                lsn_floor,
+                            }),
+                        ))
+                    } else {
+                        Some((
+                            SearchResult {
+                                layer: delta,
+                                lsn_floor,
+                            },
+                            None,
+                        ))
+                    }
                 }
             }
         }

@@ -2424,7 +2424,15 @@ impl Timeline {
         let mut result = ValueReconstructResult::Continue;
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
+        let mut search_incremental = false;
+
         'outer: loop {
+            let this_round_search_incremental = if search_incremental {
+                search_incremental = false;
+                true
+            } else {
+                false
+            };
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
@@ -2547,6 +2555,7 @@ impl Timeline {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
+                            assert!(!this_round_search_incremental);
                             cont_lsn = lsn_floor;
                             // metrics: open_layer does not count as fs access, so we are not updating `read_count`
                             traversal_path.push((
@@ -2560,6 +2569,7 @@ impl Timeline {
                             continue 'outer;
                         }
                     }
+
                     for frozen_layer in layers.frozen_layers.iter().rev() {
                         let start_lsn = frozen_layer.get_lsn_range().start;
                         if cont_lsn > start_lsn {
@@ -2574,6 +2584,7 @@ impl Timeline {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
+                            assert!(!this_round_search_incremental);
                             cont_lsn = lsn_floor;
                             // metrics: open_layer does not count as fs access, so we are not updating `read_count`
                             traversal_path.push((
@@ -2588,7 +2599,9 @@ impl Timeline {
                         }
                     }
 
-                    if let Some(SearchResult { lsn_floor, layer }) = layers.search(key, cont_lsn) {
+                    if let Some((SearchResult { lsn_floor, layer }, next)) =
+                        layers.search_incremental(key, cont_lsn, this_round_search_incremental)
+                    {
                         let layer = timeline.lcache.get_from_desc(&layer);
                         // If it's a remote layer, download it and retry.
                         if let Some(remote_layer) =
@@ -2610,6 +2623,17 @@ impl Timeline {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
+
+                            if !layer.layer_desc().is_delta
+                                && matches!(result, ValueReconstructResult::Continue)
+                            {
+                                // if is incremental image layer and not found, try again with delta layer
+                                if next.is_some() {
+                                    search_incremental = true;
+                                    continue 'outer;
+                                }
+                            };
+
                             cont_lsn = lsn_floor;
                             *read_count += 1;
                             traversal_path.push((
@@ -4071,7 +4095,7 @@ impl Timeline {
         let mut construct_image_for_key = false;
         let image_lsn = Lsn(lsn_range.end.0 - 1);
 
-        const PAGE_MATERIALIZE_THRESHOLD: usize = 2000;
+        const PAGE_MATERIALIZE_THRESHOLD: usize = 40;
 
         for x in all_values_iter {
             let (key, lsn, value) = x?;
