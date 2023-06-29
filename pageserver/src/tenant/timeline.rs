@@ -2620,7 +2620,6 @@ impl Timeline {
                                 let old_layer = layer.clone();
                                 // if is incremental image layer and not found, try again with delta layer
                                 if let Some(SearchResult { lsn_floor, layer }) = next {
-                                    println!("TRIGGERED!");
                                     traversal_path.push((
                                         result,
                                         cont_lsn,
