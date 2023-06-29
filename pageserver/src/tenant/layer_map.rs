@@ -285,18 +285,14 @@ impl LayerMap {
                 let img_lsn = image.get_lsn_range().start;
                 let image_is_newer = image.get_lsn_range().end >= delta.get_lsn_range().end;
                 let image_exact_match = img_lsn + 1 == end_lsn;
-                if !image_exact_match && image_is_newer {
-                    Some((
-                        SearchResult {
-                            layer: image,
-                            lsn_floor: img_lsn,
-                        },
-                        None,
-                    ))
-                } else {
-                    let lsn_floor =
-                        std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
-                    if image_exact_match {
+                if image_is_newer || image_exact_match {
+                    if img_lsn + 1 == delta.get_lsn_range().end {
+                        // incremental, image lsn N, if it does not contain the image, we should start with
+                        // delta lsn N+1 instead of N.
+                        let lsn_floor = std::cmp::max(
+                            delta.get_lsn_range().start,
+                            image.get_lsn_range().start + 1,
+                        );
                         Some((
                             SearchResult {
                                 layer: image,
@@ -310,12 +306,22 @@ impl LayerMap {
                     } else {
                         Some((
                             SearchResult {
-                                layer: delta,
-                                lsn_floor,
+                                layer: image,
+                                lsn_floor: img_lsn,
                             },
                             None,
                         ))
                     }
+                } else {
+                    let lsn_floor =
+                        std::cmp::max(delta.get_lsn_range().start, image.get_lsn_range().start + 1);
+                    Some((
+                        SearchResult {
+                            layer: delta,
+                            lsn_floor,
+                        },
+                        None,
+                    ))
                 }
             }
         }
