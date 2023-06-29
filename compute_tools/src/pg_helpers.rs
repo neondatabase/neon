@@ -215,7 +215,7 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<Vec<Database>> {
 /// Wait for Postgres to become ready to accept connections. It's ready to
 /// accept connections when the state-field in `pgdata/postmaster.pid` says
 /// 'ready'.
-#[instrument(skip(pg))]
+#[instrument(skip_all, fields(pgdata = %pgdata.display()))]
 pub fn wait_for_postgres(pg: &mut Child, pgdata: &Path) -> Result<()> {
     let pid_path = pgdata.join("postmaster.pid");
 
