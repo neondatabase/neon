@@ -4027,7 +4027,7 @@ impl Timeline {
                         if let Ok((b_key, b_lsn, _)) = b {
                             match a_key.cmp(b_key) {
                                 Ordering::Less => true,
-                                Ordering::Equal => a_lsn <= b_lsn,
+                                Ordering::Equal => a_lsn < b_lsn,
                                 Ordering::Greater => false,
                             }
                         } else {
@@ -4049,7 +4049,7 @@ impl Timeline {
                     let (b_key, b_lsn, _) = b;
                     match a_key.cmp(b_key) {
                         Ordering::Less => true,
-                        Ordering::Equal => a_lsn <= b_lsn,
+                        Ordering::Equal => a_lsn < b_lsn,
                         Ordering::Greater => false,
                     }
                 })
@@ -4082,39 +4082,42 @@ impl Timeline {
                 same_key_cnt = 1;
                 construct_image_for_key = false;
             }
-            if same_key_cnt >= PAGE_MATERIALIZE_THRESHOLD && !construct_image_for_key {
-                let img = match self.get(key, image_lsn, ctx).await {
-                    Ok(img) => img,
-                    Err(err) => {
-                        if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
-                            warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
-                            ZERO_PAGE.clone()
-                        } else {
-                            return Err(CompactionError::Other(err.into()));
+            if same_key_cnt >= PAGE_MATERIALIZE_THRESHOLD {
+                assert!(lsn <= image_lsn);
+                if !construct_image_for_key {
+                    let img = match self.get(key, image_lsn, ctx).await {
+                        Ok(img) => img,
+                        Err(err) => {
+                            if is_rel_fsm_block_key(key) || is_rel_vm_block_key(key) {
+                                warn!("could not reconstruct FSM or VM key {key}, filling with zeros: {err:?}");
+                                ZERO_PAGE.clone()
+                            } else {
+                                return Err(CompactionError::Other(err.into()));
+                            }
                         }
+                    };
+                    if image_writer.is_none() {
+                        // Create writer if not initiaized yet
+                        image_writer = Some(ImageLayerWriter::new(
+                            self.conf,
+                            self.timeline_id,
+                            self.tenant_id,
+                            // TODO(chi): should not use the full key range
+                            key.clone(),
+                            image_lsn,
+                            true,
+                        )?);
                     }
-                };
-                if image_writer.is_none() {
-                    // Create writer if not initiaized yet
-                    image_writer = Some(ImageLayerWriter::new(
-                        self.conf,
-                        self.timeline_id,
-                        self.tenant_id,
-                        // TODO(chi): should not use the full key range
-                        key.clone(),
-                        image_lsn,
-                        true,
-                    )?);
-                }
 
-                let image_writer_mut = image_writer.as_mut().unwrap();
-                image_writer_mut.put_image(key, &img)?;
-                construct_image_for_key = true;
+                    let image_writer_mut = image_writer.as_mut().unwrap();
+                    image_writer_mut.put_image(key, &img)?;
+                    construct_image_for_key = true;
 
-                let written_size: u64 = image_writer_mut.size();
-                if written_size + key_values_total_size > target_file_size {
-                    new_layers.push(Arc::new(image_writer.take().unwrap().finish(key.next())?));
-                    image_writer = None;
+                    let written_size: u64 = image_writer_mut.size();
+                    if written_size + key_values_total_size > target_file_size {
+                        new_layers.push(Arc::new(image_writer.take().unwrap().finish(key.next())?));
+                        image_writer = None;
+                    }
                 }
             }
 
@@ -4753,10 +4756,19 @@ impl Timeline {
 
                 let last_rec_lsn = data.records.last().unwrap().0;
 
+                use std::fmt::Write;
+
+                let mut debug_info = String::new();
+                write!(debug_info, "{} at {}", key, request_lsn).unwrap();
+
+                if let Some((ref img, _)) = data.img {
+                    write!(debug_info, " with base image at {}", img).unwrap();
+                }
+
                 let img = match self
                     .walredo_mgr
                     .request_redo(key, request_lsn, data.img, data.records, self.pg_version)
-                    .context("Failed to reconstruct a page image:")
+                    .with_context(|| format!("Failed to reconstruct a page image: {debug_info}"))
                 {
                     Ok(img) => img,
                     Err(e) => return Err(PageReconstructError::from(e)),
