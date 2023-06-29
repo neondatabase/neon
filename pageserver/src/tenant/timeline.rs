@@ -126,7 +126,11 @@ impl LayerFileManager {
     fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
         // The assumption for the `expect()` is that all code maintains the following invariant:
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
-        self.0.get(&desc.key()).expect("not found").clone()
+        self.0
+            .get(&desc.key())
+            .context("get layer from desc")
+            .expect("not found")
+            .clone()
     }
 
     pub(crate) fn insert(&mut self, layer: Arc<dyn PersistentLayer>) {
@@ -185,9 +189,7 @@ impl LayerFileManager {
             *layer = new;
             Ok(())
         } else {
-            anyhow::bail!(
-                "replacing downloaded layer into layermap failed because layer was not found"
-            );
+            anyhow::bail!("layer was not found");
         }
     }
 }
@@ -1741,8 +1743,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(layer.layer_desc().clone());
-                mapping.insert(Arc::new(layer));
+                self.insert_historic_layer(Arc::new(layer), &mut updates, mapping);
                 num_layers += 1;
             } else if let Some(deltafilename) = DeltaFileName::parse_str(&fname) {
                 // Create a DeltaLayer struct for each delta file.
@@ -1774,8 +1775,7 @@ impl Timeline {
 
                 trace!("found layer {}", layer.path().display());
                 total_physical_size += file_size;
-                updates.insert_historic(layer.layer_desc().clone());
-                mapping.insert(Arc::new(layer));
+                self.insert_historic_layer(Arc::new(layer), &mut updates, mapping);
                 num_layers += 1;
             } else if fname == METADATA_FILE_NAME || fname.ends_with(".old") {
                 // ignore these
@@ -1875,8 +1875,7 @@ impl Timeline {
                         anyhow::bail!("could not rename file {local_layer_path:?}: {err:?}");
                     } else {
                         self.metrics.resident_physical_size_gauge.sub(local_size);
-                        updates.remove_historic(local_layer.layer_desc().clone());
-                        mapping.remove(local_layer);
+                        self.remove_historic_layer(local_layer, &mut updates, mapping);
                         // fall-through to adding the remote layer
                     }
                 } else {
@@ -1915,8 +1914,7 @@ impl Timeline {
                     );
                     let remote_layer = Arc::new(remote_layer);
 
-                    updates.insert_historic(remote_layer.layer_desc().clone());
-                    mapping.insert(remote_layer);
+                    self.insert_historic_layer(remote_layer, &mut updates, mapping);
                 }
                 LayerFileName::Delta(deltafilename) => {
                     // Create a RemoteLayer for the delta file.
@@ -1943,8 +1941,7 @@ impl Timeline {
                         ),
                     );
                     let remote_layer = Arc::new(remote_layer);
-                    updates.insert_historic(remote_layer.layer_desc().clone());
-                    mapping.insert(remote_layer);
+                    self.insert_historic_layer(remote_layer, &mut updates, mapping);
                 }
             }
         }
@@ -2371,6 +2368,30 @@ impl Timeline {
         }
 
         None
+    }
+
+    /// Helper function to insert a layer from both layer map and layer file manager. Will be removed in the future
+    /// after we introduce `LayerMapManager`.
+    fn insert_historic_layer(
+        &self,
+        layer: Arc<dyn PersistentLayer>,
+        updates: &mut BatchedUpdates<'_>,
+        mapping: &mut LayerFileManager,
+    ) {
+        updates.insert_historic(layer.layer_desc().clone());
+        mapping.insert(layer);
+    }
+
+    /// Helper function to remove a layer from both layer map and layer file manager. Will be removed in the future
+    /// after we introduce `LayerMapManager`.
+    fn remove_historic_layer(
+        &self,
+        layer: Arc<dyn PersistentLayer>,
+        updates: &mut BatchedUpdates<'_>,
+        mapping: &mut LayerFileManager,
+    ) {
+        updates.remove_historic(layer.layer_desc().clone());
+        mapping.remove(layer);
     }
 
     /// Removes the layer from local FS (if present) and from memory.
@@ -3160,8 +3181,7 @@ impl Timeline {
             LayerResidenceStatus::Resident,
             LayerResidenceEventReason::LayerCreate,
         );
-        batch_updates.insert_historic(l.layer_desc().clone());
-        mapping.insert(l);
+        self.insert_historic_layer(l, &mut batch_updates, mapping);
         batch_updates.flush();
 
         // update metrics
@@ -3412,8 +3432,7 @@ impl Timeline {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            updates.insert_historic(l.layer_desc().clone());
-            mapping.insert(l);
+            self.insert_historic_layer(l, &mut updates, mapping);
         }
         updates.flush();
         drop_wlock(guard);
@@ -4031,8 +4050,7 @@ impl Timeline {
                 LayerResidenceStatus::Resident,
                 LayerResidenceEventReason::LayerCreate,
             );
-            updates.insert_historic(x.layer_desc().clone());
-            mapping.insert(x);
+            self.insert_historic_layer(x, &mut updates, mapping);
         }
 
         // Now that we have reshuffled the data to set of new delta layers, we can
