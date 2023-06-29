@@ -217,6 +217,19 @@ pub struct Timeline {
 
     pub pg_version: u32,
 
+    /// The tuple has two elements.
+    /// 1. `LayerFileManager` keeps track of the various physical representations of the layer files (inmem, local, remote).
+    /// 2. `LayerMap`, the acceleration data structure for `get_reconstruct_data`.
+    ///
+    /// `LayerMap` maps out the `(PAGE,LSN) / (KEY,LSN)` space, which is composed of `(KeyRange, LsnRange)` rectangles.
+    /// We describe these rectangles through the `PersistentLayerDesc` struct.
+    ///
+    /// When we want to reconstruct a page, we first find the `PersistentLayerDesc`'s that we need for page reconstruction,
+    /// using `LayerMap`. Then, we use `LayerFileManager` to get the `PersistentLayer`'s that correspond to the
+    /// `PersistentLayerDesc`'s.
+    ///
+    /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
+    /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
     pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, LayerFileManager)>>,
 
     /// Set of key ranges which should be covered by image layers to
