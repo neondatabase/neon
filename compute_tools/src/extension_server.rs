@@ -12,7 +12,7 @@ use std::str;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-const SHARE_EXT_PATH: &str = "share/postgresql/extension";
+const SHARE_EXT_PATH: &str = "share/extension";
 
 fn get_pg_config(argument: &str, pgbin: &str) -> String {
     // gives the result of `pg_config [argument]`
@@ -174,6 +174,20 @@ pub async fn get_available_libraries(
         );
     }
 
+    // TODO: shouldn't we filter this by .so?
+    /*
+    right now we are getting weird stuff like
+    "pg_isolation_regress": RemotePath("v14/lib/pgxs/src/test/isolation/pg_isolation_regress"),
+    Makefile.shlib": RemotePath("v14/lib/pgxs/src/Makefile.shlib")
+    which we should not try to download...
+
+    the expected format is
+    "timescaledb-2.10.1.so": RemotePath("v14/lib/timescaledb-2.10.1.so")
+
+    Q: do we care about files like this?
+    libecpg.so.6": RemotePath("v14/lib/libecpg.so.6")
+    libpgtypes.so.3": RemotePath("v14/lib/libpgtypes.so.3")
+     */
     let all_available_libraries = list_files_in_prefixes(remote_storage, &paths).await?;
 
     info!("list of library files {:?}", &all_available_libraries);
