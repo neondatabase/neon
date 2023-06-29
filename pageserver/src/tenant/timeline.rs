@@ -2617,13 +2617,36 @@ impl Timeline {
                             if !layer.layer_desc().is_delta
                                 && matches!(result, ValueReconstructResult::Continue)
                             {
+                                let old_layer = layer.clone();
                                 // if is incremental image layer and not found, try again with delta layer
                                 if let Some(SearchResult { lsn_floor, layer }) = next {
-                                    println!("TRIGGERED: image + delta same layer");
+                                    traversal_path.push((
+                                        result,
+                                        cont_lsn,
+                                        Box::new({
+                                            let layer = Arc::clone(&old_layer);
+                                            move || layer.traversal_id()
+                                        }),
+                                    ));
+
                                     // HACK: no remote storage for now, safely get and downcast
                                     let layer = timeline.lcache.get_from_desc(&layer);
+
+                                    // Get all the data needed to reconstruct the page version from this layer.
+                                    // But if we have an older cached page image, no need to go past that.
+                                    let lsn_floor = max(cached_lsn + 1, lsn_floor);
+                                    result = match layer.get_value_reconstruct_data(
+                                        key,
+                                        lsn_floor..cont_lsn,
+                                        reconstruct_state,
+                                        ctx,
+                                    ) {
+                                        Ok(result) => result,
+                                        Err(e) => return Err(PageReconstructError::from(e)),
+                                    };
+
                                     cont_lsn = lsn_floor;
-                                    *read_count += 1;
+                                    *read_count += 2;
                                     traversal_path.push((
                                         result,
                                         cont_lsn,
