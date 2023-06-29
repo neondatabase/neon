@@ -1298,9 +1298,8 @@ impl Timeline {
     }
 }
 
-/// Number of times we will compute partition within a checkpoint distance. Currently, this is set to 10, which
-/// indicates that we will recompute partition 10 times within a checkpoint distance.
-pub const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
+/// Number of times we will compute partition within a checkpoint distance.
+const REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE: u64 = 10;
 
 // Private functions
 impl Timeline {
