@@ -217,6 +217,8 @@ def test_delete_timeline_excersize_crash_safety_failpoints(
     )
     # This happens when we retry delete requests for broken timelines
     env.pageserver.allowed_errors.append(".*Ignoring state update Stopping for broken timeline")
+    # This happens when timeline remains are cleaned up during loading
+    env.pageserver.allowed_errors.append(".*Timeline dir entry become invalid.*")
 
     ps_http.configure_failpoints((failpoint, "return"))
 
