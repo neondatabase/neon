@@ -8,7 +8,7 @@ use compute_api::responses::ComputeStatus;
 
 use crate::compute::ComputeNode;
 
-#[instrument(skip(compute))]
+#[instrument(skip_all)]
 fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     info!("waiting for reconfiguration requests");
     loop {
