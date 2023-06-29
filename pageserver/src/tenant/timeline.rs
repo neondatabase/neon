@@ -3232,6 +3232,9 @@ impl Timeline {
         force: bool,
         ctx: &RequestContext,
     ) -> Result<HashMap<LayerFileName, LayerFileMetadata>, PageReconstructError> {
+        if ENABLE_TIERED_COMPACTION {
+            return Ok(HashMap::new());
+        }
         let timer = self.metrics.create_images_time_histo.start_timer();
         let mut image_layers: Vec<ImageLayer> = Vec::new();
 
@@ -4074,7 +4077,7 @@ impl Timeline {
         let mut construct_image_for_key = false;
         let image_lsn = Lsn(lsn_range.end.0 - 1);
 
-        const PAGE_MATERIALIZE_THRESHOLD: usize = 64;
+        const PAGE_MATERIALIZE_THRESHOLD: usize = 40;
 
         for x in all_values_iter {
             let (key, lsn, value) = x?;

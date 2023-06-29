@@ -11,6 +11,7 @@ use crate::tenant::blob_io::{BlobCursor, BlobWriter};
 use crate::tenant::block_io::BlockReader;
 use crate::tenant::ephemeral_file::EphemeralFile;
 use crate::tenant::storage_layer::{ValueReconstructResult, ValueReconstructState};
+use crate::tenant::timeline::ENABLE_TIERED_COMPACTION;
 use crate::walrecord;
 use anyhow::{ensure, Result};
 use pageserver_api::models::InMemoryLayerInfo;
@@ -341,20 +342,24 @@ impl InMemoryLayer {
         // rare though, so we just accept the potential latency hit for now.
         let inner = self.inner.read().unwrap();
 
+        let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
+        keys.sort_by_key(|k| k.0);
+
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timeline_id,
             self.tenant_id,
-            Key::MIN,
+            if ENABLE_TIERED_COMPACTION {
+                keys.first().unwrap().0.clone()
+            } else {
+                Key::MIN
+            },
             self.start_lsn..inner.end_lsn.unwrap(),
         )?;
 
         let mut buf = Vec::new();
 
         let mut cursor = inner.file.block_cursor();
-
-        let mut keys: Vec<(&Key, &VecMap<Lsn, u64>)> = inner.index.iter().collect();
-        keys.sort_by_key(|k| k.0);
 
         for (key, vec_map) in keys.iter() {
             let key = **key;
@@ -366,7 +371,11 @@ impl InMemoryLayer {
             }
         }
 
-        let delta_layer = delta_layer_writer.finish(Key::MAX)?;
+        let delta_layer = delta_layer_writer.finish(if ENABLE_TIERED_COMPACTION {
+            keys.last().unwrap().0.next()
+        } else {
+            Key::MAX
+        })?;
         Ok(delta_layer)
     }
 }
