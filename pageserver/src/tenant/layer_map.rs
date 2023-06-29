@@ -58,7 +58,7 @@ use std::sync::Arc;
 use utils::lsn::Lsn;
 
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
-pub use historic_layer_coverage::{LayerKey, Replacement};
+pub use historic_layer_coverage::LayerKey;
 
 use super::storage_layer::range_eq;
 use super::storage_layer::PersistentLayerDesc;
