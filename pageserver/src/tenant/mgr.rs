@@ -643,6 +643,8 @@ pub async fn list_tenants() -> Result<Vec<(TenantId, TenantState)>, TenantMapLis
     let tenants = TENANTS.read().await;
     match &*tenants {
         TenantsMap::Initializing => Err(TenantMapListError::Initializing),
+        // Do not copy paste futures::future::join_all usage to production code with many tenants
+        // Use a JoinSet instead
         TenantsMap::Open(m) => Ok(futures::future::join_all(m.map.iter().map(
             |(id, tenant)| async {
                 (
