@@ -88,6 +88,7 @@ async fn download_helper(
                 "Downloading file with prefix. Create directory {:?}",
                 prefix
             );
+            // if directory already exists, this is a no-op
             std::fs::create_dir_all(prefix)?;
         }
     }
@@ -215,8 +216,27 @@ pub async fn download_extension_sql_files(
     if let Some(files) = all_available_files.get(ext_name) {
         for file in files {
             if file.extension().context("bad file name")? != "control" {
+                // find files prefix to handle cases when extension files are stored
+                // in a directory with the same name as the extension
+                // example:
+                // share/postgresql/extension/extension_name/extension_name--1.0.sql
+                let index = file
+                    .get_path()
+                    .to_str()
+                    .context("invalid path")?
+                    .find(ext_name)
+                    .context("invalid path")?;
+
+                let prefix_str =
+                    file.get_path().to_str().context("invalid path")?[..index].to_string();
+                let remote_from_prefix = if prefix_str.is_empty() {
+                    None
+                } else {
+                    Some(Path::new(&prefix_str))
+                };
+
+                download_helper(remote_storage, file, remote_from_prefix, &local_sharedir).await?;
                 downloaded_something = true;
-                download_helper(remote_storage, file, None, &local_sharedir).await?;
             }
         }
     }
@@ -325,8 +345,12 @@ async fn list_files_in_prefixes(
 // If it is not, this code will not download it.
 fn get_ext_name(path: &str) -> Result<&str> {
     let path_suffix: Vec<&str> = path.split(&format!("{SHARE_EXT_PATH}/")).collect();
+
     let path_suffix = path_suffix.last().expect("bad ext name");
-    for index in ["--", "/"] {
+    // the order of these is important
+    // otherwise we'll return incorrect extension name
+    // for path like share/postgresql/extension/extension_name/extension_name--1.0.sql
+    for index in ["/", "--"] {
         if let Some(index) = path_suffix.find(index) {
             return Ok(&path_suffix[..index]);
         }
