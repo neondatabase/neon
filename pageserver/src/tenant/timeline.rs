@@ -3419,9 +3419,6 @@ impl Timeline {
         let guard = self.layers.read().await;
         let (layers, _) = &*guard;
 
-        println!("before compaction:");
-        layers.dump(false, ctx)?;
-
         let mut level0_deltas = layers.get_level0_deltas()?;
 
         // Only compact if enough layers have accumulated.
@@ -3433,6 +3430,9 @@ impl Timeline {
             );
             return Ok(CompactLevel0Phase1Result::default());
         }
+
+        println!("before compaction:");
+        layers.dump(false, ctx)?;
 
         // Gather the files to compact in this iteration.
         //
@@ -3956,10 +3956,6 @@ impl Timeline {
             let threshold = 8;
             assert!(threshold >= 2);
 
-            info!("getting tiered compaction task, before compaction:");
-
-            layers.dump(false, ctx)?;
-
             if layers.sorted_runs.num_of_tiers() < threshold {
                 info!(
                     level0_deltas = layers.sorted_runs.num_of_tiers(),
@@ -3976,7 +3972,9 @@ impl Timeline {
                 return Ok(None);
             };
 
-            println!("tier_to_compact: {tier_to_compact:?}");
+            info!("getting tiered compaction task, before compaction:");
+            layers.dump(false, ctx)?;
+
             for &tier in &tier_to_compact {
                 compacting_tiers.insert(tier);
             }
@@ -3988,8 +3986,6 @@ impl Timeline {
                     deltas_to_compact_layers.extend(layers.iter().cloned());
                 }
             }
-
-            println!("deltas_to_compact_layers: {deltas_to_compact_layers:?}");
 
             let deltas_to_compact_layers = deltas_to_compact_layers
                 .into_iter()
@@ -4015,8 +4011,6 @@ impl Timeline {
                 "Starting tier compaction in LSN range {}-{} for tiers {:?}",
                 lsn_range.start, lsn_range.end, tier_to_compact
             );
-
-            layers.dump(false, ctx)?;
 
             (deltas_to_compact_layers, tier_to_compact, lsn_range)
         };
@@ -4256,9 +4250,6 @@ impl Timeline {
         drop(layer_removal_cs);
         let layer_removal_cs = self.lcache.delete_guard_write().await;
 
-        println!("new_tier_at: {:?}", new_tier_at);
-        println!("removed_tiers: {:?}", removed_tiers);
-
         // Before deleting any layers, we need to wait for their upload ops to finish.
         // See storage_sync module level comment on consistency.
         // Do it here because we don't want to hold self.layers.write() while waiting.
@@ -4340,7 +4331,7 @@ impl Timeline {
 
         updates.flush();
 
-        println!("after compaction:");
+        info!("after compaction:");
         layers.dump(false, ctx)?;
 
         let mut compacting_tiers = self.compacting.lock().unwrap();
