@@ -228,6 +228,10 @@ pub struct Timeline {
     /// using `LayerMap`. Then, we use `LayerFileManager` to get the `PersistentLayer`'s that correspond to the
     /// `PersistentLayerDesc`'s.
     ///
+    /// Hence, it's important to keep things coherent. The `LayerFileManager` must always have an entry for all
+    /// `PersistentLayerDesc`'s in the `LayerMap`. If it doesn't, `LayerFileManager::get_from_desc` will panic at
+    /// runtime, e.g., during page reconstruction.
+    ///
     /// In the future, we'll be able to split up the tuple of LayerMap and `LayerFileManager`,
     /// so that e.g. on-demand-download/eviction, and layer spreading, can operate just on `LayerFileManager`.
     pub(crate) layers: Arc<tokio::sync::RwLock<(LayerMap, LayerFileManager)>>,
