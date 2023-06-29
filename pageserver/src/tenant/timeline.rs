@@ -128,7 +128,7 @@ impl LayerFileManager {
         // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.0
             .get(&desc.key())
-            .context("get layer from desc")
+            .with_context(|| format!("get layer from desc: {}", desc.filename().file_name()))
             .expect("not found")
             .clone()
     }
