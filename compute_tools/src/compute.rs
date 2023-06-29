@@ -235,7 +235,7 @@ impl ComputeNode {
 
     // Get basebackup from the libpq connection to pageserver using `connstr` and
     // unarchive it to `pgdata` directory overriding all its previous content.
-    #[instrument(skip_all)]
+    #[instrument(skip_all, fields(%lsn))]
     fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let spec = compute_state.pspec.as_ref().expect("spec must be set");
         let start_time = Utc::now();
