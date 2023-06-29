@@ -2424,15 +2424,7 @@ impl Timeline {
         let mut result = ValueReconstructResult::Continue;
         let mut cont_lsn = Lsn(request_lsn.0 + 1);
 
-        let mut search_incremental = false;
-
         'outer: loop {
-            let this_round_search_incremental = if search_incremental {
-                search_incremental = false;
-                true
-            } else {
-                false
-            };
             // The function should have updated 'state'
             //info!("CALLED for {} at {}: {:?} with {} records, cached {}", key, cont_lsn, result, reconstruct_state.records.len(), cached_lsn);
             match result {
@@ -2555,7 +2547,6 @@ impl Timeline {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
-                            assert!(!this_round_search_incremental);
                             cont_lsn = lsn_floor;
                             // metrics: open_layer does not count as fs access, so we are not updating `read_count`
                             traversal_path.push((
@@ -2584,7 +2575,6 @@ impl Timeline {
                                 Ok(result) => result,
                                 Err(e) => return Err(PageReconstructError::from(e)),
                             };
-                            assert!(!this_round_search_incremental);
                             cont_lsn = lsn_floor;
                             // metrics: open_layer does not count as fs access, so we are not updating `read_count`
                             traversal_path.push((
@@ -2600,7 +2590,7 @@ impl Timeline {
                     }
 
                     if let Some((SearchResult { lsn_floor, layer }, next)) =
-                        layers.search_incremental(key, cont_lsn, this_round_search_incremental)
+                        layers.search_incremental(key, cont_lsn)
                     {
                         let layer = timeline.lcache.get_from_desc(&layer);
                         // If it's a remote layer, download it and retry.
@@ -2628,8 +2618,20 @@ impl Timeline {
                                 && matches!(result, ValueReconstructResult::Continue)
                             {
                                 // if is incremental image layer and not found, try again with delta layer
-                                if next.is_some() {
-                                    search_incremental = true;
+                                if let Some(SearchResult { lsn_floor, layer }) = next {
+                                    println!("TRIGGERED: image + delta same layer");
+                                    // HACK: no remote storage for now, safely get and downcast
+                                    let layer = timeline.lcache.get_from_desc(&layer);
+                                    cont_lsn = lsn_floor;
+                                    *read_count += 1;
+                                    traversal_path.push((
+                                        result,
+                                        cont_lsn,
+                                        Box::new({
+                                            let layer = Arc::clone(&layer);
+                                            move || layer.traversal_id()
+                                        }),
+                                    ));
                                     continue 'outer;
                                 }
                             };
