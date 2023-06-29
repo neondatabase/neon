@@ -597,7 +597,6 @@ impl Timeline {
     /// This method makes no distinction between local and remote layers.
     /// Hence, the result **does not represent local filesystem usage**.
     pub async fn layer_size_sum(&self) -> u64 {
-        let _guard = self.lcache.layer_in_use_read();
         let layer_map = self.layer_mgr.read();
         let mut size = 0;
         for l in layer_map.iter_historic_layers() {
@@ -908,7 +907,6 @@ impl Timeline {
     pub async fn check_checkpoint_distance(self: &Arc<Timeline>) -> anyhow::Result<()> {
         let last_lsn = self.get_last_record_lsn();
         let open_layer_size = {
-            let _guard = self.lcache.layer_in_use_read();
             let layers = self.layer_mgr.read();
             let Some(open_layer) = layers.open_layer.as_ref() else {
                 return Ok(());
@@ -1040,7 +1038,6 @@ impl Timeline {
     }
 
     pub async fn layer_map_info(&self, reset: LayerAccessStatsReset) -> LayerMapInfo {
-        let _guard = self.lcache.layer_in_use_read();
         let layer_map = self.layer_mgr.read();
         let mut in_memory_layers = Vec::with_capacity(layer_map.frozen_layers.len() + 1);
         if let Some(open_layer) = &layer_map.open_layer {
@@ -1164,7 +1161,6 @@ impl Timeline {
         let mut results = Vec::with_capacity(layers_to_evict.len());
 
         // start the batch update
-        let guard = self.lcache.layer_in_use_write().await;
         self.layer_mgr
             .update(|mut layer_map| async {
                 let mut batch_updates = layer_map.batch_update();
@@ -1188,7 +1184,7 @@ impl Timeline {
             })
             .await?;
 
-        drop(guard);
+        // drop(guard);
         drop(layer_removal_guard);
 
         assert_eq!(results.len(), layers_to_evict.len());
@@ -1614,7 +1610,6 @@ impl Timeline {
     /// Scan the timeline directory to populate the layer map.
     ///
     pub(super) async fn load_layer_map(&self, disk_consistent_lsn: Lsn) -> anyhow::Result<()> {
-        let guard = self.lcache.layer_in_use_write().await;
         self.layer_mgr
             .update(|mut layers| async move {
                 let mut updates = layers.batch_update();
@@ -1751,7 +1746,6 @@ impl Timeline {
 
         // We're holding a layer map lock for a while but this
         // method is only called during init so it's fine.
-        let guard = self.lcache.layer_in_use_write().await;
         let mut layers_to_remove = vec![];
         let mut layers_to_insert = vec![];
 
@@ -1913,7 +1907,6 @@ impl Timeline {
         let disk_consistent_lsn = up_to_date_metadata.disk_consistent_lsn();
 
         let local_layers = {
-            let guard = self.lcache.layer_in_use_read().await;
             let layers = self.layer_mgr.read();
             layers
                 .iter_historic_layers()
@@ -2290,7 +2283,6 @@ impl Timeline {
     }
 
     async fn find_layer(&self, layer_file_name: &str) -> Option<Arc<dyn PersistentLayer>> {
-        let guard = self.lcache.layer_in_use_read().await;
         let layers = self.layer_mgr.read();
         for historic_layer in layers.iter_historic_layers() {
             let historic_layer_name = historic_layer.filename().file_name();
@@ -2511,7 +2503,6 @@ impl Timeline {
             #[allow(clippy::never_loop)] // see comment at bottom of this loop
             'layer_map_search: loop {
                 let remote_layer = {
-                    let guard = timeline.lcache.layer_in_use_read().await;
                     let layers = timeline.layer_mgr.read();
 
                     // Check the open and frozen in-memory layers first, in order from newest
@@ -2696,7 +2687,6 @@ impl Timeline {
     /// Get a handle to the latest layer for appending.
     ///
     async fn get_layer_for_write(&self, lsn: Lsn) -> anyhow::Result<Arc<InMemoryLayer>> {
-        let guard = self.lcache.layer_in_use_write().await;
         let layers = self.layer_mgr.read();
 
         ensure!(lsn.is_aligned());
@@ -2779,7 +2769,6 @@ impl Timeline {
         } else {
             Some(self.write_lock.lock().await)
         };
-        let mut _guard = self.lcache.layer_in_use_write().await;
         let layers = self.layer_mgr.read();
 
         if let Some(open_layer) = &layers.open_layer {
@@ -2825,7 +2814,6 @@ impl Timeline {
             let flush_counter = *layer_flush_start_rx.borrow();
             let result = loop {
                 let layer_to_flush = {
-                    let guard = self.lcache.layer_in_use_read().await;
                     let layers = self.layer_mgr.read();
                     layers.frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
@@ -2951,7 +2939,6 @@ impl Timeline {
         // The new on-disk layers are now in the layer map. We can remove the
         // in-memory layer from the map now.
         {
-            let _guard = self.lcache.layer_in_use_write().await;
             self.layer_mgr
                 .update(|mut layers| async {
                     let l = layers.frozen_layers.pop_front();
@@ -3094,7 +3081,6 @@ impl Timeline {
 
         // Add it to the layer map
         let l = Arc::new(new_delta);
-        let guard = self.lcache.layer_in_use_write().await;
         self.layer_mgr
             .update(|mut layers| async {
                 let mut batch_updates = layers.batch_update();
@@ -3156,7 +3142,6 @@ impl Timeline {
     ) -> anyhow::Result<bool> {
         let threshold = self.get_image_creation_threshold();
 
-        let guard = self.lcache.layer_in_use_read().await;
         let layers = self.layer_mgr.read();
 
         let mut max_deltas = 0;
@@ -3335,7 +3320,6 @@ impl Timeline {
 
         let mut layer_paths_to_upload = HashMap::with_capacity(image_layers.len());
 
-        let guard = self.lcache.layer_in_use_write().await;
         self.layer_mgr
             .update(|mut layers| async {
                 let mut updates = layers.batch_update();
@@ -3367,7 +3351,7 @@ impl Timeline {
                 Ok(layers)
             })
             .await?;
-        drop(guard);
+        // drop(guard);
         timer.stop_and_record();
 
         Ok(layer_paths_to_upload)
@@ -3410,7 +3394,6 @@ impl Timeline {
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
-        let guard = self.lcache.layer_in_use_read().await;
         let layers = self.layer_mgr.read();
         let mut level0_deltas = layers.get_level0_deltas()?;
 
@@ -3474,7 +3457,7 @@ impl Timeline {
             .map(|l| self.lcache.get_from_desc(l))
             .collect_vec();
 
-        drop(guard);
+        // drop(guard);
 
         if !remotes.is_empty() {
             // caller is holding the lock to layer_removal_cs, and we don't want to download while
@@ -3541,7 +3524,6 @@ impl Timeline {
         // Determine N largest holes where N is number of compacted layers.
         let max_holes = deltas_to_compact.len();
         let last_record_lsn = self.get_last_record_lsn();
-        let guard = self.lcache.layer_in_use_read().await; // Is'n it better to hold original layers lock till here?
         let layers = self.layer_mgr.read();
         let min_hole_range = (target_file_size / page_cache::PAGE_SZ as u64) as i128;
         let min_hole_coverage_size = 3; // TODO: something more flexible?
@@ -3575,7 +3557,7 @@ impl Timeline {
             }
             prev = Some(next_key.next());
         }
-        drop(guard);
+        // drop(guard);
         let mut holes = heap.into_vec();
         holes.sort_unstable_by_key(|hole| hole.key_range.start);
         let mut next_hole = 0; // index of next hole in holes vector
@@ -3779,7 +3761,6 @@ impl Timeline {
                 .context("wait for layer upload ops to complete")?;
         }
 
-        let guard = self.lcache.layer_in_use_write().await;
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         self.layer_mgr
             .update(|mut layers| async {
@@ -3827,7 +3808,7 @@ impl Timeline {
                 Ok(layers)
             })
             .await?;
-        drop(guard);
+        // drop(guard);
 
         // Also schedule the deletions in remote storage
         if let Some(remote_client) = &self.remote_client {
@@ -4043,7 +4024,6 @@ impl Timeline {
         // 4. newer on-disk image layers cover the layer's whole key range
         //
         // TODO holding a write lock is too agressive and avoidable
-        let guard = self.lcache.layer_in_use_write().await;
         let layers = self.layer_mgr.read();
         'outer: for l in layers.iter_historic_layers() {
             result.layers_total += 1;
@@ -4349,7 +4329,6 @@ impl Timeline {
 
                     // Download complete. Replace the RemoteLayer with the corresponding
                     // Delta- or ImageLayer in the layer map.
-                    let guard = self_clone.lcache.layer_in_use_write().await;
                     let new_layer = remote_layer.create_downloaded_layer(self_clone.conf, *size);
                     {
                         let l: Arc<dyn PersistentLayer> = remote_layer.clone();
@@ -4381,7 +4360,7 @@ impl Timeline {
                                 .store(true, Relaxed);
                         }
                     }
-                    drop(guard);
+                    // drop(guard);
 
                     info!("on-demand download successful");
 
@@ -4480,7 +4459,6 @@ impl Timeline {
     ) {
         let mut downloads = Vec::new();
         {
-            let guard = self.lcache.layer_in_use_read().await;
             let layers = self.layer_mgr.read();
             layers
                 .iter_historic_layers()
@@ -4585,7 +4563,6 @@ impl LocalLayerInfoForDiskUsageEviction {
 
 impl Timeline {
     pub(crate) async fn get_local_layers_for_disk_usage_eviction(&self) -> DiskUsageEvictionInfo {
-        let guard = self.lcache.layer_in_use_read().await;
         let layers = self.layer_mgr.read();
 
         let mut max_layer_size: Option<u64> = None;

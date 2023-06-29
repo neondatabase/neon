@@ -24,10 +24,6 @@ pub struct LayerCache {
     mapping: Mutex<HashMap<PersistentLayerKey, Arc<dyn PersistentLayer>>>,
 }
 
-pub struct LayerInUseWrite(tokio::sync::OwnedRwLockWriteGuard<()>);
-
-pub struct LayerInUseRead(tokio::sync::OwnedRwLockReadGuard<()>);
-
 #[derive(Clone)]
 pub struct DeleteGuard(Arc<tokio::sync::OwnedMutexGuard<()>>);
 
@@ -44,18 +40,6 @@ impl LayerCache {
     pub fn get_from_desc(&self, desc: &PersistentLayerDesc) -> Arc<dyn PersistentLayer> {
         let guard = self.mapping.lock().unwrap();
         guard.get(&desc.key()).expect("not found").clone()
-    }
-
-    /// This function is to mock the original behavior of `layers` lock in `Timeline`. Can be removed after we ensure
-    /// we won't delete files that are being read.
-    pub async fn layer_in_use_write(&self) -> LayerInUseWrite {
-        LayerInUseWrite(self.layers_operation_lock.clone().write_owned().await)
-    }
-
-    /// This function is to mock the original behavior of `layers` lock in `Timeline`. Can be removed after we ensure
-    /// we won't delete files that are being read.
-    pub async fn layer_in_use_read(&self) -> LayerInUseRead {
-        LayerInUseRead(self.layers_operation_lock.clone().read_owned().await)
     }
 
     /// Ensures only one of compaction / gc can happen at a time.
