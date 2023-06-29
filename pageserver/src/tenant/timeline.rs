@@ -3605,6 +3605,11 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
 }
 
 impl Timeline {
+    /// Level0 files first phase of compaction, explained in the [`compact_inner`] comment.
+    ///
+    /// This method takes the `_layer_removal_cs` guard to highlight it required downloads are
+    /// returned as an error. If the `layer_removal_cs` boundary is changed not to be taken in the
+    /// start of level0 files compaction, the on-demand download should be revisited as well.
     fn compact_level0_phase1(
         self: Arc<Self>,
         _layer_removal_cs: Arc<tokio::sync::OwnedMutexGuard<()>>,
@@ -4075,6 +4080,9 @@ impl Timeline {
         let mut layer_names_to_delete = Vec::with_capacity(deltas_to_compact.len());
         for l in deltas_to_compact {
             layer_names_to_delete.push(l.filename());
+            // NB: the layer file identified by descriptor `l` is guaranteed to be present
+            // in the LayerFileManager because we kept holding `layer_removal_cs` the entire
+            // time, even though we dropped `Timeline::layers` inbetween.
             self.delete_historic_layer(layer_removal_cs.clone(), l, &mut updates, mapping)?;
         }
         updates.flush();
