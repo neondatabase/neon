@@ -8,7 +8,7 @@ use bytes::Bytes;
 use fail::fail_point;
 use futures::StreamExt;
 use itertools::Itertools;
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use pageserver_api::models::{
     DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest,
     DownloadRemoteLayersTaskState, LayerMapInfo, LayerResidenceEventReason, LayerResidenceStatus,
@@ -665,11 +665,27 @@ impl Timeline {
             img: cached_page_img,
         };
 
+        static GET_RECONSTRUCT_DATA_CONCURRENCY: Lazy<Option<usize>> = Lazy::new(|| {
+            std::env::var("PAGESERVER_TIMELINE_GET_RECONSTRUCT_DATA_CONCURRENCY_LIMIT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        });
+        static GET_RECONSTRUCT_DATA_SEMAPHORE: Lazy<Option<Semaphore>> =
+            Lazy::new(|| (*GET_RECONSTRUCT_DATA_CONCURRENCY).map(Semaphore::new));
+
+        let permit = if let Some(sem) = GET_RECONSTRUCT_DATA_SEMAPHORE.as_ref() {
+            Some(sem.acquire().await)
+        } else {
+            None
+        };
+
         let timer = self.metrics.get_reconstruct_data_time_histo.start_timer();
         let reconstruct_state = self
             .get_reconstruct_data(key, lsn, reconstruct_state, ctx)
             .await?;
         timer.stop_and_record();
+
+        drop(permit);
 
         RECONSTRUCT_TIME
             .observe_closure_duration(|| self.reconstruct_value(key, lsn, reconstruct_state))
