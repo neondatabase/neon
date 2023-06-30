@@ -130,6 +130,24 @@ pub static MATERIALIZED_PAGE_CACHE_HIT: Lazy<IntCounter> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_cache_read_accesses_total",
+        "Number of read accesses to the page cache",
+        &["key_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "pageserver_page_cache_read_hits_total",
+        "Number of read accesses to the page cache that hit",
+        &["key_kind", "hit_kind"]
+    )
+    .expect("failed to define a metric")
+});
+
 static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
         "pageserver_wait_lsn_seconds",

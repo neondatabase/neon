@@ -313,6 +313,11 @@ impl PageCache {
         key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
+        crate::metrics::PAGE_CACHE_READ_ACCESSES
+            .get_metric_with_label_values(&["materialized_page"])
+            .unwrap()
+            .inc();
+
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
                 tenant_id,
@@ -323,8 +328,23 @@ impl PageCache {
         };
 
         if let Some(guard) = self.try_lock_for_read(&mut cache_key) {
-            if let CacheKey::MaterializedPage { hash_key: _, lsn } = cache_key {
-                Some((lsn, guard))
+            if let CacheKey::MaterializedPage {
+                hash_key: _,
+                lsn: available_lsn,
+            } = cache_key
+            {
+                if available_lsn == lsn {
+                    crate::metrics::PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&["materialized_page", "exact"])
+                        .unwrap()
+                        .inc();
+                } else {
+                    crate::metrics::PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&["materialized_page", "older_lsn"])
+                        .unwrap()
+                        .inc();
+                }
+                Some((available_lsn, guard))
             } else {
                 panic!("unexpected key type in slot");
             }
@@ -499,11 +519,30 @@ impl PageCache {
     /// ```
     ///
     fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
+        let key_kind = match cache_key {
+            CacheKey::MaterializedPage { .. } => {
+                unreachable!("Materialized pages use lookup_materialized_page")
+            }
+            CacheKey::EphemeralPage { .. } => "ephemeral",
+            CacheKey::ImmutableFilePage { .. } => "immutable",
+        };
+        crate::metrics::PAGE_CACHE_READ_ACCESSES
+            .get_metric_with_label_values(&[key_kind])
+            .unwrap()
+            .inc();
+        let mut is_first_iteration = true;
         loop {
             // First check if the key already exists in the cache.
             if let Some(read_guard) = self.try_lock_for_read(cache_key) {
+                if is_first_iteration {
+                    crate::metrics::PAGE_CACHE_READ_HITS
+                        .get_metric_with_label_values(&[key_kind, "-"])
+                        .unwrap()
+                        .inc();
+                }
                 return Ok(ReadBufResult::Found(read_guard));
             }
+            is_first_iteration = false;
 
             // Not found. Find a victim buffer
             let (slot_idx, mut inner) =
