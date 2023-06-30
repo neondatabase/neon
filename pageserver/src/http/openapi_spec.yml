@@ -723,7 +723,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
         "406":
-          description: Permanently unsatisfiable request
+          description: Permanently unsatisfiable request, don't retry.
           content:
             application/json:
               schema:

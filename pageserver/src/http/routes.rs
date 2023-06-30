@@ -340,7 +340,7 @@ async fn timeline_create_handler(
             }
             Err(tenant::CreateTimelineError::AncestorLsn(err)) => {
                 json_response(StatusCode::NOT_ACCEPTABLE, HttpErrorBody::from_msg(
-                err.to_string(),
+                    format!("{err:#}")
                 ))
             }
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
