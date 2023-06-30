@@ -689,6 +689,46 @@ pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_QUEUE_DELAY: Lazy<His
     },
 );
 
+pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "pageserver_layer_get_value_reconstruct_data_completion_time_seconds",
+        "Time a Layer::get_value_reconstruct_data call takes to complete",
+        &["result"],
+        vec![
+            0.000_005,
+            0.000_010,
+            0.000_025,
+            0.000_050,
+            0.000_100,
+            0.000_250,
+            0.000_500,
+            0.001_000,
+            0.002_500,
+            0.005_000,
+            0.010_000,
+            0.025_000,
+            0.050_000,
+            0.100_000,
+            0.250_000,
+            0.500_000,
+            1.000_000,
+            2.000_000,
+            5.000_000,
+            10.000_000,
+            25.000_000,
+            50.000_000,
+            100.000_000,
+        ]
+    )
+    .expect("failed to define a metric")
+});
+
+pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME_OK: Lazy<Histogram> =
+    Lazy::new(|| LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME.with_label_values(&["ok"]));
+
+pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME_ERROR: Lazy<Histogram> =
+    Lazy::new(|| LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME.with_label_values(&["error"]));
+
 // Metrics collected on WAL redo operations
 //
 // We collect the time spent in actual WAL redo ('redo'), and time waiting

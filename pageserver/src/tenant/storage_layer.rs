@@ -396,14 +396,22 @@ pub trait Layer: std::fmt::Debug + Send + Sync + 'static {
     ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
         let span = tracing::info_span!("get_value_reconstruct_data_spawn_blocking");
         let start = Instant::now();
-        tokio::task::spawn_blocking(move || {
+        let res = tokio::task::spawn_blocking(move || {
             crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_QUEUE_DELAY
                 .observe(start.elapsed().as_secs_f64());
             let _enter = span.enter();
             self.get_value_reconstruct_data_blocking(key, lsn_range, reconstruct_data, ctx)
         })
         .await
-        .context("spawn_blocking")?
+        .context("spawn_blocking");
+        let histo = match &res {
+            Ok(Ok(_)) => &crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME_OK,
+            Ok(Err(_)) | Err(_) => {
+                &crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME_ERROR
+            }
+        };
+        histo.observe(start.elapsed().as_secs_f64());
+        res?
     }
 
     /// A short ID string that uniquely identifies the given layer within a [`LayerMap`].
