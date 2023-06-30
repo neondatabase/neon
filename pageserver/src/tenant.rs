@@ -501,6 +501,11 @@ impl DeletionGuard {
     }
 }
 
+pub(crate) enum CreateTimelineError {
+    AlreadyExists,
+    Other(anyhow::Error),
+}
+
 impl Tenant {
     /// Yet another helper for timeline initialization.
     /// Contains the common part of `load_local_timeline` and `load_remote_timeline`.
@@ -1374,8 +1379,7 @@ impl Tenant {
     /// Returns the new timeline ID and reference to its Timeline object.
     ///
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
-    /// the same timeline ID already exists, returns None. If `new_timeline_id` is not given,
-    /// a new unique ID is generated.
+    /// the same timeline ID already exists, returns CreateTimelineError::ALreadyExists.
     pub async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -1384,7 +1388,7 @@ impl Tenant {
         pg_version: u32,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Option<Arc<Timeline>>> {
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
         anyhow::ensure!(
             self.is_active(),
             "Cannot create timelines on inactive tenant"
@@ -1408,7 +1412,7 @@ impl Tenant {
                     .context("wait for timeline uploads to complete")?;
             }
 
-            return Ok(None);
+            return Err(CreateTimelineError::AlreadyExists);
         }
 
         let loaded_timeline = match ancestor_timeline_id {

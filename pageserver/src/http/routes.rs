@@ -23,7 +23,6 @@ use super::models::{
     TimelineCreateRequest, TimelineGcRequest, TimelineInfo,
 };
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::disk_usage_eviction_task;
 use crate::metrics::{StorageTimeOperation, STORAGE_TIME_GLOBAL};
 use crate::pgdatadir_mapping::LsnForTimestamp;
 use crate::task_mgr::TaskKind;
@@ -35,6 +34,7 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError, Timeline};
 use crate::{config::PageServerConf, tenant::mgr};
+use crate::{disk_usage_eviction_task, tenant};
 use utils::{
     auth::JwtAuth,
     http::{
@@ -328,15 +328,17 @@ async fn timeline_create_handler(
             &ctx,
         )
         .await {
-            Ok(Some(new_timeline)) => {
+            Ok(new_timeline) => {
                 // Created. Construct a TimelineInfo for it.
                 let timeline_info = build_timeline_info_common(&new_timeline, &ctx)
                     .await
                     .map_err(ApiError::InternalServerError)?;
                 json_response(StatusCode::CREATED, timeline_info)
             }
-            Ok(None) => json_response(StatusCode::CONFLICT, ()), // timeline already exists
-            Err(err) => Err(ApiError::InternalServerError(err)),
+            Err(tenant::CreateTimelineError::AlreadyExists) => {
+                json_response(StatusCode::CONFLICT, ())
+            }
+            Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
     .instrument(info_span!("timeline_create", tenant = %tenant_id, timeline_id = %new_timeline_id, lsn=?request_data.ancestor_start_lsn, pg_version=?request_data.pg_version))
