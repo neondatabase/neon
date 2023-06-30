@@ -102,11 +102,33 @@ use crate::shutdown_pageserver;
 // It's also good to avoid hogging all threads that would be needed to process
 // other operations, if the upload tasks e.g. get blocked on locks. It shouldn't
 // happen, but still.
-//
+
+static PAGESERVER_TOKIO_MAX_BLOCKING_THREADS_OVERRIDE: Lazy<Option<usize>> = Lazy::new(|| {
+    let env_var: String = match std::env::var("PAGESERVER_TOKIO_MAX_BLOCKING_THREADS") {
+        Ok(v) => v,
+        Err(std::env::VarError::NotPresent) => {
+            debug!("env var PAGESERVER_TOKIO_MAX_BLOCKING_THREADS not set, using default");
+            return None;
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("env var PAGESERVER_TOKIO_MAX_BLOCKING_THREADS is not valid UTF-8");
+        }
+    };
+    let pool_size = match env_var.parse() {
+        Ok(v) => v,
+        Err(e) => {
+            panic!("Failed to parse PAGESERVER_TOKIO_MAX_BLOCKING_THREADS: {e:?}");
+        }
+    };
+    eprintln!("using spawn_blocking pool size override from env var PAGESERVER_TOKIO_MAX_BLOCKING_THREADS: {pool_size:?}");
+    Some(pool_size)
+});
+
 pub static COMPUTE_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("compute request worker")
         .enable_all()
+        .max_blocking_threads((*PAGESERVER_TOKIO_MAX_BLOCKING_THREADS_OVERRIDE).unwrap_or(512))
         .build()
         .expect("Failed to create compute request runtime")
 });
@@ -115,6 +137,7 @@ pub static MGMT_REQUEST_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("mgmt request worker")
         .enable_all()
+        .max_blocking_threads((*PAGESERVER_TOKIO_MAX_BLOCKING_THREADS_OVERRIDE).unwrap_or(512))
         .build()
         .expect("Failed to create mgmt request runtime")
 });
@@ -123,6 +146,7 @@ pub static WALRECEIVER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("walreceiver worker")
         .enable_all()
+        .max_blocking_threads((*PAGESERVER_TOKIO_MAX_BLOCKING_THREADS_OVERRIDE).unwrap_or(512))
         .build()
         .expect("Failed to create walreceiver runtime")
 });
@@ -131,6 +155,7 @@ pub static BACKGROUND_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("background op worker")
         .enable_all()
+        .max_blocking_threads((*PAGESERVER_TOKIO_MAX_BLOCKING_THREADS_OVERRIDE).unwrap_or(512))
         .build()
         .expect("Failed to create background op runtime")
 });
