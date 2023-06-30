@@ -722,6 +722,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ForbiddenError"
+        "406":
+          description: Permanently unsatisfiable request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "409":
           description: Timeline already exists, creation skipped
           content:

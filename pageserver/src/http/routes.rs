@@ -338,6 +338,11 @@ async fn timeline_create_handler(
             Err(tenant::CreateTimelineError::AlreadyExists) => {
                 json_response(StatusCode::CONFLICT, ())
             }
+            Err(tenant::CreateTimelineError::AncestorLsn(err)) => {
+                json_response(StatusCode::NOT_ACCEPTABLE, HttpErrorBody::from_msg(
+                err.to_string(),
+                ))
+            }
             Err(tenant::CreateTimelineError::Other(err)) => Err(ApiError::InternalServerError(err)),
         }
     }
