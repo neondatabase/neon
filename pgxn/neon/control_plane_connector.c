@@ -162,8 +162,11 @@ ConstructDeltaMessage()
 			PushKeyValue(&state, "name", entry->name);
 			if (entry->password)
 			{
+#if PG_MAJORVERSION_NUM == 14
 				char	   *logdetail;
-
+#else
+				const char *logdetail;
+#endif
 				PushKeyValue(&state, "password", (char *) entry->password);
 				PushKeyValue(&state, "encrypted_password", get_role_password(entry->name, &logdetail));
 			}
