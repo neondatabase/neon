@@ -139,6 +139,24 @@ pub static PAGE_CACHE_READ_ACCESSES: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("failed to define a metric")
 });
 
+pub static PAGE_CACHE_READ_ACCESSES_MATERIALIZED_PAGE: Lazy<IntCounter> = Lazy::new(|| {
+    PAGE_CACHE_READ_ACCESSES
+        .get_metric_with_label_values(&["materialized_page"])
+        .unwrap()
+});
+
+pub static PAGE_CACHE_READ_ACCESSES_EPHEMERAL: Lazy<IntCounter> = Lazy::new(|| {
+    PAGE_CACHE_READ_ACCESSES
+        .get_metric_with_label_values(&["ephemeral"])
+        .unwrap()
+});
+
+pub static PAGE_CACHE_READ_ACCESSES_IMMUTABLE: Lazy<IntCounter> = Lazy::new(|| {
+    PAGE_CACHE_READ_ACCESSES
+        .get_metric_with_label_values(&["immutable"])
+        .unwrap()
+});
+
 pub static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "pageserver_page_cache_read_hits_total",
@@ -146,6 +164,30 @@ pub static PAGE_CACHE_READ_HITS: Lazy<IntCounterVec> = Lazy::new(|| {
         &["key_kind", "hit_kind"]
     )
     .expect("failed to define a metric")
+});
+
+pub static PAGE_CACHE_READ_HITS_EPHEMERAL: Lazy<IntCounter> = Lazy::new(|| {
+    PAGE_CACHE_READ_HITS
+        .get_metric_with_label_values(&["ephemeral", "-"])
+        .unwrap()
+});
+
+pub static PAGE_CACHE_READ_HITS_IMMUTABLE: Lazy<IntCounter> = Lazy::new(|| {
+    PAGE_CACHE_READ_HITS
+        .get_metric_with_label_values(&["immutable", "-"])
+        .unwrap()
+});
+
+pub static PAGE_CACHE_READ_HITS_MATERIALIZED_PAGE_EXACT: Lazy<IntCounter> = Lazy::new(|| {
+    PAGE_CACHE_READ_HITS
+        .get_metric_with_label_values(&["materialized_page", "exact"])
+        .unwrap()
+});
+
+pub static PAGE_CACHE_READ_HITS_MATERIALIZED_PAGE_OLDER_LSN: Lazy<IntCounter> = Lazy::new(|| {
+    PAGE_CACHE_READ_HITS
+        .get_metric_with_label_values(&["materialized_page", "older_lsn"])
+        .unwrap()
 });
 
 static WAIT_LSN_TIME: Lazy<HistogramVec> = Lazy::new(|| {
