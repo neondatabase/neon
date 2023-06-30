@@ -1056,7 +1056,7 @@ impl Tenant {
 
                 let metadata_path = self.conf.metadata_path(timeline_id, self.tenant_id);
                 if metadata_path.exists() {
-                    // Remote deletion didn finish. Need to resume.
+                    // Remote deletion did not finish. Need to resume.
                     timelines_to_resume_deletion.push((
                         timeline_id,
                         load_metadata(self.conf, timeline_id, self.tenant_id)?,
@@ -1222,7 +1222,7 @@ impl Tenant {
         Ok(())
     }
 
-    // Shortuct to create Timeline in stopping state and spawn deletion task.
+    // Shortcut to create Timeline in stopping state and spawn deletion task.
     fn resume_deletion(
         self: &Arc<Self>,
         timeline_id: TimelineId,
