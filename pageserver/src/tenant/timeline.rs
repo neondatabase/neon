@@ -3431,6 +3431,7 @@ struct CompactLevel0Phase1Result {
 #[derive(Default)]
 struct CompactTieredPhase1Result {
     new_layers: Vec<Arc<dyn PersistentLayer>>,
+    trivial_move_layers: Vec<Arc<dyn PersistentLayer>>,
     new_tier_at: usize,
     removed_tiers: Vec<usize>,
 }
@@ -4013,7 +4014,7 @@ impl Timeline {
         target_file_size: u64,
         ctx: &RequestContext,
     ) -> Result<Option<CompactTieredPhase1Result>, CompactionError> {
-        let (deltas_to_compact_layers, tier_to_compact, lsn_range) = {
+        let (deltas_to_compact_layers, tier_to_compact, lsn_range, trivial_move_layers) = {
             let guard = self.layers.read().await;
             let (layers, _) = &*guard;
 
@@ -4045,10 +4046,70 @@ impl Timeline {
             }
             drop(compacting_tiers);
 
-            let mut deltas_to_compact_layers = vec![];
+            let mut layers_in_tier = vec![];
             for (tier_id, layers) in layers.sorted_runs.runs.iter() {
                 if tier_to_compact.contains(tier_id) {
-                    deltas_to_compact_layers.extend(layers.iter().cloned());
+                    layers_in_tier.push(layers.iter().cloned().collect_vec());
+                }
+            }
+
+            let mut layers_range = vec![];
+            for layers in &layers_in_tier {
+                let key_range_start = layers
+                    .iter()
+                    .map(|l| l.get_key_range().start)
+                    .min()
+                    .unwrap();
+                let key_range_end = layers.iter().map(|l| l.get_key_range().end).max().unwrap();
+                layers_range.push(key_range_start..key_range_end);
+            }
+
+            let mut deltas_to_compact_layers = vec![];
+            let mut trivial_move_layers = vec![];
+            for (idx, layers) in layers_in_tier.into_iter().enumerate() {
+                let range_to_check = {
+                    let start = layers_range
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != idx)
+                        .map(|(_, k)| k.start)
+                        .min()
+                        .unwrap();
+                    let end = layers_range
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != idx)
+                        .map(|(_, k)| k.end)
+                        .max()
+                        .unwrap();
+                    start..end
+                };
+                fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
+                    !(a.end <= b.start || b.end <= a.start)
+                }
+                let first_overlap = layers
+                    .iter()
+                    .enumerate()
+                    .find(|(_, l)| overlaps_with(&range_to_check, &l.get_key_range()))
+                    .map(|(i, _)| i);
+                let last_overlap = layers
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, l)| overlaps_with(&range_to_check, &l.get_key_range()))
+                    .map(|(i, _)| i);
+                if let (Some(first_overlap), Some(last_overlap)) = (first_overlap, last_overlap) {
+                    for (i, layer) in layers.into_iter().enumerate() {
+                        if i < first_overlap || i > last_overlap {
+                            trivial_move_layers.push(layer);
+                        } else {
+                            deltas_to_compact_layers.push(layer);
+                        }
+                    }
+                } else {
+                    assert!(first_overlap.is_none());
+                    assert!(last_overlap.is_none());
+                    trivial_move_layers.extend(layers);
                 }
             }
 
@@ -4077,10 +4138,13 @@ impl Timeline {
                 lsn_range.start, lsn_range.end, tier_to_compact
             );
 
-            (deltas_to_compact_layers, tier_to_compact, lsn_range)
+            (
+                deltas_to_compact_layers,
+                tier_to_compact,
+                lsn_range,
+                trivial_move_layers,
+            )
         };
-
-        // TODO: leverage the properties that some layers do not overlap, kmerge is too costly
 
         // This iterator walks through all key-value pairs from all the layers
         // we're compacting, in key, LSN order.
@@ -4296,6 +4360,7 @@ impl Timeline {
             new_layers,
             new_tier_at: *tier_to_compact.last().unwrap(),
             removed_tiers: tier_to_compact,
+            trivial_move_layers: vec![],
         }))
     }
 
@@ -4310,7 +4375,8 @@ impl Timeline {
         let Some(CompactTieredPhase1Result {
             new_layers,
             new_tier_at,
-            removed_tiers
+            removed_tiers,
+            trivial_move_layers
         }) = self
             .compact_tiered_phase1(layer_removal_cs.clone(), target_file_size, ctx)
             .await? else { return Ok(()); };
@@ -4338,6 +4404,11 @@ impl Timeline {
         let mut new_tier_at_index = None;
         let mut layers_to_delete = vec![];
         let mut layer_names_to_delete = vec![];
+
+        let trivial_move_layers_keys = trivial_move_layers
+            .iter()
+            .map(|x| x.layer_desc().key())
+            .collect::<HashSet<_>>();
         for (tier_id, tier) in &updates.sorted_runs().runs {
             if *tier_id == new_tier_at {
                 new_tier_at_index = Some(new_sorted_runs.len());
@@ -4346,7 +4417,9 @@ impl Timeline {
                 new_sorted_runs.push((*tier_id, tier.clone()));
             } else {
                 for layer in tier {
-                    layers_to_delete.push(layer.clone());
+                    if !trivial_move_layers_keys.contains(&layer.key()) {
+                        layers_to_delete.push(layer.clone());
+                    }
                 }
             }
         }
@@ -4359,7 +4432,7 @@ impl Timeline {
         let new_tier_at_index = new_tier_at_index.unwrap();
 
         let mut new_layer_paths = HashMap::with_capacity(new_layers.len());
-        let mut new_layer_descs = vec![];
+        let mut new_layer_descs: Vec<Arc<PersistentLayerDesc>> = vec![];
         for l in new_layers {
             let new_path = l.local_path().unwrap();
 
@@ -4393,7 +4466,12 @@ impl Timeline {
             self.lcache.create_new_layer(l);
         }
 
+        for layer in &trivial_move_layers {
+            new_layer_descs.push(layer.layer_desc().clone().into());
+        }
+
         let new_tier_id = updates.sorted_runs().next_tier_id();
+        new_layer_descs.sort_by_key(|x| (x.is_delta(), x.key_range.start));
         new_sorted_runs.insert(new_tier_at_index, (new_tier_id, new_layer_descs));
         updates.sorted_runs().runs = new_sorted_runs;
 
@@ -5367,6 +5445,7 @@ fn compaction_simulator_1() {
             let mut new_tiers = vec![];
             let mut new_tier_size = 0;
             let mut insert_at = 0;
+            let tiers_to_compact_clone = tiers_to_compact.clone();
             for &(tier_id, size) in &tiers {
                 if tiers_to_compact.contains(&tier_id) {
                     new_tier_size += size;
@@ -5381,7 +5460,7 @@ fn compaction_simulator_1() {
             next_tier_id += 1;
             println!(
                 "finish {:?} -> {}, size = {}",
-                tiers_to_compact, next_tier_id, new_tier_size
+                tiers_to_compact_clone, next_tier_id, new_tier_size
             );
             for tier in &tiers_to_compact {
                 skip_tiers.remove(tier);
