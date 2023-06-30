@@ -501,9 +501,12 @@ impl DeletionGuard {
     }
 }
 
-pub(crate) enum CreateTimelineError {
+#[derive(thiserror::Error, Debug)]
+pub enum CreateTimelineError {
+    #[error("a timeline with the given ID already exists")]
     AlreadyExists,
-    Other(anyhow::Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 impl Tenant {
@@ -1379,7 +1382,7 @@ impl Tenant {
     /// Returns the new timeline ID and reference to its Timeline object.
     ///
     /// If the caller specified the timeline ID to use (`new_timeline_id`), and timeline with
-    /// the same timeline ID already exists, returns CreateTimelineError::ALreadyExists.
+    /// the same timeline ID already exists, returns CreateTimelineError::AlreadyExists.
     pub async fn create_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -1389,10 +1392,11 @@ impl Tenant {
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        anyhow::ensure!(
-            self.is_active(),
-            "Cannot create timelines on inactive tenant"
-        );
+        if !self.is_active() {
+            return Err(CreateTimelineError::Other(anyhow::anyhow!(
+                "Cannot create timelines on inactive tenant"
+            )));
+        }
 
         if let Ok(existing) = self.get_timeline(new_timeline_id, false) {
             debug!("timeline {new_timeline_id} already exists");
@@ -1427,12 +1431,12 @@ impl Tenant {
                     let ancestor_ancestor_lsn = ancestor_timeline.get_ancestor_lsn();
                     if ancestor_ancestor_lsn > *lsn {
                         // can we safely just branch from the ancestor instead?
-                        bail!(
+                        return Err(CreateTimelineError::Other(anyhow::anyhow!(
                             "invalid start lsn {} for ancestor timeline {}: less than timeline ancestor lsn {}",
                             lsn,
                             ancestor_timeline_id,
                             ancestor_ancestor_lsn,
-                        );
+                        )));
                     }
 
                     // Wait for the WAL to arrive and be processed on the parent branch up
@@ -1466,7 +1470,7 @@ impl Tenant {
             })?;
         }
 
-        Ok(Some(loaded_timeline))
+        Ok(loaded_timeline)
     }
 
     /// perform one garbage collection iteration, removing old data files from disk.
