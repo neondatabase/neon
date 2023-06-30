@@ -135,7 +135,7 @@ hnsw_check_available_memory(Size requested)
 		elog(ERROR, "Failed to get amount of RAM: %m");
 
 	if ((Size)NBuffers*BLCKSZ + requested >= total)
-		elog(ERROR, "HNSW index requeries %ld bytes whileonly %ld are available",
+		elog(ERROR, "HNSW index requeries %ld bytes while only %ld are available",
 			requested, total - (Size)NBuffers*BLCKSZ);
 }
 
@@ -152,9 +152,9 @@ hnsw_check_available_memory(Size requested)
 		elog(ERROR, "Failed to get amount of RAM: %n");
 
 	total = si.totalram*si.mem_unit;
-	if ((Size)shared_buffers*BLCKSZ + requested >= total)
-		elog(ERROR, "HNSW index requeries %ld bytes whileonly %ld are available",
-			requested, total - (Size)shareds_buffers*BLCKSZ);
+	if ((Size)NBuffers*BLCKSZ + requested >= total)
+		elog(ERROR, "HNSW index requeries %ld bytes while only %ld are available",
+			requested, total - (Size)NBuffers*BLCKSZ);
 }
 
 #endif
