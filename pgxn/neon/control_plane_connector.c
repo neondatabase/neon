@@ -32,6 +32,7 @@
 #include "port.h"
 #include <curl/curl.h>
 #include "utils/jsonb.h"
+#include "libpq/crypt.h"
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
@@ -161,7 +162,10 @@ ConstructDeltaMessage()
 			PushKeyValue(&state, "name", entry->name);
 			if (entry->password)
 			{
+				const char *logdetail;
+
 				PushKeyValue(&state, "password", (char *) entry->password);
+				PushKeyValue(&state, "encrypted_password", get_role_password(entry->name, &logdetail));
 			}
 			if (entry->old_name[0] != '\0')
 			{
