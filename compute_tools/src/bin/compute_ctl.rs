@@ -256,12 +256,15 @@ fn main() -> Result<()> {
         exit_code = ecode.code()
     }
 
-    info!("syncing safekeepers on shutdown");
+    // Maybe sync safekeepers again, to speed up next startup
     let compute_state = compute.state.lock().unwrap().clone();
     let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-    let storage_auth_token = pspec.storage_auth_token.clone();
-    let lsn = compute.sync_safekeepers(storage_auth_token)?;
-    info!("synced safekeepers at lsn {lsn}");
+    if matches!(pspec.spec.mode, compute_api::spec::ComputeMode::Primary) {
+        info!("syncing safekeepers on shutdown");
+        let storage_auth_token = pspec.storage_auth_token.clone();
+        let lsn = compute.sync_safekeepers(storage_auth_token)?;
+        info!("synced safekeepers at lsn {lsn}");
+    }
 
     if let Err(err) = compute.check_for_core_dumps() {
         error!("error while checking for core dumps: {err:?}");
