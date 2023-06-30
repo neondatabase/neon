@@ -168,7 +168,16 @@ ConstructDeltaMessage()
 				const char *logdetail;
 #endif
 				PushKeyValue(&state, "password", (char *) entry->password);
-				PushKeyValue(&state, "encrypted_password", get_role_password(entry->name, &logdetail));
+				char	   *encrypted_password = get_role_password(entry->name, &logdetail);
+
+				if (encrypted_password)
+				{
+					PushKeyValue(&state, "encrypted_password", encrypted_password);
+				}
+				else
+				{
+					elog(ERROR, "Failed to get encrypted password: %s", logdetail);
+				}
 			}
 			if (entry->old_name[0] != '\0')
 			{
