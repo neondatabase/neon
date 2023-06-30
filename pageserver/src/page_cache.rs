@@ -313,10 +313,7 @@ impl PageCache {
         key: &Key,
         lsn: Lsn,
     ) -> Option<(Lsn, PageReadGuard)> {
-        crate::metrics::PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&["materialized_page"])
-            .unwrap()
-            .inc();
+        crate::metrics::PAGE_CACHE_READ_ACCESSES_MATERIALIZED_PAGE.inc();
 
         let mut cache_key = CacheKey::MaterializedPage {
             hash_key: MaterializedPageHashKey {
@@ -334,15 +331,9 @@ impl PageCache {
             } = cache_key
             {
                 if available_lsn == lsn {
-                    crate::metrics::PAGE_CACHE_READ_HITS
-                        .get_metric_with_label_values(&["materialized_page", "exact"])
-                        .unwrap()
-                        .inc();
+                    crate::metrics::PAGE_CACHE_READ_HITS_MATERIALIZED_PAGE_EXACT.inc();
                 } else {
-                    crate::metrics::PAGE_CACHE_READ_HITS
-                        .get_metric_with_label_values(&["materialized_page", "older_lsn"])
-                        .unwrap()
-                        .inc();
+                    crate::metrics::PAGE_CACHE_READ_HITS_MATERIALIZED_PAGE_OLDER_LSN.inc();
                 }
                 Some((available_lsn, guard))
             } else {
@@ -519,26 +510,27 @@ impl PageCache {
     /// ```
     ///
     fn lock_for_read(&self, cache_key: &mut CacheKey) -> anyhow::Result<ReadBufResult> {
-        let key_kind = match cache_key {
+        let (read_access, hit) = match cache_key {
             CacheKey::MaterializedPage { .. } => {
                 unreachable!("Materialized pages use lookup_materialized_page")
             }
-            CacheKey::EphemeralPage { .. } => "ephemeral",
-            CacheKey::ImmutableFilePage { .. } => "immutable",
+            CacheKey::EphemeralPage { .. } => (
+                &crate::metrics::PAGE_CACHE_READ_ACCESSES_EPHEMERAL,
+                &crate::metrics::PAGE_CACHE_READ_HITS_EPHEMERAL,
+            ),
+            CacheKey::ImmutableFilePage { .. } => (
+                &crate::metrics::PAGE_CACHE_READ_ACCESSES_IMMUTABLE,
+                &crate::metrics::PAGE_CACHE_READ_HITS_IMMUTABLE,
+            ),
         };
-        crate::metrics::PAGE_CACHE_READ_ACCESSES
-            .get_metric_with_label_values(&[key_kind])
-            .unwrap()
-            .inc();
+        read_access.inc();
+
         let mut is_first_iteration = true;
         loop {
             // First check if the key already exists in the cache.
             if let Some(read_guard) = self.try_lock_for_read(cache_key) {
                 if is_first_iteration {
-                    crate::metrics::PAGE_CACHE_READ_HITS
-                        .get_metric_with_label_values(&[key_kind, "-"])
-                        .unwrap()
-                        .inc();
+                    hit.inc();
                 }
                 return Ok(ReadBufResult::Found(read_guard));
             }
