@@ -360,6 +360,7 @@ impl XlXactParsedRecord {
             }
         }
         let mut xnodes = Vec::<RelFileNode>::new();
+        // In v16 this XACT_XINFO_HAS_RELFILENODES is renamed to XACT_XINFO_HAS_RELFILELOCATORS
         if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
             let nrels = buf.get_i32_le();
             for _i in 0..nrels {

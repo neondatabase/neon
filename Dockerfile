@@ -12,6 +12,7 @@ WORKDIR /home/nonroot
 
 COPY --chown=nonroot vendor/postgres-v14 vendor/postgres-v14
 COPY --chown=nonroot vendor/postgres-v15 vendor/postgres-v15
+COPY --chown=nonroot vendor/postgres-v16 vendor/postgres-v16
 COPY --chown=nonroot pgxn pgxn
 COPY --chown=nonroot Makefile Makefile
 COPY --chown=nonroot scripts/ninstall.sh scripts/ninstall.sh
@@ -39,6 +40,7 @@ ARG CACHEPOT_BUCKET=neon-github-dev
 
 COPY --from=pg-build /home/nonroot/pg_install/v14/include/postgresql/server pg_install/v14/include/postgresql/server
 COPY --from=pg-build /home/nonroot/pg_install/v15/include/postgresql/server pg_install/v15/include/postgresql/server
+COPY --from=pg-build /home/nonroot/pg_install/v16/include/postgresql/server pg_install/v16/include/postgresql/server
 COPY --chown=nonroot . .
 
 # Show build caching stats to check if it was used in the end.
@@ -79,6 +81,7 @@ COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy          
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/
+COPY --from=pg-build /home/nonroot/pg_install/v16 /usr/local/v16/
 COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.

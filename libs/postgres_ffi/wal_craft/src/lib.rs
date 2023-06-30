@@ -52,6 +52,7 @@ impl Conf {
         match self.pg_version {
             14 => Ok(path.join(format!("v{}", self.pg_version))),
             15 => Ok(path.join(format!("v{}", self.pg_version))),
+            16 => Ok(path.join(format!("v{}", self.pg_version))),
             _ => bail!("Unsupported postgres version: {}", self.pg_version),
         }
     }

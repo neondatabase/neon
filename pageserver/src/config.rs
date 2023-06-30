@@ -655,6 +655,7 @@ impl PageServerConf {
         match pg_version {
             14 => Ok(path.join(format!("v{pg_version}"))),
             15 => Ok(path.join(format!("v{pg_version}"))),
+            16 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
@@ -663,6 +664,7 @@ impl PageServerConf {
         match pg_version {
             14 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
             15 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
+            16 => Ok(self.pg_distrib_dir(pg_version)?.join("bin")),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
@@ -670,6 +672,7 @@ impl PageServerConf {
         match pg_version {
             14 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
             15 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
+            16 => Ok(self.pg_distrib_dir(pg_version)?.join("lib")),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
