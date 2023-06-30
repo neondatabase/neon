@@ -54,7 +54,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 )]
 #[serde(tag = "slug", content = "data")]
 pub enum TenantState {
-    /// This tenant is not yet loaded
+    /// This tenant is not yet loaded. This state is not actually used internally because not loaded tenants are handled using OnceSet.
+    /// This value is needed only for reporting state of such tenants by list_tenants() function
     ///
     NotLoaded,
     /// This tenant is being loaded from local disk.
