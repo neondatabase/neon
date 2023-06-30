@@ -412,6 +412,7 @@ pub trait Layer: std::fmt::Debug + Send + Sync + 'static {
                 ctx,
             ))
         } else {
+            crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_STARTED_COUNT.inc();
             tokio::task::spawn_blocking(move || {
                 crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_QUEUE_DELAY
                     .observe(start.elapsed().as_secs_f64());

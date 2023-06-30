@@ -674,6 +674,15 @@ pub static WALRECEIVER_CANDIDATES_ADDED: Lazy<IntCounter> =
 pub static WALRECEIVER_CANDIDATES_REMOVED: Lazy<IntCounter> =
     Lazy::new(|| WALRECEIVER_CANDIDATES_EVENTS.with_label_values(&["remove"]));
 
+pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_STARTED_COUNT: Lazy<IntCounter> =
+    Lazy::new(|| {
+        register_int_counter!(
+            "pageserver_layer_get_value_reconstruct_data_spawn_blocking_started_count",
+            "Number of spawn_blocking calls made in Layer::get_value_reconstruct_data"
+        )
+        .expect("failed to define a metric")
+    });
+
 pub static LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_QUEUE_DELAY: Lazy<Histogram> = Lazy::new(
     || {
         register_histogram!(
