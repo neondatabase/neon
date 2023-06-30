@@ -395,15 +395,32 @@ pub trait Layer: std::fmt::Debug + Send + Sync + 'static {
         ctx: RequestContext,
     ) -> Result<(ValueReconstructState, ValueReconstructResult)> {
         let span = tracing::info_span!("get_value_reconstruct_data_spawn_blocking");
+        static USE_SPAWN_BLOCKING: Lazy<bool> = Lazy::new(|| {
+            let val = std::env::var("PAGESERVER_LAYER_GET_RECONSTRUCT_DATA_USE_SPAWN_BLOCKING")
+                .map(|s| s == "1")
+                .unwrap_or(false);
+            tracing::info!("PAGESERVER_LAYER_GET_RECONSTRUCT_DATA_USE_SPAWN_BLOCKING={val}");
+            val
+        });
+        let use_spawn_blocking = *USE_SPAWN_BLOCKING;
         let start = Instant::now();
-        let res = tokio::task::spawn_blocking(move || {
-            crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_QUEUE_DELAY
-                .observe(start.elapsed().as_secs_f64());
-            let _enter = span.enter();
-            self.get_value_reconstruct_data_blocking(key, lsn_range, reconstruct_data, ctx)
-        })
-        .await
-        .context("spawn_blocking");
+        let res = if !use_spawn_blocking {
+            anyhow::Ok(self.get_value_reconstruct_data_blocking(
+                key,
+                lsn_range,
+                reconstruct_data,
+                ctx,
+            ))
+        } else {
+            tokio::task::spawn_blocking(move || {
+                crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_SPAWN_BLOCKING_QUEUE_DELAY
+                    .observe(start.elapsed().as_secs_f64());
+                let _enter = span.enter();
+                self.get_value_reconstruct_data_blocking(key, lsn_range, reconstruct_data, ctx)
+            })
+            .await
+            .context("spawn_blocking")
+        };
         let histo = match &res {
             Ok(Ok(_)) => &crate::metrics::LAYER_GET_VALUE_RECONSTRUCT_DATA_COMPLETION_TIME_OK,
             Ok(Err(_)) | Err(_) => {
