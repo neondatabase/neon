@@ -742,21 +742,3 @@ def test_timeline_delete_works_for_remote_smoke(
         0.5,
         lambda: assert_prefix_empty(neon_env_builder),
     )
-
-
-@pytest.mark.parametrize(
-    "remote_storage_kind",
-    list(
-        filter(
-            lambda s: s in (RemoteStorageKind.MOCK_S3, RemoteStorageKind.REAL_S3),
-            available_remote_storages(),
-        )
-    ),
-)
-def test_timeline_delete_retry_after_index_is_deleted(
-    neon_env_builder: NeonEnvBuilder,
-    remote_storage_kind: RemoteStorageKind,
-):
-    """
-    This test case excersizes the situation when
-    """
