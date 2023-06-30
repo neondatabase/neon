@@ -162,7 +162,7 @@ ConstructDeltaMessage()
 			PushKeyValue(&state, "name", entry->name);
 			if (entry->password)
 			{
-				const char *logdetail;
+				char	   *logdetail;
 
 				PushKeyValue(&state, "password", (char *) entry->password);
 				PushKeyValue(&state, "encrypted_password", get_role_password(entry->name, &logdetail));
