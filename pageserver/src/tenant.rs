@@ -2792,7 +2792,7 @@ impl Tenant {
             let gc_info = src_timeline.gc_info.read().unwrap();
             let cutoff = min(gc_info.pitr_cutoff, gc_info.horizon_cutoff);
             if start_lsn < cutoff {
-                return Err(CreateTimelineError::AncestorLsn(anyhow::format_err!(
+                return Err(CreateTimelineError::AncestorLsn(anyhow::anyhow!(
                     "invalid branch start lsn: less than planned GC cutoff {cutoff}"
                 )));
             }

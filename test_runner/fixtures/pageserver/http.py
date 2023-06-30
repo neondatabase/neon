@@ -21,9 +21,10 @@ class PageserverApiException(Exception):
         self.status_code = status_code
 
 
-class TimelineCreate406(Exception):
+class TimelineCreate406(PageserverApiException):
     def __init__(self, res: requests.Response):
-        super().__init__(res.json()["msg"])
+        assert res.status_code == 406
+        super().__init__(res.json()["msg"], res.status_code)
 
 
 @dataclass
