@@ -3865,6 +3865,8 @@ mod tests {
                 };
                 assert!(&err.to_string().contains("invalid branch start lsn"));
                 assert!(&err
+                    .source()
+                    .unwrap()
                     .to_string()
                     .contains("is earlier than latest GC horizon"));
             }
