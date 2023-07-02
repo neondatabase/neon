@@ -264,7 +264,7 @@ jobs:
           export REMOTE_STORAGE_S3_BUCKET=neon-github-public-dev
           export REMOTE_STORAGE_S3_REGION=eu-central-1
           # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test pagination_tests -- s3_pagination_should_work --exact
+          ${cov_prefix} cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
 
       - name: Install rust binaries
         run: |
@@ -492,11 +492,16 @@ jobs:
         env:
           COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          scripts/coverage \
-            --dir=/tmp/coverage report \
+          scripts/coverage --dir=/tmp/coverage \
+            report \
             --input-objects=/tmp/coverage/binaries.list \
             --commit-url=${COMMIT_URL} \
             --format=github
+
+          scripts/coverage --dir=/tmp/coverage \
+            report \
+            --input-objects=/tmp/coverage/binaries.list \
+            --format=lcov
 
       - name: Upload coverage report
         id: upload-coverage-report
@@ -504,7 +509,7 @@ jobs:
           BUCKET: neon-github-public-dev
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://neon-github-public-dev/code-coverage/${COMMIT_SHA}
+          aws s3 cp --only-show-errors --recursive /tmp/coverage/report s3://${BUCKET}/code-coverage/${COMMIT_SHA}
 
           REPORT_URL=https://${BUCKET}.s3.amazonaws.com/code-coverage/${COMMIT_SHA}/index.html
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
@@ -618,51 +623,6 @@ jobs:
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
-
-  neon-image-depot:
-    # For testing this will run side-by-side for a few merges.
-    # This action is not really optimized yet, but gets the job done
-    runs-on: [ self-hosted, gen3, large ]
-    needs: [ tag ]
-    container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Setup go
-        uses: actions/setup-go@v3
-        with:
-          go-version: '1.19'
-
-      - name: Set up Depot CLI
-        uses: depot/setup-action@v1
-
-      - name: Install Crane & ECR helper
-        run: go install github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cli/docker-credential-ecr-login@69c85dc22db6511932bbf119e1a0cc5c90c69a7f # v0.6.0
-
-      - name: Configure ECR login
-        run: |
-          mkdir /github/home/.docker/
-          echo "{\"credsStore\":\"ecr-login\"}" > /github/home/.docker/config.json
-
-      - name: Build and push
-        uses: depot/build-push-action@v1
-        with:
-          # if no depot.json file is at the root of your repo, you must specify the project id
-          project: nrdv0s4kcs
-          push: true
-          tags: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/neon:depot-${{needs.tag.outputs.build-tag}}
-          build-args: |
-            GIT_VERSION=${{ github.sha }}
-            REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
-
   compute-tools-image:
     runs-on: [ self-hosted, gen3, large ]
     needs: [ tag ]
@@ -699,6 +659,7 @@ jobs:
                            --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
+                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-tools
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}}
@@ -756,10 +717,40 @@ jobs:
                            --context .
                            --build-arg GIT_VERSION=${{ github.sha }}
                            --build-arg PG_VERSION=${{ matrix.version }}
+                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}}
                            --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com
                            --dockerfile Dockerfile.compute-node
                            --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
                            --destination neondatabase/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+                           --cleanup
+
+      # Due to a kaniko bug, we can't use cache for extensions image, thus it takes about the same amount of time as compute-node image to build (~10 min)
+      # During the transition period we need to have extensions in both places (in S3 and in compute-node image),
+      # so we won't build extension twice, but extract them from compute-node.
+      #
+      # For now we use extensions image only for new custom extensitons
+      - name: Kaniko build extensions only
+        run: |
+          # Kaniko is suposed to clean up after itself if --cleanup flag is set, but it doesn't.
+          # Despite some fixes were made in https://github.com/GoogleContainerTools/kaniko/pull/2504 (in kaniko v1.11.0),
+          # it still fails with error:
+          #   error building image: could not save file: copying file: symlink postgres /kaniko/1/usr/local/pgsql/bin/postmaster: file exists
+          #
+          # Ref https://github.com/GoogleContainerTools/kaniko/issues/1406
+          find /kaniko -maxdepth 1 -mindepth 1 -type d -regex "/kaniko/[0-9]*" -exec rm -rv {} \;
+
+          /kaniko/executor --reproducible --snapshot-mode=redo --skip-unused-stages --cache=true \
+                           --cache-repo 369495373322.dkr.ecr.eu-central-1.amazonaws.com/cache \
+                           --context . \
+                           --build-arg GIT_VERSION=${{ github.sha }} \
+                           --build-arg PG_VERSION=${{ matrix.version }} \
+                           --build-arg BUILD_TAG=${{needs.tag.outputs.build-tag}} \
+                           --build-arg REPOSITORY=369495373322.dkr.ecr.eu-central-1.amazonaws.com \
+                           --dockerfile Dockerfile.compute-node \
+                           --destination 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
+                           --destination neondatabase/extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} \
+                           --cleanup \
+                           --target postgres-extensions
 
       # Cleanup script fails otherwise - rm: cannot remove '/nvme/actions-runner/_work/_temp/_github_home/.ecr': Permission denied
       - name: Cleanup ECR folder
@@ -776,7 +767,7 @@ jobs:
       run:
         shell: sh -eu {0}
     env:
-      VM_BUILDER_VERSION: v0.8.0
+      VM_BUILDER_VERSION: v0.11.1
 
     steps:
       - name: Checkout
@@ -797,7 +788,7 @@ jobs:
 
       - name: Build vm image
         run: |
-          ./vm-builder -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
+          ./vm-builder -enable-file-cache -src=369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}} -dst=369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}
 
       - name: Pushing vm-compute-node image
         run: |
@@ -878,8 +869,10 @@ jobs:
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-v15:${{needs.tag.outputs.build-tag}} latest
 
       - name: Push images to production ECR
         if: |
@@ -890,8 +883,10 @@ jobs:
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v14:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-v14:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/extensions-v14:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/compute-node-v15:latest
           crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/vm-compute-node-v15:latest
+          crane copy 369495373322.dkr.ecr.eu-central-1.amazonaws.com/extensions-v15:${{needs.tag.outputs.build-tag}} 093970136003.dkr.ecr.eu-central-1.amazonaws.com/extensions-v15:latest
 
       - name: Configure Docker Hub login
         run: |
@@ -913,16 +908,89 @@ jobs:
           crane tag neondatabase/compute-tools:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v14:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/extensions-v14:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/compute-node-v15:${{needs.tag.outputs.build-tag}} latest
           crane tag neondatabase/vm-compute-node-v15:${{needs.tag.outputs.build-tag}} latest
+          crane tag neondatabase/extensions-v15:${{needs.tag.outputs.build-tag}} latest
 
       - name: Cleanup ECR folder
         run: rm -rf ~/.ecr
 
+  upload-postgres-extensions-to-s3:
+    if: |
+      (github.ref_name == 'main' || github.ref_name == 'release') &&
+       github.event_name != 'workflow_dispatch'
+    runs-on: ${{ github.ref_name == 'release' && fromJSON('["self-hosted", "prod", "x64"]') || fromJSON('["self-hosted", "gen3", "small"]') }}
+    needs: [ tag, promote-images ]
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [ v14, v15 ]
+
+    env:
+      # While on transition period we extract public extensions from compute-node image and custom extensions from extensions image.
+      # Later all the extensions will be moved to extensions image.
+      EXTENSIONS_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/extensions-${{ matrix.version }}:latest
+      COMPUTE_NODE_IMAGE: ${{ github.ref_name == 'release' && '093970136003' || '369495373322'}}.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:latest
+      AWS_ACCESS_KEY_ID: ${{ github.ref_name == 'release' && secrets.AWS_ACCESS_KEY_PROD || secrets.AWS_ACCESS_KEY_DEV }}
+      AWS_SECRET_ACCESS_KEY: ${{ github.ref_name == 'release' && secrets.AWS_SECRET_KEY_PROD || secrets.AWS_SECRET_KEY_DEV }}
+      S3_BUCKETS: |
+        ${{ github.ref_name == 'release' &&
+          'neon-prod-extensions-ap-southeast-1 neon-prod-extensions-eu-central-1 neon-prod-extensions-us-east-1 neon-prod-extensions-us-east-2 neon-prod-extensions-us-west-2' ||
+          'neon-dev-extensions-eu-central-1 neon-dev-extensions-eu-west-1 neon-dev-extensions-us-east-2' }}
+
+    steps:
+      - name: Pull postgres-extensions image
+        run: |
+          docker pull ${EXTENSIONS_IMAGE}
+          docker pull ${COMPUTE_NODE_IMAGE}
+
+      - name: Create postgres-extensions container
+        id: create-container
+        run: |
+          EID=$(docker create ${EXTENSIONS_IMAGE} true)
+          echo "EID=${EID}" >> $GITHUB_OUTPUT
+
+          CID=$(docker create ${COMPUTE_NODE_IMAGE} true)
+          echo "CID=${CID}" >> $GITHUB_OUTPUT
+
+      - name: Extract postgres-extensions from container
+        run: |
+          rm -rf ./extensions-to-upload ./custom-extensions # Just in case
+
+          # In compute image we have a bit different directory layout
+          mkdir -p extensions-to-upload/share
+          docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/share/extension ./extensions-to-upload/share/extension
+          docker cp ${{ steps.create-container.outputs.CID }}:/usr/local/lib             ./extensions-to-upload/lib
+
+          # Delete Neon extensitons (they always present on compute-node image)
+          rm -rf ./extensions-to-upload/share/extension/neon*
+          rm -rf ./extensions-to-upload/lib/neon*
+
+          docker cp ${{ steps.create-container.outputs.EID }}:/extensions ./custom-extensions
+          for EXT_NAME in $(ls ./custom-extensions); do
+            mkdir -p ./extensions-to-upload/${EXT_NAME}/share
+
+            mv ./custom-extensions/${EXT_NAME}/share/extension ./extensions-to-upload/${EXT_NAME}/share/extension
+            mv ./custom-extensions/${EXT_NAME}/lib             ./extensions-to-upload/${EXT_NAME}/lib
+          done
+
+      - name: Upload postgres-extensions to S3
+        run: |
+          for BUCKET in $(echo ${S3_BUCKETS}); do
+            aws s3 cp --recursive --only-show-errors ./extensions-to-upload s3://${BUCKET}/${{ needs.tag.outputs.build-tag }}/${{ matrix.version }}
+          done
+
+      - name: Cleanup
+        if: ${{ always() && (steps.create-container.outputs.CID || steps.create-container.outputs.EID) }}
+        run: |
+          docker rm ${{ steps.create-container.outputs.CID }} || true
+          docker rm ${{ steps.create-container.outputs.EID }} || true
+
   deploy:
     runs-on: [ self-hosted, gen3, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
-    needs: [ promote-images, tag, regress-tests ]
+    needs: [ upload-postgres-extensions-to-s3, promote-images, tag, regress-tests ]
     if: ( github.ref_name == 'main' || github.ref_name == 'release' ) && github.event_name != 'workflow_dispatch'
     steps:
       - name: Fix git ownership
@@ -953,6 +1021,20 @@ jobs:
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1
           fi
+
+      - name: Create git tag
+        if: github.ref_name == 'release'
+        uses: actions/github-script@v6
+        with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: "refs/tags/${{ needs.tag.outputs.build-tag }}",
+              sha: context.sha,
+            })
 
   promote-compatibility-data:
     runs-on: [ self-hosted, gen3, small ]

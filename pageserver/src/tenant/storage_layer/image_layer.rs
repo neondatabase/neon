@@ -52,8 +52,8 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::filename::{ImageFileName, LayerFileName};
-use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf};
+use super::filename::ImageFileName;
+use super::{Layer, LayerAccessStatsReset, LayerIter, PathOrConf, PersistentLayerDesc};
 
 ///
 /// Header stored in the beginning of the file
@@ -84,9 +84,9 @@ impl From<&ImageLayer> for Summary {
         Self {
             magic: IMAGE_FILE_MAGIC,
             format_version: STORAGE_FORMAT_VERSION,
-            tenant_id: layer.tenant_id,
-            timeline_id: layer.timeline_id,
-            key_range: layer.key_range.clone(),
+            tenant_id: layer.desc.tenant_id,
+            timeline_id: layer.desc.timeline_id,
+            key_range: layer.desc.key_range.clone(),
             lsn: layer.lsn,
 
             index_start_blk: 0,
@@ -104,12 +104,9 @@ impl From<&ImageLayer> for Summary {
 /// and it needs to be loaded before using it in queries.
 pub struct ImageLayer {
     path_or_conf: PathOrConf,
-    pub tenant_id: TenantId,
-    pub timeline_id: TimelineId,
-    pub key_range: Range<Key>,
-    pub file_size: u64,
 
-    // This entry contains an image of all pages as of this LSN
+    pub desc: PersistentLayerDesc,
+    // This entry contains an image of all pages as of this LSN, should be the same as desc.lsn
     pub lsn: Lsn,
 
     access_stats: LayerAccessStats,
@@ -122,8 +119,8 @@ impl std::fmt::Debug for ImageLayer {
         use super::RangeDisplayDebug;
 
         f.debug_struct("ImageLayer")
-            .field("key_range", &RangeDisplayDebug(&self.key_range))
-            .field("file_size", &self.file_size)
+            .field("key_range", &RangeDisplayDebug(&self.desc.key_range))
+            .field("file_size", &self.desc.file_size)
             .field("lsn", &self.lsn)
             .field("inner", &self.inner)
             .finish()
@@ -153,27 +150,15 @@ impl std::fmt::Debug for ImageLayerInner {
 }
 
 impl Layer for ImageLayer {
-    fn get_key_range(&self) -> Range<Key> {
-        self.key_range.clone()
-    }
-
-    fn get_lsn_range(&self) -> Range<Lsn> {
-        // End-bound is exclusive
-        self.lsn..(self.lsn + 1)
-    }
-    fn is_incremental(&self) -> bool {
-        false
-    }
-
-    fn short_id(&self) -> String {
-        self.filename().file_name()
-    }
-
     /// debugging function to print out the contents of the layer
     fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         println!(
             "----- image layer for ten {} tli {} key {}-{} at {} ----",
-            self.tenant_id, self.timeline_id, self.key_range.start, self.key_range.end, self.lsn
+            self.desc.tenant_id,
+            self.desc.timeline_id,
+            self.desc.key_range.start,
+            self.desc.key_range.end,
+            self.lsn
         );
 
         if !verbose {
@@ -203,7 +188,7 @@ impl Layer for ImageLayer {
         reconstruct_state: &mut ValueReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<ValueReconstructResult> {
-        assert!(self.key_range.contains(&key));
+        assert!(self.desc.key_range.contains(&key));
         assert!(lsn_range.start >= self.lsn);
         assert!(lsn_range.end >= self.lsn);
 
@@ -230,24 +215,37 @@ impl Layer for ImageLayer {
             Ok(ValueReconstructResult::Missing)
         }
     }
+
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+    fn get_key_range(&self) -> Range<Key> {
+        self.layer_desc().key_range.clone()
+    }
+
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+    fn get_lsn_range(&self) -> Range<Lsn> {
+        self.layer_desc().lsn_range.clone()
+    }
+
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+    fn is_incremental(&self) -> bool {
+        self.layer_desc().is_incremental
+    }
+
+    /// Boilerplate to implement the Layer trait, always use layer_desc for persistent layers.
+    fn short_id(&self) -> String {
+        self.layer_desc().short_id()
+    }
 }
 
 impl PersistentLayer for ImageLayer {
-    fn filename(&self) -> LayerFileName {
-        self.layer_name().into()
+    fn layer_desc(&self) -> &PersistentLayerDesc {
+        &self.desc
     }
 
     fn local_path(&self) -> Option<PathBuf> {
         Some(self.path())
     }
 
-    fn get_tenant_id(&self) -> TenantId {
-        self.tenant_id
-    }
-
-    fn get_timeline_id(&self) -> TimelineId {
-        self.timeline_id
-    }
     fn iter(&self, _ctx: &RequestContext) -> Result<LayerIter<'_>> {
         unimplemented!();
     }
@@ -258,17 +256,13 @@ impl PersistentLayer for ImageLayer {
         Ok(())
     }
 
-    fn file_size(&self) -> u64 {
-        self.file_size
-    }
-
     fn info(&self, reset: LayerAccessStatsReset) -> HistoricLayerInfo {
         let layer_file_name = self.filename().file_name();
         let lsn_range = self.get_lsn_range();
 
         HistoricLayerInfo::Image {
             layer_file_name,
-            layer_file_size: self.file_size,
+            layer_file_size: self.desc.file_size,
             lsn_start: lsn_range.start,
             remote: false,
             access_stats: self.access_stats.as_api_model(reset),
@@ -405,11 +399,15 @@ impl ImageLayer {
     ) -> ImageLayer {
         ImageLayer {
             path_or_conf: PathOrConf::Conf(conf),
-            timeline_id,
-            tenant_id,
-            key_range: filename.key_range.clone(),
+            desc: PersistentLayerDesc::new_img(
+                tenant_id,
+                timeline_id,
+                filename.key_range.clone(),
+                filename.lsn,
+                false,
+                file_size,
+            ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: filename.lsn,
-            file_size,
             access_stats,
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
@@ -433,11 +431,15 @@ impl ImageLayer {
             .context("get file metadata to determine size")?;
         Ok(ImageLayer {
             path_or_conf: PathOrConf::Path(path.to_path_buf()),
-            timeline_id: summary.timeline_id,
-            tenant_id: summary.tenant_id,
-            key_range: summary.key_range,
+            desc: PersistentLayerDesc::new_img(
+                summary.tenant_id,
+                summary.timeline_id,
+                summary.key_range,
+                summary.lsn,
+                false,
+                metadata.len(),
+            ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
-            file_size: metadata.len(),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(ImageLayerInner {
                 file: None,
@@ -449,18 +451,15 @@ impl ImageLayer {
     }
 
     fn layer_name(&self) -> ImageFileName {
-        ImageFileName {
-            key_range: self.key_range.clone(),
-            lsn: self.lsn,
-        }
+        self.desc.image_file_name()
     }
 
     /// Path to the layer file in pageserver workdir.
     pub fn path(&self) -> PathBuf {
         Self::path_for(
             &self.path_or_conf,
-            self.timeline_id,
-            self.tenant_id,
+            self.desc.timeline_id,
+            self.desc.tenant_id,
             &self.layer_name(),
         )
     }
@@ -484,6 +483,7 @@ struct ImageLayerWriterInner {
     tenant_id: TenantId,
     key_range: Range<Key>,
     lsn: Lsn,
+    is_incremental: bool,
 
     blob_writer: WriteBlobWriter<VirtualFile>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
@@ -499,6 +499,7 @@ impl ImageLayerWriterInner {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        is_incremental: bool,
     ) -> anyhow::Result<Self> {
         // Create the file initially with a temporary filename.
         // We'll atomically rename it to the final name when we're done.
@@ -533,6 +534,7 @@ impl ImageLayerWriterInner {
             lsn,
             tree: tree_builder,
             blob_writer,
+            is_incremental,
         };
 
         Ok(writer)
@@ -588,16 +590,22 @@ impl ImageLayerWriterInner {
             .metadata()
             .context("get metadata to determine file size")?;
 
+        let desc = PersistentLayerDesc::new_img(
+            self.tenant_id,
+            self.timeline_id,
+            self.key_range.clone(),
+            self.lsn,
+            self.is_incremental, // for now, image layer ALWAYS covers the full range
+            metadata.len(),
+        );
+
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
         let layer = ImageLayer {
             path_or_conf: PathOrConf::Conf(self.conf),
-            timeline_id: self.timeline_id,
-            tenant_id: self.tenant_id,
-            key_range: self.key_range.clone(),
+            desc,
             lsn: self.lsn,
-            file_size: metadata.len(),
             access_stats: LayerAccessStats::empty_will_record_residence_event_later(),
             inner: RwLock::new(ImageLayerInner {
                 loaded: false,
@@ -667,6 +675,7 @@ impl ImageLayerWriter {
         tenant_id: TenantId,
         key_range: &Range<Key>,
         lsn: Lsn,
+        is_incremental: bool,
     ) -> anyhow::Result<ImageLayerWriter> {
         Ok(Self {
             inner: Some(ImageLayerWriterInner::new(
@@ -675,6 +684,7 @@ impl ImageLayerWriter {
                 tenant_id,
                 key_range,
                 lsn,
+                is_incremental,
             )?),
         })
     }

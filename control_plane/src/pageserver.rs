@@ -1,3 +1,9 @@
+//! Code to manage pageservers
+//!
+//! In the local test environment, the pageserver stores its data directly in
+//!
+//!   .neon/
+//!
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
@@ -369,6 +375,11 @@ impl PageServerNode {
             evictions_low_residence_duration_metric_threshold: settings
                 .remove("evictions_low_residence_duration_metric_threshold")
                 .map(|x| x.to_string()),
+            gc_feedback: settings
+                .remove("gc_feedback")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'gc_feedback' as bool")?,
         };
 
         // If tenant ID was not specified, generate one
@@ -463,6 +474,11 @@ impl PageServerNode {
                 evictions_low_residence_duration_metric_threshold: settings
                     .remove("evictions_low_residence_duration_metric_threshold")
                     .map(|x| x.to_string()),
+                gc_feedback: settings
+                    .remove("gc_feedback")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'gc_feedback' as bool")?,
             }
         };
 

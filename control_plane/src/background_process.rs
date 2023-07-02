@@ -180,6 +180,11 @@ pub fn stop_process(immediate: bool, process_name: &str, pid_file: &Path) -> any
     }
 
     // Wait until process is gone
+    wait_until_stopped(process_name, pid)?;
+    Ok(())
+}
+
+pub fn wait_until_stopped(process_name: &str, pid: Pid) -> anyhow::Result<()> {
     for retries in 0..RETRIES {
         match process_has_stopped(pid) {
             Ok(true) => {

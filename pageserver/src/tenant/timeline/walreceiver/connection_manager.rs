@@ -18,7 +18,7 @@ use crate::metrics::{
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
 };
 use crate::task_mgr::TaskKind;
-use crate::tenant::Timeline;
+use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
@@ -55,8 +55,11 @@ pub(super) async fn connection_manager_loop_step(
         .await
     {
         Ok(()) => {}
-        Err(_) => {
-            info!("Timeline dropped state updates sender before becoming active, stopping wal connection manager loop");
+        Err(new_state) => {
+            debug!(
+                ?new_state,
+                "state changed, stopping wal connection manager loop"
+            );
             return ControlFlow::Break(());
         }
     }
@@ -79,7 +82,7 @@ pub(super) async fn connection_manager_loop_step(
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
     let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id).await;
-    info!("Subscribed for broker timeline updates");
+    debug!("Subscribed for broker timeline updates");
 
     loop {
         let time_until_next_retry = connection_manager_state.time_until_next_retry();
@@ -150,13 +153,13 @@ pub(super) async fn connection_manager_loop_step(
                             match new_state {
                                 // we're already active as walreceiver, no need to reactivate
                                 TimelineState::Active => continue,
-                                TimelineState::Broken | TimelineState::Stopping => {
-                                    info!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
+                                TimelineState::Broken { .. } | TimelineState::Stopping => {
+                                    debug!("timeline entered terminal state {new_state:?}, stopping wal connection manager loop");
                                     return ControlFlow::Break(());
                                 }
                                 TimelineState::Loading => {
                                     warn!("timeline transitioned back to Loading state, that should not happen");
-                                    return ControlFlow::Continue(new_state);
+                                    return ControlFlow::Continue(());
                                 }
                             }
                         }
@@ -164,12 +167,11 @@ pub(super) async fn connection_manager_loop_step(
                     }
                 }
             } => match new_event {
-                ControlFlow::Continue(new_state) => {
-                    info!("observed timeline state change, new state is {new_state:?}");
+                ControlFlow::Continue(()) => {
                     return ControlFlow::Continue(());
                 }
                 ControlFlow::Break(()) => {
-                    info!("Timeline dropped state updates sender, stopping wal connection manager loop");
+                    debug!("Timeline is no longer active, stopping wal connection manager loop");
                     return ControlFlow::Break(());
                 }
             },
@@ -390,7 +392,6 @@ impl ConnectionManagerState {
 
         self.drop_old_connection(true).await;
 
-        let id = self.id;
         let node_id = new_sk.safekeeper_id;
         let connect_timeout = self.conf.wal_connect_timeout;
         let timeline = Arc::clone(&self.timeline);
@@ -398,9 +399,13 @@ impl ConnectionManagerState {
             TaskKind::WalReceiverConnectionHandler,
             DownloadBehavior::Download,
         );
+
+        let span = info_span!("connection", %node_id);
         let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
             async move {
-                super::walreceiver_connection::handle_walreceiver_connection(
+                debug_assert_current_span_has_tenant_and_timeline_id();
+
+                let res = super::walreceiver_connection::handle_walreceiver_connection(
                     timeline,
                     new_sk.wal_source_connconf,
                     events_sender,
@@ -409,12 +414,23 @@ impl ConnectionManagerState {
                     ctx,
                     node_id,
                 )
-                .await
-                .context("walreceiver connection handling failure")
+                .await;
+
+                match res {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        use super::walreceiver_connection::ExpectedError;
+                        if e.is_expected() {
+                            info!("walreceiver connection handling ended: {e:#}");
+                            Ok(())
+                        } else {
+                            // give out an error to have task_mgr give it a really verbose logging
+                            Err(e).context("walreceiver connection handling failure")
+                        }
+                    }
+                }
             }
-            .instrument(
-                info_span!("walreceiver_connection", tenant_id = %id.tenant_id, timeline_id = %id.timeline_id, %node_id),
-            )
+            .instrument(span)
         });
 
         let now = Utc::now().naive_utc();
@@ -1305,10 +1321,11 @@ mod tests {
 
     const DUMMY_SAFEKEEPER_HOST: &str = "safekeeper_connstr";
 
-    async fn dummy_state(harness: &TenantHarness<'_>) -> ConnectionManagerState {
+    async fn dummy_state(harness: &TenantHarness) -> ConnectionManagerState {
         let (tenant, ctx) = harness.load().await;
         let timeline = tenant
-            .create_test_timeline(TIMELINE_ID, Lsn(0), crate::DEFAULT_PG_VERSION, &ctx)
+            .create_test_timeline(TIMELINE_ID, Lsn(0x8), crate::DEFAULT_PG_VERSION, &ctx)
+            .await
             .expect("Failed to create an empty timeline for dummy wal connection manager");
 
         ConnectionManagerState {

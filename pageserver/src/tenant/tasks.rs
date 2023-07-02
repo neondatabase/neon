@@ -12,8 +12,13 @@ use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::{Tenant, TenantState};
 use tokio_util::sync::CancellationToken;
 use tracing::*;
+use utils::completion;
 
-pub fn start_background_loops(tenant: &Arc<Tenant>) {
+/// Start per tenant background loops: compaction and gc.
+pub fn start_background_loops(
+    tenant: &Arc<Tenant>,
+    background_jobs_can_start: Option<&completion::Barrier>,
+) {
     let tenant_id = tenant.tenant_id;
     task_mgr::spawn(
         BACKGROUND_RUNTIME.handle(),
@@ -24,8 +29,14 @@ pub fn start_background_loops(tenant: &Arc<Tenant>) {
         false,
         {
             let tenant = Arc::clone(tenant);
+            let background_jobs_can_start = background_jobs_can_start.cloned();
             async move {
-                compaction_loop(tenant)
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()) },
+                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                };
+                compaction_loop(tenant, cancel)
                     .instrument(info_span!("compaction_loop", tenant_id = %tenant_id))
                     .await;
                 Ok(())
@@ -41,8 +52,14 @@ pub fn start_background_loops(tenant: &Arc<Tenant>) {
         false,
         {
             let tenant = Arc::clone(tenant);
+            let background_jobs_can_start = background_jobs_can_start.cloned();
             async move {
-                gc_loop(tenant)
+                let cancel = task_mgr::shutdown_token();
+                tokio::select! {
+                    _ = cancel.cancelled() => { return Ok(()) },
+                    _ = completion::Barrier::maybe_wait(background_jobs_can_start) => {}
+                };
+                gc_loop(tenant, cancel)
                     .instrument(info_span!("gc_loop", tenant_id = %tenant_id))
                     .await;
                 Ok(())
@@ -54,12 +71,11 @@ pub fn start_background_loops(tenant: &Arc<Tenant>) {
 ///
 /// Compaction task's main loop
 ///
-async fn compaction_loop(tenant: Arc<Tenant>) {
+async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let wait_duration = Duration::from_secs(2);
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
-        let cancel = task_mgr::shutdown_token();
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
         let mut first = true;
         loop {
@@ -124,12 +140,11 @@ async fn compaction_loop(tenant: Arc<Tenant>) {
 ///
 /// GC task's main loop
 ///
-async fn gc_loop(tenant: Arc<Tenant>) {
+async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     let wait_duration = Duration::from_secs(2);
     info!("starting");
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
-        let cancel = task_mgr::shutdown_token();
         // GC might require downloading, to find the cutoff LSN that corresponds to the
         // cutoff specified as time.
         let ctx =

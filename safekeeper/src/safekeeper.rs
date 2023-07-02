@@ -10,6 +10,7 @@ use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
+use std::time::Duration;
 use storage_broker::proto::SafekeeperTimelineInfo;
 
 use tracing::*;
@@ -567,25 +568,27 @@ where
 
     /// Process message from proposer and possibly form reply. Concurrent
     /// callers must exclude each other.
-    pub fn process_msg(
+    pub async fn process_msg(
         &mut self,
         msg: &ProposerAcceptorMessage,
     ) -> Result<Option<AcceptorProposerMessage>> {
         match msg {
-            ProposerAcceptorMessage::Greeting(msg) => self.handle_greeting(msg),
-            ProposerAcceptorMessage::VoteRequest(msg) => self.handle_vote_request(msg),
-            ProposerAcceptorMessage::Elected(msg) => self.handle_elected(msg),
-            ProposerAcceptorMessage::AppendRequest(msg) => self.handle_append_request(msg, true),
-            ProposerAcceptorMessage::NoFlushAppendRequest(msg) => {
-                self.handle_append_request(msg, false)
+            ProposerAcceptorMessage::Greeting(msg) => self.handle_greeting(msg).await,
+            ProposerAcceptorMessage::VoteRequest(msg) => self.handle_vote_request(msg).await,
+            ProposerAcceptorMessage::Elected(msg) => self.handle_elected(msg).await,
+            ProposerAcceptorMessage::AppendRequest(msg) => {
+                self.handle_append_request(msg, true).await
             }
-            ProposerAcceptorMessage::FlushWAL => self.handle_flush(),
+            ProposerAcceptorMessage::NoFlushAppendRequest(msg) => {
+                self.handle_append_request(msg, false).await
+            }
+            ProposerAcceptorMessage::FlushWAL => self.handle_flush().await,
         }
     }
 
     /// Handle initial message from proposer: check its sanity and send my
     /// current term.
-    fn handle_greeting(
+    async fn handle_greeting(
         &mut self,
         msg: &ProposerGreeting,
     ) -> Result<Option<AcceptorProposerMessage>> {
@@ -634,7 +637,8 @@ where
         }
 
         // system_id will be updated on mismatch
-        if self.state.server.system_id != msg.system_id {
+        // sync-safekeepers doesn't know sysid and sends 0, ignore it
+        if self.state.server.system_id != msg.system_id && msg.system_id != 0 {
             if self.state.server.system_id != 0 {
                 warn!(
                     "unexpected system ID arrived, got {}, expected {}",
@@ -647,7 +651,7 @@ where
             if msg.pg_version != UNKNOWN_SERVER_VERSION {
                 state.server.pg_version = msg.pg_version;
             }
-            self.state.persist(&state)?;
+            self.state.persist(&state).await?;
         }
 
         info!(
@@ -662,7 +666,7 @@ where
     }
 
     /// Give vote for the given term, if we haven't done that previously.
-    fn handle_vote_request(
+    async fn handle_vote_request(
         &mut self,
         msg: &VoteRequest,
     ) -> Result<Option<AcceptorProposerMessage>> {
@@ -676,7 +680,7 @@ where
         // handle_elected instead. Currently not a big deal, as proposer is the
         // only source of WAL; with peer2peer recovery it would be more
         // important.
-        self.wal_store.flush_wal()?;
+        self.wal_store.flush_wal().await?;
         // initialize with refusal
         let mut resp = VoteResponse {
             term: self.state.acceptor_state.term,
@@ -690,7 +694,7 @@ where
             let mut state = self.state.clone();
             state.acceptor_state.term = msg.term;
             // persist vote before sending it out
-            self.state.persist(&state)?;
+            self.state.persist(&state).await?;
 
             resp.term = self.state.acceptor_state.term;
             resp.vote_given = true as u64;
@@ -713,12 +717,15 @@ where
         ar
     }
 
-    fn handle_elected(&mut self, msg: &ProposerElected) -> Result<Option<AcceptorProposerMessage>> {
+    async fn handle_elected(
+        &mut self,
+        msg: &ProposerElected,
+    ) -> Result<Option<AcceptorProposerMessage>> {
         info!("received ProposerElected {:?}", msg);
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.clone();
             state.acceptor_state.term = msg.term;
-            self.state.persist(&state)?;
+            self.state.persist(&state).await?;
         }
 
         // If our term is higher, ignore the message (next feedback will inform the compute)
@@ -748,7 +755,7 @@ where
         // intersection of our history and history from msg
 
         // truncate wal, update the LSNs
-        self.wal_store.truncate_wal(msg.start_streaming_at)?;
+        self.wal_store.truncate_wal(msg.start_streaming_at).await?;
 
         // and now adopt term history from proposer
         {
@@ -782,7 +789,7 @@ where
             self.inmem.backup_lsn = max(self.inmem.backup_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
-            self.persist_control_file(state)?;
+            self.persist_control_file(state).await?;
         }
 
         info!("start receiving WAL since {:?}", msg.start_streaming_at);
@@ -794,7 +801,7 @@ where
     ///
     /// Note: it is assumed that 'WAL we have is from the right term' check has
     /// already been done outside.
-    fn update_commit_lsn(&mut self, mut candidate: Lsn) -> Result<()> {
+    async fn update_commit_lsn(&mut self, mut candidate: Lsn) -> Result<()> {
         // Both peers and walproposer communicate this value, we might already
         // have a fresher (higher) version.
         candidate = max(candidate, self.inmem.commit_lsn);
@@ -816,29 +823,52 @@ where
         // that we receive new epoch_start_lsn, and we still need to sync
         // control file in this case.
         if commit_lsn == self.epoch_start_lsn && self.state.commit_lsn != commit_lsn {
-            self.persist_control_file(self.state.clone())?;
+            self.persist_control_file(self.state.clone()).await?;
         }
 
         Ok(())
     }
 
     /// Persist control file to disk, called only after timeline creation (bootstrap).
-    pub fn persist(&mut self) -> Result<()> {
-        self.persist_control_file(self.state.clone())
+    pub async fn persist(&mut self) -> Result<()> {
+        self.persist_control_file(self.state.clone()).await
     }
 
     /// Persist in-memory state to the disk, taking other data from state.
-    fn persist_control_file(&mut self, mut state: SafeKeeperState) -> Result<()> {
+    async fn persist_control_file(&mut self, mut state: SafeKeeperState) -> Result<()> {
         state.commit_lsn = self.inmem.commit_lsn;
         state.backup_lsn = self.inmem.backup_lsn;
         state.peer_horizon_lsn = self.inmem.peer_horizon_lsn;
         state.proposer_uuid = self.inmem.proposer_uuid;
-        self.state.persist(&state)
+        self.state.persist(&state).await
+    }
+
+    /// Persist control file if there is something to save and enough time
+    /// passed after the last save.
+    pub async fn maybe_persist_control_file(
+        &mut self,
+        inmem_remote_consistent_lsn: Lsn,
+    ) -> Result<()> {
+        const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
+        if self.state.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
+            return Ok(());
+        }
+        let need_persist = self.inmem.commit_lsn > self.state.commit_lsn
+            || self.inmem.backup_lsn > self.state.backup_lsn
+            || self.inmem.peer_horizon_lsn > self.state.peer_horizon_lsn
+            || inmem_remote_consistent_lsn > self.state.remote_consistent_lsn;
+        if need_persist {
+            let mut state = self.state.clone();
+            state.remote_consistent_lsn = inmem_remote_consistent_lsn;
+            self.persist_control_file(state).await?;
+            trace!("saved control file: {CF_SAVE_INTERVAL:?} passed");
+        }
+        Ok(())
     }
 
     /// Handle request to append WAL.
     #[allow(clippy::comparison_chain)]
-    fn handle_append_request(
+    async fn handle_append_request(
         &mut self,
         msg: &AppendRequest,
         require_flush: bool,
@@ -861,17 +891,19 @@ where
 
         // do the job
         if !msg.wal_data.is_empty() {
-            self.wal_store.write_wal(msg.h.begin_lsn, &msg.wal_data)?;
+            self.wal_store
+                .write_wal(msg.h.begin_lsn, &msg.wal_data)
+                .await?;
         }
 
         // flush wal to the disk, if required
         if require_flush {
-            self.wal_store.flush_wal()?;
+            self.wal_store.flush_wal().await?;
         }
 
         // Update commit_lsn.
         if msg.h.commit_lsn != Lsn(0) {
-            self.update_commit_lsn(msg.h.commit_lsn)?;
+            self.update_commit_lsn(msg.h.commit_lsn).await?;
         }
         // Value calculated by walproposer can always lag:
         // - safekeepers can forget inmem value and send to proposer lower
@@ -887,7 +919,7 @@ where
         if self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
             < self.inmem.peer_horizon_lsn
         {
-            self.persist_control_file(self.state.clone())?;
+            self.persist_control_file(self.state.clone()).await?;
         }
 
         trace!(
@@ -909,15 +941,15 @@ where
     }
 
     /// Flush WAL to disk. Return AppendResponse with latest LSNs.
-    fn handle_flush(&mut self) -> Result<Option<AcceptorProposerMessage>> {
-        self.wal_store.flush_wal()?;
+    async fn handle_flush(&mut self) -> Result<Option<AcceptorProposerMessage>> {
+        self.wal_store.flush_wal().await?;
         Ok(Some(AcceptorProposerMessage::AppendResponse(
             self.append_response(),
         )))
     }
 
     /// Update timeline state with peer safekeeper data.
-    pub fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
+    pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
         let mut sync_control_file = false;
 
         if (Lsn(sk_info.commit_lsn) != Lsn::INVALID) && (sk_info.last_log_term != INVALID_TERM) {
@@ -925,7 +957,7 @@ where
             // commit_lsn if our history matches (is part of) history of advanced
             // commit_lsn provider.
             if sk_info.last_log_term == self.get_epoch() {
-                self.update_commit_lsn(Lsn(sk_info.commit_lsn))?;
+                self.update_commit_lsn(Lsn(sk_info.commit_lsn)).await?;
             }
         }
 
@@ -948,11 +980,10 @@ where
 
         if sync_control_file {
             let mut state = self.state.clone();
-            // Note: we do not persist remote_consistent_lsn in other paths of
-            // persisting cf -- that is not much needed currently. We could do
-            // that by storing Arc to walsenders in Safekeeper.
+            // Note: we could make remote_consistent_lsn update in cf common by
+            // storing Arc to walsenders in Safekeeper.
             state.remote_consistent_lsn = new_remote_consistent_lsn;
-            self.persist_control_file(state)?;
+            self.persist_control_file(state).await?;
         }
         Ok(())
     }
@@ -976,21 +1007,27 @@ where
 
 #[cfg(test)]
 mod tests {
+    use futures::future::BoxFuture;
     use postgres_ffi::WAL_SEGMENT_SIZE;
 
     use super::*;
     use crate::wal_storage::Storage;
-    use std::ops::Deref;
+    use std::{ops::Deref, time::Instant};
 
     // fake storage for tests
     struct InMemoryState {
         persisted_state: SafeKeeperState,
     }
 
+    #[async_trait::async_trait]
     impl control_file::Storage for InMemoryState {
-        fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
+        async fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
             self.persisted_state = s.clone();
             Ok(())
+        }
+
+        fn last_persist_at(&self) -> Instant {
+            Instant::now()
         }
     }
 
@@ -1014,27 +1051,28 @@ mod tests {
         lsn: Lsn,
     }
 
+    #[async_trait::async_trait]
     impl wal_storage::Storage for DummyWalStore {
         fn flush_lsn(&self) -> Lsn {
             self.lsn
         }
 
-        fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
+        async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
             self.lsn = startpos + buf.len() as u64;
             Ok(())
         }
 
-        fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
+        async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
             self.lsn = end_pos;
             Ok(())
         }
 
-        fn flush_wal(&mut self) -> Result<()> {
+        async fn flush_wal(&mut self) -> Result<()> {
             Ok(())
         }
 
-        fn remove_up_to(&self) -> Box<dyn Fn(XLogSegNo) -> Result<()>> {
-            Box::new(move |_segno_up_to: XLogSegNo| Ok(()))
+        fn remove_up_to(&self, _segno_up_to: XLogSegNo) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
         }
 
         fn get_metrics(&self) -> crate::metrics::WalStorageMetrics {
@@ -1042,8 +1080,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_voting() {
+    #[tokio::test]
+    async fn test_voting() {
         let storage = InMemoryState {
             persisted_state: test_sk_state(),
         };
@@ -1052,7 +1090,7 @@ mod tests {
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
-        let mut vote_resp = sk.process_msg(&vote_request);
+        let mut vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
             Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given != 0),
             r => panic!("unexpected response: {:?}", r),
@@ -1067,15 +1105,15 @@ mod tests {
         sk = SafeKeeper::new(storage, sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
-        vote_resp = sk.process_msg(&vote_request);
+        vote_resp = sk.process_msg(&vote_request).await;
         match vote_resp.unwrap() {
             Some(AcceptorProposerMessage::VoteResponse(resp)) => assert!(resp.vote_given == 0),
             r => panic!("unexpected response: {:?}", r),
         }
     }
 
-    #[test]
-    fn test_epoch_switch() {
+    #[tokio::test]
+    async fn test_epoch_switch() {
         let storage = InMemoryState {
             persisted_state: test_sk_state(),
         };
@@ -1107,10 +1145,13 @@ mod tests {
             timeline_start_lsn: Lsn(0),
         };
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
+            .await
             .unwrap();
 
         // check that AppendRequest before epochStartLsn doesn't switch epoch
-        let resp = sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request));
+        let resp = sk
+            .process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await;
         assert!(resp.is_ok());
         assert_eq!(sk.get_epoch(), 0);
 
@@ -1121,9 +1162,11 @@ mod tests {
             h: ar_hdr,
             wal_data: Bytes::from_static(b"b"),
         };
-        let resp = sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request));
+        let resp = sk
+            .process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await;
         assert!(resp.is_ok());
-        sk.wal_store.truncate_wal(Lsn(3)).unwrap(); // imitate the complete record at 3 %)
+        sk.wal_store.truncate_wal(Lsn(3)).await.unwrap(); // imitate the complete record at 3 %)
         assert_eq!(sk.get_epoch(), 1);
     }
 }

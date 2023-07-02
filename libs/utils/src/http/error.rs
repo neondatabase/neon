@@ -1,5 +1,6 @@
 use hyper::{header, Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::error::Error as StdError;
 use thiserror::Error;
 use tracing::error;
 
@@ -15,13 +16,13 @@ pub enum ApiError {
     Unauthorized(String),
 
     #[error("NotFound: {0}")]
-    NotFound(anyhow::Error),
+    NotFound(Box<dyn StdError + Send + Sync + 'static>),
 
     #[error("Conflict: {0}")]
     Conflict(String),
 
     #[error("Precondition failed: {0}")]
-    PreconditionFailed(&'static str),
+    PreconditionFailed(Box<str>),
 
     #[error(transparent)]
     InternalServerError(anyhow::Error),
@@ -83,13 +84,24 @@ impl HttpErrorBody {
     }
 }
 
-pub async fn handler(err: routerify::RouteError) -> Response<Body> {
-    let api_error = err
-        .downcast::<ApiError>()
-        .expect("handler should always return api error");
+pub async fn route_error_handler(err: routerify::RouteError) -> Response<Body> {
+    match err.downcast::<ApiError>() {
+        Ok(api_error) => api_error_handler(*api_error),
+        Err(other_error) => {
+            // We expect all the request handlers to return an ApiError, so this should
+            // not be reached. But just in case.
+            error!("Error processing HTTP request: {other_error:?}");
+            HttpErrorBody::response_from_msg_and_status(
+                other_error.to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        }
+    }
+}
 
+pub fn api_error_handler(api_error: ApiError) -> Response<Body> {
     // Print a stack trace for Internal Server errors
-    if let ApiError::InternalServerError(_) = api_error.as_ref() {
+    if let ApiError::InternalServerError(_) = api_error {
         error!("Error processing HTTP request: {api_error:?}");
     } else {
         error!("Error processing HTTP request: {api_error:#}");

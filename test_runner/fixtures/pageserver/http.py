@@ -342,6 +342,11 @@ class PageserverHttpClient(requests.Session):
         return res_json
 
     def timeline_delete(self, tenant_id: TenantId, timeline_id: TimelineId, **kwargs):
+        """
+        Note that deletion is not instant, it is scheduled and performed mostly in the background.
+        So if you need to wait for it to complete use `timeline_delete_wait_completed`.
+        For longer description consult with pageserver openapi spec.
+        """
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}", **kwargs
         )

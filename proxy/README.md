@@ -93,6 +93,15 @@ With the current approach we made the following design decisions:
    and column oids. Command tag capturing was added to the rust-postgres
    functionality as part of this change.
 
+### Output options
+
+User can pass several optional headers that will affect resulting json.
+
+1. `Neon-Raw-Text-Output: true`. Return postgres values as text, without parsing them. So numbers, objects, booleans, nulls and arrays will be returned as text. That can be useful in cases when client code wants to implement it's own parsing or reuse parsing libraries from e.g. node-postgres.
+2. `Neon-Array-Mode: true`. Return postgres rows as arrays instead of objects. That is more compact representation and also helps in some edge
+cases where it is hard to use rows represented as objects (e.g. when several fields have the same name).
+
+
 ## Using SNI-based routing on localhost
 
 Now proxy determines project name from the subdomain, request to the `round-rice-566201.somedomain.tld` will be routed to the project named `round-rice-566201`. Unfortunately, `/etc/hosts` does not support domain wildcards, so I usually use `*.localtest.me` which resolves to `127.0.0.1`. Now we can create self-signed certificate and play with proxy:

@@ -20,6 +20,11 @@ def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
         test_name="test_attach_tenant_config",
     )
     env = neon_env_builder.init_start()
+
+    # eviction might be the first one after an attach to access the layers
+    env.pageserver.allowed_errors.append(
+        ".*unexpectedly on-demand downloading remote layer remote.* for task kind Eviction"
+    )
     assert isinstance(env.remote_storage, LocalFsStorage)
     return env
 
@@ -158,6 +163,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
             "threshold": "23h",
         },
         "evictions_low_residence_duration_metric_threshold": "2days",
+        "gc_feedback": True,
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
         "image_creation_threshold": 7,

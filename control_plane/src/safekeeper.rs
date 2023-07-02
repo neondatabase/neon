@@ -1,3 +1,9 @@
+//! Code to manage safekeepers
+//!
+//! In the local test environment, the data for each safekeeper is stored in
+//!
+//!   .neon/safekeepers/<safekeeper id>
+//!
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Child;

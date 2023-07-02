@@ -2,11 +2,13 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use tokio::fs::{self, File};
+use tokio::io::AsyncWriteExt;
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::control_file_upgrade::upgrade_control_file;
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
@@ -25,9 +27,13 @@ pub const CHECKSUM_SIZE: usize = std::mem::size_of::<u32>();
 
 /// Storage should keep actual state inside of it. It should implement Deref
 /// trait to access state fields and have persist method for updating that state.
+#[async_trait::async_trait]
 pub trait Storage: Deref<Target = SafeKeeperState> {
     /// Persist safekeeper state on disk and update internal state.
-    fn persist(&mut self, s: &SafeKeeperState) -> Result<()>;
+    async fn persist(&mut self, s: &SafeKeeperState) -> Result<()>;
+
+    /// Timestamp of last persist.
+    fn last_persist_at(&self) -> Instant;
 }
 
 #[derive(Debug)]
@@ -38,6 +44,8 @@ pub struct FileStorage {
 
     /// Last state persisted to disk.
     state: SafeKeeperState,
+    /// Not preserved across restarts.
+    last_persist_at: Instant,
 }
 
 impl FileStorage {
@@ -51,6 +59,7 @@ impl FileStorage {
             timeline_dir,
             conf: conf.clone(),
             state,
+            last_persist_at: Instant::now(),
         })
     }
 
@@ -66,6 +75,7 @@ impl FileStorage {
             timeline_dir,
             conf: conf.clone(),
             state,
+            last_persist_at: Instant::now(),
         };
 
         Ok(store)
@@ -74,7 +84,7 @@ impl FileStorage {
     /// Check the magic/version in the on-disk data and deserialize it, if possible.
     fn deser_sk_state(buf: &mut &[u8]) -> Result<SafeKeeperState> {
         // Read the version independent part
-        let magic = buf.read_u32::<LittleEndian>()?;
+        let magic = ReadBytesExt::read_u32::<LittleEndian>(buf)?;
         if magic != SK_MAGIC {
             bail!(
                 "bad control file magic: {:X}, expected {:X}",
@@ -82,7 +92,7 @@ impl FileStorage {
                 SK_MAGIC
             );
         }
-        let version = buf.read_u32::<LittleEndian>()?;
+        let version = ReadBytesExt::read_u32::<LittleEndian>(buf)?;
         if version == SK_FORMAT_VERSION {
             let res = SafeKeeperState::des(buf)?;
             return Ok(res);
@@ -102,7 +112,7 @@ impl FileStorage {
 
     /// Read in the control file.
     pub fn load_control_file<P: AsRef<Path>>(control_file_path: P) -> Result<SafeKeeperState> {
-        let mut control_file = OpenOptions::new()
+        let mut control_file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&control_file_path)
@@ -151,30 +161,31 @@ impl Deref for FileStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl Storage for FileStorage {
     /// persists state durably to underlying storage
     /// for description see https://lwn.net/Articles/457667/
-    fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
+    async fn persist(&mut self, s: &SafeKeeperState) -> Result<()> {
         let _timer = PERSIST_CONTROL_FILE_SECONDS.start_timer();
 
         // write data to safekeeper.control.partial
         let control_partial_path = self.timeline_dir.join(CONTROL_FILE_NAME_PARTIAL);
-        let mut control_partial = File::create(&control_partial_path).with_context(|| {
+        let mut control_partial = File::create(&control_partial_path).await.with_context(|| {
             format!(
                 "failed to create partial control file at: {}",
                 &control_partial_path.display()
             )
         })?;
         let mut buf: Vec<u8> = Vec::new();
-        buf.write_u32::<LittleEndian>(SK_MAGIC)?;
-        buf.write_u32::<LittleEndian>(SK_FORMAT_VERSION)?;
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_MAGIC)?;
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SK_FORMAT_VERSION)?;
         s.ser_into(&mut buf)?;
 
         // calculate checksum before resize
         let checksum = crc32c::crc32c(&buf);
         buf.extend_from_slice(&checksum.to_le_bytes());
 
-        control_partial.write_all(&buf).with_context(|| {
+        control_partial.write_all(&buf).await.with_context(|| {
             format!(
                 "failed to write safekeeper state into control file at: {}",
                 control_partial_path.display()
@@ -183,7 +194,7 @@ impl Storage for FileStorage {
 
         // fsync the file
         if !self.conf.no_sync {
-            control_partial.sync_all().with_context(|| {
+            control_partial.sync_all().await.with_context(|| {
                 format!(
                     "failed to sync partial control file at {}",
                     control_partial_path.display()
@@ -194,27 +205,32 @@ impl Storage for FileStorage {
         let control_path = self.timeline_dir.join(CONTROL_FILE_NAME);
 
         // rename should be atomic
-        fs::rename(&control_partial_path, &control_path)?;
+        fs::rename(&control_partial_path, &control_path).await?;
         // this sync is not required by any standard but postgres does this (see durable_rename)
         if !self.conf.no_sync {
-            File::open(&control_path)
-                .and_then(|f| f.sync_all())
-                .with_context(|| {
-                    format!(
-                        "failed to sync control file at: {}",
-                        &control_path.display()
-                    )
-                })?;
+            let new_f = File::open(&control_path).await?;
+            new_f.sync_all().await.with_context(|| {
+                format!(
+                    "failed to sync control file at: {}",
+                    &control_path.display()
+                )
+            })?;
 
             // fsync the directory (linux specific)
-            File::open(&self.timeline_dir)
-                .and_then(|f| f.sync_all())
+            let tli_dir = File::open(&self.timeline_dir).await?;
+            tli_dir
+                .sync_all()
+                .await
                 .context("failed to sync control file directory")?;
         }
 
         // update internal state
         self.state = s.clone();
         Ok(())
+    }
+
+    fn last_persist_at(&self) -> Instant {
+        self.last_persist_at
     }
 }
 
@@ -224,7 +240,6 @@ mod test {
     use super::*;
     use crate::{safekeeper::SafeKeeperState, SafeKeeperConf};
     use anyhow::Result;
-    use std::fs;
     use utils::{id::TenantTimelineId, lsn::Lsn};
 
     fn stub_conf() -> SafeKeeperConf {
@@ -235,59 +250,75 @@ mod test {
         }
     }
 
-    fn load_from_control_file(
+    async fn load_from_control_file(
         conf: &SafeKeeperConf,
         ttid: &TenantTimelineId,
     ) -> Result<(FileStorage, SafeKeeperState)> {
-        fs::create_dir_all(conf.timeline_dir(ttid)).expect("failed to create timeline dir");
+        fs::create_dir_all(conf.timeline_dir(ttid))
+            .await
+            .expect("failed to create timeline dir");
         Ok((
             FileStorage::restore_new(ttid, conf)?,
             FileStorage::load_control_file_conf(conf, ttid)?,
         ))
     }
 
-    fn create(
+    async fn create(
         conf: &SafeKeeperConf,
         ttid: &TenantTimelineId,
     ) -> Result<(FileStorage, SafeKeeperState)> {
-        fs::create_dir_all(conf.timeline_dir(ttid)).expect("failed to create timeline dir");
+        fs::create_dir_all(conf.timeline_dir(ttid))
+            .await
+            .expect("failed to create timeline dir");
         let state = SafeKeeperState::empty();
         let storage = FileStorage::create_new(ttid, conf, state.clone())?;
         Ok((storage, state))
     }
 
-    #[test]
-    fn test_read_write_safekeeper_state() {
+    #[tokio::test]
+    async fn test_read_write_safekeeper_state() {
         let conf = stub_conf();
         let ttid = TenantTimelineId::generate();
         {
-            let (mut storage, mut state) = create(&conf, &ttid).expect("failed to create state");
+            let (mut storage, mut state) =
+                create(&conf, &ttid).await.expect("failed to create state");
             // change something
             state.commit_lsn = Lsn(42);
-            storage.persist(&state).expect("failed to persist state");
+            storage
+                .persist(&state)
+                .await
+                .expect("failed to persist state");
         }
 
-        let (_, state) = load_from_control_file(&conf, &ttid).expect("failed to read state");
+        let (_, state) = load_from_control_file(&conf, &ttid)
+            .await
+            .expect("failed to read state");
         assert_eq!(state.commit_lsn, Lsn(42));
     }
 
-    #[test]
-    fn test_safekeeper_state_checksum_mismatch() {
+    #[tokio::test]
+    async fn test_safekeeper_state_checksum_mismatch() {
         let conf = stub_conf();
         let ttid = TenantTimelineId::generate();
         {
-            let (mut storage, mut state) = create(&conf, &ttid).expect("failed to read state");
+            let (mut storage, mut state) =
+                create(&conf, &ttid).await.expect("failed to read state");
 
             // change something
             state.commit_lsn = Lsn(42);
-            storage.persist(&state).expect("failed to persist state");
+            storage
+                .persist(&state)
+                .await
+                .expect("failed to persist state");
         }
         let control_path = conf.timeline_dir(&ttid).join(CONTROL_FILE_NAME);
-        let mut data = fs::read(&control_path).unwrap();
+        let mut data = fs::read(&control_path).await.unwrap();
         data[0] += 1; // change the first byte of the file to fail checksum validation
-        fs::write(&control_path, &data).expect("failed to write control file");
+        fs::write(&control_path, &data)
+            .await
+            .expect("failed to write control file");
 
-        match load_from_control_file(&conf, &ttid) {
+        match load_from_control_file(&conf, &ttid).await {
             Err(err) => assert!(err
                 .to_string()
                 .contains("safekeeper control file checksum mismatch")),

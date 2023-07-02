@@ -21,8 +21,9 @@ from fixtures.neon_fixtures import (
     RemoteStorageKind,
     available_remote_storages,
 )
-from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.utils import timeline_delete_wait_completed
 from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
 
@@ -213,7 +214,7 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     # Test (a subset of) pageserver global metrics
     for metric in PAGESERVER_GLOBAL_METRICS:
         ps_samples = ps_metrics.query_all(metric, {})
-        assert len(ps_samples) > 0
+        assert len(ps_samples) > 0, f"expected at least one sample for {metric}"
         for sample in ps_samples:
             labels = ",".join([f'{key}="{value}"' for key, value in sample.labels.items()])
             log.info(f"{sample.name}{{{labels}}} {sample.value}")
@@ -267,6 +268,7 @@ def test_pageserver_metrics_removed_after_detach(
                 cur.execute("INSERT INTO t SELECT generate_series(1,100000), 'payload'")
                 cur.execute("SELECT sum(key) FROM t")
                 assert cur.fetchone() == (5000050000,)
+        endpoint.stop()
 
     def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
         ps_metrics = env.pageserver.http_client().get_metrics()
@@ -309,9 +311,7 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.allowed_errors.append(
         ".*marking .* as locally complete, while it doesnt exist in remote index.*"
     )
-    env.pageserver.allowed_errors.append(
-        ".*could not load tenant.*Failed to list timelines directory.*"
-    )
+    env.pageserver.allowed_errors.append(".*load failed.*list timelines directory.*")
 
     client = env.pageserver.http_client()
 
@@ -319,9 +319,10 @@ def test_pageserver_with_empty_tenants(
     client.tenant_create(tenant_with_empty_timelines)
     temp_timelines = client.timeline_list(tenant_with_empty_timelines)
     for temp_timeline in temp_timelines:
-        client.timeline_delete(
-            tenant_with_empty_timelines, TimelineId(temp_timeline["timeline_id"])
+        timeline_delete_wait_completed(
+            client, tenant_with_empty_timelines, TimelineId(temp_timeline["timeline_id"])
         )
+
     files_in_timelines_dir = sum(
         1
         for _p in Path.iterdir(
@@ -342,9 +343,15 @@ def test_pageserver_with_empty_tenants(
     env.pageserver.start()
 
     client = env.pageserver.http_client()
-    tenants = client.tenant_list()
 
-    assert len(tenants) == 2
+    def not_loading():
+        tenants = client.tenant_list()
+        assert len(tenants) == 2
+        assert all(t["state"]["slug"] != "Loading" for t in tenants)
+
+    wait_until(10, 0.2, not_loading)
+
+    tenants = client.tenant_list()
 
     [broken_tenant] = [t for t in tenants if t["id"] == str(tenant_without_timelines_dir)]
     assert (
@@ -356,7 +363,7 @@ def test_pageserver_with_empty_tenants(
         broken_tenant_status["state"]["slug"] == "Broken"
     ), f"Tenant {tenant_without_timelines_dir} without timelines dir should be broken"
 
-    assert env.pageserver.log_contains(".*Setting tenant as Broken state, reason:.*")
+    assert env.pageserver.log_contains(".*load failed, setting tenant state to Broken:.*")
 
     [loaded_tenant] = [t for t in tenants if t["id"] == str(tenant_with_empty_timelines)]
     assert (

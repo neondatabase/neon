@@ -1,22 +1,23 @@
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::{Layer, LayerDescriptor, LayerFileName};
+use pageserver::tenant::storage_layer::{tests::LayerDescriptor, Layer, LayerFileName};
+use pageserver::tenant::storage_layer::{PersistentLayer, PersistentLayerDesc};
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Instant;
+use utils::id::{TenantId, TimelineId};
 
 use utils::lsn::Lsn;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
-    let mut layer_map = LayerMap::<LayerDescriptor>::default();
+fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
+    let mut layer_map = LayerMap::default();
 
     let mut min_lsn = Lsn(u64::MAX);
     let mut max_lsn = Lsn(0);
@@ -33,7 +34,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
         min_lsn = min(min_lsn, lsn_range.start);
         max_lsn = max(max_lsn, Lsn(lsn_range.end.0 - 1));
 
-        updates.insert_historic(Arc::new(layer));
+        updates.insert_historic(layer.layer_desc().clone());
     }
 
     println!("min: {min_lsn}, max: {max_lsn}");
@@ -43,7 +44,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap<LayerDescriptor> {
 }
 
 /// Construct a layer map query pattern for benchmarks
-fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn)> {
+fn uniform_query_pattern(layer_map: &LayerMap) -> Vec<(Key, Lsn)> {
     // For each image layer we query one of the pages contained, at LSN right
     // before the image layer was created. This gives us a somewhat uniform
     // coverage of both the lsn and key space because image layers have
@@ -69,7 +70,7 @@ fn uniform_query_pattern(layer_map: &LayerMap<LayerDescriptor>) -> Vec<(Key, Lsn
 
 // Construct a partitioning for testing get_difficulty map when we
 // don't have an exact result of `collect_keyspace` to work with.
-fn uniform_key_partitioning(layer_map: &LayerMap<LayerDescriptor>, _lsn: Lsn) -> KeyPartitioning {
+fn uniform_key_partitioning(layer_map: &LayerMap, _lsn: Lsn) -> KeyPartitioning {
     let mut parts = Vec::new();
 
     // We add a partition boundary at the start of each image layer,
@@ -209,13 +210,15 @@ fn bench_sequential(c: &mut Criterion) {
     for i in 0..100_000 {
         let i32 = (i as u32) % 100;
         let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
-        let layer = LayerDescriptor {
-            key: zero.add(10 * i32)..zero.add(10 * i32 + 1),
-            lsn: Lsn(i)..Lsn(i + 1),
-            is_incremental: false,
-            short_id: format!("Layer {}", i),
-        };
-        updates.insert_historic(Arc::new(layer));
+        let layer = LayerDescriptor::from(PersistentLayerDesc::new_img(
+            TenantId::generate(),
+            TimelineId::generate(),
+            zero.add(10 * i32)..zero.add(10 * i32 + 1),
+            Lsn(i),
+            false,
+            0,
+        ));
+        updates.insert_historic(layer.layer_desc().clone());
     }
     updates.flush();
     println!("Finished layer map init in {:?}", now.elapsed());

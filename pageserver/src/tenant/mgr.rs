@@ -11,6 +11,7 @@ use tokio::fs;
 use anyhow::Context;
 use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
+use tokio::task::JoinSet;
 use tracing::*;
 
 use remote_storage::GenericRemoteStorage;
@@ -21,7 +22,7 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind};
 use crate::tenant::config::TenantConfOpt;
 use crate::tenant::{create_tenant_files, CreateTenantFilesMode, Tenant, TenantState};
-use crate::IGNORED_TENANT_FILE_NAME;
+use crate::{InitializationOrder, IGNORED_TENANT_FILE_NAME};
 
 use utils::fs_ext::PathExt;
 use utils::id::{TenantId, TimelineId};
@@ -64,6 +65,7 @@ pub async fn init_tenant_mgr(
     conf: &'static PageServerConf,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    init_order: InitializationOrder,
 ) -> anyhow::Result<()> {
     // Scan local filesystem for attached tenants
     let tenants_dir = conf.tenants_path();
@@ -120,6 +122,7 @@ pub async fn init_tenant_mgr(
                         &tenant_dir_path,
                         broker_client.clone(),
                         remote_storage.clone(),
+                        Some(init_order.clone()),
                         &ctx,
                     ) {
                         Ok(tenant) => {
@@ -155,6 +158,7 @@ pub fn schedule_local_tenant_processing(
     tenant_path: &Path,
     broker_client: storage_broker::BrokerClientChannel,
     remote_storage: Option<GenericRemoteStorage>,
+    init_order: Option<InitializationOrder>,
     ctx: &RequestContext,
 ) -> anyhow::Result<Arc<Tenant>> {
     anyhow::ensure!(
@@ -208,7 +212,14 @@ pub fn schedule_local_tenant_processing(
     } else {
         info!("tenant {tenant_id} is assumed to be loadable, starting load operation");
         // Start loading the tenant into memory. It will initially be in Loading state.
-        Tenant::spawn_load(conf, tenant_id, broker_client, remote_storage, ctx)
+        Tenant::spawn_load(
+            conf,
+            tenant_id,
+            broker_client,
+            remote_storage,
+            init_order,
+            ctx,
+        )
     };
     Ok(tenant)
 }
@@ -223,6 +234,7 @@ pub fn schedule_local_tenant_processing(
 /// That could be easily misinterpreted by control plane, the consumer of the
 /// management API. For example, it could attach the tenant on a different pageserver.
 /// We would then be in split-brain once this pageserver restarts.
+#[instrument]
 pub async fn shutdown_all_tenants() {
     // Prevent new tenants from being created.
     let tenants_to_shut_down = {
@@ -239,39 +251,51 @@ pub async fn shutdown_all_tenants() {
                 tenants_clone
             }
             TenantsMap::ShuttingDown(_) => {
+                // TODO: it is possible that detach and shutdown happen at the same time. as a
+                // result, during shutdown we do not wait for detach.
                 error!("already shutting down, this function isn't supposed to be called more than once");
                 return;
             }
         }
     };
 
-    let mut tenants_to_freeze_and_flush = Vec::with_capacity(tenants_to_shut_down.len());
-    for (_, tenant) in tenants_to_shut_down {
-        if tenant.is_active() {
-            // updates tenant state, forbidding new GC and compaction iterations from starting
-            tenant.set_stopping();
-            tenants_to_freeze_and_flush.push(tenant);
+    let mut join_set = JoinSet::new();
+    for (tenant_id, tenant) in tenants_to_shut_down {
+        join_set.spawn(
+            async move {
+                let freeze_and_flush = true;
+
+                match tenant.shutdown(freeze_and_flush).await {
+                    Ok(()) => debug!("tenant successfully stopped"),
+                    Err(super::ShutdownError::AlreadyStopping) => {
+                        warn!("tenant was already shutting down")
+                    }
+                }
+            }
+            .instrument(info_span!("shutdown", %tenant_id)),
+        );
+    }
+
+    let mut panicked = 0;
+
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Ok(()) => {}
+            Err(join_error) if join_error.is_cancelled() => {
+                unreachable!("we are not cancelling any of the futures");
+            }
+            Err(join_error) if join_error.is_panic() => {
+                // cannot really do anything, as this panic is likely a bug
+                panicked += 1;
+            }
+            Err(join_error) => {
+                warn!("unknown kind of JoinError: {join_error}");
+            }
         }
     }
 
-    // Shut down all existing walreceiver connections and stop accepting the new ones.
-    task_mgr::shutdown_tasks(Some(TaskKind::WalReceiverManager), None, None).await;
-
-    // Ok, no background tasks running anymore. Flush any remaining data in
-    // memory to disk.
-    //
-    // We assume that any incoming connections that might request pages from
-    // the tenant have already been terminated by the caller, so there
-    // should be no more activity in any of the repositories.
-    //
-    // On error, log it but continue with the shutdown for other tenants.
-    for tenant in tenants_to_freeze_and_flush {
-        let tenant_id = tenant.tenant_id();
-        debug!("shutdown tenant {tenant_id}");
-
-        if let Err(err) = tenant.freeze_and_flush().await {
-            error!("Could not checkpoint tenant {tenant_id} during shutdown: {err:?}");
-        }
+    if panicked > 0 {
+        warn!(panicked, "observed panicks while shutting down tenants");
     }
 }
 
@@ -302,7 +326,9 @@ pub async fn create_tenant(
         });
 
         let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, ctx)?;
+            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, None, ctx)?;
+        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
+        //      See https://github.com/neondatabase/neon/issues/4233
         let created_tenant = scopeguard::guard(created_tenant, |tenant| {
             // As we might have removed the directory, the tenant should directly go into the broken state.
             tenant.set_broken("failed to create".into());
@@ -393,7 +419,9 @@ pub async fn delete_timeline(
     ctx: &RequestContext,
 ) -> Result<(), DeleteTimelineError> {
     let tenant = get_tenant(tenant_id, true).await?;
-    tenant.delete_timeline(timeline_id, ctx).await?;
+    tenant
+        .prepare_and_schedule_delete_timeline(timeline_id, ctx)
+        .await?;
     Ok(())
 }
 
@@ -458,7 +486,7 @@ pub async fn load_tenant(
                 .with_context(|| format!("Failed to remove tenant ignore mark {tenant_ignore_mark:?} during tenant loading"))?;
         }
 
-        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, ctx)
+        let new_tenant = schedule_local_tenant_processing(conf, &tenant_path, broker_client, remote_storage, None, ctx)
             .with_context(|| {
                 format!("Failed to schedule tenant processing in path {tenant_path:?}")
             })?;
@@ -540,8 +568,9 @@ pub async fn attach_tenant(
             "create_tenant_files should have created the attach marker file"
         );
 
-        let attached_tenant =
-            schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), None, ctx)?;
+        // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
+        //      See https://github.com/neondatabase/neon/issues/4233
         let attached_tenant = scopeguard::guard(attached_tenant, |tenant| {
             // As we might have removed the directory, the tenant should directly go into the broken state.
             tenant.set_broken("failed to attach".into());
@@ -623,24 +652,25 @@ where
     // The exclusive lock here ensures we don't miss the tenant state updates before trying another removal.
     // tenant-wde cleanup operations may take some time (removing the entire tenant directory), we want to
     // avoid holding the lock for the entire process.
-    {
-        let tenants_accessor = TENANTS.write().await;
-        match tenants_accessor.get(&tenant_id) {
-            Some(tenant) => match tenant.current_state() {
-                TenantState::Attaching
-                | TenantState::Loading
-                | TenantState::Broken { .. }
-                | TenantState::Active => tenant.set_stopping(),
-                TenantState::Stopping => return Err(TenantStateError::IsStopping(tenant_id)),
-            },
-            None => return Err(TenantStateError::NotFound(tenant_id)),
+    let tenant = {
+        TENANTS
+            .write()
+            .await
+            .get(&tenant_id)
+            .cloned()
+            .ok_or(TenantStateError::NotFound(tenant_id))?
+    };
+
+    let freeze_and_flush = false;
+
+    // shutdown is sure to transition tenant to stopping, and wait for all tasks to complete, so
+    // that we can continue safely to cleanup.
+    match tenant.shutdown(freeze_and_flush).await {
+        Ok(()) => {}
+        Err(super::ShutdownError::AlreadyStopping) => {
+            return Err(TenantStateError::IsStopping(tenant_id))
         }
     }
-
-    // shutdown all tenant and timeline tasks: gc, compaction, page service)
-    // No new tasks will be started for this tenant because it's in `Stopping` state.
-    // Hence, once we're done here, the `tenant_cleanup` callback can mutate tenant on-disk state freely.
-    task_mgr::shutdown_tasks(None, Some(tenant_id), None).await;
 
     match tenant_cleanup
         .await
@@ -657,7 +687,7 @@ where
             let tenants_accessor = TENANTS.read().await;
             match tenants_accessor.get(&tenant_id) {
                 Some(tenant) => {
-                    tenant.set_broken(e.to_string());
+                    tenant.set_broken(e.to_string()).await;
                 }
                 None => {
                     warn!("Tenant {tenant_id} got removed from memory");
@@ -685,7 +715,7 @@ pub async fn immediate_gc(
         .get(&tenant_id)
         .map(Arc::clone)
         .with_context(|| format!("tenant {tenant_id}"))
-        .map_err(ApiError::NotFound)?;
+        .map_err(|e| ApiError::NotFound(e.into()))?;
 
     let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
     // Use tenant's pitr setting
@@ -723,7 +753,6 @@ pub async fn immediate_gc(
     Ok(wait_task_done)
 }
 
-#[cfg(feature = "testing")]
 pub async fn immediate_compact(
     tenant_id: TenantId,
     timeline_id: TimelineId,
@@ -735,11 +764,11 @@ pub async fn immediate_compact(
         .get(&tenant_id)
         .map(Arc::clone)
         .with_context(|| format!("tenant {tenant_id}"))
-        .map_err(ApiError::NotFound)?;
+        .map_err(|e| ApiError::NotFound(e.into()))?;
 
     let timeline = tenant
         .get_timeline(timeline_id, true)
-        .map_err(ApiError::NotFound)?;
+        .map_err(|e| ApiError::NotFound(e.into()))?;
 
     // Run in task_mgr to avoid race with tenant_detach operation
     let ctx = ctx.detached_child(TaskKind::Compaction, DownloadBehavior::Download);

@@ -257,6 +257,9 @@ pub enum TaskKind {
     // task that handles attaching a tenant
     Attach,
 
+    // Used mostly for background deletion from s3
+    TimelineDeletionWorker,
+
     // task that handhes metrics collection
     MetricsCollection,
 
@@ -476,27 +479,44 @@ pub async fn shutdown_tasks(
                 && (timeline_id.is_none() || task_mut.timeline_id == timeline_id)
             {
                 task.cancel.cancel();
-                victim_tasks.push(Arc::clone(task));
+                victim_tasks.push((
+                    Arc::clone(task),
+                    task.kind,
+                    task_mut.tenant_id,
+                    task_mut.timeline_id,
+                ));
             }
         }
     }
 
-    for task in victim_tasks {
+    let log_all = kind.is_none() && tenant_id.is_none() && timeline_id.is_none();
+
+    for (task, task_kind, tenant_id, timeline_id) in victim_tasks {
         let join_handle = {
             let mut task_mut = task.mutable.lock().unwrap();
             task_mut.join_handle.take()
         };
         if let Some(mut join_handle) = join_handle {
-            let completed = tokio::select! {
-                _ = &mut join_handle => { true },
+            if log_all {
+                if tenant_id.is_none() {
+                    // there are quite few of these
+                    info!(name = task.name, kind = ?task_kind, "stopping global task");
+                } else {
+                    // warn to catch these in tests; there shouldn't be any
+                    warn!(name = task.name, tenant_id = ?tenant_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
+                }
+            }
+            let join_handle = tokio::select! {
+                biased;
+                _ = &mut join_handle => { None },
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
                     // allow some time to elapse before logging to cut down the number of log
                     // lines.
                     info!("waiting for {} to shut down", task.name);
-                    false
+                    Some(join_handle)
                 }
             };
-            if !completed {
+            if let Some(join_handle) = join_handle {
                 // we never handled this return value, but:
                 // - we don't deschedule which would lead to is_cancelled
                 // - panics are already logged (is_panicked)

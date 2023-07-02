@@ -70,6 +70,14 @@ impl RemotePath {
     pub fn join(&self, segment: &Path) -> Self {
         Self(self.0.join(segment))
     }
+
+    pub fn get_path(&self) -> &PathBuf {
+        &self.0
+    }
+
+    pub fn extension(&self) -> Option<&str> {
+        self.0.extension()?.to_str()
+    }
 }
 
 /// Storage (potentially remote) API to manage its state.
@@ -85,6 +93,19 @@ pub trait RemoteStorage: Send + Sync + 'static {
         &self,
         prefix: Option<&RemotePath>,
     ) -> Result<Vec<RemotePath>, DownloadError>;
+
+    /// Lists all files in directory "recursively"
+    /// (not really recursively, because AWS has a flat namespace)
+    /// Note: This is subtely different than list_prefixes,
+    /// because it is for listing files instead of listing
+    /// names sharing common prefixes.
+    /// For example,
+    /// list_files("foo/bar") = ["foo/bar/cat123.txt",
+    /// "foo/bar/cat567.txt", "foo/bar/dog123.txt", "foo/bar/dog456.txt"]
+    /// whereas,
+    /// list_prefixes("foo/bar/") = ["cat", "dog"]
+    /// See `test_real_s3.rs` for more details.
+    async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     async fn upload(
@@ -111,6 +132,8 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<Download, DownloadError>;
 
     async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
+
+    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
 }
 
 pub struct Download {
@@ -172,6 +195,14 @@ impl GenericRemoteStorage {
         }
     }
 
+    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+        match self {
+            Self::LocalFs(s) => s.list_files(folder).await,
+            Self::AwsS3(s) => s.list_files(folder).await,
+            Self::Unreliable(s) => s.list_files(folder).await,
+        }
+    }
+
     pub async fn upload(
         &self,
         from: impl io::AsyncRead + Unpin + Send + Sync + 'static,
@@ -221,6 +252,14 @@ impl GenericRemoteStorage {
             Self::LocalFs(s) => s.delete(path).await,
             Self::AwsS3(s) => s.delete(path).await,
             Self::Unreliable(s) => s.delete(path).await,
+        }
+    }
+
+    pub async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.delete_objects(paths).await,
+            Self::AwsS3(s) => s.delete_objects(paths).await,
+            Self::Unreliable(s) => s.delete_objects(paths).await,
         }
     }
 }
