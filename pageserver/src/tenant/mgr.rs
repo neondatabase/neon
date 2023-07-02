@@ -337,7 +337,9 @@ pub async fn create_tenant(
         //      See https://github.com/neondatabase/neon/issues/4233
         let created_tenant = scopeguard::guard(created_tenant, |tenant| {
             // As we might have removed the directory, the tenant should directly go into the broken state.
-            tenant.set_broken("failed to create".into());
+            task_mgr::BACKGROUND_RUNTIME.block_on(async {
+                tenant.set_broken("failed to create".into()).await;
+            });
         });
 
         fail::fail_point!("tenant-create-fail", |_| {
@@ -586,7 +588,9 @@ pub async fn attach_tenant(
         //      See https://github.com/neondatabase/neon/issues/4233
         let attached_tenant = scopeguard::guard(attached_tenant, |tenant| {
             // As we might have removed the directory, the tenant should directly go into the broken state.
-            tenant.set_broken("failed to attach".into());
+            task_mgr::BACKGROUND_RUNTIME.block_on(async {
+                tenant.set_broken("failed to create".into()).await;
+            });
         });
 
         let attached_tenant_id = attached_tenant.tenant_id();
