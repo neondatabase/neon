@@ -325,8 +325,14 @@ pub async fn create_tenant(
             }
         });
 
-        let created_tenant =
-            schedule_local_tenant_processing(conf, &tenant_directory, broker_client, remote_storage, None, ctx)?;
+        let created_tenant = schedule_local_tenant_processing(
+            conf,
+            &tenant_directory,
+            broker_client,
+            remote_storage,
+            None,
+            ctx,
+        )?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
         let created_tenant = scopeguard::guard(created_tenant, |tenant| {
@@ -568,7 +574,14 @@ pub async fn attach_tenant(
             "create_tenant_files should have created the attach marker file"
         );
 
-        let attached_tenant = schedule_local_tenant_processing(conf, &tenant_dir, broker_client, Some(remote_storage), None, ctx)?;
+        let attached_tenant = schedule_local_tenant_processing(
+            conf,
+            &tenant_dir,
+            broker_client,
+            Some(remote_storage),
+            None,
+            ctx,
+        )?;
         // TODO: tenant object & its background loops remain, untracked in tenant map, if we fail here.
         //      See https://github.com/neondatabase/neon/issues/4233
         let attached_tenant = scopeguard::guard(attached_tenant, |tenant| {
