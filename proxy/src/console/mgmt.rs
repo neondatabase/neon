@@ -8,7 +8,7 @@ use postgres_backend::{self, AuthType, PostgresBackend, PostgresBackendTCP, Quer
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::future;
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, info_span};
+use tracing::{error, info, info_span, Instrument};
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
 
@@ -44,19 +44,21 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
             .set_nodelay(true)
             .context("failed to set client socket option")?;
 
-        tokio::task::spawn(async move {
-            let span = info_span!("mgmt", peer = %peer_addr);
-            let _enter = span.enter();
+        let span = info_span!("mgmt", peer = %peer_addr);
 
-            info!("started a new console management API thread");
-            scopeguard::defer! {
-                info!("console management API thread is about to finish");
-            }
+        tokio::task::spawn(
+            async move {
+                info!("started a new console management API thread");
+                scopeguard::defer! {
+                    info!("console management API thread is about to finish");
+                }
 
-            if let Err(e) = handle_connection(socket).await {
-                error!("thread failed with an error: {e}");
+                if let Err(e) = handle_connection(socket).await {
+                    error!("thread failed with an error: {e}");
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 }
 
@@ -88,20 +90,22 @@ async fn try_process_query(pgb: &mut PostgresBackendTCP, query: &str) -> Result<
     let resp: KickSession = serde_json::from_str(query).context("Failed to parse query as json")?;
 
     let span = info_span!("event", session_id = resp.session_id);
-    let _enter = span.enter();
-    info!("got response: {:?}", resp.result);
+    async move {
+        info!("got response: {:?}", resp.result);
 
-    match notify(resp.session_id, Ok(resp.result)) {
-        Ok(()) => {
-            pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
-                .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
-                .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        match notify(resp.session_id, Ok(resp.result)) {
+            Ok(()) => {
+                pgb.write_message_noflush(&SINGLE_COL_ROWDESC)?
+                    .write_message_noflush(&BeMessage::DataRow(&[Some(b"ok")]))?
+                    .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+            }
+            Err(e) => {
+                error!("failed to deliver response to per-client task");
+                pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string(), None))?;
+            }
         }
-        Err(e) => {
-            error!("failed to deliver response to per-client task");
-            pgb.write_message_noflush(&BeMessage::ErrorResponse(&e.to_string(), None))?;
-        }
+        Ok(())
     }
-
-    Ok(())
+    .instrument(span)
+    .await
 }
